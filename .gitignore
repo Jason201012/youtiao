@@ -1,0 +1,93 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ / Android Studio related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication / obfuscation related
+app.*.symbols
+app.*.map.json
+
+# Android related
+**/android/**/gradle-wrapper.jar
+.gradle/
+/android/.gradle/
+**/android/capture-screenshots/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/key.properties
+**/android/!gradle-wrapper.properties
+
+# iOS/XCode related
+**/ios/**/*.mode1v3
+**/ios/**/*.mode2v3
+**/ios/**/project.pbxproj
+**/ios/**/project.xcworkspace
+**/ios/**/xcuserdata
+**/ios/.generated/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/ephemeral
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/ServiceDefinitions.json
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# Exceptions to above rules.
+!**/ios/**/default.mode1v3
+!**/ios/**/default.mode2v3
+!**/ios/Runner/GeneratedPluginRegistrant.swift
+!**/android/!gradle-wrapper.properties
+!**/android/gradle-wrapper.properties
+
+# Local secrets / signing keys (never commit)
+*.jks
+*.keystore
+key.properties
+
+# Gradle / build caches (machine-specific)
+.gradle-home/
+
+# WorkBuddy internal project data (do not publish)
+.workbuddy/
+
+# Scratch / debug artifacts (do not commit)
+/board_final*.png
+/home_final*.png
+/trash_screen_*.png
+/trash_bg_check.png
+/v_*.png
+/ui*.xml
+/*.txt
+/设计交接规格.md
+/ardot_check/
