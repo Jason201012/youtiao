@@ -16,6 +16,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.todolist/exact_alarm"
     private val CHANNEL_IO = "com.example.todolist/file_io"
+    private val CHANNEL_BG = "com.example.todolist/background_service"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -111,6 +112,39 @@ class MainActivity : FlutterActivity() {
                                 "Android 10 以下不支持直接写入 Downloads",
                                 null,
                             )
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 前台守护服务通道：start/stop 让 App 在后台常驻，
+        // 保证定时提醒在 ColorOS 等国产 ROM 上划掉后台后仍准时送达。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_BG)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> {
+                        try {
+                            val intent =
+                                Intent(this, ReminderForegroundService::class.java)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("START_FAIL", e.message, null)
+                        }
+                    }
+                    "stop" -> {
+                        try {
+                            stopService(
+                                Intent(this, ReminderForegroundService::class.java),
+                            )
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("STOP_FAIL", e.message, null)
                         }
                     }
                     else -> result.notImplemented()

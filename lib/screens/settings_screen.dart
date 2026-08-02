@@ -37,7 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '1.8.3');
+      if (mounted) setState(() => _version = '1.8.4');
     }
   }
 
@@ -91,6 +91,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       label: '声音',
                       switchValue: provider.soundEnabled,
                       onSwitchChanged: provider.setSoundEnabled,
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    SettingsRow(
+                      icon: Symbols.shield,
+                      label: '后台提醒守护',
+                      switchValue: provider.backgroundGuardEnabled,
+                      onSwitchChanged: (v) => provider.setBackgroundGuard(v),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(

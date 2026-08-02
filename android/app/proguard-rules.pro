@@ -20,6 +20,9 @@
 # 本应用 MethodChannel（精确闹钟权限查询）相关类，避免被 R8 重命名后反射找不到
 -keep class com.example.todolist.MainActivity { *; }
 
+# 前台守护服务：避免 R8 混淆后 release 下服务类被移除 / 反射找不到导致崩溃
+-keep class com.example.todolist.ReminderForegroundService { *; }
+
 # 通用 Flutter/R8 兼容性保留
 -keep class io.flutter.app.** { *; }
 -keep class io.flutter.plugin.** { *; }

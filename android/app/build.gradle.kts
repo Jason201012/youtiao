@@ -77,7 +77,8 @@ tasks.configureEach {
     //    禁用会反过来报 "Changes are not tracked" 直接失败；故只精准命中上面三类。
     //    其余任务（Kotlin / merge*JniLib / merge*Dex / Resources / R8）保持状态追踪，
     //    它们在一次 clean 构建里能正常产出普通文件。彻底根因是把 GRADLE_USER_HOME 移到同盘。
-    if (name.contains("NativeLibs", ignoreCase = true)) {
-        doNotTrackState("跨盘符号链接快照保护（原生库合并）")
+    if (name.contains("NativeLibs", ignoreCase = true) ||
+        name.contains("NativeSymbolTables", ignoreCase = true)) {
+        doNotTrackState("跨盘符号链接快照保护（原生库合并 / 原生符号表）")
     }
 }

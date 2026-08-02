@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/background_service.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/bottom_nav.dart';
@@ -16,6 +17,10 @@ void main() async {
   await NotificationService.instance.init();
   final provider = TaskProvider();
   await provider.load();
+  // 启动前台守护（若用户在设置里开启）：保证划掉后台后定时提醒仍准时送达
+  if (provider.backgroundGuardEnabled) {
+    await BackgroundService.instance.start();
+  }
   runApp(MyApp(provider: provider));
 }
 

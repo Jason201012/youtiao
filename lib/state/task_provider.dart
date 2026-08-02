@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/background_service.dart';
 
 /// 内存状态 + shared_preferences 持久化（任务列表与开关设置落盘，重启不丢）
 class TaskProvider extends ChangeNotifier {
@@ -12,6 +13,7 @@ class TaskProvider extends ChangeNotifier {
   static const String _kFollowSystem = 'follow_system';
   static const String _kNotify = 'notifications_enabled';
   static const String _kSound = 'sound_enabled';
+  static const String _kGuard = 'background_guard';
 
   ThemeMode _themeMode = ThemeMode.light;
   ThemeMode get themeMode => _themeMode;
@@ -68,6 +70,10 @@ class TaskProvider extends ChangeNotifier {
   // ===== 声音开关（控制提醒是否响铃）=====
   bool _soundEnabled = true;
   bool get soundEnabled => _soundEnabled;
+
+  // ===== 后台提醒守护（前台服务保活）=====
+  bool _backgroundGuard = true;
+  bool get backgroundGuardEnabled => _backgroundGuard;
   void setSoundEnabled(bool v) {
     _soundEnabled = v;
     // 重新调度所有「未完成且未过期」的提醒，应用新的声音设置
@@ -78,6 +84,20 @@ class TaskProvider extends ChangeNotifier {
           NotificationService.instance.scheduleForTask(t, playSound: v);
         }
       }
+    }
+    notifyListeners();
+    _persist();
+  }
+
+  /// 后台提醒守护开关：开启则拉起前台服务（进程常驻），关闭则停止。
+  /// ColorOS 等国产 ROM 划掉后台后会速冻第三方 App，前台服务是唯一可靠的保活手段。
+  Future<void> setBackgroundGuard(bool v) async {
+    if (_backgroundGuard == v) return;
+    _backgroundGuard = v;
+    if (v) {
+      await BackgroundService.instance.start();
+    } else {
+      await BackgroundService.instance.stop();
     }
     notifyListeners();
     _persist();
@@ -120,6 +140,7 @@ class TaskProvider extends ChangeNotifier {
     _followSystem = prefs.getBool(_kFollowSystem) ?? true;
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
     _soundEnabled = prefs.getBool(_kSound) ?? true;
+    _backgroundGuard = prefs.getBool(_kGuard) ?? true;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 启动时为已有「未完成且未过期」的任务重新调度提醒（老任务/初始 mock 也能响）
     if (_notificationsEnabled) {
@@ -145,6 +166,7 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setBool(_kFollowSystem, _followSystem);
     await prefs.setBool(_kNotify, _notificationsEnabled);
     await prefs.setBool(_kSound, _soundEnabled);
+    await prefs.setBool(_kGuard, _backgroundGuard);
   }
 
   /// 载入后重算自增 id 起点，避免新任务 id 与已有（含回收站）冲突。
