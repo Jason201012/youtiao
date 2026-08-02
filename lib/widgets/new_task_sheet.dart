@@ -31,6 +31,10 @@ class _TaskSheetState extends State<TaskSheet> {
   Category _category = Category.work;
   DateTime? _dueDate;
 
+  /// 每日提醒开关与每天提醒时刻。
+  bool _dailyReminder = false;
+  TimeOfDay _dailyTime = const TimeOfDay(hour: 7, minute: 0);
+
   bool get _isEdit => widget.task != null;
 
   @override
@@ -42,6 +46,10 @@ class _TaskSheetState extends State<TaskSheet> {
       _priority = t.priority;
       _category = t.category;
       _dueDate = t.dueDate;
+      _dailyReminder = t.dailyReminder;
+      _dailyTime = t.dailyReminderMinute != null
+          ? TimeOfDay(hour: t.dailyReminderMinute! ~/ 60, minute: t.dailyReminderMinute! % 60)
+          : const TimeOfDay(hour: 7, minute: 0);
     }
   }
 
@@ -57,6 +65,9 @@ class _TaskSheetState extends State<TaskSheet> {
   String _formatTime(DateTime d) =>
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 
+  String _formatTimeOfDay(TimeOfDay t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
   Future<void> _pickDate() async {
     final now = DateTime.now();
     final picked = await showDatePicker(
@@ -66,11 +77,34 @@ class _TaskSheetState extends State<TaskSheet> {
       lastDate: now.add(const Duration(days: 365 * 5)),
     );
     if (picked != null) {
-      // 选日期后默认 09:00，编辑时保留既有时间
-      final h = _dueDate?.hour ?? 9;
-      final m = _dueDate?.minute ?? 0;
+      // 开启每日提醒时，截止时间固定为所选日期 23:59；否则保留既有时间或默认 09:00。
+      final int h;
+      final int m;
+      if (_dailyReminder) {
+        h = 23;
+        m = 59;
+      } else {
+        h = _dueDate?.hour ?? 9;
+        m = _dueDate?.minute ?? 0;
+      }
       setState(() => _dueDate = DateTime(picked.year, picked.month, picked.day, h, m));
     }
+  }
+
+  /// 每日提醒开关变化：开启时隐藏截止时间选择器，并把截止时间设为当天 23:59。
+  /// 若当前没有截止日期，则默认设为今天 23:59。
+  void _onDailyReminderChanged(bool v) {
+    setState(() {
+      _dailyReminder = v;
+      if (v) {
+        final now = DateTime.now();
+        if (_dueDate == null) {
+          _dueDate = DateTime(now.year, now.month, now.day, 23, 59);
+        } else {
+          _dueDate = DateTime(_dueDate!.year, _dueDate!.month, _dueDate!.day, 23, 59);
+        }
+      }
+    });
   }
 
   Future<void> _pickTime() async {
@@ -91,16 +125,28 @@ class _TaskSheetState extends State<TaskSheet> {
     }
   }
 
+  Future<void> _pickDailyTime() async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _dailyTime,
+      helpText: '选择每日提醒时间',
+    );
+    if (picked != null) setState(() => _dailyTime = picked);
+  }
+
   void _save() {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
     final provider = Provider.of<TaskProvider>(context, listen: false);
+    final dailyMinute = _dailyReminder ? _dailyTime.hour * 60 + _dailyTime.minute : null;
     if (_isEdit) {
       provider.updateTask(widget.task!.copyWith(
         title: title,
         priority: _priority,
         category: _category,
         dueDate: _dueDate,
+        dailyReminder: _dailyReminder,
+        dailyReminderMinute: dailyMinute,
       ));
     } else {
       provider.addTask(Task(
@@ -109,6 +155,8 @@ class _TaskSheetState extends State<TaskSheet> {
         priority: _priority,
         category: _category,
         dueDate: _dueDate,
+        dailyReminder: _dailyReminder,
+        dailyReminderMinute: dailyMinute,
       ));
     }
     Navigator.pop(context);
@@ -249,33 +297,86 @@ class _TaskSheetState extends State<TaskSheet> {
               ),
             ),
           ),
-          const SizedBox(height: 18),
-          // 截止时间
-          _SectionLabel('截止时间'),
-          const SizedBox(height: 8),
-          GestureDetector(
-            onTap: _dueDate == null ? null : _pickTime,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              decoration: BoxDecoration(
-                color: ext.chip,
-                borderRadius: BorderRadius.circular(AppColors.chipRadius),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    _dueDate == null ? '请先选择日期' : _formatTime(_dueDate!),
-                    style: TextStyle(
-                      color: _dueDate == null ? ext.meta : scheme.onSurface,
-                      fontSize: 16,
+          // 开启每日提醒后，截止时间固定为截止日期 23:59，不再让用户单独选择。
+          if (!_dailyReminder) ...[
+            const SizedBox(height: 18),
+            _SectionLabel('截止时间'),
+            const SizedBox(height: 8),
+            GestureDetector(
+              onTap: _dueDate == null ? null : _pickTime,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      _dueDate == null ? '请先选择日期' : _formatTime(_dueDate!),
+                      style: TextStyle(
+                        color: _dueDate == null ? ext.meta : scheme.onSurface,
+                        fontSize: 16,
+                      ),
                     ),
-                  ),
-                  Icon(Symbols.schedule, size: 20, color: ext.meta),
-                ],
+                    Icon(Symbols.schedule, size: 20, color: ext.meta),
+                  ],
+                ),
               ),
             ),
+          ],
+          const SizedBox(height: 18),
+          // 每日提醒开关
+          _SectionLabel('每日提醒'),
+          const SizedBox(height: 8),
+          Container(
+            height: 52,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              color: ext.chip,
+              borderRadius: BorderRadius.circular(AppColors.chipRadius),
+            ),
+            child: Row(
+              children: [
+                Icon(Symbols.repeat, size: 20, color: ext.meta),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '每天固定时间提醒此任务',
+                    style: TextStyle(color: scheme.onSurface, fontSize: 15),
+                  ),
+                ),
+                Switch(
+                  value: _dailyReminder,
+                  onChanged: _onDailyReminderChanged,
+                ),
+              ],
+            ),
           ),
+          const SizedBox(height: 8),
+          // 每日提醒时间（开启时显示）
+          if (_dailyReminder)
+            GestureDetector(
+              onTap: _pickDailyTime,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      _formatTimeOfDay(_dailyTime),
+                      style: TextStyle(color: scheme.onSurface, fontSize: 16),
+                    ),
+                    Icon(Symbols.schedule, size: 20, color: ext.meta),
+                  ],
+                ),
+              ),
+            ),
           const SizedBox(height: 20),
           // 保存
           SizedBox(

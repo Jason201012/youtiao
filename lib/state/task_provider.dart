@@ -48,13 +48,8 @@ class TaskProvider extends ChangeNotifier {
     if (v) {
       // 打开开关时重新请求通知权限（若之前被拒可再次弹窗）
       NotificationService.instance.requestPermission();
-      // 重新调度所有「未完成且未过期」的提醒，应用新状态
-      final now = DateTime.now();
-      for (final t in _tasks) {
-        if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
-          NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
-        }
-      }
+      // 重新调度所有「未完成且未过期」的截止提醒 + 每日提醒，应用新状态
+      _rescheduleAllActive();
     } else {
       NotificationService.instance.cancelAll();
     }
@@ -76,14 +71,9 @@ class TaskProvider extends ChangeNotifier {
   bool get backgroundGuardEnabled => _backgroundGuard;
   void setSoundEnabled(bool v) {
     _soundEnabled = v;
-    // 重新调度所有「未完成且未过期」的提醒，应用新的声音设置
+    // 重新调度所有提醒（截止 + 每日），应用新的声音设置
     if (_notificationsEnabled) {
-      final now = DateTime.now();
-      for (final t in _tasks) {
-        if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
-          NotificationService.instance.scheduleForTask(t, playSound: v);
-        }
-      }
+      _rescheduleAllActive();
     }
     notifyListeners();
     _persist();
@@ -142,15 +132,23 @@ class TaskProvider extends ChangeNotifier {
     _soundEnabled = prefs.getBool(_kSound) ?? true;
     _backgroundGuard = prefs.getBool(_kGuard) ?? true;
     NotificationService.instance.enabled = _notificationsEnabled;
-    // 启动时为已有「未完成且未过期」的任务重新调度提醒（老任务/初始 mock 也能响）
-    if (_notificationsEnabled) {
-      final now = DateTime.now();
-      for (final t in _tasks) {
-        if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
-          NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
+    // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    var dailyDirty = false;
+    for (var i = 0; i < _tasks.length; i++) {
+      final t = _tasks[i];
+      if (t.dailyReminder && t.done && (t.dueDate == null || !_dateHasPassed(t.dueDate!))) {
+        final c = t.completedAt;
+        if (c == null || DateTime(c.year, c.month, c.day).isBefore(today)) {
+          _tasks[i] = t.copyWith(done: false, completedAt: null);
+          dailyDirty = true;
         }
       }
     }
+    if (dailyDirty) await _persist();
+    // 启动时为已有「未完成且未过期」的任务 + 每日提醒重新调度（老任务/初始 mock 也能响）
+    if (_notificationsEnabled) _rescheduleAllActive();
     _recomputeIdSeq();
     notifyListeners();
   }
@@ -330,19 +328,17 @@ class TaskProvider extends ChangeNotifier {
   }
 
   int _idSeq = 8;
-  /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间则调度提醒。
+  /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间或每日提醒则调度。
   void addTask(Task task) {
     final newTask = task.copyWith(id: (_idSeq++).toString());
     _tasks.insert(0, newTask);
-    if (newTask.dueDate != null) {
-      NotificationService.instance.scheduleForTask(newTask, playSound: _soundEnabled);
-    }
+    _scheduleRemindersFor(newTask);
     notifyListeners();
     _persist();
   }
 
   /// 更新已有任务：保留 id / done / completedAt / subtask 计数，
-  /// 仅修改标题·优先级·分类·截止时间；截止时间变化时同步重排本地提醒。
+  /// 仅修改标题·优先级·分类·截止时间·每日提醒；相关字段变化时同步重排本地提醒。
   void updateTask(Task updated) {
     final i = _tasks.indexWhere((t) => t.id == updated.id);
     if (i == -1) return;
@@ -352,69 +348,102 @@ class TaskProvider extends ChangeNotifier {
       priority: updated.priority,
       category: updated.category,
       dueDate: updated.dueDate,
+      dailyReminder: updated.dailyReminder,
+      dailyReminderMinute: updated.dailyReminderMinute,
     );
-    if (old.dueDate != updated.dueDate) {
-      if (updated.dueDate != null) {
-        NotificationService.instance.scheduleForTask(_tasks[i], playSound: _soundEnabled);
-      } else {
-        NotificationService.instance.cancel(updated.id);
-      }
+    // 截止时间或每日提醒设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
+    final remindersChanged = old.dueDate != updated.dueDate ||
+        old.dailyReminder != updated.dailyReminder ||
+        old.dailyReminderMinute != updated.dailyReminderMinute;
+    if (remindersChanged) {
+      _cancelRemindersFor(updated.id);
+      _scheduleRemindersFor(_tasks[i]);
     }
     notifyListeners();
     _persist();
   }
 
   // ===== 删除（移入回收站，带撤销）=====
-  Task? _lastRemoved;
-  int _lastRemovedIndex = -1;
+  // 用批量撤销缓冲，使「单个删除」与「多选批量删除」共用同一套撤销逻辑。
+  List<Task> _lastBatch = [];
+  List<int> _lastBatchIndices = [];
+
+  /// 批量删除指定 id 的任务：从任务列表移除，移入回收站（记录删除时间），
+  /// 并取消其全部本地提醒。返回被删除的任务列表（按原始索引升序）。
+  /// 注意：每次调用都会覆盖上一次删除的撤销缓冲（仅可撤销最近一次删除操作）。
+  List<Task> _removeMany(List<String> ids) {
+    // 收集待删任务的原始索引与对象（升序）
+    final toRemove = <int, Task>{};
+    for (final id in ids) {
+      final i = _tasks.indexWhere((t) => t.id == id);
+      if (i != -1) toRemove[i] = _tasks[i];
+    }
+    final sortedIdx = toRemove.keys.toList()..sort(); // 升序
+    // 按索引降序删除，保证删除时索引依然有效
+    for (final i in sortedIdx.reversed) {
+      final r = _tasks.removeAt(i);
+      _cancelRemindersFor(r.id);
+      _trash.insert(0, r.copyWith(deletedAt: DateTime.now()));
+    }
+    _lastBatch = sortedIdx.map((i) => toRemove[i]!).toList(); // 升序
+    _lastBatchIndices = sortedIdx; // 升序，与 _lastBatch 一一对应
+    notifyListeners();
+    _persist();
+    return _lastBatch;
+  }
 
   /// 删除指定 id 的任务：从任务列表移除，并移入回收站（记录删除时间）。
-  /// 返回被删除的任务（用于撤销）。
+  /// 返回被删除的任务（用于撤销 / 提示）。
   Task? deleteTask(String id) {
-    final i = _tasks.indexWhere((t) => t.id == id);
-    if (i == -1) return null;
-    _lastRemoved = _tasks[i];
-    _lastRemovedIndex = i;
-    final removed = _tasks.removeAt(i);
-    // 移入回收站（置 deletedAt）
-    _trash.insert(0, removed.copyWith(deletedAt: DateTime.now()));
-    notifyListeners();
-    _persist();
-    return _lastRemoved;
+    final removed = _removeMany([id]);
+    return removed.isEmpty ? null : removed.first;
   }
 
-  /// 撤销上一次删除：从回收站取回并还原到原位置。
+  /// 多选批量删除：一次删除多个任务（移入回收站，可整体撤销）。
+  void deleteTasks(List<String> ids) => _removeMany(ids);
+
+  /// 撤销上一次删除（支持批量）：从回收站取回并按原始索引归位，恢复其本地提醒。
   void undoDelete() {
-    if (_lastRemoved == null) return;
-    final idx = _lastRemovedIndex.clamp(0, _tasks.length);
-    _tasks.insert(idx, _lastRemoved!);
-    _trash.removeWhere((t) => t.id == _lastRemoved!.id);
-    _lastRemoved = null;
-    _lastRemovedIndex = -1;
+    if (_lastBatch.isEmpty) return;
+    for (var k = 0; k < _lastBatch.length; k++) {
+      final r = _lastBatch[k];
+      final idx = _lastBatchIndices[k].clamp(0, _tasks.length);
+      _tasks.insert(idx, r);
+      _trash.removeWhere((t) => t.id == r.id);
+      _scheduleRemindersFor(r);
+    }
+    _lastBatch = [];
+    _lastBatchIndices = [];
     notifyListeners();
     _persist();
   }
 
-  /// 从回收站恢复任务到任务列表（清除 deletedAt，放回顶部）。
+  /// 从回收站恢复任务到任务列表（清除 deletedAt，放回顶部），并恢复其本地提醒。
   void restoreFromTrash(String id) {
     final i = _trash.indexWhere((t) => t.id == id);
     if (i == -1) return;
     final t = _trash.removeAt(i);
-    _tasks.insert(0, t.copyWith(deletedAt: null));
+    final restored = t.copyWith(deletedAt: null);
+    _tasks.insert(0, restored);
+    _scheduleRemindersFor(restored);
     notifyListeners();
     _persist();
   }
 
-  /// 在回收站中彻底删除某任务（不可恢复）。
+  /// 在回收站中彻底删除某任务（不可恢复），并取消其本地提醒。
   void permanentDelete(String id) {
     _trash.removeWhere((t) => t.id == id);
+    _cancelRemindersFor(id);
     notifyListeners();
     _persist();
   }
 
-  /// 清空回收站（全部彻底删除）。
+  /// 清空回收站（全部彻底删除），并取消其中所有任务的本地提醒。
   void clearTrash() {
     if (_trash.isEmpty) return;
+    for (final t in _trash) {
+      _cancelRemindersFor(t.id);
+    }
     _trash.clear();
     notifyListeners();
     _persist();
@@ -462,14 +491,7 @@ class TaskProvider extends ChangeNotifier {
     if (data['sound_enabled'] is bool) _soundEnabled = data['sound_enabled'];
     NotificationService.instance.enabled = _notificationsEnabled;
     NotificationService.instance.cancelAll();
-    if (_notificationsEnabled) {
-      final now = DateTime.now();
-      for (final t in _tasks) {
-        if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
-          NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
-        }
-      }
-    }
+    if (_notificationsEnabled) _rescheduleAllActive();
     _recomputeIdSeq();
     notifyListeners();
     await _persist();
@@ -510,13 +532,19 @@ class TaskProvider extends ChangeNotifier {
     buf.writeln('## 未完成（${_tasks.where((e) => !e.done).length}）');
     for (final t in _tasks.where((e) => !e.done)) {
       final due = t.dueDate == null ? '' : ' ｜ 截止 ${_fmt(t.dueDate!)}';
-      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due');
+      final daily = (t.dailyReminder && t.dailyReminderMinute != null)
+          ? ' ｜ 每日 ${_fmtMinute(t.dailyReminderMinute!)}'
+          : '';
+      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$daily');
     }
     buf.writeln('');
     buf.writeln('## 已完成（${_tasks.where((e) => e.done).length}）');
     for (final t in _tasks.where((e) => e.done)) {
       final c = t.completedAt == null ? '' : ' ｜ 完成于 ${_fmt(t.completedAt!)}';
-      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c');
+      final daily = (t.dailyReminder && t.dailyReminderMinute != null)
+          ? ' ｜ 每日 ${_fmtMinute(t.dailyReminderMinute!)}'
+          : '';
+      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$daily');
     }
     if (includeTrash && _trash.isNotEmpty) {
       buf.writeln('');
@@ -532,6 +560,8 @@ class TaskProvider extends ChangeNotifier {
   static String _fmt(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  static String _fmtMinute(int m) =>
+      '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
   static String _prioLabel(Priority p) =>
       p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
   static String _catLabel(Category c) =>
@@ -541,5 +571,45 @@ class TaskProvider extends ChangeNotifier {
   /// 新建任务时按 dueDate 调度本地通知
   Future<void> scheduleFor(Task task) async {
     await NotificationService.instance.scheduleForTask(task);
+  }
+
+  /// 为单个任务调度其全部本地提醒（截止提醒 + 每日提醒）。
+  /// 每日提醒只在「有截止日期且截止日期未过」时才调度，逾期后自动停止。
+  void _scheduleRemindersFor(Task t) {
+    if (t.dueDate != null) {
+      NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
+    }
+    if (t.dailyReminder && t.dailyReminderMinute != null &&
+        t.dueDate != null && !_dateHasPassed(t.dueDate!)) {
+      NotificationService.instance.scheduleDailyReminder(t, playSound: _soundEnabled);
+    }
+  }
+
+  /// 取消单个任务的全部本地提醒（截止提醒 + 每日提醒）。
+  void _cancelRemindersFor(String id) {
+    NotificationService.instance.cancel(id);
+    NotificationService.instance.cancelDailyReminder(id);
+  }
+
+  /// 统一重排所有活动任务的提醒：未完成且未过期的截止提醒 + 未过期的每日提醒。
+  /// 用于开关/声音变化、启动时刷新。
+  void _rescheduleAllActive() {
+    final now = DateTime.now();
+    for (final t in _tasks) {
+      if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
+        NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
+      }
+      if (t.dailyReminder && t.dailyReminderMinute != null &&
+          t.dueDate != null && !_dateHasPassed(t.dueDate!)) {
+        NotificationService.instance.scheduleDailyReminder(t, playSound: _soundEnabled);
+      }
+    }
+  }
+
+  /// 判断日期是否已完全过去（以「今天 00:00」为界，与 dueDate 的 23:59 语义一致）。
+  static bool _dateHasPassed(DateTime d) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return DateTime(d.year, d.month, d.day).isBefore(today);
   }
 }

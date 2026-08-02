@@ -78,6 +78,10 @@ key.properties
 # Gradle / build caches (machine-specific)
 .gradle-home/
 
+# Android build outputs (Gradle) — never commit
+**/android/**/build/
+
+
 # WorkBuddy internal project data (do not publish)
 .workbuddy/
 

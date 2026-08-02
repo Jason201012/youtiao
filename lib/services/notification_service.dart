@@ -42,6 +42,11 @@ class NotificationService {
   /// 否则编辑/删除时取消会错位。
   static int _notifyIdOf(String id) => int.tryParse(id) ?? id.hashCode;
 
+  /// 每日提醒使用独立 id 段（基础 id + 固定偏移），与一次性「截止提醒」区分开，
+  /// 避免同一任务的两种提醒互相 cancel 掉。偏移量远小于 int32 上限，且本 App
+  /// 任务 id 为较小的纯数字，不会越界。
+  static int _dailyNotifyIdOf(String id) => _notifyIdOf(id) + 500000;
+
   /// 与 MainActivity.kt 中的 MethodChannel 对应，用于查询/跳转「精确闹钟」权限。
   static const MethodChannel _exactAlarmChannel =
       MethodChannel('com.example.todolist/exact_alarm');
@@ -264,8 +269,68 @@ class NotificationService {
     }
   }
 
-  /// 按任务 id 取消单条已调度的通知。
+  /// 按任务 id 取消单条已调度的「截止提醒」通知。
   Future<void> cancel(String id) => _plugin.cancel(_notifyIdOf(id));
+
+  /// 为任务调度「每日提醒」：每天在设定时间重复触发（setAlarmClock 模式，
+  /// 不被 ColorOS 等国产 ROM 拦截；配合 :guard 进程内的 ScheduledNotificationReceiver
+  /// 即使主进程被杀也能按时触发）。返回 true 表示已成功提交。
+  ///
+  /// [matchDateTimeComponents: DateTimeComponents.time] 让 flutter_local_notifications
+  /// 在每天的同一时刻重复触发；[when] 设为「下一个该时刻」（今天未过则今天，已过则明天）。
+  Future<bool> scheduleDailyReminder(Task task, {bool playSound = true}) async {
+    if (!enabled) {
+      debugPrint('[通知] 未调度每日提醒 id=${task.id}：通知总开关关闭');
+      return false;
+    }
+    if (!task.dailyReminder || task.dailyReminderMinute == null) {
+      debugPrint('[通知] 未调度每日提醒 id=${task.id}：未开启每日提醒');
+      return false;
+    }
+    try {
+      final loc = _loc ?? tz.UTC;
+      final m = task.dailyReminderMinute!;
+      final hh = m ~/ 60;
+      final mm = m % 60;
+      final now = tz.TZDateTime.now(loc);
+      var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+      if (!when.isAfter(now)) when = when.add(const Duration(days: 1));
+      final chId = playSound ? _chSound : _chSilent;
+      final androidDetail = AndroidNotificationDetails(
+        chId,
+        '任务提醒',
+        channelDescription: '每日定时提醒',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: playSound,
+      );
+      final detail = NotificationDetails(android: androidDetail);
+      final mode = await _scheduleMode;
+      await _plugin.zonedSchedule(
+        _dailyNotifyIdOf(task.id),
+        '每日提醒',
+        task.title,
+        when,
+        detail,
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+      debugPrint('[通知] 已调度每日提醒 id=${task.id} 每天 '
+          '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}'
+          ' (首次=$when, mode=${mode.name})');
+      return true;
+    } catch (e, s) {
+      debugPrint('[通知] 每日提醒调度失败 id=${task.id}: $e');
+      debugPrint('$s');
+      return false;
+    }
+  }
+
+  /// 按任务 id 取消单条「每日提醒」通知。
+  Future<void> cancelDailyReminder(String id) =>
+      _plugin.cancel(_dailyNotifyIdOf(id));
 
   /// 清空所有已调度的通知（关闭总开关时调用）。
   Future<void> cancelAll() => _plugin.cancelAll();
