@@ -67,16 +67,16 @@ dependencies {
 // 说明：曾尝试降级到 Gradle 8.14 想绕开，但本机 JDK 是 25.0.2、Gradle 8.14 不支持 JDK 25 会 1 秒即崩，
 // 故最终留在 Gradle 9.1 + in-process 策略。compile*Kotlin 绝不能加 doNotTrackState
 // —— Kotlin 增量编译器依赖任务状态，禁用会报 "Changes are not tracked"。
-//   3) package* 任务（packageRelease/packageDebug）在跨盘下也会把 dex-renamer 增量状态写成符号链接，
-//     其 incrementalFolder 快照同样报 "not a regular file"，用同一 doNotTrackState 兜底。
+//   3) packageRelease / packageDebug 的 dex-renamer-state.txt 符号链接 ——
+//      ⚠️ 这类任务【不能】doNotTrackState（会反过来报 "Changes are not tracked" 直接失败）。
+//      真正修复见下方：把 Gradle 临时目录也放到 D 盘（gradle.properties 的 org.gradle.jvmargs
+//      加 -Djava.io.tmpdir=D:/workbuddy/.gradle/tmp），让 dex-renamer 的临时文件与 build 输出同盘，
+//      跨卷 move 不再退化成符号链接；并偶尔 `flutter clean` 清掉已残留的符号链接。
 tasks.configureEach {
-    // 跨盘（build 在 D 盘、GRADLE_USER_HOME 在 C 盘）时，Gradle 9.1 会把多个任务的
-    // 增量/输出写成符号链接，严格快照报 "not a regular file" 导致 release 构建失败
-    // （已先后命中 merge*NativeLibs、package*、extract*NativeSymbolTables 等）。
-    // ⚠️ 不可无差别关闭状态追踪：mergeReleaseJniLibFolders 等任务依赖增量状态，
-    //    禁用会反过来报 "Changes are not tracked" 直接失败；故只精准命中上面三类。
-    //    其余任务（Kotlin / merge*JniLib / merge*Dex / Resources / R8）保持状态追踪，
-    //    它们在一次 clean 构建里能正常产出普通文件。彻底根因是把 GRADLE_USER_HOME 移到同盘。
+    // 只关闭"不依赖增量变化检测"的任务的状态追踪，避开 Gradle 9.1 对符号链接的严格快照。
+    // packageRelease/packageDebug 必须保留状态追踪（否则报 Changes are not tracked）。
+    // 其余任务（Kotlin / merge*JniLib / merge*Dex / Resources / R8 / package*）保持状态追踪，
+    // 配合同盘临时目录，它们在构建里能正常产出普通文件。彻底根因是临时目录与 build 同盘。
     if (name.contains("NativeLibs", ignoreCase = true) ||
         name.contains("NativeSymbolTables", ignoreCase = true)) {
         doNotTrackState("跨盘符号链接快照保护（原生库合并 / 原生符号表）")
