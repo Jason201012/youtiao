@@ -51,7 +51,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  /// 全选 / 反选当前可见任务（今天 + 已完成）
+  /// 全选 / 反选当前可见任务
   void _toggleSelectAll(List<Task> visible) {
     final allSelected = visible.isNotEmpty &&
         visible.every((t) => _selected.contains(t.id));
@@ -76,6 +76,24 @@ class _HomeScreenState extends State<HomeScreen> {
     _showBatchUndoSnackBar(context, provider, count);
   }
 
+  /// 单个任务行（含滑动/多选/编辑），两个分区与筛选列表共用。
+  Widget _tile(BuildContext context, Task t) {
+    final provider = context.read<TaskProvider>();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppColors.contentGap),
+      child: _DismissibleTask(
+        task: t,
+        selecting: _selecting,
+        selected: _selected.contains(t.id),
+        onToggle: () => provider.toggleDone(t.id),
+        onLongPress: () => _enterSelect(t),
+        onEdit: () => TaskSheet.show(context, task: t),
+        onSelect: () => _toggleSelect(t.id),
+        onDeleted: (removed) => _showUndoSnackBar(context, provider, removed),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
@@ -89,7 +107,21 @@ class _HomeScreenState extends State<HomeScreen> {
         final tasks = provider.tasks;
         final today = tasks.where((t) => !t.done).toList();
         final done = tasks.where((t) => t.done).toList();
-        final visible = [...today, ...done];
+        final filter = provider.taskFilter;
+        final filtered = switch (filter) {
+          TaskFilter.todo => tasks.where((t) => t.status == TaskStatus.todo).toList(),
+          TaskFilter.doing =>
+            tasks.where((t) => t.status == TaskStatus.doing).toList(),
+          TaskFilter.done => tasks.where((t) => t.status == TaskStatus.done).toList(),
+          TaskFilter.overdue => tasks
+              .where((t) =>
+                  !t.done &&
+                  t.dueDate != null &&
+                  t.dueDate!.isBefore(DateTime.now()))
+              .toList(),
+          TaskFilter.all => const <Task>[],
+        };
+        final visible = filter == TaskFilter.all ? [...today, ...done] : filtered;
 
         final appBar = _selecting
             ? SizedBox(
@@ -151,55 +183,30 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 今天
-                    _SectionHeader(
-                      title: '今天',
-                      count: today.length,
-                      chipColor: ext.chip,
-                      metaColor: ext.meta,
-                    ),
-                    ...today.map(
-                      (t) => Padding(
-                        padding:
-                            const EdgeInsets.only(bottom: AppColors.contentGap),
-                        child: _DismissibleTask(
-                          task: t,
-                          selecting: _selecting,
-                          selected: _selected.contains(t.id),
-                          onToggle: () => provider.toggleDone(t.id),
-                          onLongPress: () => _enterSelect(t),
-                          onEdit: () => TaskSheet.show(context, task: t),
-                          onSelect: () => _toggleSelect(t.id),
-                          onDeleted: (removed) =>
-                              _showUndoSnackBar(context, provider, removed),
-                        ),
+                    // 筛选芯片：默认「全部」；看板统计卡点击会套用对应筛选
+                    _FilterChips(provider: provider),
+                    const SizedBox(height: 12),
+                    if (filter == TaskFilter.all) ...[
+                      // 今天
+                      _SectionHeader(
+                        title: '今天',
+                        count: today.length,
+                        chipColor: ext.chip,
+                        metaColor: ext.meta,
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    // 已完成
-                    _SectionHeader(
-                      title: '已完成',
-                      count: done.length,
-                      chipColor: ext.chip,
-                      metaColor: ext.meta,
-                    ),
-                    ...done.map(
-                      (t) => Padding(
-                        padding:
-                            const EdgeInsets.only(bottom: AppColors.contentGap),
-                        child: _DismissibleTask(
-                          task: t,
-                          selecting: _selecting,
-                          selected: _selected.contains(t.id),
-                          onToggle: () => provider.toggleDone(t.id),
-                          onLongPress: () => _enterSelect(t),
-                          onEdit: () => TaskSheet.show(context, task: t),
-                          onSelect: () => _toggleSelect(t.id),
-                          onDeleted: (removed) =>
-                              _showUndoSnackBar(context, provider, removed),
-                        ),
+                      ...today.map((t) => _tile(context, t)),
+                      const SizedBox(height: 8),
+                      // 已完成
+                      _SectionHeader(
+                        title: '已完成',
+                        count: done.length,
+                        chipColor: ext.chip,
+                        metaColor: ext.meta,
                       ),
-                    ),
+                      ...done.map((t) => _tile(context, t)),
+                    ] else ...[
+                      ...filtered.map((t) => _tile(context, t)),
+                    ],
                   ],
                 ),
               ),
@@ -207,6 +214,60 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         );
       },
+    );
+  }
+}
+
+/// 首页筛选芯片行：全部 / 待办 / 进行中 / 已完成 / 逾期。
+class _FilterChips extends StatelessWidget {
+  final TaskProvider provider;
+  const _FilterChips({required this.provider});
+
+  static const List<(TaskFilter, String)> _items = [
+    (TaskFilter.all, '全部'),
+    (TaskFilter.todo, '待办'),
+    (TaskFilter.doing, '进行中'),
+    (TaskFilter.done, '已完成'),
+    (TaskFilter.overdue, '逾期'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final primary = Theme.of(context).colorScheme.primary;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final selectedText = isDark ? AppColors.lightChip : Colors.white;
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final (f, label) in _items)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () => provider.setTaskFilter(f),
+                child: Container(
+                  height: 32,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: provider.taskFilter == f ? primary : ext.chip,
+                    borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                  ),
+                  child: Center(
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: provider.taskFilter == f ? selectedText : ext.meta,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

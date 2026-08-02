@@ -5,6 +5,9 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
 
+/// 首页列表筛选（看板统计卡点击后跳转首页并套用）。
+enum TaskFilter { all, todo, doing, done, overdue }
+
 /// 内存状态 + shared_preferences 持久化（任务列表与开关设置落盘，重启不丢）
 class TaskProvider extends ChangeNotifier {
   static const String _kTasks = 'tasks';
@@ -138,10 +141,11 @@ class TaskProvider extends ChangeNotifier {
     var dailyDirty = false;
     for (var i = 0; i < _tasks.length; i++) {
       final t = _tasks[i];
-      if (t.dailyReminder && t.done && (t.dueDate == null || !_dateHasPassed(t.dueDate!))) {
+      if (t.dailyReminder && t.status == TaskStatus.done &&
+          (t.dueDate == null || !_dateHasPassed(t.dueDate!))) {
         final c = t.completedAt;
         if (c == null || DateTime(c.year, c.month, c.day).isBefore(today)) {
-          _tasks[i] = t.copyWith(done: false, completedAt: null);
+          _tasks[i] = t.copyWith(status: TaskStatus.todo, completedAt: null);
           dailyDirty = true;
         }
       }
@@ -220,7 +224,7 @@ class TaskProvider extends ChangeNotifier {
       priority: Priority.high,
       category: Category.work,
       dueDate: DateTime.now().add(const Duration(days: -1)),
-      done: true,
+      status: TaskStatus.done,
       completedAt: DateTime.now().add(const Duration(days: -2)),
     ),
     Task(
@@ -228,7 +232,7 @@ class TaskProvider extends ChangeNotifier {
       title: '给绿植浇水',
       priority: Priority.low,
       category: Category.life,
-      done: true,
+      status: TaskStatus.done,
       completedAt: DateTime.now().add(const Duration(days: -4)),
     ),
     Task(
@@ -236,7 +240,7 @@ class TaskProvider extends ChangeNotifier {
       title: '完成算法作业',
       priority: Priority.high,
       category: Category.study,
-      done: true,
+      status: TaskStatus.done,
       completedAt: DateTime.now().add(const Duration(days: -6)),
     ),
   ];
@@ -259,7 +263,7 @@ class TaskProvider extends ChangeNotifier {
   int get completed => _tasks.where((t) => t.done).length;
   int get overdue =>
       _tasks.where((t) => !t.done && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
-  int get inProgress => _tasks.where((t) => !t.done).length;
+  int get inProgress => _tasks.where((t) => t.status == TaskStatus.doing).length;
   double get completionRate => total == 0 ? 0 : completed / total;
 
   /// 各分类完成比例
@@ -315,12 +319,62 @@ class TaskProvider extends ChangeNotifier {
     return counts;
   }
 
+  // ===== 首页筛选（看板统计卡点击跳转）=====
+  TaskFilter _taskFilter = TaskFilter.all;
+  TaskFilter get taskFilter => _taskFilter;
+  void setTaskFilter(TaskFilter f) {
+    if (_taskFilter == f) return;
+    _taskFilter = f;
+    notifyListeners();
+  }
+
+  /// 看板/首页注册的「跳回首页」回调：统计卡点击后由 scaffold 切换 Tab。
+  void Function()? _onRequestHome;
+  set onRequestHome(void Function()? cb) => _onRequestHome = cb;
+  void requestHomeWithFilter(TaskFilter f) {
+    _taskFilter = f;
+    _onRequestHome?.call();
+    notifyListeners();
+  }
+
+  /// 看板三列分组：待办 / 进行中 / 已完成（保留列表原顺序）。
+  Map<TaskStatus, List<Task>> get kanbanGroups {
+    final map = {for (final s in TaskStatus.values) s: <Task>[]};
+    for (final t in _tasks) {
+      map[t.status]!.add(t);
+    }
+    return map;
+  }
+
+  /// 未完成任务的优先级分布（高/中/低），用于看板「优先级」进度条。
+  Map<Priority, int> get priorityCounts {
+    final map = {for (final p in Priority.values) p: 0};
+    for (final t in _tasks) {
+      if (!t.done) map[t.priority] = map[t.priority]! + 1;
+    }
+    return map;
+  }
+
+  /// 把任务在 待办/进行中/已完成 之间移动（看板拖拽 / 点击循环切换）。
+  void setStatus(String id, TaskStatus s) {
+    final i = _tasks.indexWhere((t) => t.id == id);
+    if (i == -1) return;
+    final cur = _tasks[i];
+    if (cur.status == s) return;
+    _tasks[i] = cur.copyWith(
+      status: s,
+      completedAt: s == TaskStatus.done ? DateTime.now() : null,
+    );
+    notifyListeners();
+    _persist();
+  }
+
   void toggleDone(String id) {
     final i = _tasks.indexWhere((t) => t.id == id);
     if (i == -1) return;
     final willDone = !_tasks[i].done;
     _tasks[i] = _tasks[i].copyWith(
-      done: willDone,
+      status: willDone ? TaskStatus.done : TaskStatus.todo,
       completedAt: willDone ? DateTime.now() : null,
     );
     notifyListeners();

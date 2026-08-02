@@ -9,6 +9,9 @@ import 'package:todolist/widgets/completion_ring.dart';
 import 'package:todolist/widgets/stat_card.dart';
 import 'package:todolist/widgets/category_progress.dart';
 import 'package:todolist/widgets/week_trend.dart';
+import 'package:todolist/widgets/priority_distribution.dart';
+import 'package:todolist/widgets/guard_status_card.dart';
+import 'package:todolist/widgets/kanban_board.dart';
 
 class BoardScreen extends StatelessWidget {
   const BoardScreen({super.key});
@@ -38,15 +41,20 @@ class BoardScreen extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 今日概览
+                    // 概览（标题改为「概览」，统计为全局口径，与数字一致）
                     Padding(
                       padding: const EdgeInsets.only(bottom: AppColors.contentGap),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('今日概览',
-                              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: onBg)),
-                          Text(today, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: ext.meta)),
+                          Text('概览',
+                              style: TextStyle(
+                                  fontSize: 20, fontWeight: FontWeight.bold, color: onBg)),
+                          Text(today,
+                              style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: ext.meta)),
                         ],
                       ),
                     ),
@@ -59,17 +67,29 @@ class BoardScreen extends StatelessWidget {
                       ),
                       child: Row(
                         children: [
-                          CompletionRing(value: rate, centerText: '${(rate * 100).round()}%'),
+                          CompletionRing(
+                              value: rate, centerText: '${(rate * 100).round()}%'),
                           const SizedBox(width: 16),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Text('已完成', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: ext.meta)),
+                                Text('已完成',
+                                    style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        color: ext.meta)),
                                 Text('${provider.completed} / ${provider.total}',
-                                    style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold, color: progressColor)),
-                                Text('今日任务完成率', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: ext.meta)),
+                                    style: TextStyle(
+                                        fontSize: 30,
+                                        fontWeight: FontWeight.bold,
+                                        color: progressColor)),
+                                Text('任务完成率',
+                                    style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        color: ext.meta)),
                               ],
                             ),
                           ),
@@ -77,15 +97,30 @@ class BoardScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
-                    // 统计网格 2×2
+                    // 后台提醒守护状态卡
+                    GuardStatusCard(enabled: provider.backgroundGuardEnabled),
+                    const SizedBox(height: AppColors.contentGap),
+                    // 统计网格 2×2（可点击跳首页筛选）
                     Row(
                       children: [
                         Expanded(
-                          child: StatCard(value: '${provider.total}', label: '总任务', valueColor: onBg),
+                          child: StatCard(
+                            value: '${provider.total}',
+                            label: '总任务',
+                            valueColor: onBg,
+                            onTap: () =>
+                                provider.requestHomeWithFilter(TaskFilter.all),
+                          ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: StatCard(value: '${provider.completed}', label: '已完成', valueColor: progressColor),
+                          child: StatCard(
+                            value: '${provider.completed}',
+                            label: '已完成',
+                            valueColor: progressColor,
+                            onTap: () =>
+                                provider.requestHomeWithFilter(TaskFilter.done),
+                          ),
                         ),
                       ],
                     ),
@@ -93,24 +128,42 @@ class BoardScreen extends StatelessWidget {
                     Row(
                       children: [
                         Expanded(
-                          child: StatCard(value: '${provider.overdue}', label: '逾期', valueColor: AppColors.lightHigh),
+                          child: StatCard(
+                            value: '${provider.overdue}',
+                            label: '逾期',
+                            valueColor: AppColors.lightHigh,
+                            onTap: () =>
+                                provider.requestHomeWithFilter(TaskFilter.overdue),
+                          ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: StatCard(value: '${provider.inProgress}', label: '进行中', valueColor: progressColor),
+                          child: StatCard(
+                            value: '${provider.inProgress}',
+                            label: '进行中',
+                            valueColor: progressColor,
+                            onTap: () =>
+                                provider.requestHomeWithFilter(TaskFilter.doing),
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 24),
+                    // 优先级分布
+                    PriorityDistribution(counts: provider.priorityCounts),
+                    const SizedBox(height: 24),
                     // 分类进度
                     CategoryProgress(progress: provider.categoryProgress()),
                     const SizedBox(height: 24),
-                    // 周趋势
+                    // 周趋势（含上周同期对比）
                     WeekTrend(
                       values: provider.weekTrend,
                       dates: provider.weekTrendDates,
                       lastWeekValues: provider.lastWeekTrend,
                     ),
+                    const SizedBox(height: 24),
+                    // 看板三列（拖拽 / 点击切换状态）
+                    const KanbanBoard(),
                   ],
                 ),
               );

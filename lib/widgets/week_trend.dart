@@ -88,40 +88,69 @@ class WeekTrend extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 12),
-        // 柱状图：每根柱上方显示当天完成数
+        // 柱状图：本周实色柱 + 上周同期淡色柱（同一刻度对比），每根柱上方显示当天完成数
         SizedBox(
           height: 74,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              for (int i = 0; i < values.length; i++)
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Text(
-                      '${values[i]}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: i == values.length - 1 ? todayFill : fill,
+          child: Builder(builder: (context) {
+            final lastMax = lastWeekValues.isEmpty
+                ? 0
+                : lastWeekValues.reduce((a, b) => a > b ? a : b);
+            final scaleMax = (max == 0 && lastMax == 0) ? 1 : (max > lastMax ? max : lastMax);
+            return Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                for (int i = 0; i < values.length; i++)
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        '${values[i]}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: i == values.length - 1 ? todayFill : fill,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 3),
-                    Container(
-                      width: 40,
-                      height: max == 0 ? 0 : (values[i] / max) * 56,
-                      decoration: BoxDecoration(
-                        color: i == values.length - 1 ? todayFill : fill,
-                        borderRadius:
-                            BorderRadius.circular(AppColors.progressRadius),
+                      const SizedBox(height: 3),
+                      SizedBox(
+                        width: 40,
+                        height: 56,
+                        child: Stack(
+                          alignment: Alignment.bottomCenter,
+                          children: [
+                            // 上周同期（淡）
+                            Container(
+                              width: 40,
+                              height: (lastWeekValues[i] / scaleMax) * 56,
+                              decoration: BoxDecoration(
+                                color: meta.withOpacity(0.22),
+                                borderRadius:
+                                    BorderRadius.circular(AppColors.progressRadius),
+                              ),
+                            ),
+                            // 本周（实色，略窄以便对比）
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 7),
+                              child: Container(
+                                width: 26,
+                                height: (values[i] / scaleMax) * 56,
+                                decoration: BoxDecoration(
+                                  color: i == values.length - 1 ? todayFill : fill,
+                                  borderRadius:
+                                      BorderRadius.circular(AppColors.progressRadius),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-            ],
-          ),
+                    ],
+                  ),
+              ],
+            );
+          }),
         ),
         const SizedBox(height: 8),
         // 星期标签

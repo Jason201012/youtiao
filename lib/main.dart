@@ -66,6 +66,14 @@ class _MainScaffoldState extends State<MainScaffold> {
   final _pages = const [HomeScreen(), BoardScreen(), SettingsScreen()];
 
   @override
+  void initState() {
+    super.initState();
+    // 看板统计卡点击后，由 provider 回调切回首页并套用筛选。
+    Provider.of<TaskProvider>(context, listen: false).onRequestHome =
+        () => setState(() => _index = 0);
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,

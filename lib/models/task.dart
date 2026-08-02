@@ -44,17 +44,37 @@ extension CategoryLabel on Category {
   }
 }
 
+/// 任务状态：待办 / 进行中 / 已完成。
+/// 看板页按此分为三列，可在列间拖拽或点击循环切换。
+enum TaskStatus { todo, doing, done }
+
+extension TaskStatusLabel on TaskStatus {
+  String get label {
+    switch (this) {
+      case TaskStatus.todo:
+        return '待办';
+      case TaskStatus.doing:
+        return '进行中';
+      case TaskStatus.done:
+        return '已完成';
+    }
+  }
+}
+
 class Task {
   final String id;
   final String title;
   final Priority priority;
   final Category category;
   final DateTime? dueDate;
-  final bool done;
+  final TaskStatus status;
   final DateTime? completedAt;
   final int subtaskTotal;
   final int subtaskDone;
   final DateTime? deletedAt;
+
+  /// 是否完成：由 [status] 派生，保持对外只读语义一致。
+  bool get done => status == TaskStatus.done;
 
   /// 是否为「每日提醒」任务：开启后每天在设定时间提醒该任务（如每天 07:00 背单词）。
   final bool dailyReminder;
@@ -68,7 +88,7 @@ class Task {
     required this.priority,
     required this.category,
     this.dueDate,
-    this.done = false,
+    this.status = TaskStatus.todo,
     this.completedAt,
     this.subtaskTotal = 0,
     this.subtaskDone = 0,
@@ -83,7 +103,7 @@ class Task {
     Priority? priority,
     Category? category,
     DateTime? dueDate,
-    bool? done,
+    TaskStatus? status,
     DateTime? completedAt,
     int? subtaskTotal,
     int? subtaskDone,
@@ -97,7 +117,7 @@ class Task {
         priority: priority ?? this.priority,
         category: category ?? this.category,
         dueDate: dueDate ?? this.dueDate,
-        done: done ?? this.done,
+        status: status ?? this.status,
         completedAt: completedAt ?? this.completedAt,
         subtaskTotal: subtaskTotal ?? this.subtaskTotal,
         subtaskDone: subtaskDone ?? this.subtaskDone,
@@ -113,7 +133,8 @@ class Task {
         'priority': priority.name,
         'category': category.name,
         'dueDate': dueDate?.toIso8601String(),
-        'done': done,
+        'status': status.name,
+        'done': done, // 保留旧字段，兼容历史备份/读取
         'completedAt': completedAt?.toIso8601String(),
         'subtaskTotal': subtaskTotal,
         'subtaskDone': subtaskDone,
@@ -122,14 +143,16 @@ class Task {
         'dailyReminderMinute': dailyReminderMinute,
       };
 
-  /// 从 JSON 反序列化
+  /// 从 JSON 反序列化（兼容旧版仅含 [done] 布尔的备份）
   factory Task.fromJson(Map<String, dynamic> j) => Task(
         id: j['id'] as String,
         title: j['title'] as String,
         priority: Priority.values.byName(j['priority'] as String),
         category: Category.values.byName(j['category'] as String),
         dueDate: j['dueDate'] == null ? null : DateTime.parse(j['dueDate'] as String),
-        done: j['done'] as bool? ?? false,
+        status: j['status'] != null
+            ? TaskStatus.values.byName(j['status'] as String)
+            : ((j['done'] as bool? ?? false) ? TaskStatus.done : TaskStatus.todo),
         completedAt:
             j['completedAt'] == null ? null : DateTime.parse(j['completedAt'] as String),
         subtaskTotal: j['subtaskTotal'] as int? ?? 0,
