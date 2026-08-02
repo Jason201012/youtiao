@@ -67,7 +67,7 @@ flutter build apk --release   # 构建 Android release 包
 
 ## 📦 发行版（Release）
 
-安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，对应版本（如 `v1.8.4`）的附件中下载 `app-release.apk`。
+安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，对应版本（如 `v1.8.7`）的附件中下载 `app-release.apk`。
 
 ## 📁 项目结构
 
