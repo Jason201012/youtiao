@@ -105,7 +105,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return Consumer<TaskProvider>(
       builder: (context, provider, _) {
         final tasks = provider.tasks;
-        final today = tasks.where((t) => !t.done).toList();
+        final today = tasks.where((t) => !t.done && !t.dailyReminder).toList();
+        final daily = tasks.where((t) => t.dailyReminder && !t.done).toList();
         final done = tasks.where((t) => t.done).toList();
         final filter = provider.taskFilter;
         final filtered = switch (filter) {
@@ -121,7 +122,7 @@ class _HomeScreenState extends State<HomeScreen> {
               .toList(),
           TaskFilter.all => const <Task>[],
         };
-        final visible = filter == TaskFilter.all ? [...today, ...done] : filtered;
+        final visible = filter == TaskFilter.all ? [...today, ...daily, ...done] : filtered;
 
         final appBar = _selecting
             ? SizedBox(
@@ -195,6 +196,15 @@ class _HomeScreenState extends State<HomeScreen> {
                         metaColor: ext.meta,
                       ),
                       ...today.map((t) => _tile(context, t)),
+                      const SizedBox(height: 8),
+                      // 每天：每日提醒任务（进行中）
+                      _SectionHeader(
+                        title: '每天',
+                        count: daily.length,
+                        chipColor: ext.chip,
+                        metaColor: ext.meta,
+                      ),
+                      ...daily.map((t) => _tile(context, t)),
                       const SizedBox(height: 8),
                       // 已完成
                       _SectionHeader(
