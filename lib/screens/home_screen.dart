@@ -9,6 +9,21 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 
+/// 首页所有分区标题共用的字号。
+/// 「逾期 / 今天 / 未来 / 每天 / 已完成」必须完全一致，避免视觉层级混乱。
+const double _sectionTitleFontSize = 20;
+
+/// 计算截止日期相对「今天」的天数差（只比较年月日，忽略时分秒）。
+///
+/// 返回值：负数 = 逾期，0 = 今天，正数 = 未来，null = 没有截止日期。
+/// 与任务行右侧的日期标签（task_row.dart 的 _dueLabel）采用同一套按天比较口径。
+int? _dueDayDiff(DateTime? due) {
+  if (due == null) return null;
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  return DateTime(due.year, due.month, due.day).difference(today).inDays;
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -94,6 +109,32 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// 生成一个首页分区：标题行 + 任务行 + 段间距。
+  ///
+  /// - 任务为空时整段隐藏，避免首页出现一排「0」的空标题；
+  /// - [alwaysShow] 为 true 的分区（「今天」）即使为空也保留标题，让页面不至于全空；
+  /// - [countColor] 用于给「逾期」的计数一点醒目色，标题字号/字重/颜色所有分区完全一致。
+  List<Widget> _section(
+    BuildContext context,
+    String title,
+    List<Task> items,
+    AppColorsExt ext, {
+    Color? countColor,
+    bool alwaysShow = false,
+  }) {
+    if (items.isEmpty && !alwaysShow) return const [];
+    return [
+      _SectionHeader(
+        title: title,
+        count: items.length,
+        chipColor: ext.chip,
+        metaColor: countColor ?? ext.meta,
+      ),
+      ...items.map((t) => _tile(context, t)),
+      const SizedBox(height: 8),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
@@ -105,24 +146,60 @@ class _HomeScreenState extends State<HomeScreen> {
     return Consumer<TaskProvider>(
       builder: (context, provider, _) {
         final tasks = provider.tasks;
-        final today = tasks.where((t) => !t.done && !t.dailyReminder).toList();
-        final daily = tasks.where((t) => t.dailyReminder && !t.done).toList();
+
+        // —— 首页分区口径（按日期切分）——
+        // 1) 未完成 + 非每日提醒的任务，按截止日期分成「逾期 / 今天 / 未来」三段；
+        //    无截止日期的任务归入「未来」（视为尚未安排，不占用「今天」的注意力）。
+        // 2) 未完成 + 开启每日提醒的任务单独归入「每天」，不参与日期切分（它每天都要做）。
+        // 3) 已完成的任务统一进「已完成」，不按日期切分。
+        // 四类互不重叠，任何一个任务在首页只会出现在一个板块里。
+        final active = tasks.where((t) => !t.done && !t.dailyReminder).toList();
+
+        // 逾期：截止日期早于今天，按截止时间升序（拖得最久的排最前，优先处理）
+        final overdue = active
+            .where((t) => (_dueDayDiff(t.dueDate) ?? 0) < 0)
+            .toList()
+          ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+
+        // 今天：截止日期就是今天，按当天时刻升序
+        final today = active
+            .where((t) => _dueDayDiff(t.dueDate) == 0)
+            .toList()
+          ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+
+        // 未来：截止日期在今天之后，或没有截止日期（无截止排在最后）
+        final future = active.where((t) {
+          final d = _dueDayDiff(t.dueDate);
+          return d == null || d > 0;
+        }).toList()
+          ..sort((a, b) {
+            if (a.dueDate == null && b.dueDate == null) return 0;
+            if (a.dueDate == null) return 1;
+            if (b.dueDate == null) return -1;
+            return a.dueDate!.compareTo(b.dueDate!);
+          });
+
+        // 每天：每日提醒任务，按提醒时刻升序（未设时刻的排最后）
+        final daily = tasks.where((t) => t.dailyReminder && !t.done).toList()
+          ..sort((a, b) => (a.dailyReminderMinute ?? 24 * 60)
+              .compareTo(b.dailyReminderMinute ?? 24 * 60));
+
         final done = tasks.where((t) => t.done).toList();
+
         final filter = provider.taskFilter;
         final filtered = switch (filter) {
           TaskFilter.todo => tasks.where((t) => t.status == TaskStatus.todo).toList(),
           TaskFilter.doing =>
             tasks.where((t) => t.status == TaskStatus.doing).toList(),
           TaskFilter.done => tasks.where((t) => t.status == TaskStatus.done).toList(),
-          TaskFilter.overdue => tasks
-              .where((t) =>
-                  !t.done &&
-                  t.dueDate != null &&
-                  t.dueDate!.isBefore(DateTime.now()))
-              .toList(),
+          // 与「逾期」板块口径保持一致：按「天」判断，今天到点未做不算逾期。
+          TaskFilter.overdue =>
+            tasks.where((t) => !t.done && (_dueDayDiff(t.dueDate) ?? 0) < 0).toList(),
           TaskFilter.all => const <Task>[],
         };
-        final visible = filter == TaskFilter.all ? [...today, ...daily, ...done] : filtered;
+        final visible = filter == TaskFilter.all
+            ? [...overdue, ...today, ...future, ...daily, ...done]
+            : filtered;
 
         final appBar = _selecting
             ? SizedBox(
@@ -188,32 +265,16 @@ class _HomeScreenState extends State<HomeScreen> {
                     _FilterChips(provider: provider),
                     const SizedBox(height: 12),
                     if (filter == TaskFilter.all) ...[
-                      // 今天
-                      _SectionHeader(
-                        title: '今天',
-                        count: today.length,
-                        chipColor: ext.chip,
-                        metaColor: ext.meta,
-                      ),
-                      ...today.map((t) => _tile(context, t)),
-                      const SizedBox(height: 8),
+                      // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
+                      ..._section(context, '逾期', overdue, ext, countColor: error),
+                      // 今天：今天到期（唯一常驻分区，为空也保留标题）
+                      ..._section(context, '今天', today, ext, alwaysShow: true),
+                      // 未来：今天之后到期 + 无截止日期
+                      ..._section(context, '未来', future, ext),
                       // 每天：每日提醒任务（进行中）
-                      _SectionHeader(
-                        title: '每天',
-                        count: daily.length,
-                        chipColor: ext.chip,
-                        metaColor: ext.meta,
-                      ),
-                      ...daily.map((t) => _tile(context, t)),
-                      const SizedBox(height: 8),
+                      ..._section(context, '每天', daily, ext),
                       // 已完成
-                      _SectionHeader(
-                        title: '已完成',
-                        count: done.length,
-                        chipColor: ext.chip,
-                        metaColor: ext.meta,
-                      ),
-                      ...done.map((t) => _tile(context, t)),
+                      ..._section(context, '已完成', done, ext),
                     ] else ...[
                       ...filtered.map((t) => _tile(context, t)),
                     ],
@@ -302,9 +363,12 @@ class _SectionHeader extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          // 字号统一走 _sectionTitleFontSize，保证各分区标题一样大
           Text(title,
-              style:
-                  TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: onBg)),
+              style: TextStyle(
+                  fontSize: _sectionTitleFontSize,
+                  fontWeight: FontWeight.bold,
+                  color: onBg)),
           Container(
             height: 19,
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
