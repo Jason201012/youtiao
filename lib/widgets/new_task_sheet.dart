@@ -193,20 +193,26 @@ class _TaskSheetState extends State<TaskSheet> {
     final ext = appColors(context);
     final canSave = _titleController.text.trim().isNotEmpty;
     return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height -
+            MediaQuery.of(context).viewInsets.bottom -
+            12,
+      ),
       decoration: BoxDecoration(
         color: scheme.surface,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      padding: EdgeInsets.fromLTRB(
-        AppColors.pagePadX,
-        20,
-        AppColors.pagePadX,
-        MediaQuery.of(context).padding.bottom + 20,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          AppColors.pagePadX,
+          20,
+          AppColors.pagePadX,
+          MediaQuery.of(context).padding.bottom + 20,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
           // 标题栏
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -503,6 +509,7 @@ class _TaskSheetState extends State<TaskSheet> {
             ),
           ),
         ],
+      ),
       ),
     );
   }
