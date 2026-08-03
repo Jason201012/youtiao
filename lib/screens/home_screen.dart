@@ -26,7 +26,10 @@ int? _dueDayDiff(DateTime? due) {
 }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  /// 搜索态变化回调：用于让宿主 Scaffold 在搜索时隐藏「新增任务」FAB。
+  final void Function(bool)? onSearchingChanged;
+
+  const HomeScreen({super.key, this.onSearchingChanged});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -38,6 +41,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// 已选中的任务 id（多选模式）
   final Set<String> _selected = {};
+
+  /// 是否进入搜索模式
+  bool _searching = false;
+
+  /// 搜索关键字输入框
+  final TextEditingController _searchCtl = TextEditingController();
 
   /// 长按进入多选模式，并把当前任务预选上。
   void _enterSelect(Task task) {
@@ -65,6 +74,39 @@ class _HomeScreenState extends State<HomeScreen> {
       _selecting = false;
       _selected.clear();
     });
+  }
+
+  /// 进入搜索模式
+  void _enterSearch() {
+    setState(() => _searching = true);
+    widget.onSearchingChanged?.call(true);
+  }
+
+  /// 退出搜索模式并清空关键字
+  void _exitSearch() {
+    _searchCtl.clear();
+    setState(() => _searching = false);
+    widget.onSearchingChanged?.call(false);
+  }
+
+  /// 任务是否命中搜索关键字：标题 / 分类 / 优先级（忽略大小写）。
+  bool _matchesQuery(Task t) {
+    final q = _searchCtl.text.trim().toLowerCase();
+    if (q.isEmpty) return false;
+    return t.title.toLowerCase().contains(q) ||
+        t.category.label.toLowerCase().contains(q) ||
+        t.category.name.toLowerCase().contains(q) ||
+        _prioLabel(t.priority).contains(q) ||
+        t.priority.name.toLowerCase().contains(q);
+  }
+
+  static String _prioLabel(Priority p) =>
+      p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
+
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
   }
 
   /// 全选 / 反选当前可见任务
@@ -136,6 +178,51 @@ class _HomeScreenState extends State<HomeScreen> {
     ];
   }
 
+  /// 搜索结果视图：空关键字显示提示，有结果则扁平列出命中任务（复用现有任务行）。
+  Widget _buildSearchResults(BuildContext context, TaskProvider provider) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final query = _searchCtl.text.trim();
+    if (query.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text('输入关键字搜索任务',
+              style: TextStyle(color: ext.meta, fontSize: 14)),
+        ),
+      );
+    }
+    final results = provider.tasks.where(_matchesQuery).toList();
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        AppColors.pagePadX,
+        8,
+        AppColors.pagePadX,
+        20,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text('找到 ${results.length} 条',
+                style: TextStyle(color: ext.meta, fontSize: 13)),
+          ),
+          if (results.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 40),
+              child: Center(
+                child: Text('没有匹配的任务',
+                    style: TextStyle(color: ext.meta, fontSize: 14)),
+              ),
+            )
+          else
+            ...results.map((t) => _tile(context, t)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
@@ -202,7 +289,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ? [...overdue, ...today, ...future, ...daily, ...done]
             : filtered;
 
-        final appBar = _selecting
+        final appBar = _searching
             ? SizedBox(
                 height: 64,
                 child: Padding(
@@ -212,88 +299,146 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       IconButton(
-                        onPressed: _exitSelect,
-                        icon: Icon(Symbols.close, size: 24, color: onBg),
+                        onPressed: _exitSearch,
+                        icon: Icon(Symbols.arrow_back, size: 24, color: onBg),
                         splashRadius: 20,
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(),
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '已选 ${_selected.length}',
-                        style: TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                          color: onBg,
-                        ),
-                      ),
-                      const Spacer(),
-                      TextButton(
-                        onPressed: () => _toggleSelectAll(visible),
-                        child: Text(
-                          '全选',
-                          style: TextStyle(fontSize: 15, color: primary),
-                        ),
-                      ),
                       const SizedBox(width: 4),
-                      IconButton(
-                        onPressed: () => _deleteSelected(context),
-                        icon: Icon(Symbols.delete, size: 24, color: error),
-                        splashRadius: 20,
-                        tooltip: '删除所选',
+                      Expanded(
+                        child: TextField(
+                          controller: _searchCtl,
+                          autofocus: true,
+                          onChanged: (_) => setState(() {}),
+                          style: TextStyle(fontSize: 16, color: onBg),
+                          decoration: InputDecoration(
+                            hintText: '搜索任务 / 分类 / 优先级',
+                            hintStyle: TextStyle(fontSize: 16, color: ext.meta),
+                            border: InputBorder.none,
+                            isCollapsed: true,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
                       ),
                     ],
                   ),
                 ),
               )
-            : TopAppBar(
-                title: '首页',
-                actions: [
-                  IconButton(
-                    onPressed: () => showShareSheet(context, home: true),
-                    icon: Icon(Symbols.ios_share, size: 24, color: onBg),
-                    tooltip: '分享首页',
-                    splashRadius: 20,
-                  ),
-                ],
-              );
-
-        return Column(
-          children: [
-            appBar,
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(
-                  AppColors.pagePadX,
-                  8,
-                  AppColors.pagePadX,
-                  20,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 筛选芯片：默认「全部」；看板统计卡点击会套用对应筛选
-                    _FilterChips(provider: provider),
-                    const SizedBox(height: 12),
-                    if (filter == TaskFilter.all) ...[
-                      // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
-                      ..._section(context, '逾期', overdue, ext, countColor: error),
-                      // 今天：今天到期（唯一常驻分区，为空也保留标题）
-                      ..._section(context, '今天', today, ext, alwaysShow: true),
-                      // 未来：今天之后到期 + 无截止日期
-                      ..._section(context, '未来', future, ext),
-                      // 每天：每日提醒任务（进行中）
-                      ..._section(context, '每天', daily, ext),
-                      // 已完成
-                      ..._section(context, '已完成', done, ext),
-                    ] else ...[
-                      ...filtered.map((t) => _tile(context, t)),
+            : _selecting
+                ? SizedBox(
+                    height: 64,
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: AppColors.pagePadX),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            onPressed: _exitSelect,
+                            icon: Icon(Symbols.close, size: 24, color: onBg),
+                            splashRadius: 20,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '已选 ${_selected.length}',
+                            style: TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              color: onBg,
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () => _toggleSelectAll(visible),
+                            child: Text(
+                              '全选',
+                              style: TextStyle(fontSize: 15, color: primary),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          IconButton(
+                            onPressed: () => _deleteSelected(context),
+                            icon: Icon(Symbols.delete, size: 24, color: error),
+                            splashRadius: 20,
+                            tooltip: '删除所选',
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : TopAppBar(
+                    title: '首页',
+                    actions: [
+                      IconButton(
+                        onPressed: _enterSearch,
+                        icon: Icon(Symbols.search, size: 24, color: onBg),
+                        tooltip: '搜索',
+                        splashRadius: 20,
+                      ),
+                      IconButton(
+                        onPressed: () => showShareSheet(context, home: true),
+                        icon: Icon(Symbols.ios_share, size: 24, color: onBg),
+                        tooltip: '分享首页',
+                        splashRadius: 20,
+                      ),
                     ],
-                  ],
-                ),
-              ),
+                  );
+
+        return PopScope(
+          // 搜索 / 多选模式下，系统侧滑返回应先退出子模式，而不是直接退出 App 回到桌面
+          canPop: !_searching && !_selecting,
+          onPopInvokedWithResult: (bool didPop, Object? result) {
+            if (didPop) return;
+            if (_searching) {
+              _exitSearch();
+            } else if (_selecting) {
+              _exitSelect();
+            }
+          },
+          child: Column(
+            children: [
+              appBar,
+            Expanded(
+              child: _searching
+                  ? _buildSearchResults(context, provider)
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(
+                        AppColors.pagePadX,
+                        8,
+                        AppColors.pagePadX,
+                        20,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // 筛选芯片：默认「全部」；看板统计卡点击会套用对应筛选
+                          _FilterChips(provider: provider),
+                          const SizedBox(height: 12),
+                          if (filter == TaskFilter.all) ...[
+                            // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
+                            ..._section(context, '逾期', overdue, ext,
+                                countColor: error),
+                            // 今天：今天到期（唯一常驻分区，为空也保留标题）
+                            ..._section(context, '今天', today, ext,
+                                alwaysShow: true),
+                            // 未来：今天之后到期 + 无截止日期
+                            ..._section(context, '未来', future, ext),
+                            // 每天：每日提醒任务（进行中）
+                            ..._section(context, '每天', daily, ext),
+                            // 已完成
+                            ..._section(context, '已完成', done, ext),
+                          ] else ...[
+                            ...filtered.map((t) => _tile(context, t)),
+                          ],
+                        ],
+                      ),
+                    ),
             ),
           ],
+          ),
         );
       },
     );

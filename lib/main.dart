@@ -63,7 +63,7 @@ class MainScaffold extends StatefulWidget {
 
 class _MainScaffoldState extends State<MainScaffold> {
   int _index = 0;
-  final _pages = const [HomeScreen(), BoardScreen(), SettingsScreen()];
+  bool _homeSearching = false;
 
   @override
   void initState() {
@@ -75,19 +75,29 @@ class _MainScaffoldState extends State<MainScaffold> {
 
   @override
   Widget build(BuildContext context) {
+    final pages = [
+      HomeScreen(
+        onSearchingChanged: (v) => setState(() => _homeSearching = v),
+      ),
+      const BoardScreen(),
+      const SettingsScreen(),
+    ];
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      body: SafeArea(child: _pages[_index]),
-      // FAB 仅首页
-      floatingActionButton: _index == 0
+      body: SafeArea(child: pages[_index]),
+      // FAB 仅首页，且搜索时隐藏（搜索页不需要新增任务的加号）
+      floatingActionButton: _index == 0 && !_homeSearching
           ? NewTaskFab(
               onPressed: () => TaskSheet.show(context),
             )
           : null,
-      bottomNavigationBar: AppBottomNav(
-        currentIndex: _index,
-        onTap: (i) => setState(() => _index = i),
-      ),
+      // 搜索时隐藏底部导航（搜索页不需要切换 Tab）
+      bottomNavigationBar: _homeSearching
+          ? null
+          : AppBottomNav(
+              currentIndex: _index,
+              onTap: (i) => setState(() => _index = i),
+            ),
     );
   }
 }
