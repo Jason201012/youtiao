@@ -13,7 +13,7 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/share_card.dart';
 
 /// 打开「分享看板」面板：实时预览长图 + 勾选包含的板块 + 保存到相册 / 系统分享。
-Future<void> showShareSheet(BuildContext context) {
+Future<void> showShareSheet(BuildContext context, {bool home = false}) {
   // 进面板时取一次数据快照，避免勾选过程中数字跳动。
   final data = ShareCardData.from(context.read<TaskProvider>());
   return showModalBottomSheet<void>(
@@ -23,13 +23,14 @@ Future<void> showShareSheet(BuildContext context) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (_) => _ShareSheet(data: data),
+    builder: (_) => _ShareSheet(data: data, home: home),
   );
 }
 
 class _ShareSheet extends StatefulWidget {
   final ShareCardData data;
-  const _ShareSheet({required this.data});
+  final bool home;
+  const _ShareSheet({required this.data, this.home = false});
 
   @override
   State<_ShareSheet> createState() => _ShareSheetState();
@@ -38,6 +39,25 @@ class _ShareSheet extends StatefulWidget {
 class _ShareSheetState extends State<_ShareSheet> {
   final GlobalKey _cardKey = GlobalKey();
   ShareOptions _opt = const ShareOptions();
+
+  @override
+  void initState() {
+    super.initState();
+    // 首页分享只含「日期分区」（逾期/今天/未来/每天/已完成），
+    // 不挂载看板页的分析模块（完成率/统计/优先级/分类/趋势/看板）。
+    // 看板分享保持默认全套板块。
+    _opt = widget.home
+        ? const ShareOptions(
+            ring: false,
+            stats: false,
+            priority: false,
+            category: false,
+            trend: false,
+            kanban: false,
+            home: true,
+          )
+        : const ShareOptions();
+  }
   bool _busy = false;
 
   /// 把预览中的卡片渲染成 PNG 字节。
@@ -55,7 +75,7 @@ class _ShareSheetState extends State<_ShareSheet> {
   }
 
   String get _fileName =>
-      '有条看板_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.png';
+      '${widget.home ? '有条清单' : '有条看板'}_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.png';
 
   Future<void> _saveToGallery() async {
     final messenger = ScaffoldMessenger.of(context);
@@ -126,7 +146,7 @@ class _ShareSheetState extends State<_ShareSheet> {
               child: Row(
                 children: [
                   Text(
-                    '分享看板',
+                    widget.home ? '分享首页' : '分享看板',
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -156,7 +176,7 @@ class _ShareSheetState extends State<_ShareSheet> {
                     _label('卡片外观', onBg),
                     const SizedBox(height: 10),
                     _appearance(),
-                    if (_opt.kanban) ...[
+                    if (!widget.home && _opt.kanban) ...[
                       const SizedBox(height: 6),
                       _hideTitlesSwitch(ext, onBg),
                     ],
@@ -215,12 +235,18 @@ class _ShareSheetState extends State<_ShareSheet> {
 
   Widget _moduleChips() {
     final items = <(String, bool, ShareOptions Function(bool))>[
-      ('完成率', _opt.ring, (v) => _opt.copyWith(ring: v)),
-      ('数据统计', _opt.stats, (v) => _opt.copyWith(stats: v)),
-      ('优先级', _opt.priority, (v) => _opt.copyWith(priority: v)),
-      ('分类进度', _opt.category, (v) => _opt.copyWith(category: v)),
-      ('近 7 日趋势', _opt.trend, (v) => _opt.copyWith(trend: v)),
-      ('看板明细', _opt.kanban, (v) => _opt.copyWith(kanban: v)),
+      if (widget.home)
+        // 首页分享：仅「日期分区」一个板块
+        ('日期分区', _opt.home, (v) => _opt.copyWith(home: v))
+      else ...[
+        // 看板分享：全套分析模块
+        ('完成率', _opt.ring, (v) => _opt.copyWith(ring: v)),
+        ('数据统计', _opt.stats, (v) => _opt.copyWith(stats: v)),
+        ('优先级', _opt.priority, (v) => _opt.copyWith(priority: v)),
+        ('分类进度', _opt.category, (v) => _opt.copyWith(category: v)),
+        ('近 7 日趋势', _opt.trend, (v) => _opt.copyWith(trend: v)),
+        ('看板明细', _opt.kanban, (v) => _opt.copyWith(kanban: v)),
+      ],
     ];
     return Wrap(
       spacing: 8,

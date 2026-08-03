@@ -8,6 +8,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/widgets/share_sheet.dart';
 
 /// 首页所有分区标题共用的字号。
 /// 「逾期 / 今天 / 未来 / 每天 / 已完成」必须完全一致，避免视觉层级混乱。
@@ -245,7 +246,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               )
-            : const TopAppBar(title: '首页');
+            : TopAppBar(
+                title: '首页',
+                actions: [
+                  IconButton(
+                    onPressed: () => showShareSheet(context, home: true),
+                    icon: Icon(Symbols.ios_share, size: 24, color: onBg),
+                    tooltip: '分享首页',
+                    splashRadius: 20,
+                  ),
+                ],
+              );
 
         return Column(
           children: [

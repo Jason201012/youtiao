@@ -24,6 +24,7 @@ class ShareOptions {
   final bool category; // 分类进度
   final bool trend; // 近 7 日完成趋势
   final bool kanban; // 看板三列明细
+  final bool home; // 首页日期分区（逾期/今天/未来/每天/已完成）
   final bool dark; // 深色卡片
   final bool hideTitles; // 隐藏任务标题
 
@@ -34,12 +35,14 @@ class ShareOptions {
     this.category = true,
     this.trend = true,
     this.kanban = false,
+    this.home = false,
     this.dark = false,
     this.hideTitles = false,
   });
 
   /// 至少要留一个板块，否则生成的图是空的。
-  bool get hasModule => ring || stats || priority || category || trend || kanban;
+  bool get hasModule =>
+      ring || stats || priority || category || trend || kanban || home;
 
   ShareOptions copyWith({
     bool? ring,
@@ -48,6 +51,7 @@ class ShareOptions {
     bool? category,
     bool? trend,
     bool? kanban,
+    bool? home,
     bool? dark,
     bool? hideTitles,
   }) =>
@@ -58,6 +62,7 @@ class ShareOptions {
         category: category ?? this.category,
         trend: trend ?? this.trend,
         kanban: kanban ?? this.kanban,
+        home: home ?? this.home,
         dark: dark ?? this.dark,
         hideTitles: hideTitles ?? this.hideTitles,
       );
@@ -81,6 +86,8 @@ class ShareCardData {
   final List<int> lastWeekValues;
   final Map<TaskStatus, List<String>> kanbanTitles;
   final Map<TaskStatus, int> kanbanCounts;
+  final Map<String, int> homeCounts; // 首页分区计数：overdue/today/future/daily/done
+  final Map<String, List<Task>> homeTasks; // 首页分区任务明细：逾期/今天/未来/每天/已完成
 
   const ShareCardData({
     required this.date,
@@ -96,6 +103,8 @@ class ShareCardData {
     required this.lastWeekValues,
     required this.kanbanTitles,
     required this.kanbanCounts,
+    required this.homeCounts,
+    required this.homeTasks,
   });
 
   /// 从 TaskProvider 取一份即时快照。
@@ -120,6 +129,8 @@ class ShareCardData {
       kanbanCounts: {
         for (final s in TaskStatus.values) s: (groups[s] ?? const <Task>[]).length,
       },
+      homeCounts: p.sectionCounts,
+      homeTasks: p.homeTasks,
     );
   }
 }
@@ -170,7 +181,7 @@ class ShareCard extends StatelessWidget {
   }
 
   List<Widget> _buildBlocks(BuildContext context) {
-    final blocks = <Widget>[_Header(date: data.date)];
+    final blocks = <Widget>[_Header(date: data.date, home: options.home)];
 
     void add(Widget w) {
       blocks.add(const SizedBox(height: 14));
@@ -197,6 +208,9 @@ class ShareCard extends StatelessWidget {
     if (options.kanban) {
       add(_KanbanBlock(data: data, hideTitles: options.hideTitles));
     }
+    if (options.home) {
+      add(_HomeBlock(data: data, hideTitles: options.hideTitles));
+    }
 
     blocks.add(const SizedBox(height: 16));
     blocks.add(const _Footer());
@@ -207,7 +221,8 @@ class ShareCard extends StatelessWidget {
 /// 顶部品牌行：图标 + 有条 + 日期。
 class _Header extends StatelessWidget {
   final DateTime date;
-  const _Header({required this.date});
+  final bool home;
+  const _Header({required this.date, this.home = false});
 
   @override
   Widget build(BuildContext context) {
@@ -237,7 +252,7 @@ class _Header extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              '有条 · 任务看板',
+              home ? '有条 · 我的清单' : '有条 · 任务看板',
               style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
@@ -640,6 +655,226 @@ class _KanbanColumn extends StatelessWidget {
       ],
     );
   }
+}
+
+/// 首页日期分区明细：逾期 / 今天 / 未来 / 每天 / 已完成，每段列出真实事件 / 任务。
+class _HomeBlock extends StatelessWidget {
+  final ShareCardData data;
+  final bool hideTitles;
+  const _HomeBlock({required this.data, this.hideTitles = false});
+
+  static const List<(String, String)> _sections = [
+    ('overdue', '逾期'),
+    ('today', '今天'),
+    ('future', '未来'),
+    ('daily', '每天'),
+    ('done', '已完成'),
+  ];
+
+  Color _color(BuildContext context, String key) {
+    final scheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final ext = appColors(context);
+    switch (key) {
+      case 'overdue':
+        return scheme.error;
+      case 'today':
+        return isDark ? AppColors.darkAccent : AppColors.lightPrimary;
+      case 'future':
+        return ext.meta;
+      case 'daily':
+        return isDark ? const Color(0xFF80C0FF) : const Color(0xFF378ADD);
+      case 'done':
+      default:
+        return const Color(0xFF0F6E56);
+    }
+  }
+
+  /// 每行次要信息：每日提醒显示「每天 HH:mm」，已完成显示「完成于 M月d日」，
+  /// 其余显示相对截止时间（今天 / 明天 / M月d日 …）。
+  String _meta(Task t, String key) {
+    if (key == 'daily') {
+      if (t.dailyReminderMinute != null) {
+        final hh = t.dailyReminderMinute! ~/ 60;
+        final mm = t.dailyReminderMinute! % 60;
+        return '每天 ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}';
+      }
+      return '每天';
+    }
+    if (key == 'done') {
+      if (t.completedAt != null) {
+        return '完成于 ${t.completedAt!.month}月${t.completedAt!.day}日';
+      }
+      return _dueLabel(t.dueDate);
+    }
+    return _dueLabel(t.dueDate);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final onBg = Theme.of(context).colorScheme.onBackground;
+
+    return _Section(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '日期分区',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: onBg,
+            ),
+          ),
+          const SizedBox(height: 12),
+          for (final (key, label) in _sections) ...[
+            _HomeSection(
+              label: label,
+              color: _color(context, key),
+              tasks: data.homeTasks[key] ?? const [],
+              metaOf: (t) => _meta(t, key),
+              hideTitles: hideTitles,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 单个日期分区：标题（彩色圆点 + 名称 + 数量）+ 该段下的具体任务列表。
+class _HomeSection extends StatelessWidget {
+  final String label;
+  final Color color;
+  final List<Task> tasks;
+  final String Function(Task) metaOf;
+  final bool hideTitles;
+  const _HomeSection({
+    required this.label,
+    required this.color,
+    required this.tasks,
+    required this.metaOf,
+    this.hideTitles = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(width: 8, height: 8,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: color,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '${tasks.length}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: ext.meta,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (tasks.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 15, bottom: 10),
+            child: Text('暂无任务',
+                style: TextStyle(fontSize: 12, color: ext.meta)),
+          )
+        else
+          for (final t in tasks)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: ext.track.withOpacity(0.35),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 3,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: t.done
+                          ? ext.meta
+                          : (isDark
+                              ? t.priority.darkColor()
+                              : t.priority.lightColor()),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          hideTitles ? '· · ·' : t.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            color: t.done ? ext.meta : onBg,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${t.category.label} · ${metaOf(t)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: ext.meta,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        const SizedBox(height: 10),
+      ],
+    );
+  }
+}
+
+/// 相对截止时间文案（与 task_row.dart 的 _dueLabel 口径一致，但本文件内独立定义，
+/// 避免依赖首页私有的划线函数）。
+String _dueLabel(DateTime? due) {
+  if (due == null) return '无截止';
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final d = DateTime(due.year, due.month, due.day);
+  final diff = d.difference(today).inDays;
+  final time =
+      ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
+  if (diff == 0) return '今天$time';
+  if (diff == 1) return '明天$time';
+  if (diff == -1) return '昨天$time';
+  if (diff < 0) return '已逾期$time';
+  return '${due.month}月${due.day}日$time';
 }
 
 /// 底部署名：App 名 + 开源地址。

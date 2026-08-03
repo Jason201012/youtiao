@@ -385,6 +385,79 @@ class TaskProvider extends ChangeNotifier {
     return map;
   }
 
+  /// 首页分区计数：逾期 / 今天 / 未来 / 每天 / 已完成。
+  /// 口径与首页完全一致（按「天」比较截止日期，每日提醒任务单独成段、不参与日期切分），
+  /// 供分享卡片直接复用，避免再依赖首页私有的 _dueDayDiff。
+  Map<String, int> get sectionCounts {
+    int? dayDiff(DateTime? due) {
+      if (due == null) return null;
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      return DateTime(due.year, due.month, due.day).difference(today).inDays;
+    }
+
+    final active = _tasks.where((t) => !t.done && !t.dailyReminder);
+    final overdue = active.where((t) => (dayDiff(t.dueDate) ?? 0) < 0).length;
+    final today = active.where((t) => dayDiff(t.dueDate) == 0).length;
+    final future =
+        active.where((t) => t.dueDate == null || dayDiff(t.dueDate)! > 0).length;
+    final daily = _tasks.where((t) => t.dailyReminder && !t.done).length;
+    final done = _tasks.where((t) => t.done).length;
+    return {
+      'overdue': overdue,
+      'today': today,
+      'future': future,
+      'daily': daily,
+      'done': done,
+    };
+  }
+
+  /// 首页分区任务列表：逾期 / 今天 / 未来 / 每天 / 已完成（各自已排序）。
+  /// 与首页 [_section] 完全一致的分组与排序口径，供分享卡片列出「详细事件 / 任务」，
+  /// 而非只有计数。
+  Map<String, List<Task>> get homeTasks {
+    int? dayDiff(DateTime? due) {
+      if (due == null) return null;
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      return DateTime(due.year, due.month, due.day).difference(today).inDays;
+    }
+
+    // 未完成 + 非每日提醒，按截止日期切分为 逾期 / 今天 / 未来。
+    final active = _tasks.where((t) => !t.done && !t.dailyReminder).toList();
+    final overdue = active
+        .where((t) => (dayDiff(t.dueDate) ?? 0) < 0)
+        .toList()
+      ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!)); // 拖最久的排前
+    final today = active
+        .where((t) => dayDiff(t.dueDate) == 0)
+        .toList()
+      ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+    final future = active.where((t) {
+      final d = dayDiff(t.dueDate);
+      return d == null || d > 0;
+    }).toList()
+      ..sort((a, b) {
+        if (a.dueDate == null && b.dueDate == null) return 0;
+        if (a.dueDate == null) return 1;
+        if (b.dueDate == null) return -1;
+        return a.dueDate!.compareTo(b.dueDate!);
+      });
+    // 每日提醒任务单独成段，按提醒时刻升序。
+    final daily = _tasks.where((t) => t.dailyReminder && !t.done).toList()
+      ..sort((a, b) => (a.dailyReminderMinute ?? 24 * 60)
+          .compareTo(b.dailyReminderMinute ?? 24 * 60));
+    // 已完成统一进「已完成」。
+    final done = _tasks.where((t) => t.done).toList();
+    return {
+      'overdue': overdue,
+      'today': today,
+      'future': future,
+      'daily': daily,
+      'done': done,
+    };
+  }
+
   /// 把任务在 待办/进行中/已完成 之间移动（看板拖拽 / 点击循环切换）。
   void setStatus(String id, TaskStatus s) {
     final i = _tasks.indexWhere((t) => t.id == id);
