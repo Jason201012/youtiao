@@ -334,4 +334,26 @@ class NotificationService {
 
   /// 清空所有已调度的通知（关闭总开关时调用）。
   Future<void> cancelAll() => _plugin.cancelAll();
+
+  /// 挂上「每日任务当天 00:00 自动重置」的午夜闹钟（setAlarmClock，ColorOS 可靠，
+  /// 不依赖 App 是否打开）。由原生 MidnightResetReceiver 在午夜触发并自循环调度。
+  /// 失败静默忽略（不影响其它功能）。
+  static const MethodChannel _midnightChannel =
+      MethodChannel('com.example.todolist/midnight_reset');
+  Future<void> armMidnightReset() async {
+    try {
+      await _midnightChannel.invokeMethod<bool>('schedule');
+    } catch (_) {
+      // 通道未就绪或权限不足均不影响主流程
+    }
+  }
+
+  /// 取消午夜重置闹钟（关闭每日重置总逻辑时调用）。
+  Future<void> disarmMidnightReset() async {
+    try {
+      await _midnightChannel.invokeMethod<bool>('cancel');
+    } catch (_) {
+      // 忽略
+    }
+  }
 }

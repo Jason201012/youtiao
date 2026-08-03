@@ -136,6 +136,21 @@ class TaskProvider extends ChangeNotifier {
     _backgroundGuard = prefs.getBool(_kGuard) ?? true;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
+    // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
+    //  App 启动时的兜底，并在 App 前台时由 _startMidnightWatch 周期性刷新。）
+    _resetDailyIfNeeded();
+    // 挂上「当天 00:00 自动重置」的午夜闹钟（不依赖 App 是否打开）。
+    NotificationService.instance.armMidnightReset();
+    // 启动时为已有「未完成且未过期」的任务 + 每日提醒重新调度（老任务/初始 mock 也能响）
+    if (_notificationsEnabled) _rescheduleAllActive();
+    _recomputeIdSeq();
+    _startMidnightWatch();
+    notifyListeners();
+  }
+
+  /// 把「已完成且 completedAt 日期早于今天、且未过截止日」的每日任务重置为未完成。
+  /// 返回是否发生了变更（仅在变更时落盘 + 通知 UI）。与原生 MidnightResetReceiver 逻辑一致。
+  bool _resetDailyIfNeeded() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     var dailyDirty = false;
@@ -150,11 +165,26 @@ class TaskProvider extends ChangeNotifier {
         }
       }
     }
-    if (dailyDirty) await _persist();
-    // 启动时为已有「未完成且未过期」的任务 + 每日提醒重新调度（老任务/初始 mock 也能响）
-    if (_notificationsEnabled) _rescheduleAllActive();
-    _recomputeIdSeq();
-    notifyListeners();
+    if (dailyDirty) _persist();
+    return dailyDirty;
+  }
+
+  /// 供生命周期/周期守护调用的对外入口：跨天则重置每日任务并刷新 UI。
+  void checkDailyReset() {
+    if (_resetDailyIfNeeded()) notifyListeners();
+  }
+
+  /// App 在前台/后台存活期间的轻量守护：周期性（15 分钟）+ 回到前台时检查「日期是否已跨天」，
+  /// 若跨天则重置每日任务。原生午夜闹钟负责「App 已关闭」的情况，本守护负责「App 正开着」的边界。
+  void _startMidnightWatch() {
+    // 周期性检查（App 进程存活时有效）
+    Future.doWhile(() async {
+      await Future.delayed(const Duration(minutes: 15));
+      checkDailyReset();
+      return true; // 持续循环直到进程退出
+    });
+    // 回到前台时补一次（覆盖后台被系统节流、多年未触发的边界）
+    WidgetsBinding.instance.addObserver(_LifecycleObserver(this));
   }
 
   /// 把当前任务列表与开关设置写入本地。
@@ -665,5 +695,19 @@ class TaskProvider extends ChangeNotifier {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     return DateTime(d.year, d.month, d.day).isBefore(today);
+  }
+}
+
+/// 监听 App 生命周期：回到前台（resumed）时补一次每日重置检查，
+/// 覆盖「App 后台挂了一夜、系统节流了周期守护」的边界。
+class _LifecycleObserver extends WidgetsBindingObserver {
+  final TaskProvider _provider;
+  _LifecycleObserver(this._provider);
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _provider.checkDailyReset();
+    }
   }
 }

@@ -17,6 +17,7 @@ class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.todolist/exact_alarm"
     private val CHANNEL_IO = "com.example.todolist/file_io"
     private val CHANNEL_BG = "com.example.todolist/background_service"
+    private val CHANNEL_MIDNIGHT = "com.example.todolist/midnight_reset"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -145,6 +146,31 @@ class MainActivity : FlutterActivity() {
                             result.success(true)
                         } catch (e: Exception) {
                             result.error("STOP_FAIL", e.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 午夜重置闹钟通道：Dart 侧在启动时挂上「当天 00:00 自动重置每日任务」的
+        // setAlarmClock 闹钟（ColorOS 可靠）；关闭每日重置时取消。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_MIDNIGHT)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "schedule" -> {
+                        try {
+                            MidnightResetReceiver.schedule(this)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("SCHED_FAIL", e.message, null)
+                        }
+                    }
+                    "cancel" -> {
+                        try {
+                            MidnightResetReceiver.cancel(this)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("CANCEL_FAIL", e.message, null)
                         }
                     }
                     else -> result.notImplemented()

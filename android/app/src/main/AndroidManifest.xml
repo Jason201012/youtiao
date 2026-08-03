@@ -69,6 +69,19 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- 每日任务「当天 00:00 自动重置」接收器：放到 :guard 进程，
+             与 ScheduledNotificationReceiver 一致——主进程被 ColorOS 划掉时，
+             仍然由已存活的守护进程在午夜闹钟触发时完成重置，无需用户打开 App。 -->
+        <receiver
+            android:name=".MidnightResetReceiver"
+            android:exported="false"
+            android:process=":guard">
+            <intent-filter>
+                <action android:name="com.example.todolist.MIDNIGHT_RESET" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
