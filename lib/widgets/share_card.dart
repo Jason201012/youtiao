@@ -848,6 +848,19 @@ class _HomeSection extends StatelessWidget {
                             color: ext.meta,
                           ),
                         ),
+                        if (!hideTitles && t.note.isNotEmpty) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            t.note,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w400,
+                              color: ext.meta,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),

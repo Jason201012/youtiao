@@ -97,7 +97,8 @@ class _HomeScreenState extends State<HomeScreen> {
         t.category.label.toLowerCase().contains(q) ||
         t.category.name.toLowerCase().contains(q) ||
         _prioLabel(t.priority).contains(q) ||
-        t.priority.name.toLowerCase().contains(q);
+        t.priority.name.toLowerCase().contains(q) ||
+        t.note.toLowerCase().contains(q);
   }
 
   static String _prioLabel(Priority p) =>

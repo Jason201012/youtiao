@@ -82,6 +82,9 @@ class Task {
   /// 每日提醒时间，单位「自 00:00 起的分钟数」(0-1439)。仅在 [dailyReminder]=true 时有意义。
   final int? dailyReminderMinute;
 
+  /// 任务备注 / 解释：对任务的补充说明（链接、思路、细节等），可选，默认空串。
+  final String note;
+
   const Task({
     required this.id,
     required this.title,
@@ -95,6 +98,7 @@ class Task {
     this.deletedAt,
     this.dailyReminder = false,
     this.dailyReminderMinute,
+    this.note = '',
   });
 
   Task copyWith({
@@ -110,6 +114,7 @@ class Task {
     DateTime? deletedAt,
     bool? dailyReminder,
     int? dailyReminderMinute,
+    String? note,
   }) =>
       Task(
         id: id ?? this.id,
@@ -124,6 +129,7 @@ class Task {
         deletedAt: deletedAt ?? this.deletedAt,
         dailyReminder: dailyReminder ?? this.dailyReminder,
         dailyReminderMinute: dailyReminderMinute ?? this.dailyReminderMinute,
+        note: note ?? this.note,
       );
 
   /// 序列化为 JSON（用于 shared_preferences 持久化）
@@ -141,6 +147,7 @@ class Task {
         'deletedAt': deletedAt?.toIso8601String(),
         'dailyReminder': dailyReminder,
         'dailyReminderMinute': dailyReminderMinute,
+        'note': note,
       };
 
   /// 从 JSON 反序列化（兼容旧版仅含 [done] 布尔的备份）
@@ -161,5 +168,6 @@ class Task {
             j['deletedAt'] == null ? null : DateTime.parse(j['deletedAt'] as String),
         dailyReminder: j['dailyReminder'] as bool? ?? false,
         dailyReminderMinute: j['dailyReminderMinute'] as int?,
+        note: j['note'] as String? ?? '',
       );
 }

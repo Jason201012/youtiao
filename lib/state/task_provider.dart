@@ -507,6 +507,7 @@ class TaskProvider extends ChangeNotifier {
       dueDate: updated.dueDate,
       dailyReminder: updated.dailyReminder,
       dailyReminderMinute: updated.dailyReminderMinute,
+      note: updated.note,
     );
     // 截止时间或每日提醒设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
     final remindersChanged = old.dueDate != updated.dueDate ||

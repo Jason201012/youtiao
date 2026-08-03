@@ -89,8 +89,9 @@ class TaskRow extends StatelessWidget {
       );
     }
 
+    final hasNote = task.note.isNotEmpty;
     final content = Container(
-      height: 64,
+      height: hasNote ? 78 : 64,
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
@@ -105,17 +106,36 @@ class TaskRow extends StatelessWidget {
         children: [
           leading,
           if (!selecting) const SizedBox(width: 12),
-          // 标题
+          // 标题（+ 备注预览）
           Expanded(
-            child: Text(
-              task.title,
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-                color: titleColor,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  task.title,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                    color: titleColor,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (hasNote) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    task.note,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                      color: ext.meta,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
             ),
           ),
           const SizedBox(width: 12),

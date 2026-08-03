@@ -27,6 +27,7 @@ class TaskSheet extends StatefulWidget {
 
 class _TaskSheetState extends State<TaskSheet> {
   final _titleController = TextEditingController();
+  final _noteController = TextEditingController();
   Priority _priority = Priority.medium;
   Category _category = Category.work;
   DateTime? _dueDate;
@@ -50,12 +51,14 @@ class _TaskSheetState extends State<TaskSheet> {
       _dailyTime = t.dailyReminderMinute != null
           ? TimeOfDay(hour: t.dailyReminderMinute! ~/ 60, minute: t.dailyReminderMinute! % 60)
           : const TimeOfDay(hour: 7, minute: 0);
+      _noteController.text = t.note;
     }
   }
 
   @override
   void dispose() {
     _titleController.dispose();
+    _noteController.dispose();
     super.dispose();
   }
 
@@ -147,6 +150,7 @@ class _TaskSheetState extends State<TaskSheet> {
         dueDate: _dueDate,
         dailyReminder: _dailyReminder,
         dailyReminderMinute: dailyMinute,
+        note: _noteController.text.trim(),
       ));
     } else {
       provider.addTask(Task(
@@ -157,6 +161,7 @@ class _TaskSheetState extends State<TaskSheet> {
         dueDate: _dueDate,
         dailyReminder: _dailyReminder,
         dailyReminderMinute: dailyMinute,
+        note: _noteController.text.trim(),
       ));
     }
     Navigator.pop(context);
@@ -216,6 +221,29 @@ class _TaskSheetState extends State<TaskSheet> {
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             ),
             style: TextStyle(color: scheme.onSurface, fontSize: 16),
+          ),
+          const SizedBox(height: 18),
+          // 备注
+          _SectionLabel('备注'),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _noteController,
+            maxLines: 4,
+            minLines: 2,
+            textInputAction: TextInputAction.newline,
+            decoration: InputDecoration(
+              hintText: '补充说明、链接、思路…（可选）',
+              hintStyle: TextStyle(color: ext.meta),
+              filled: true,
+              fillColor: ext.chip,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
+            style: TextStyle(color: scheme.onSurface, fontSize: 15),
           ),
           const SizedBox(height: 18),
           // 优先级
@@ -377,7 +405,7 @@ class _TaskSheetState extends State<TaskSheet> {
                 ),
               ),
             ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 18),
           // 保存
           SizedBox(
             width: double.infinity,
