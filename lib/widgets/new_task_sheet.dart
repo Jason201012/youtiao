@@ -32,9 +32,12 @@ class _TaskSheetState extends State<TaskSheet> {
   Category _category = Category.work;
   DateTime? _dueDate;
 
-  /// 每日提醒开关与每天提醒时刻。
-  bool _dailyReminder = false;
-  TimeOfDay _dailyTime = const TimeOfDay(hour: 7, minute: 0);
+  /// 重复规则与提醒时刻 / 星期 / 间隔。
+  RepeatType _repeat = RepeatType.none;
+  TimeOfDay _repeatTime = const TimeOfDay(hour: 7, minute: 0);
+  List<int> _repeatWeekdays = [DateTime.monday];
+  int _repeatInterval = 2;
+  DateTime? _repeatAnchor; // interval 锚点，创建时填当天
 
   bool get _isEdit => widget.task != null;
 
@@ -47,9 +50,12 @@ class _TaskSheetState extends State<TaskSheet> {
       _priority = t.priority;
       _category = t.category;
       _dueDate = t.dueDate;
-      _dailyReminder = t.dailyReminder;
-      _dailyTime = t.dailyReminderMinute != null
-          ? TimeOfDay(hour: t.dailyReminderMinute! ~/ 60, minute: t.dailyReminderMinute! % 60)
+      _repeat = t.repeat;
+      _repeatWeekdays = List.from(t.repeatWeekdays);
+      _repeatInterval = t.repeatInterval;
+      _repeatAnchor = t.repeatAnchor;
+      _repeatTime = t.repeatMinute != null
+          ? TimeOfDay(hour: t.repeatMinute! ~/ 60, minute: t.repeatMinute! % 60)
           : const TimeOfDay(hour: 7, minute: 0);
       _noteController.text = t.note;
     }
@@ -80,10 +86,10 @@ class _TaskSheetState extends State<TaskSheet> {
       lastDate: now.add(const Duration(days: 365 * 5)),
     );
     if (picked != null) {
-      // 开启每日提醒时，截止时间固定为所选日期 23:59；否则保留既有时间或默认 09:00。
+      // 重复任务：截止时间固定为所选日期 23:59（作为重复窗口结束日）；否则保留既有时间或默认 09:00。
       final int h;
       final int m;
-      if (_dailyReminder) {
+      if (_repeat != RepeatType.none) {
         h = 23;
         m = 59;
       } else {
@@ -94,12 +100,12 @@ class _TaskSheetState extends State<TaskSheet> {
     }
   }
 
-  /// 每日提醒开关变化：开启时隐藏截止时间选择器，并把截止时间设为当天 23:59。
-  /// 若当前没有截止日期，则默认设为今天 23:59。
-  void _onDailyReminderChanged(bool v) {
+  /// 重复规则变化：从「不重复」切到某种重复时，若没有截止日期则默认设为今天 23:59
+  /// （作为重复窗口的结束日，与原「每天」行为一致）。切回「不重复」则保持截止日期不变。
+  void _onRepeatChanged(RepeatType v) {
     setState(() {
-      _dailyReminder = v;
-      if (v) {
+      _repeat = v;
+      if (v != RepeatType.none) {
         final now = DateTime.now();
         if (_dueDate == null) {
           _dueDate = DateTime(now.year, now.month, now.day, 23, 59);
@@ -128,28 +134,39 @@ class _TaskSheetState extends State<TaskSheet> {
     }
   }
 
-  Future<void> _pickDailyTime() async {
+  Future<void> _pickRepeatTime() async {
     final picked = await showTimePicker(
       context: context,
-      initialTime: _dailyTime,
-      helpText: '选择每日提醒时间',
+      initialTime: _repeatTime,
+      helpText: '选择提醒时间',
     );
-    if (picked != null) setState(() => _dailyTime = picked);
+    if (picked != null) setState(() => _repeatTime = picked);
   }
 
   void _save() {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
     final provider = Provider.of<TaskProvider>(context, listen: false);
-    final dailyMinute = _dailyReminder ? _dailyTime.hour * 60 + _dailyTime.minute : null;
+    final repeatMinute =
+        _repeat != RepeatType.none ? _repeatTime.hour * 60 + _repeatTime.minute : null;
+    // 每隔 N 天：创建时把锚点设为当天（date-only），保证从今天起每 N 天循环。
+    final anchor = (_repeat == RepeatType.interval && !_isEdit)
+        ? DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)
+        : _repeatAnchor;
+    final weekdays = _repeat == RepeatType.weekly
+        ? (_repeatWeekdays.isNotEmpty ? List<int>.from(_repeatWeekdays) : [DateTime.monday])
+        : const <int>[];
     if (_isEdit) {
       provider.updateTask(widget.task!.copyWith(
         title: title,
         priority: _priority,
         category: _category,
         dueDate: _dueDate,
-        dailyReminder: _dailyReminder,
-        dailyReminderMinute: dailyMinute,
+        repeat: _repeat,
+        repeatWeekdays: weekdays,
+        repeatInterval: _repeatInterval,
+        repeatMinute: repeatMinute,
+        repeatAnchor: anchor,
         note: _noteController.text.trim(),
       ));
     } else {
@@ -159,8 +176,11 @@ class _TaskSheetState extends State<TaskSheet> {
         priority: _priority,
         category: _category,
         dueDate: _dueDate,
-        dailyReminder: _dailyReminder,
-        dailyReminderMinute: dailyMinute,
+        repeat: _repeat,
+        repeatWeekdays: weekdays,
+        repeatInterval: _repeatInterval,
+        repeatMinute: repeatMinute,
+        repeatAnchor: anchor,
         note: _noteController.text.trim(),
       ));
     }
@@ -325,8 +345,8 @@ class _TaskSheetState extends State<TaskSheet> {
               ),
             ),
           ),
-          // 开启每日提醒后，截止时间固定为截止日期 23:59，不再让用户单独选择。
-          if (!_dailyReminder) ...[
+          // 重复任务：开启后截止时间固定为截止日期 23:59，不再单独选择。
+          if (_repeat == RepeatType.none) ...[
             const SizedBox(height: 18),
             _SectionLabel('截止时间'),
             const SizedBox(height: 8),
@@ -355,38 +375,106 @@ class _TaskSheetState extends State<TaskSheet> {
             ),
           ],
           const SizedBox(height: 18),
-          // 每日提醒开关
-          _SectionLabel('每日提醒'),
+          // 重复规则
+          _SectionLabel('重复'),
           const SizedBox(height: 8),
-          Container(
-            height: 52,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: BoxDecoration(
-              color: ext.chip,
-              borderRadius: BorderRadius.circular(AppColors.chipRadius),
-            ),
-            child: Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _PriorityChip(
+                label: '不重复',
+                selected: _repeat == RepeatType.none,
+                onTap: () => _onRepeatChanged(RepeatType.none),
+              ),
+              _PriorityChip(
+                label: '每天',
+                selected: _repeat == RepeatType.daily,
+                onTap: () => _onRepeatChanged(RepeatType.daily),
+              ),
+              _PriorityChip(
+                label: '每周',
+                selected: _repeat == RepeatType.weekly,
+                onTap: () => _onRepeatChanged(RepeatType.weekly),
+              ),
+              _PriorityChip(
+                label: '每隔N天',
+                selected: _repeat == RepeatType.interval,
+                onTap: () => _onRepeatChanged(RepeatType.interval),
+              ),
+              _PriorityChip(
+                label: '仅工作日',
+                selected: _repeat == RepeatType.weekday,
+                onTap: () => _onRepeatChanged(RepeatType.weekday),
+              ),
+            ],
+          ),
+          // 每周：选择星期（可多选）
+          if (_repeat == RepeatType.weekly) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
               children: [
-                Icon(Symbols.repeat, size: 20, color: ext.meta),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    '每天固定时间提醒此任务',
-                    style: TextStyle(color: scheme.onSurface, fontSize: 15),
+                for (var d = 1; d <= 7; d++)
+                  _PriorityChip(
+                    label: ['一', '二', '三', '四', '五', '六', '日'][d - 1],
+                    selected: _repeatWeekdays.contains(d),
+                    onTap: () => setState(() {
+                      if (_repeatWeekdays.contains(d)) {
+                        if (_repeatWeekdays.length > 1) _repeatWeekdays.remove(d);
+                      } else {
+                        _repeatWeekdays.add(d);
+                      }
+                    }),
                   ),
-                ),
-                Switch(
-                  value: _dailyReminder,
-                  onChanged: _onDailyReminderChanged,
-                ),
               ],
             ),
-          ),
-          const SizedBox(height: 8),
-          // 每日提醒时间（开启时显示）
-          if (_dailyReminder)
+          ],
+          // 每隔 N 天：间隔步进
+          if (_repeat == RepeatType.interval) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Text('每', style: TextStyle(color: ext.meta, fontSize: 15)),
+                IconButton(
+                  onPressed: () => setState(
+                      () => _repeatInterval = (_repeatInterval - 1).clamp(1, 30)),
+                  icon: Icon(Symbols.remove, size: 18, color: scheme.onSurface),
+                  style: IconButton.styleFrom(
+                    backgroundColor: ext.chip,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    padding: const EdgeInsets.all(8),
+                  ),
+                ),
+                Container(
+                  width: 36,
+                  alignment: Alignment.center,
+                  child: Text('$_repeatInterval',
+                      style: TextStyle(
+                          color: scheme.onSurface,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600)),
+                ),
+                IconButton(
+                  onPressed: () => setState(
+                      () => _repeatInterval = (_repeatInterval + 1).clamp(1, 30)),
+                  icon: Icon(Symbols.add, size: 18, color: scheme.onSurface),
+                  style: IconButton.styleFrom(
+                    backgroundColor: ext.chip,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    padding: const EdgeInsets.all(8),
+                  ),
+                ),
+                Text('天', style: TextStyle(color: ext.meta, fontSize: 15)),
+              ],
+            ),
+          ],
+          const SizedBox(height: 12),
+          // 提醒时间（任意重复类型都有）
+          if (_repeat != RepeatType.none)
             GestureDetector(
-              onTap: _pickDailyTime,
+              onTap: _pickRepeatTime,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 decoration: BoxDecoration(
@@ -397,7 +485,7 @@ class _TaskSheetState extends State<TaskSheet> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      _formatTimeOfDay(_dailyTime),
+                      _formatTimeOfDay(_repeatTime),
                       style: TextStyle(color: scheme.onSurface, fontSize: 16),
                     ),
                     Icon(Symbols.schedule, size: 20, color: ext.meta),

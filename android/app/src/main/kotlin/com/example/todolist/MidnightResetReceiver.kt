@@ -124,7 +124,7 @@ class MidnightResetReceiver : BroadcastReceiver() {
         schedule(context)
     }
 
-    /** 读取 tasks JSON，重置符合条件的每日任务，写回。 */
+    /** 读取 tasks JSON，重置符合条件的重复任务，写回。 */
     private fun resetDailyTasks(context: Context) {
         try {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -134,14 +134,19 @@ class MidnightResetReceiver : BroadcastReceiver() {
             var changed = false
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
-                if (!obj.optBoolean("dailyReminder", false)) continue
+                // 解析重复规则（与 Dart Task.repeat 一致）
+                val repeat = parseRepeat(obj)
+                if (repeat == RepeatMode.NONE) continue
                 val status = obj.optString("status", "todo")
                 val done = obj.optBoolean("done", false)
                 if (status != "done" && !done) continue
 
-                // 截止日期已过的每日任务不再重置（与 load() 的 !_dateHasPassed 一致）
+                // 截止日期已过的重复任务不再重置（与 load() 的 !_dateHasPassed 一致）
                 val dueDate = datePart(obj.opt("dueDate"))
                 if (dueDate != null && dueDate < today) continue
+
+                // 仅在「今天是其循环日」才重置（与 Dart Task.repeatsOn 一致）
+                if (!isRecurrenceToday(obj, repeat, today)) continue
 
                 // completedAt 日期早于今天才重置（今天刚完成的保持已完成）
                 val compDate = datePart(obj.opt("completedAt"))
@@ -159,5 +164,78 @@ class MidnightResetReceiver : BroadcastReceiver() {
         } catch (_: Exception) {
             // 解析/写入失败不崩溃
         }
+    }
+
+    /** 重复规则枚举，与 Dart RepeatType 对应。 */
+    private enum class RepeatMode { NONE, DAILY, WEEKLY, INTERVAL, WEEKDAY }
+
+    /** 从 task JSON 解析重复规则：兼容旧版 dailyReminder 布尔字段。 */
+    private fun parseRepeat(obj: JSONObject): RepeatMode {
+        val r = obj.optString("repeat", null)
+        if (r != null) {
+            return when (r) {
+                "daily" -> RepeatMode.DAILY
+                "weekly" -> RepeatMode.WEEKLY
+                "interval" -> RepeatMode.INTERVAL
+                "weekday" -> RepeatMode.WEEKDAY
+                else -> RepeatMode.NONE
+            }
+        }
+        // 旧数据：dailyReminder=true 视作「每天」
+        return if (obj.optBoolean("dailyReminder", false)) RepeatMode.DAILY else RepeatMode.NONE
+    }
+
+    /** 判断今天（yyyy-MM-dd）是否为该重复任务的循环日。与 Dart Task.repeatsOn 完全一致。 */
+    private fun isRecurrenceToday(obj: JSONObject, repeat: RepeatMode, today: String): Boolean {
+        when (repeat) {
+            RepeatMode.NONE -> return false
+            RepeatMode.DAILY -> return true
+            RepeatMode.WEEKDAY -> {
+                val wd = weekdayOf(today)
+                return wd in 1..5 // 周一至周五
+            }
+            RepeatMode.WEEKLY -> {
+                val wd = weekdayOf(today)
+                val days = obj.optJSONArray("repeatWeekdays") ?: return false
+                for (j in 0 until days.length()) {
+                    if (days.optInt(j, -1) == wd) return true
+                }
+                return false
+            }
+            RepeatMode.INTERVAL -> {
+                val anchor = datePart(obj.opt("repeatAnchor")) ?: return false
+                val diff = dayDiff(anchor, today)
+                if (diff < 0) return false
+                val n = obj.optInt("repeatInterval", 2).coerceAtLeast(1)
+                return diff % n == 0L
+            }
+        }
+    }
+
+    /** 1=周一 … 7=周日（与 Dart DateTime.weekday 一致）。 */
+    private fun weekdayOf(dateStr: String): Int {
+        // 用 Calendar 解析 yyyy-MM-dd，get(DAY_OF_WEEK)：1=周日…7=周六
+        val cal = Calendar.getInstance()
+        val parts = dateStr.split("-")
+        if (parts.size < 3) return -1
+        cal.set(parts[0].toInt(), parts[1].toInt() - 1, parts[2].toInt())
+        val dow = cal.get(Calendar.DAY_OF_WEEK) // 1=Sun..7=Sat
+        // 转成 1=Mon..7=Sun
+        return if (dow == Calendar.SUNDAY) 7 else dow - 1
+    }
+
+    /** 两个 yyyy-MM-dd 相差的整天数（b - a）。按字符串逐段转毫秒，避免时区干扰。 */
+    private fun dayDiff(a: String, b: String): Long {
+        val pa = a.split("-"); val pb = b.split("-")
+        if (pa.size < 3 || pb.size < 3) return 0L
+        val ca = Calendar.getInstance().apply {
+            set(pa[0].toInt(), pa[1].toInt() - 1, pa[2].toInt(), 0, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val cb = Calendar.getInstance().apply {
+            set(pb[0].toInt(), pb[1].toInt() - 1, pb[2].toInt(), 0, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        return ((cb.timeInMillis - ca.timeInMillis) / (24 * 60 * 60 * 1000L))
     }
 }

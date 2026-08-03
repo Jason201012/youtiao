@@ -42,10 +42,12 @@ class NotificationService {
   /// 否则编辑/删除时取消会错位。
   static int _notifyIdOf(String id) => int.tryParse(id) ?? id.hashCode;
 
-  /// 每日提醒使用独立 id 段（基础 id + 固定偏移），与一次性「截止提醒」区分开，
-  /// 避免同一任务的两种提醒互相 cancel 掉。偏移量远小于 int32 上限，且本 App
-  /// 任务 id 为较小的纯数字，不会越界。
-  static int _dailyNotifyIdOf(String id) => _notifyIdOf(id) + 500000;
+  /// 重复提醒使用独立 id 段（基础 id + 固定偏移 + 星期索引），与一次性「截止提醒」区分开，
+  /// 避免同一任务的两种提醒互相 cancel 掉。dayIndex：daily / interval 用 0；
+  /// weekly / weekday 用 1..7（对应周一..周日），每个星期一个独立 id。
+  /// 偏移量远小于 int32 上限，且本 App 任务 id 为较小的纯数字，不会越界。
+  static int _repeatNotifyIdOf(String id, int dayIndex) =>
+      _notifyIdOf(id) + 500000 + dayIndex * 13;
 
   /// 与 MainActivity.kt 中的 MethodChannel 对应，用于查询/跳转「精确闹钟」权限。
   static const MethodChannel _exactAlarmChannel =
@@ -272,65 +274,170 @@ class NotificationService {
   /// 按任务 id 取消单条已调度的「截止提醒」通知。
   Future<void> cancel(String id) => _plugin.cancel(_notifyIdOf(id));
 
-  /// 为任务调度「每日提醒」：每天在设定时间重复触发（setAlarmClock 模式，
-  /// 不被 ColorOS 等国产 ROM 拦截；配合 :guard 进程内的 ScheduledNotificationReceiver
-  /// 即使主进程被杀也能按时触发）。返回 true 表示已成功提交。
+  /// 为「重复任务」调度本地提醒：按 [Task.repeat] 规则在设定时刻重复触发
+  /// （setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。返回 true 表示已提交。
   ///
-  /// [matchDateTimeComponents: DateTimeComponents.time] 让 flutter_local_notifications
-  /// 在每天的同一时刻重复触发；[when] 设为「下一个该时刻」（今天未过则今天，已过则明天）。
-  Future<bool> scheduleDailyReminder(Task task, {bool playSound = true}) async {
+  /// - daily：每天同一时刻（[DateTimeComponents.time]）。
+  /// - weekly / weekday：按所选星期逐个挂 [DateTimeComponents.dayOfWeekAndTime]
+  ///   （每个星期用独立 notifyId 区分）。
+  /// - interval：flutter 没有「每隔 N 天」原语，降级为「下一次 occurrence 的一次性
+  ///   setAlarmClock」；App 每次启动 / 回到前台（_rescheduleAllActive +
+  ///   checkDailyReset）会重算并重新挂上，覆盖绝大多数使用场景。
+  ///
+  /// [when] 设为「下一个该时刻」（今天未过则今天，已过则顺延到下一个 recurrence 日）。
+  Future<bool> scheduleRepeatReminder(Task task, {bool playSound = true}) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度每日提醒 id=${task.id}：通知总开关关闭');
+      debugPrint('[通知] 未调度重复提醒 id=${task.id}：通知总开关关闭');
       return false;
     }
-    if (!task.dailyReminder || task.dailyReminderMinute == null) {
-      debugPrint('[通知] 未调度每日提醒 id=${task.id}：未开启每日提醒');
+    if (!task.isRepeating || task.repeatMinute == null) {
+      debugPrint('[通知] 未调度重复提醒 id=${task.id}：非重复任务或无提醒时间');
       return false;
     }
     try {
       final loc = _loc ?? tz.UTC;
-      final m = task.dailyReminderMinute!;
+      final m = task.repeatMinute!;
       final hh = m ~/ 60;
       final mm = m % 60;
-      final now = tz.TZDateTime.now(loc);
-      var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-      if (!when.isAfter(now)) when = when.add(const Duration(days: 1));
       final chId = playSound ? _chSound : _chSilent;
       final androidDetail = AndroidNotificationDetails(
         chId,
         '任务提醒',
-        channelDescription: '每日定时提醒',
+        channelDescription: '重复任务定时提醒',
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
-      await _plugin.zonedSchedule(
-        _dailyNotifyIdOf(task.id),
-        '每日提醒',
-        task.title,
-        when,
-        detail,
-        androidScheduleMode: mode,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: DateTimeComponents.time,
-      );
-      debugPrint('[通知] 已调度每日提醒 id=${task.id} 每天 '
-          '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}'
-          ' (首次=$when, mode=${mode.name})');
-      return true;
+
+      // 收集需要挂提醒的「星期」列表（dayOfWeekAndTime 用）。
+      List<int> weeklyDays;
+      switch (task.repeat) {
+        case RepeatType.daily:
+          // 每天：用 time 组件，无需按星期枚举。
+          weeklyDays = const [];
+          break;
+        case RepeatType.weekday:
+          weeklyDays = const [1, 2, 3, 4, 5]; // 周一至周五
+          break;
+        case RepeatType.weekly:
+          weeklyDays = task.repeatWeekdays
+              .where((d) => d >= 1 && d <= 7)
+              .toList();
+          break;
+        case RepeatType.interval:
+          weeklyDays = const []; // 一次性，下方单独处理
+          break;
+        case RepeatType.none:
+          return false;
+      }
+
+      if (weeklyDays.isNotEmpty) {
+        // 逐星期挂 dayOfWeekAndTime（每个星期一个独立 notifyId）。
+        for (final wd in weeklyDays) {
+          var when =
+              tz.TZDateTime(loc, 2000, 1, 1 + (wd - 1), hh, mm); // 占位日期，组件会忽略年月日
+          // 计算下一个该星期的真实时刻
+          final now = tz.TZDateTime.now(loc);
+          // 找到本周/下周该星期
+          var candidate =
+              tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+          while (candidate.weekday != wd || !candidate.isAfter(now)) {
+            candidate = candidate.add(const Duration(days: 1));
+          }
+          when = candidate;
+          await _plugin.zonedSchedule(
+            _repeatNotifyIdOf(task.id, wd),
+            task.repeatSummary,
+            task.title,
+            when,
+            detail,
+            androidScheduleMode: mode,
+            uiLocalNotificationDateInterpretation:
+                UILocalNotificationDateInterpretation.absoluteTime,
+            matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+          );
+        }
+        debugPrint('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
+            '每周 $weeklyDays @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}');
+        return true;
+      }
+
+      if (task.repeat == RepeatType.daily) {
+        final now = tz.TZDateTime.now(loc);
+        var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+        if (!when.isAfter(now)) when = when.add(const Duration(days: 1));
+        await _plugin.zonedSchedule(
+          _repeatNotifyIdOf(task.id, 0),
+          task.repeatSummary,
+          task.title,
+          when,
+          detail,
+          androidScheduleMode: mode,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+          matchDateTimeComponents: DateTimeComponents.time,
+        );
+        debugPrint('[通知] 已调度重复提醒 id=${task.id} 每天 '
+            '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} (首次=$when)');
+        return true;
+      }
+
+      if (task.repeat == RepeatType.interval) {
+        final next = _nextIntervalOccurrence(task);
+        if (next == null) {
+          debugPrint('[通知] 未调度 interval 提醒 id=${task.id}：缺锚点');
+          return false;
+        }
+        final now = tz.TZDateTime.now(loc);
+        final when = next.isAfter(now) ? next : next.add(const Duration(days: 1));
+        await _plugin.zonedSchedule(
+          _repeatNotifyIdOf(task.id, 0),
+          task.repeatSummary,
+          task.title,
+          when,
+          detail,
+          androidScheduleMode: mode,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+        );
+        debugPrint('[通知] 已调度重复提醒(interval) id=${task.id} 下次 '
+            '${when.year}-${when.month}-${when.day} ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}');
+        return true;
+      }
+
+      return false;
     } catch (e, s) {
-      debugPrint('[通知] 每日提醒调度失败 id=${task.id}: $e');
+      debugPrint('[通知] 重复提醒调度失败 id=${task.id}: $e');
       debugPrint('$s');
       return false;
     }
   }
 
-  /// 按任务 id 取消单条「每日提醒」通知。
-  Future<void> cancelDailyReminder(String id) =>
-      _plugin.cancel(_dailyNotifyIdOf(id));
+  /// 计算 interval 任务下一次 occurrence 的「日期+时刻」（date-only 锚点 + N 天步进）。
+  tz.TZDateTime? _nextIntervalOccurrence(Task task) {
+    final a = task.repeatAnchor;
+    if (a == null || task.repeatMinute == null) return null;
+    final loc = _loc ?? tz.UTC;
+    final n = task.repeatInterval < 1 ? 1 : task.repeatInterval;
+    final m = task.repeatMinute!;
+    final now = tz.TZDateTime.now(loc);
+    final today = DateTime(now.year, now.month, now.day);
+    final ad = DateTime(a.year, a.month, a.day);
+    final diff = today.difference(ad).inDays;
+    // 已过去的天数里，最大的可整除步数 → 下一次 occurrence
+    final k = diff < 0 ? 0 : (diff ~/ n);
+    final occDate = ad.add(Duration(days: (k + 1) * n));
+    return tz.TZDateTime(loc, occDate.year, occDate.month, occDate.day, m ~/ 60, m % 60);
+  }
+
+  /// 按任务 id 取消全部「重复提醒」通知（daily 用 dayIndex=0；weekly/weekday 用 1..7）。
+  Future<void> cancelRepeatReminder(String id) async {
+    for (var d = 0; d <= 7; d++) {
+      await _plugin.cancel(_repeatNotifyIdOf(id, d));
+    }
+  }
 
   /// 清空所有已调度的通知（关闭总开关时调用）。
   Future<void> cancelAll() => _plugin.cancelAll();

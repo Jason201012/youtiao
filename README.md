@@ -4,7 +4,7 @@
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v1.9.4**（versionCode 13）　·　开源协议 **[MIT](LICENSE)**
+当前版本 **v1.9.5**（versionCode 14）　·　开源协议 **[MIT](LICENSE)**
 
 ## ✨ 功能特性
 
@@ -73,10 +73,10 @@ flutter build apk --release   # 构建 Android release 包
 
 ## 📦 发行版（Release）
 
-安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，在对应版本（当前最新 `v1.9.4`）的附件中下载 `app-release-v1.9.4.apk`。
+安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，在对应版本（当前最新 `v1.9.5`）的附件中下载 `app-release-v1.9.5.apk`。
 
 - 发行版列表：<https://gitee.com/jason1012/youtiao/releases>
-- 当前版本：`v1.9.4`（versionCode 13）
+- 当前版本：`v1.9.5`（versionCode 14）
 
 ## 📁 项目结构
 

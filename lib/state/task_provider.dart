@@ -148,7 +148,7 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 把「已完成且 completedAt 日期早于今天、且未过截止日」的每日任务重置为未完成。
+  /// 把「已完成、未过截止日、且今天是其循环日、且上次完成早于今天」的重复任务重置为未完成。
   /// 返回是否发生了变更（仅在变更时落盘 + 通知 UI）。与原生 MidnightResetReceiver 逻辑一致。
   bool _resetDailyIfNeeded() {
     final now = DateTime.now();
@@ -156,8 +156,10 @@ class TaskProvider extends ChangeNotifier {
     var dailyDirty = false;
     for (var i = 0; i < _tasks.length; i++) {
       final t = _tasks[i];
-      if (t.dailyReminder && t.status == TaskStatus.done &&
-          (t.dueDate == null || !_dateHasPassed(t.dueDate!))) {
+      if (t.isRepeating &&
+          t.status == TaskStatus.done &&
+          (t.dueDate == null || !_dateHasPassed(t.dueDate!)) &&
+          t.repeatsOn(today)) {
         final c = t.completedAt;
         if (c == null || DateTime(c.year, c.month, c.day).isBefore(today)) {
           _tasks[i] = t.copyWith(status: TaskStatus.todo, completedAt: null);
@@ -396,18 +398,18 @@ class TaskProvider extends ChangeNotifier {
       return DateTime(due.year, due.month, due.day).difference(today).inDays;
     }
 
-    final active = _tasks.where((t) => !t.done && !t.dailyReminder);
+    final active = _tasks.where((t) => !t.done && !t.isRepeating);
     final overdue = active.where((t) => (dayDiff(t.dueDate) ?? 0) < 0).length;
     final today = active.where((t) => dayDiff(t.dueDate) == 0).length;
     final future =
         active.where((t) => t.dueDate == null || dayDiff(t.dueDate)! > 0).length;
-    final daily = _tasks.where((t) => t.dailyReminder && !t.done).length;
+    final repeat = _tasks.where((t) => t.isRepeating && !t.done).length;
     final done = _tasks.where((t) => t.done).length;
     return {
       'overdue': overdue,
       'today': today,
       'future': future,
-      'daily': daily,
+      'repeat': repeat,
       'done': done,
     };
   }
@@ -423,8 +425,8 @@ class TaskProvider extends ChangeNotifier {
       return DateTime(due.year, due.month, due.day).difference(today).inDays;
     }
 
-    // 未完成 + 非每日提醒，按截止日期切分为 逾期 / 今天 / 未来。
-    final active = _tasks.where((t) => !t.done && !t.dailyReminder).toList();
+    // 未完成 + 非重复，按截止日期切分为 逾期 / 今天 / 未来。
+    final active = _tasks.where((t) => !t.done && !t.isRepeating).toList();
     final overdue = active
         .where((t) => (dayDiff(t.dueDate) ?? 0) < 0)
         .toList()
@@ -443,17 +445,17 @@ class TaskProvider extends ChangeNotifier {
         if (b.dueDate == null) return -1;
         return a.dueDate!.compareTo(b.dueDate!);
       });
-    // 每日提醒任务单独成段，按提醒时刻升序。
-    final daily = _tasks.where((t) => t.dailyReminder && !t.done).toList()
-      ..sort((a, b) => (a.dailyReminderMinute ?? 24 * 60)
-          .compareTo(b.dailyReminderMinute ?? 24 * 60));
+    // 重复任务单独成段，按提醒时刻升序。
+    final repeat = _tasks.where((t) => t.isRepeating && !t.done).toList()
+      ..sort((a, b) => (a.repeatMinute ?? 24 * 60)
+          .compareTo(b.repeatMinute ?? 24 * 60));
     // 已完成统一进「已完成」。
     final done = _tasks.where((t) => t.done).toList();
     return {
       'overdue': overdue,
       'today': today,
       'future': future,
-      'daily': daily,
+      'repeat': repeat,
       'done': done,
     };
   }
@@ -505,14 +507,20 @@ class TaskProvider extends ChangeNotifier {
       priority: updated.priority,
       category: updated.category,
       dueDate: updated.dueDate,
-      dailyReminder: updated.dailyReminder,
-      dailyReminderMinute: updated.dailyReminderMinute,
+      repeat: updated.repeat,
+      repeatWeekdays: updated.repeatWeekdays,
+      repeatInterval: updated.repeatInterval,
+      repeatMinute: updated.repeatMinute,
+      repeatAnchor: updated.repeatAnchor,
       note: updated.note,
     );
-    // 截止时间或每日提醒设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
+    // 截止时间或重复设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
     final remindersChanged = old.dueDate != updated.dueDate ||
-        old.dailyReminder != updated.dailyReminder ||
-        old.dailyReminderMinute != updated.dailyReminderMinute;
+        old.repeat != updated.repeat ||
+        old.repeatMinute != updated.repeatMinute ||
+        old.repeatInterval != updated.repeatInterval ||
+        !_listEq(old.repeatWeekdays, updated.repeatWeekdays) ||
+        old.repeatAnchor != updated.repeatAnchor;
     if (remindersChanged) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(_tasks[i]);
@@ -690,19 +698,15 @@ class TaskProvider extends ChangeNotifier {
     buf.writeln('## 未完成（${_tasks.where((e) => !e.done).length}）');
     for (final t in _tasks.where((e) => !e.done)) {
       final due = t.dueDate == null ? '' : ' ｜ 截止 ${_fmt(t.dueDate!)}';
-      final daily = (t.dailyReminder && t.dailyReminderMinute != null)
-          ? ' ｜ 每日 ${_fmtMinute(t.dailyReminderMinute!)}'
-          : '';
-      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$daily');
+      final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
+      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep');
     }
     buf.writeln('');
     buf.writeln('## 已完成（${_tasks.where((e) => e.done).length}）');
     for (final t in _tasks.where((e) => e.done)) {
       final c = t.completedAt == null ? '' : ' ｜ 完成于 ${_fmt(t.completedAt!)}';
-      final daily = (t.dailyReminder && t.dailyReminderMinute != null)
-          ? ' ｜ 每日 ${_fmtMinute(t.dailyReminderMinute!)}'
-          : '';
-      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$daily');
+      final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
+      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep');
     }
     if (includeTrash && _trash.isNotEmpty) {
       buf.writeln('');
@@ -731,25 +735,25 @@ class TaskProvider extends ChangeNotifier {
     await NotificationService.instance.scheduleForTask(task);
   }
 
-  /// 为单个任务调度其全部本地提醒（截止提醒 + 每日提醒）。
-  /// 每日提醒只在「有截止日期且截止日期未过」时才调度，逾期后自动停止。
+  /// 为单个任务调度其全部本地提醒（截止提醒 + 重复提醒）。
+  /// 重复提醒只在「有截止日期且截止日期未过」时才调度，逾期后自动停止。
   void _scheduleRemindersFor(Task t) {
     if (t.dueDate != null) {
       NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
     }
-    if (t.dailyReminder && t.dailyReminderMinute != null &&
+    if (t.isRepeating && t.repeatMinute != null &&
         t.dueDate != null && !_dateHasPassed(t.dueDate!)) {
-      NotificationService.instance.scheduleDailyReminder(t, playSound: _soundEnabled);
+      NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
     }
   }
 
-  /// 取消单个任务的全部本地提醒（截止提醒 + 每日提醒）。
+  /// 取消单个任务的全部本地提醒（截止提醒 + 重复提醒）。
   void _cancelRemindersFor(String id) {
     NotificationService.instance.cancel(id);
-    NotificationService.instance.cancelDailyReminder(id);
+    NotificationService.instance.cancelRepeatReminder(id);
   }
 
-  /// 统一重排所有活动任务的提醒：未完成且未过期的截止提醒 + 未过期的每日提醒。
+  /// 统一重排所有活动任务的提醒：未完成且未过期的截止提醒 + 未过期的重复提醒。
   /// 用于开关/声音变化、启动时刷新。
   void _rescheduleAllActive() {
     final now = DateTime.now();
@@ -757,11 +761,20 @@ class TaskProvider extends ChangeNotifier {
       if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
         NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
       }
-      if (t.dailyReminder && t.dailyReminderMinute != null &&
+      if (t.isRepeating && t.repeatMinute != null &&
           t.dueDate != null && !_dateHasPassed(t.dueDate!)) {
-        NotificationService.instance.scheduleDailyReminder(t, playSound: _soundEnabled);
+        NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
       }
     }
+  }
+
+  /// 两个 int 列表内容是否相等（[List] 默认 == 比较引用，重复星期需按内容比较）。
+  static bool _listEq(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   /// 判断日期是否已完全过去（以「今天 00:00」为界，与 dueDate 的 23:59 语义一致）。

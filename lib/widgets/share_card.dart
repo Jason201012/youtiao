@@ -667,7 +667,7 @@ class _HomeBlock extends StatelessWidget {
     ('overdue', '逾期'),
     ('today', '今天'),
     ('future', '未来'),
-    ('daily', '每天'),
+    ('repeat', '重复'),
     ('done', '已完成'),
   ];
 
@@ -682,7 +682,7 @@ class _HomeBlock extends StatelessWidget {
         return isDark ? AppColors.darkAccent : AppColors.lightPrimary;
       case 'future':
         return ext.meta;
-      case 'daily':
+      case 'repeat':
         return isDark ? const Color(0xFF80C0FF) : const Color(0xFF378ADD);
       case 'done':
       default:
@@ -690,16 +690,11 @@ class _HomeBlock extends StatelessWidget {
     }
   }
 
-  /// 每行次要信息：每日提醒显示「每天 HH:mm」，已完成显示「完成于 M月d日」，
-  /// 其余显示相对截止时间（今天 / 明天 / M月d日 …）。
+  /// 每行次要信息：重复任务显示「规则 + 时间」（如「每周 一、三 09:00」），
+  /// 已完成显示「完成于 M月d日」，其余显示相对截止时间（今天 / 明天 / M月d日 …）。
   String _meta(Task t, String key) {
-    if (key == 'daily') {
-      if (t.dailyReminderMinute != null) {
-        final hh = t.dailyReminderMinute! ~/ 60;
-        final mm = t.dailyReminderMinute! % 60;
-        return '每天 ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}';
-      }
-      return '每天';
+    if (key == 'repeat') {
+      return t.repeatFull.isNotEmpty ? t.repeatFull : '重复';
     }
     if (key == 'done') {
       if (t.completedAt != null) {

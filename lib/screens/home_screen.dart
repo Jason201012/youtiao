@@ -89,7 +89,7 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.onSearchingChanged?.call(false);
   }
 
-  /// 任务是否命中搜索关键字：标题 / 分类 / 优先级（忽略大小写）。
+  /// 任务是否命中搜索关键字：标题 / 分类 / 优先级 / 备注 / 重复规则（忽略大小写）。
   bool _matchesQuery(Task t) {
     final q = _searchCtl.text.trim().toLowerCase();
     if (q.isEmpty) return false;
@@ -98,7 +98,9 @@ class _HomeScreenState extends State<HomeScreen> {
         t.category.name.toLowerCase().contains(q) ||
         _prioLabel(t.priority).contains(q) ||
         t.priority.name.toLowerCase().contains(q) ||
-        t.note.toLowerCase().contains(q);
+        t.note.toLowerCase().contains(q) ||
+        t.repeat.label.toLowerCase().contains(q) ||
+        t.repeatSummary.toLowerCase().contains(q);
   }
 
   static String _prioLabel(Priority p) =>
@@ -242,7 +244,7 @@ class _HomeScreenState extends State<HomeScreen> {
         // 2) 未完成 + 开启每日提醒的任务单独归入「每天」，不参与日期切分（它每天都要做）。
         // 3) 已完成的任务统一进「已完成」，不按日期切分。
         // 四类互不重叠，任何一个任务在首页只会出现在一个板块里。
-        final active = tasks.where((t) => !t.done && !t.dailyReminder).toList();
+        final active = tasks.where((t) => !t.done && !t.isRepeating).toList();
 
         // 逾期：截止日期早于今天，按截止时间升序（拖得最久的排最前，优先处理）
         final overdue = active
@@ -268,10 +270,10 @@ class _HomeScreenState extends State<HomeScreen> {
             return a.dueDate!.compareTo(b.dueDate!);
           });
 
-        // 每天：每日提醒任务，按提醒时刻升序（未设时刻的排最后）
-        final daily = tasks.where((t) => t.dailyReminder && !t.done).toList()
-          ..sort((a, b) => (a.dailyReminderMinute ?? 24 * 60)
-              .compareTo(b.dailyReminderMinute ?? 24 * 60));
+        // 重复：重复任务（所有规则），按提醒时刻升序（未设时刻的排最后）
+        final repeat = tasks.where((t) => t.isRepeating && !t.done).toList()
+          ..sort((a, b) => (a.repeatMinute ?? 24 * 60)
+              .compareTo(b.repeatMinute ?? 24 * 60));
 
         final done = tasks.where((t) => t.done).toList();
 
@@ -287,7 +289,7 @@ class _HomeScreenState extends State<HomeScreen> {
           TaskFilter.all => const <Task>[],
         };
         final visible = filter == TaskFilter.all
-            ? [...overdue, ...today, ...future, ...daily, ...done]
+            ? [...overdue, ...today, ...future, ...repeat, ...done]
             : filtered;
 
         final appBar = _searching
@@ -427,8 +429,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                 alwaysShow: true),
                             // 未来：今天之后到期 + 无截止日期
                             ..._section(context, '未来', future, ext),
-                            // 每天：每日提醒任务（进行中）
-                            ..._section(context, '每天', daily, ext),
+                            // 重复：重复任务（所有规则，进行中）
+                            ..._section(context, '重复', repeat, ext),
                             // 已完成
                             ..._section(context, '已完成', done, ext),
                           ] else ...[

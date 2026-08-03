@@ -189,13 +189,12 @@ class _KanbanCard extends StatelessWidget {
               ),
             ],
           ),
-          if (dueHint.isNotEmpty || task.dailyReminder) ...[
+          if (dueHint.isNotEmpty || task.isRepeating) ...[
             const SizedBox(height: 6),
             Row(
               children: [
-                if (task.dailyReminder)
-                  Icon(Symbols.repeat, size: 13, color: ext.meta),
-                if (task.dailyReminder && dueHint.isNotEmpty) const SizedBox(width: 4),
+                if (task.isRepeating) Icon(Symbols.repeat, size: 13, color: ext.meta),
+                if (task.isRepeating && dueHint.isNotEmpty) const SizedBox(width: 4),
                 if (dueHint.isNotEmpty)
                   Text(
                     dueHint,

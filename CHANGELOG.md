@@ -1,5 +1,16 @@
 # 更新日志（Changelog）
 
+## v1.9.5（2026-08-03）
+
+- **灵活重复规则**：在原有「每天」基础上新增「每周X / 每隔N天 / 仅工作日」，复用既有 00:00 重置 + 闹钟机制。
+  - 模型：用 `RepeatType`（none/daily/weekly/interval/weekday）替代原 `dailyReminder` 布尔；新增 `repeatWeekdays`（每周所选星期）、`repeatInterval`（每隔N天）、`repeatMinute`（提醒时刻）、`repeatAnchor`（间隔锚点日期）。
+  - 00:00 重置：Dart `_resetDailyIfNeeded` 与 Android 原生 `MidnightResetReceiver` 同步按 `repeatsOn(今天)` 判断——每天恒重置；工作日仅周一~周五；每周仅所选星期；每隔N天按锚点取模。仅在「今天是其循环日、且上次完成早于今天、且未过截止日」才重置为待办。
+  - 提醒调度：`scheduleRepeatReminder` 按规则挂闹钟——每天用 `time` 组件；每周/工作日按所选星期逐个 `dayOfWeekAndTime`（各自独立 id）；每隔N天用「下次 occurrence 一次性 setAlarmClock」，App 启动/回前台时重排兜底。
+  - 弹层 UI：「重复」分段（不重复/每天/每周/每隔N天/仅工作日）；每周显星期多选、每隔N天显间隔步进；任意重复类型都可设提醒时间；旧「每日提醒」开关移除。
+  - 展示：首页「重复」板块（原「每天」）、看板/任务行/分享卡/搜索均显示规则摘要（如「每周 一、三 09:00」「每2天」「工作日」）。
+  - 兼容：旧备份无 `repeat` 字段时，`dailyReminder=true` 回退为「每天」；`dailyReminderMinute` 回退为 `repeatMinute`。
+  - 开发态（未发布），待发布时升版本号。
+
 ## v1.9.4（2026-08-03）
 
 - **任务备注（解释 / 说明）**：新建与编辑任务时新增「备注」多行输入框，可记录补充说明、链接、思路等。

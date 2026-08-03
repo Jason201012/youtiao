@@ -187,9 +187,7 @@ class _MetaInfo extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[];
-    if (task.dailyReminder && task.dailyReminderMinute != null) {
-      final hh = task.dailyReminderMinute! ~/ 60;
-      final mm = task.dailyReminderMinute! % 60;
+    if (task.isRepeating && task.repeatFull.isNotEmpty) {
       children.add(
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -197,7 +195,7 @@ class _MetaInfo extends StatelessWidget {
             Icon(Symbols.repeat, size: 14, color: ext.meta),
             const SizedBox(width: 2),
             Text(
-              '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}',
+              task.repeatFull,
               style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
             ),
           ],
