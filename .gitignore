@@ -95,3 +95,6 @@ key.properties
 /*.txt
 /设计交接规格.md
 /ardot_check/
+
+# 发版产物（APK 不进 git，仅作发行版附件）
+dist/

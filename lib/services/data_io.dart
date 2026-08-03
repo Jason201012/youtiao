@@ -29,6 +29,34 @@ class DataIo {
     await Share.shareXFiles([XFile(file.path, mimeType: mimeType)]);
   }
 
+  /// 把图片字节写入临时目录并唤起系统分享面板（微信/QQ/相册等）。
+  /// 临时文件放在 getTemporaryDirectory()，系统会自行回收。
+  static Future<void> shareImageBytes(
+    Uint8List bytes, {
+    String fileName = 'share.png',
+    String? text,
+  }) async {
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/$fileName');
+    await file.writeAsBytes(bytes, flush: true);
+    await Share.shareXFiles(
+      [XFile(file.path, mimeType: 'image/png')],
+      text: text,
+    );
+  }
+
+  /// 把 PNG 字节保存到系统相册（Pictures/有条），Android 10+ 走 MediaStore 免权限。
+  /// 失败时抛 [PlatformException]，调用方应给出提示或兜底到分享。
+  static Future<void> saveImageToGallery(
+    String fileName,
+    Uint8List bytes,
+  ) async {
+    await _ioChannel.invokeMethod<void>('saveImageToGallery', {
+      'fileName': fileName,
+      'bytes': bytes,
+    });
+  }
+
   /// 把内容写入系统「下载 / Downloads」目录（Android 10+ 走 MediaStore，免存储权限）。
   /// 写入后文件在系统文件管理器的下载目录中可见。
   /// 失败时抛 [PlatformException]，调用方应兜底到 [saveToAppDocs] + [shareFile]。

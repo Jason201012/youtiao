@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -12,6 +13,7 @@ import 'package:todolist/widgets/week_trend.dart';
 import 'package:todolist/widgets/priority_distribution.dart';
 import 'package:todolist/widgets/guard_status_card.dart';
 import 'package:todolist/widgets/kanban_board.dart';
+import 'package:todolist/widgets/share_sheet.dart';
 
 class BoardScreen extends StatelessWidget {
   const BoardScreen({super.key});
@@ -26,7 +28,18 @@ class BoardScreen extends StatelessWidget {
 
     return Column(
       children: [
-        const TopAppBar(title: '看板'),
+        TopAppBar(
+          title: '看板',
+          actions: [
+            // 分享：把看板数据生成一张长图，可保存到相册或直接分享
+            IconButton(
+              onPressed: () => showShareSheet(context),
+              icon: Icon(Symbols.ios_share, size: 24, color: onBg),
+              tooltip: '分享看板',
+              splashRadius: 20,
+            ),
+          ],
+        ),
         Expanded(
           child: Consumer<TaskProvider>(
             builder: (context, provider, _) {

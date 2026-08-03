@@ -115,6 +115,57 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                     }
+                    // 把 PNG 字节写入系统相册（Pictures/有条），Android 10+ 免存储权限。
+                    // 用于「看板分享长图」的保存到相册。
+                    "saveImageToGallery" -> {
+                        val fileName = call.argument<String>("fileName")
+                        val bytes = call.argument<ByteArray>("bytes")
+                        if (fileName == null || bytes == null) {
+                            result.error("BAD_ARGS", "fileName 与 bytes 必填", null)
+                            return@setMethodCallHandler
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            try {
+                                val resolver = contentResolver
+                                val values = ContentValues().apply {
+                                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                                    put(
+                                        MediaStore.Images.Media.RELATIVE_PATH,
+                                        Environment.DIRECTORY_PICTURES + "/有条",
+                                    )
+                                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                                }
+                                val uri = resolver.insert(
+                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                    values,
+                                )
+                                if (uri == null) {
+                                    result.error(
+                                        "INSERT_FAIL",
+                                        "无法在相册创建图片（可能被系统拦截）",
+                                        null,
+                                    )
+                                    return@setMethodCallHandler
+                                }
+                                resolver.openOutputStream(uri)?.use { os ->
+                                    os.write(bytes)
+                                }
+                                values.clear()
+                                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                                resolver.update(uri, values, null, null)
+                                result.success(true)
+                            } catch (e: Exception) {
+                                result.error("SAVE_FAIL", e.message, null)
+                            }
+                        } else {
+                            result.error(
+                                "UNSUPPORTED",
+                                "Android 10 以下不支持免权限写入相册",
+                                null,
+                            )
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
