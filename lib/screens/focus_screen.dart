@@ -3,9 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/focus_session.dart';
-import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
-import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
@@ -33,7 +31,6 @@ class _FocusScreenState extends State<FocusScreen> {
   bool _running = false;
   Timer? _timer;
   DateTime? _startedAt;
-  Task? _linkedTask;
 
   @override
   void initState() {
@@ -101,8 +98,6 @@ class _FocusScreenState extends State<FocusScreen> {
     context.read<FocusProvider>().addSession(
           FocusSession(
             id: DateTime.now().millisecondsSinceEpoch.toString(),
-            taskId: _linkedTask?.id,
-            taskTitle: _linkedTask?.title,
             plannedSec: _totalSec,
             durationSec: elapsed,
             completed: completed,
@@ -128,7 +123,6 @@ class _FocusScreenState extends State<FocusScreen> {
     final primary = scheme.primary;
     final onBg = scheme.onBackground;
     final focus = context.watch<FocusProvider>();
-    final tasks = context.read<TaskProvider>().tasks;
 
     final progress =
         _totalSec == 0 ? 0.0 : 1 - _remaining / _totalSec;
@@ -240,14 +234,14 @@ class _FocusScreenState extends State<FocusScreen> {
                 ),
                 const SizedBox(height: 28),
 
-                // 控制按钮
+                // 控制按钮：两个等大圆形按钮（64×64），图标严格居中
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // 停止
+                    // 停止/重置
                     SizedBox(
-                      width: 56,
-                      height: 56,
+                      width: 64,
+                      height: 64,
                       child: OutlinedButton(
                         onPressed: _running || _remaining != _totalSec
                             ? () => _stop()
@@ -256,20 +250,22 @@ class _FocusScreenState extends State<FocusScreen> {
                           shape: const CircleBorder(),
                           side: BorderSide(color: ext.meta),
                           foregroundColor: ext.meta,
+                          padding: EdgeInsets.zero, // 去默认内边距让图标居中
                         ),
-                        child: const Icon(Symbols.stop, size: 24),
+                        child: const Icon(Symbols.stop, size: 28),
                       ),
                     ),
                     const SizedBox(width: 32),
                     // 开始/暂停
                     SizedBox(
-                      width: 72,
-                      height: 72,
+                      width: 64,
+                      height: 64,
                       child: FilledButton(
                         onPressed: _startPause,
                         style: FilledButton.styleFrom(
                           shape: const CircleBorder(),
                           backgroundColor: primary,
+                          padding: EdgeInsets.zero, // 去默认内边距让图标居中
                         ),
                         child: Icon(
                           _running ? Symbols.pause : Symbols.play_arrow,
@@ -279,16 +275,6 @@ class _FocusScreenState extends State<FocusScreen> {
                       ),
                     ),
                   ],
-                ),
-                const SizedBox(height: 24),
-
-                // 关联任务
-                _LinkTaskRow(
-                  linked: _linkedTask,
-                  tasks: tasks,
-                  ext: ext,
-                  meta: ext.meta,
-                  onPick: (t) => setState(() => _linkedTask = t),
                 ),
                 const SizedBox(height: 24),
 
@@ -369,58 +355,6 @@ class _StatItem extends StatelessWidget {
           Text(label, style: TextStyle(fontSize: 12, color: meta)),
         ],
       );
-}
-
-/// 关联任务选择行。
-class _LinkTaskRow extends StatelessWidget {
-  final Task? linked;
-  final List<Task> tasks;
-  final AppColorsExt ext;
-  final Color meta;
-  final ValueChanged<Task?> onPick;
-  const _LinkTaskRow({
-    required this.linked,
-    required this.tasks,
-    required this.ext,
-    required this.meta,
-    required this.onPick,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return PopupMenuButton<Task?>(
-      onSelected: onPick,
-      itemBuilder: (ctx) => [
-        const PopupMenuItem<Task?>(value: null, child: Text('不关联任务')),
-        for (final t in tasks)
-          PopupMenuItem<Task?>(value: t, child: Text(t.title)),
-      ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-        decoration: BoxDecoration(
-          color: ext.chip,
-          borderRadius: BorderRadius.circular(AppColors.cardRadius),
-        ),
-        child: Row(
-          children: [
-            Icon(Symbols.link, size: 20, color: meta),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                linked == null ? '关联任务（可选）' : '专注中：${linked!.title}',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: linked == null ? meta : null,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Icon(Symbols.chevron_right, size: 18, color: meta),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 /// 今日专注记录列表。
