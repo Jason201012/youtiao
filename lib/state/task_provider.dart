@@ -551,7 +551,11 @@ class TaskProvider extends ChangeNotifier {
       status: s,
       completedAt: s == TaskStatus.done ? DateTime.now() : null,
     );
-    if (_tasks[i].isRepeating) _rescheduleRepeatOnCompletion(_tasks[i]);
+    if (_tasks[i].isRepeating) {
+      _rescheduleRepeatOnCompletion(_tasks[i]);
+    } else {
+      _reconcileDeadlineOnCompletion(_tasks[i]);
+    }
     notifyListeners();
     _persist();
   }
@@ -566,7 +570,11 @@ class TaskProvider extends ChangeNotifier {
     );
     // 重复任务完成/取消完成：重排重复提醒。当天已完成则跳过今日（不弹今天提醒），
     // 否则照常挂今日；同一通知 id 覆盖掉旧闹钟。
-    if (_tasks[i].isRepeating) _rescheduleRepeatOnCompletion(_tasks[i]);
+    if (_tasks[i].isRepeating) {
+      _rescheduleRepeatOnCompletion(_tasks[i]);
+    } else {
+      _reconcileDeadlineOnCompletion(_tasks[i]);
+    }
     notifyListeners();
     _persist();
   }
@@ -847,6 +855,20 @@ class TaskProvider extends ChangeNotifier {
         t.dueDate != null &&
         !_dateHasPassed(t.dueDate!)) {
       NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
+    }
+  }
+
+  /// 非重复任务完成态变更后：取消 / 恢复其一次性「截止时间提醒」。
+  /// - 完成（含提前完成）：取消已调度的截止提醒，避免到期后仍弹出。
+  /// - 取消完成：若截止时间未过，恢复调度。
+  /// 重复任务不在此处理——其整体截止提醒仍有效（只是当天完成由
+  /// [_rescheduleRepeatOnCompletion] 跳过今日重复提醒），故直接跳过。
+  void _reconcileDeadlineOnCompletion(Task t) {
+    if (t.isRepeating) return;
+    if (t.done) {
+      NotificationService.instance.cancel(t.id);
+    } else if (t.dueDate != null && t.dueDate!.isAfter(DateTime.now())) {
+      NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
     }
   }
 

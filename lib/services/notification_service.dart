@@ -42,6 +42,12 @@ class NotificationService {
   /// 否则编辑/删除时取消会错位。
   static int _notifyIdOf(String id) => int.tryParse(id) ?? id.hashCode;
 
+  /// 记录「已取消的一次性截止提醒」任务 id。任务提前完成后我们会 [cancel] 一次性
+  /// 截止提醒，但 [scheduleForTask] 内部还有一条「应用内兜底」延迟定时器（到期 ≤1 天
+  /// 时启用），它不依赖系统 AlarmManager，[cancel] 拦不住。用此集合在兜底定时器触发时
+  /// 二次校验，确保提前完成的任务不会再弹出提醒。重新调度时会清除对应标记。
+  final Set<String> _deadlineCancelled = {};
+
   /// 重复提醒使用独立 id 段（基础 id + 固定偏移 + 星期索引），与一次性「截止提醒」区分开，
   /// 避免同一任务的两种提醒互相 cancel 掉。dayIndex：daily / interval 用 0；
   /// weekly / weekday 用 1..7（对应周一..周日），每个星期一个独立 id。
@@ -225,6 +231,14 @@ class NotificationService {
       debugPrint('[通知] 未调度 id=${task.id}：无截止时间');
       return false;
     }
+    if (task.done) {
+      // 已完成（含提前完成）的任务不再挂一次性「截止时间提醒」，避免完成后仍弹。
+      _deadlineCancelled.add(task.id);
+      debugPrint('[通知] 未调度 id=${task.id}：任务已完成（不挂截止提醒）');
+      return false;
+    }
+    // 重新调度：清除该任务的「已取消」标记（若曾因完成被取消），使后续取消能再次生效。
+    _deadlineCancelled.remove(task.id);
     try {
       final loc = _loc ?? tz.UTC;
       final due = task.dueDate!;
@@ -262,8 +276,12 @@ class NotificationService {
       // 仅对较短延时（≤1 天）启用，长期任务依赖上面的 setAlarmClock 即可。
       final delay = when.difference(tz.TZDateTime.now(loc));
       if (!delay.isNegative && delay <= const Duration(days: 1)) {
+        final id = task.id;
         Future.delayed(delay, () {
-          _plugin.show(_notifyIdOf(task.id), '任务提醒', task.title, detail);
+          // 任务在到期前已完成/被取消则不再弹：应用内兜底定时器不受系统 AlarmManager
+          // cancel 影响，必须用 _deadlineCancelled 二次校验拦截。
+          if (_deadlineCancelled.contains(id)) return;
+          _plugin.show(_notifyIdOf(id), '任务提醒', task.title, detail);
         });
       }
       return true;
@@ -276,7 +294,11 @@ class NotificationService {
   }
 
   /// 按任务 id 取消单条已调度的「截止提醒」通知。
-  Future<void> cancel(String id) => _plugin.cancel(_notifyIdOf(id));
+  /// 同时记入 [_deadlineCancelled]，让应用内兜底定时器也能正确拦截（提前完成场景）。
+  Future<void> cancel(String id) {
+    _deadlineCancelled.add(id);
+    return _plugin.cancel(_notifyIdOf(id));
+  }
 
   /// 为「重复任务」调度本地提醒：按 [Task.repeat] 规则在设定时刻重复触发
   /// （setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。返回 true 表示已提交。
@@ -443,7 +465,10 @@ class NotificationService {
   }
 
   /// 清空所有已调度的通知（关闭总开关时调用）。
-  Future<void> cancelAll() => _plugin.cancelAll();
+  Future<void> cancelAll() {
+    _deadlineCancelled.clear();
+    return _plugin.cancelAll();
+  }
 
   /// 挂上「每日任务当天 00:00 自动重置」的午夜闹钟（setAlarmClock，ColorOS 可靠，
   /// 不依赖 App 是否打开）。由原生 MidnightResetReceiver 在午夜触发并自循环调度。
