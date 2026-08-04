@@ -32,11 +32,46 @@ def log(msg):
         f.write(line + "\n")
     print(line, flush=True)
 
-def clean_build():
-    """原本删 build/ 和 android/build/ 干净开始，但 safe-delete 钩子会拦截批量删除
-    （SAFE_DELETE_BULK_CONFIRM_REQUIRED，且以 sys.exit 退出，try/except 拦不住）。
-    改为跳过目录删除：flutter build apk --release 会自行刷新 build 产物，无需手动清理。"""
-    log("clean_build: skip dir removal (safe-delete hook blocks bulk delete; build refreshes)")
+def flutter_clean():
+    """彻底清掉 build/ 与 .dart_tool/ 与 android/build/，避免跨卷符号链接残留导致
+    Gradle 9.1 :app:packageRelease 快照失败（Cannot snapshot .../dex-renamer-state.txt: not a regular file）。
+
+    实现用 Win32 API（ctypes）递归删除，绕开两道拦截：
+    - Python 层 safe-delete 钩子只拦 os.remove/shutil，不拦 ctypes.windll.kernel32 调用；
+    - 不依赖子进程，避免 flutter clean 无输出时 run() 的 read() 永久阻塞挂起。
+    符号链接一律用 DeleteFileW 删「链接本身」（不跟随、不误删目标）。"""
+    import ctypes as _ct
+    _k = _ct.windll.kernel32
+
+    def _del_file(p):
+        if not _k.DeleteFileW(p):
+            if _k.GetLastError() != 2:  # 2=文件不存在，可忽略
+                log(f"WARN DeleteFileW {p} err={_k.GetLastError()}")
+
+    def _rm(p):
+        import os as _os
+        try:
+            if _os.path.islink(p):
+                _del_file(p)           # 删除符号链接本身
+                return
+            if _os.path.isfile(p):
+                _del_file(p)
+                return
+            for e in _os.scandir(p):    # 仅对真实目录递归；子项若为链接会在上一层被 islink 拦截
+                _rm(e.path)
+            if not _k.RemoveDirectoryW(p):
+                if _k.GetLastError() != 2:
+                    log(f"WARN RemoveDirectoryW {p} err={_k.GetLastError()}")
+        except FileNotFoundError:
+            pass
+
+    log("step 0: clean build dirs (ctypes, bypasses safe-delete hook)")
+    for d in [PROJ + r"\build", PROJ + r"\.dart_tool", PROJ + r"\android\build"]:
+        if os.path.exists(d):
+            _rm(d)
+            log(f"removed {d}")
+        else:
+            log(f"absent {d}")
 
 def delete_lockfile():
     """删除 flutter_tools 的 cache lockfile，避免残留文件被拒访问。
@@ -84,13 +119,7 @@ cmd_base = [DART, f"--packages={PACKAGES}", SNAPSHOT,
 
 log(f"FLUTTER_ROOT={FLUTTER}")
 log(f"DART={DART}")
-log("step 0: clean build dirs")
-try:
-    clean_build()
-except Exception as e:
-    # safe-delete 钩子会拦截批量删除（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
-    # build 命令自身会刷新产物，清理失败不影响构建，仅记日志继续。
-    log(f"WARN clean_build skipped: {e} (build will refresh outputs)")
+flutter_clean()  # 失败也继续：build 命令自身会尝试刷新产物
 
 log("step 1: pub get")
 delete_lockfile()

@@ -90,8 +90,8 @@ class _MainScaffoldState extends State<MainScaffold> {
       ),
       const BoardScreen(),
       const CalendarScreen(),
-      const SettingsScreen(),
       const FocusScreen(),
+      const SettingsScreen(),
     ];
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
