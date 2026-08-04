@@ -16,6 +16,7 @@ class AppBottomNav extends StatelessWidget {
   static const List<(IconData, String)> _items = [
     (Symbols.home, '首页'),
     (Symbols.dashboard, '看板'),
+    (Symbols.calendar_month, '日历'),
     (Symbols.settings, '设置'),
   ];
 

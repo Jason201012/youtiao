@@ -9,7 +9,7 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/completion_ring.dart';
 import 'package:todolist/widgets/stat_card.dart';
 import 'package:todolist/widgets/category_progress.dart';
-import 'package:todolist/widgets/week_trend.dart';
+import 'package:todolist/widgets/trend_stats.dart';
 import 'package:todolist/widgets/priority_distribution.dart';
 import 'package:todolist/widgets/guard_status_card.dart';
 import 'package:todolist/widgets/kanban_board.dart';
@@ -168,11 +168,11 @@ class BoardScreen extends StatelessWidget {
                     // 分类进度
                     CategoryProgress(progress: provider.categoryProgress()),
                     const SizedBox(height: 24),
-                    // 周趋势（含上周同期对比）
-                    WeekTrend(
-                      values: provider.weekTrend,
-                      dates: provider.weekTrendDates,
-                      lastWeekValues: provider.lastWeekTrend,
+                    // 完成趋势 + 连续打卡（周/月/年 + streak）
+                    TrendStats(
+                      tasks: provider.tasks,
+                      currentStreak: provider.currentStreak,
+                      longestStreak: provider.longestStreak,
                     ),
                     const SizedBox(height: 24),
                     // 看板三列（拖拽 / 点击切换状态）

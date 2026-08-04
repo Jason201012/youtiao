@@ -402,6 +402,36 @@ class TaskProvider extends ChangeNotifier {
     return best;
   }
 
+  /// 指定月份内「每天完成数」映射（date-only → 完成数），用于日历热力图。
+  Map<DateTime, int> completionsInMonth(DateTime monthAnchor) {
+    final map = <DateTime, int>{};
+    for (final t in _tasks) {
+      if (!t.done || t.completedAt == null) continue;
+      final d = _dateOnly(t.completedAt!);
+      if (d.year == monthAnchor.year && d.month == monthAnchor.month) {
+        map[d] = (map[d] ?? 0) + 1;
+      }
+    }
+    return map;
+  }
+
+  /// 某月累计完成数（日历页顶部概览用）。
+  int completionsInMonthCount(DateTime monthAnchor) =>
+      completionsInMonth(monthAnchor).values.fold(0, (a, b) => a + b);
+
+  /// 某天完成的所有任务（按完成时间倒序），点击日历格查看当天明细用。
+  List<Task> tasksCompletedOn(DateTime day) {
+    final d = _dateOnly(day);
+    final list = _tasks
+        .where((t) =>
+            t.done &&
+            t.completedAt != null &&
+            _dateOnly(t.completedAt!) == d)
+        .toList();
+    list.sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
+    return list;
+  }
+
   // ===== 首页筛选（看板统计卡点击跳转）=====
   TaskFilter _taskFilter = TaskFilter.all;
   TaskFilter get taskFilter => _taskFilter;

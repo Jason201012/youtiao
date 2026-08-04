@@ -151,8 +151,6 @@ class _TrendStatsState extends State<TrendStats> {
     final cmpMax = compare == null ? 0 : compare.reduce((a, b) => a > b ? a : b);
     final scaleMax = (maxV == 0 && cmpMax == 0) ? 1 : (maxV > cmpMax ? maxV : cmpMax);
 
-    const cw = 34.0;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -184,49 +182,48 @@ class _TrendStatsState extends State<TrendStats> {
           ],
         ),
         const SizedBox(height: 12),
-        // 柱状图（周/月可横向滚动；内容不足一屏时自动居中）
+        // 柱状图：每根柱用 Expanded 均分可用宽度并铺满整行，消除右侧留白
         SizedBox(
           height: 96,
-          child: LayoutBuilder(
-            builder: (ctx, constraints) {
-              final contentW = values.length * cw;
-              final needScroll = contentW > constraints.maxWidth;
-              final bars = <Widget>[
-                for (int i = 0; i < values.length; i++)
-                  SizedBox(
-                    width: cw,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        Text(
-                          '${values[i]}',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: i == highlight ? todayFill : fill,
-                          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              for (int i = 0; i < values.length; i++)
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      Text(
+                        '${values[i]}',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: i == highlight ? todayFill : fill,
                         ),
-                        const SizedBox(height: 3),
-                        SizedBox(
-                          width: cw,
-                          height: 56,
-                          child: Stack(
-                            alignment: Alignment.bottomCenter,
-                            children: [
-                              if (compare != null)
-                                Container(
-                                  width: cw,
-                                  height: (compare[i] / scaleMax) * 56,
-                                  decoration: BoxDecoration(
-                                    color: meta.withOpacity(0.22),
-                                    borderRadius:
-                                        BorderRadius.circular(AppColors.progressRadius),
+                      ),
+                      const SizedBox(height: 3),
+                      LayoutBuilder(
+                        builder: (c2, bc) {
+                          final barW = (bc.maxWidth - 8).clamp(4.0, 30.0);
+                          return SizedBox(
+                            width: bc.maxWidth,
+                            height: 56,
+                            child: Stack(
+                              alignment: Alignment.bottomCenter,
+                              children: [
+                                if (compare != null)
+                                  Container(
+                                    width: barW,
+                                    height: (compare[i] / scaleMax) * 56,
+                                    decoration: BoxDecoration(
+                                      color: meta.withOpacity(0.22),
+                                      borderRadius:
+                                          BorderRadius.circular(AppColors.progressRadius),
+                                    ),
                                   ),
-                                ),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 6),
-                                child: Container(
-                                  width: cw - 12,
+                                Container(
+                                  width: barW,
                                   height: (values[i] / scaleMax) * 56,
                                   decoration: BoxDecoration(
                                     color: i == highlight ? todayFill : fill,
@@ -234,35 +231,28 @@ class _TrendStatsState extends State<TrendStats> {
                                         BorderRadius.circular(AppColors.progressRadius),
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        SizedBox(
-                          width: cw,
-                          child: Text(
-                            labels[i],
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w500,
-                              color: meta,
+                              ],
                             ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 4),
+                      SizedBox(
+                        width: double.infinity,
+                        child: Text(
+                          labels[i],
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w500,
+                            color: meta,
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-              ];
-              if (!needScroll) {
-                return Center(child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: bars));
-              }
-              return SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: bars),
-              );
-            },
+                ),
+            ],
           ),
         ),
         const SizedBox(height: 16),

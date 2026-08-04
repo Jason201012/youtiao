@@ -10,6 +10,7 @@ import 'package:todolist/widgets/new_task_fab.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/screens/home_screen.dart';
 import 'package:todolist/screens/board_screen.dart';
+import 'package:todolist/screens/calendar_screen.dart';
 import 'package:todolist/screens/settings_screen.dart';
 
 void main() async {
@@ -80,6 +81,7 @@ class _MainScaffoldState extends State<MainScaffold> {
         onSearchingChanged: (v) => setState(() => _homeSearching = v),
       ),
       const BoardScreen(),
+      const CalendarScreen(),
       const SettingsScreen(),
     ];
     return Scaffold(
