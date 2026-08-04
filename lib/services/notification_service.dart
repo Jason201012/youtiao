@@ -49,6 +49,10 @@ class NotificationService {
   static int _repeatNotifyIdOf(String id, int dayIndex) =>
       _notifyIdOf(id) + 500000 + dayIndex * 13;
 
+  /// 仅比较「年月日」，忽略时分秒（用于判断 completedAt 是否为今天）。
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
   /// 与 MainActivity.kt 中的 MethodChannel 对应，用于查询/跳转「精确闹钟」权限。
   static const MethodChannel _exactAlarmChannel =
       MethodChannel('com.example.todolist/exact_alarm');
@@ -284,7 +288,9 @@ class NotificationService {
   ///   setAlarmClock」；App 每次启动 / 回到前台（_rescheduleAllActive +
   ///   checkDailyReset）会重算并重新挂上，覆盖绝大多数使用场景。
   ///
-  /// [when] 设为「下一个该时刻」（今天未过则今天，已过则顺延到下一个 recurrence 日）。
+  /// **当天已完成则跳过今日**：若 [Task.done] 且 [Task.completedAt] 为今天（即用户已
+  /// 提前完成），则把下一次触发挂到「今天之后的第一个循环日」，避免「提前完成仍弹提醒」。
+  /// 用同一 notifyId 重新 zonedSchedule 会覆盖掉今天尚未触发的闹钟。
   Future<bool> scheduleRepeatReminder(Task task, {bool playSound = true}) async {
     if (!enabled) {
       debugPrint('[通知] 未调度重复提醒 id=${task.id}：通知总开关关闭');
@@ -299,6 +305,10 @@ class NotificationService {
       final m = task.repeatMinute!;
       final hh = m ~/ 60;
       final mm = m % 60;
+      final now = tz.TZDateTime.now(loc);
+      // 当天已完成（completedAt 为今日）→ 跳过今日这次，挂到下一个循环日。
+      final skipToday =
+          task.done && task.completedAt != null && _sameDay(task.completedAt!, DateTime.now());
       final chId = playSound ? _chSound : _chSilent;
       final androidDetail = AndroidNotificationDetails(
         chId,
@@ -311,44 +321,24 @@ class NotificationService {
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
 
-      // 收集需要挂提醒的「星期」列表（dayOfWeekAndTime 用）。
-      List<int> weeklyDays;
-      switch (task.repeat) {
-        case RepeatType.daily:
-          // 每天：用 time 组件，无需按星期枚举。
-          weeklyDays = const [];
-          break;
-        case RepeatType.weekday:
-          weeklyDays = const [1, 2, 3, 4, 5]; // 周一至周五
-          break;
-        case RepeatType.weekly:
-          weeklyDays = task.repeatWeekdays
-              .where((d) => d >= 1 && d <= 7)
-              .toList();
-          break;
-        case RepeatType.interval:
-          weeklyDays = const []; // 一次性，下方单独处理
-          break;
-        case RepeatType.none:
-          return false;
+      // 计算「下一个该星期 @ hh:mm」的真实时刻。skipToday 时要求严格晚于今天。
+      tz.TZDateTime nextWeekday(int wd) {
+        final limit = skipToday ? now.add(const Duration(days: 1)) : now;
+        var candidate = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+        while (candidate.weekday != wd || !candidate.isAfter(limit)) {
+          candidate = candidate.add(const Duration(days: 1));
+        }
+        return candidate;
       }
 
-      if (weeklyDays.isNotEmpty) {
-        // 逐星期挂 dayOfWeekAndTime（每个星期一个独立 notifyId）。
-        for (final wd in weeklyDays) {
-          var when =
-              tz.TZDateTime(loc, 2000, 1, 1 + (wd - 1), hh, mm); // 占位日期，组件会忽略年月日
-          // 计算下一个该星期的真实时刻
-          final now = tz.TZDateTime.now(loc);
-          // 找到本周/下周该星期
-          var candidate =
-              tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-          while (candidate.weekday != wd || !candidate.isAfter(now)) {
-            candidate = candidate.add(const Duration(days: 1));
-          }
-          when = candidate;
+      switch (task.repeat) {
+        case RepeatType.daily:
+          var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+          when = skipToday
+              ? when.add(const Duration(days: 1))
+              : (when.isAfter(now) ? when : when.add(const Duration(days: 1)));
           await _plugin.zonedSchedule(
-            _repeatNotifyIdOf(task.id, wd),
+            _repeatNotifyIdOf(task.id, 0),
             task.repeatSummary,
             task.title,
             when,
@@ -356,58 +346,63 @@ class NotificationService {
             androidScheduleMode: mode,
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
-            matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+            matchDateTimeComponents: DateTimeComponents.time,
           );
-        }
-        debugPrint('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
-            '每周 $weeklyDays @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}');
-        return true;
-      }
+          debugPrint('[通知] 已调度重复提醒 id=${task.id} 每天 '
+              '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
+              '(skipToday=$skipToday, 首次=$when)');
+          return true;
 
-      if (task.repeat == RepeatType.daily) {
-        final now = tz.TZDateTime.now(loc);
-        var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-        if (!when.isAfter(now)) when = when.add(const Duration(days: 1));
-        await _plugin.zonedSchedule(
-          _repeatNotifyIdOf(task.id, 0),
-          task.repeatSummary,
-          task.title,
-          when,
-          detail,
-          androidScheduleMode: mode,
-          uiLocalNotificationDateInterpretation:
-              UILocalNotificationDateInterpretation.absoluteTime,
-          matchDateTimeComponents: DateTimeComponents.time,
-        );
-        debugPrint('[通知] 已调度重复提醒 id=${task.id} 每天 '
-            '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} (首次=$when)');
-        return true;
-      }
+        case RepeatType.weekday:
+        case RepeatType.weekly:
+          final weeklyDays = task.repeat == RepeatType.weekday
+              ? const [1, 2, 3, 4, 5] // 周一至周五
+              : task.repeatWeekdays.where((d) => d >= 1 && d <= 7).toList();
+          if (weeklyDays.isEmpty) return false;
+          for (final wd in weeklyDays) {
+            final when = nextWeekday(wd);
+            await _plugin.zonedSchedule(
+              _repeatNotifyIdOf(task.id, wd),
+              task.repeatSummary,
+              task.title,
+              when,
+              detail,
+              androidScheduleMode: mode,
+              uiLocalNotificationDateInterpretation:
+                  UILocalNotificationDateInterpretation.absoluteTime,
+              matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+            );
+          }
+          debugPrint('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
+              '每周 $weeklyDays @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
+              '(skipToday=$skipToday)');
+          return true;
 
-      if (task.repeat == RepeatType.interval) {
-        final next = _nextIntervalOccurrence(task);
-        if (next == null) {
-          debugPrint('[通知] 未调度 interval 提醒 id=${task.id}：缺锚点');
+        case RepeatType.interval:
+          final next = _nextIntervalOccurrence(task, skipToday: skipToday);
+          if (next == null) {
+            debugPrint('[通知] 未调度 interval 提醒 id=${task.id}：缺锚点');
+            return false;
+          }
+          final when = next.isAfter(now) ? next : next.add(const Duration(days: 1));
+          await _plugin.zonedSchedule(
+            _repeatNotifyIdOf(task.id, 0),
+            task.repeatSummary,
+            task.title,
+            when,
+            detail,
+            androidScheduleMode: mode,
+            uiLocalNotificationDateInterpretation:
+                UILocalNotificationDateInterpretation.absoluteTime,
+          );
+          debugPrint('[通知] 已调度重复提醒(interval) id=${task.id} 下次 '
+              '${when.year}-${when.month}-${when.day} ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
+              '(skipToday=$skipToday)');
+          return true;
+
+        case RepeatType.none:
           return false;
-        }
-        final now = tz.TZDateTime.now(loc);
-        final when = next.isAfter(now) ? next : next.add(const Duration(days: 1));
-        await _plugin.zonedSchedule(
-          _repeatNotifyIdOf(task.id, 0),
-          task.repeatSummary,
-          task.title,
-          when,
-          detail,
-          androidScheduleMode: mode,
-          uiLocalNotificationDateInterpretation:
-              UILocalNotificationDateInterpretation.absoluteTime,
-        );
-        debugPrint('[通知] 已调度重复提醒(interval) id=${task.id} 下次 '
-            '${when.year}-${when.month}-${when.day} ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}');
-        return true;
       }
-
-      return false;
     } catch (e, s) {
       debugPrint('[通知] 重复提醒调度失败 id=${task.id}: $e');
       debugPrint('$s');
@@ -416,7 +411,8 @@ class NotificationService {
   }
 
   /// 计算 interval 任务下一次 occurrence 的「日期+时刻」（date-only 锚点 + N 天步进）。
-  tz.TZDateTime? _nextIntervalOccurrence(Task task) {
+  /// [skipToday] 为 true 且下一次 occurrence 恰为今天时，再往后跳一个周期（跳过今天）。
+  tz.TZDateTime? _nextIntervalOccurrence(Task task, {bool skipToday = false}) {
     final a = task.repeatAnchor;
     if (a == null || task.repeatMinute == null) return null;
     final loc = _loc ?? tz.UTC;
@@ -428,8 +424,15 @@ class NotificationService {
     final diff = today.difference(ad).inDays;
     // 已过去的天数里，最大的可整除步数 → 下一次 occurrence
     final k = diff < 0 ? 0 : (diff ~/ n);
-    final occDate = ad.add(Duration(days: (k + 1) * n));
-    return tz.TZDateTime(loc, occDate.year, occDate.month, occDate.day, m ~/ 60, m % 60);
+    var occDate = ad.add(Duration(days: (k + 1) * n));
+    var result =
+        tz.TZDateTime(loc, occDate.year, occDate.month, occDate.day, m ~/ 60, m % 60);
+    if (skipToday && _sameDay(DateTime(result.year, result.month, result.day), today)) {
+      final nextDate = ad.add(Duration(days: (k + 2) * n));
+      result = tz.TZDateTime(
+          loc, nextDate.year, nextDate.month, nextDate.day, m ~/ 60, m % 60);
+    }
+    return result;
   }
 
   /// 按任务 id 取消全部「重复提醒」通知（daily 用 dayIndex=0；weekly/weekday 用 1..7）。

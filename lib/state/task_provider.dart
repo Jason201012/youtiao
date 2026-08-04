@@ -351,6 +351,57 @@ class TaskProvider extends ChangeNotifier {
     return counts;
   }
 
+  /// 有完成记录（completedAt 当天 ≥1 个已完成任务）的所有日期（date-only）。
+  Set<DateTime> get completionDays {
+    final s = <DateTime>{};
+    for (final t in _tasks) {
+      if (t.done && t.completedAt != null) {
+        s.add(DateTime(t.completedAt!.year, t.completedAt!.month, t.completedAt!.day));
+      }
+    }
+    return s;
+  }
+
+  static DateTime _dateOnly(DateTime d) =>
+      DateTime(d.year, d.month, d.day);
+
+  /// 当前连续打卡天数：从最近一个完成日往回数连续天数；若最近完成日距今 >1 天则视为中断，记为 0。
+  int get currentStreak {
+    final days = completionDays;
+    if (days.isEmpty) return 0;
+    final today = _dateOnly(DateTime.now());
+    DateTime last = days.first;
+    for (final d in days) {
+      if (d.isAfter(last)) last = d;
+    }
+    final gap = today.difference(last).inDays;
+    if (gap > 1) return 0; // 中间空了一整天 → 中断
+    int streak = 0;
+    var cursor = last;
+    while (days.contains(cursor)) {
+      streak++;
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
+  /// 历史最长连续打卡天数。
+  int get longestStreak {
+    final days = completionDays.toList()..sort();
+    if (days.isEmpty) return 0;
+    int best = 1;
+    int run = 1;
+    for (int i = 1; i < days.length; i++) {
+      if (days[i].difference(days[i - 1]).inDays == 1) {
+        run++;
+        if (run > best) best = run;
+      } else {
+        run = 1;
+      }
+    }
+    return best;
+  }
+
   // ===== 首页筛选（看板统计卡点击跳转）=====
   TaskFilter _taskFilter = TaskFilter.all;
   TaskFilter get taskFilter => _taskFilter;
@@ -470,6 +521,7 @@ class TaskProvider extends ChangeNotifier {
       status: s,
       completedAt: s == TaskStatus.done ? DateTime.now() : null,
     );
+    if (_tasks[i].isRepeating) _rescheduleRepeatOnCompletion(_tasks[i]);
     notifyListeners();
     _persist();
   }
@@ -482,6 +534,9 @@ class TaskProvider extends ChangeNotifier {
       status: willDone ? TaskStatus.done : TaskStatus.todo,
       completedAt: willDone ? DateTime.now() : null,
     );
+    // 重复任务完成/取消完成：重排重复提醒。当天已完成则跳过今日（不弹今天提醒），
+    // 否则照常挂今日；同一通知 id 覆盖掉旧闹钟。
+    if (_tasks[i].isRepeating) _rescheduleRepeatOnCompletion(_tasks[i]);
     notifyListeners();
     _persist();
   }
@@ -751,6 +806,18 @@ class TaskProvider extends ChangeNotifier {
   void _cancelRemindersFor(String id) {
     NotificationService.instance.cancel(id);
     NotificationService.instance.cancelRepeatReminder(id);
+  }
+
+  /// 重复任务完成态变更后（toggleDone / setStatus / 取消完成）重排其重复提醒。
+  /// 仅当任务仍「未过截止日」才挂；具体「是否跳过今日」由通知服务依据
+  /// [Task.done] + [Task.completedAt] 是否为今天自行判断（当天已完成→挂明天）。
+  void _rescheduleRepeatOnCompletion(Task t) {
+    if (t.isRepeating &&
+        t.repeatMinute != null &&
+        t.dueDate != null &&
+        !_dateHasPassed(t.dueDate!)) {
+      NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
+    }
   }
 
   /// 统一重排所有活动任务的提醒：未完成且未过期的截止提醒 + 未过期的重复提醒。
