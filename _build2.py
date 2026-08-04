@@ -33,22 +33,10 @@ def log(msg):
     print(line, flush=True)
 
 def clean_build():
-    """删 build/ 和 android/build/ 干净开始（含 symlink 用 rmtree）。"""
-    for d in [PROJ + r"\build", PROJ + r"\android\build"]:
-        if os.path.exists(d):
-            try:
-                shutil.rmtree(d, ignore_errors=False)
-                log(f"cleaned {d}")
-            except Exception as e:
-                # 遇到删不掉的 symlink，尝试 onerror 回退
-                def onerr(func, path, exc):
-                    try:
-                        os.chmod(path, 0o777)
-                        func(path)
-                    except Exception:
-                        pass
-                shutil.rmtree(d, onerror=onerr)
-                log(f"cleaned {d} (with onerror)")
+    """原本删 build/ 和 android/build/ 干净开始，但 safe-delete 钩子会拦截批量删除
+    （SAFE_DELETE_BULK_CONFIRM_REQUIRED，且以 sys.exit 退出，try/except 拦不住）。
+    改为跳过目录删除：flutter build apk --release 会自行刷新 build 产物，无需手动清理。"""
+    log("clean_build: skip dir removal (safe-delete hook blocks bulk delete; build refreshes)")
 
 def delete_lockfile():
     """删除 flutter_tools 的 cache lockfile，避免残留文件被拒访问。
@@ -97,7 +85,12 @@ cmd_base = [DART, f"--packages={PACKAGES}", SNAPSHOT,
 log(f"FLUTTER_ROOT={FLUTTER}")
 log(f"DART={DART}")
 log("step 0: clean build dirs")
-clean_build()
+try:
+    clean_build()
+except Exception as e:
+    # safe-delete 钩子会拦截批量删除（SAFE_DELETE_BULK_CONFIRM_REQUIRED），
+    # build 命令自身会刷新产物，清理失败不影响构建，仅记日志继续。
+    log(f"WARN clean_build skipped: {e} (build will refresh outputs)")
 
 log("step 1: pub get")
 delete_lockfile()
