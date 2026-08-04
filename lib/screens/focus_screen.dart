@@ -24,8 +24,13 @@ class _FocusScreenState extends State<FocusScreen> {
     (15 * 60, '长休 15'),
   ];
 
+  /// _modeIndex 取值 0..2 为预设，3 为自定义。
+  static const int _kCustomIndex = 3;
+
   int _modeIndex = 0;
-  int get _totalSec => _presets[_modeIndex].$1;
+  bool get _isCustom => _modeIndex == _kCustomIndex;
+  int get _customSec => context.read<FocusProvider>().customSec;
+  int get _totalSec => _isCustom ? _customSec : _presets[_modeIndex].$1;
 
   late int _remaining;
   bool _running = false;
@@ -49,6 +54,106 @@ class _FocusScreenState extends State<FocusScreen> {
     setState(() {
       _modeIndex = index;
       _remaining = _totalSec;
+    });
+  }
+
+  /// 打开自定义时长对话框：分钟 + 秒，附快捷选项，选择后切换为自定义模式。
+  Future<void> _openCustomDialog() async {
+    final cur = _customSec;
+    final minCtl =
+        TextEditingController(text: (cur ~/ 60).toString());
+    final secCtl =
+        TextEditingController(text: (cur % 60).toString().padLeft(2, '0'));
+
+    final result = await showDialog<int>(
+      context: context,
+      builder: (ctx) {
+        int? picked;
+        return StatefulBuilder(
+          builder: (ctx2, setSt) => AlertDialog(
+            title: const Text('自定义专注时长'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: minCtl,
+                        keyboardType: TextInputType.number,
+                        textAlign: TextAlign.center,
+                        decoration: const InputDecoration(
+                          labelText: '分钟',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: secCtl,
+                        keyboardType: TextInputType.number,
+                        textAlign: TextAlign.center,
+                        decoration: const InputDecoration(
+                          labelText: '秒',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final m in [10, 20, 30, 45, 60, 90])
+                      ChoiceChip(
+                        label: Text('$m 分'),
+                        selected: picked == m * 60,
+                        onSelected: (_) {
+                          picked = m * 60;
+                          minCtl.text = '$m';
+                          secCtl.text = '00';
+                          setSt(() {});
+                        },
+                      ),
+                  ],
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(null),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final m = int.tryParse(minCtl.text) ?? 0;
+                  final s = int.tryParse(secCtl.text) ?? 0;
+                  final total = m * 60 + s;
+                  if (total <= 0 || total > 24 * 3600) {
+                    Navigator.of(ctx).pop(null);
+                    return;
+                  }
+                  Navigator.of(ctx).pop(total);
+                },
+                child: const Text('确定'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (result == null || !mounted) return;
+    await context.read<FocusProvider>().setCustomSec(result);
+    if (!mounted) return;
+    if (_running) _stop(silent: true);
+    setState(() {
+      _modeIndex = _kCustomIndex;
+      _remaining = context.read<FocusProvider>().customSec;
     });
   }
 
@@ -126,7 +231,7 @@ class _FocusScreenState extends State<FocusScreen> {
 
     final progress =
         _totalSec == 0 ? 0.0 : 1 - _remaining / _totalSec;
-    final isBreak = _modeIndex != 0;
+    final isBreak = _modeIndex == 1 || _modeIndex == 2;
 
     return Column(
       children: [
@@ -187,6 +292,34 @@ class _FocusScreenState extends State<FocusScreen> {
                             ),
                           ),
                         ),
+                      // 自定义
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: GestureDetector(
+                          onTap: _openCustomDialog,
+                          child: Container(
+                            height: 32,
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            decoration: BoxDecoration(
+                              color: _isCustom ? primary : ext.chip,
+                              borderRadius:
+                                  BorderRadius.circular(AppColors.chipRadius),
+                            ),
+                            child: Center(
+                              child: Text(
+                                _isCustom
+                                    ? '自定义 ${_customSec ~/ 60}分'
+                                    : '自定义',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  color: _isCustom ? Colors.white : ext.meta,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),

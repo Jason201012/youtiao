@@ -7,8 +7,13 @@ import 'package:todolist/models/focus_session.dart';
 /// 仅依赖 shared_preferences，key 为 [ _kFocus ]。
 class FocusProvider extends ChangeNotifier {
   static const String _kFocus = 'focus_sessions';
+  static const String _kCustom = 'focus_custom_sec';
 
   final List<FocusSession> _sessions = [];
+
+  /// 自定义专注时长（秒），默认 30 分钟。
+  int _customSec = 30 * 60;
+  int get customSec => _customSec;
 
   /// 所有会话（按结束时间倒序，最新在前）。
   List<FocusSession> get sessions =>
@@ -17,6 +22,8 @@ class FocusProvider extends ChangeNotifier {
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kFocus);
+    final saved = prefs.getInt(_kCustom);
+    if (saved != null && saved > 0) _customSec = saved;
     if (raw == null) return;
     try {
       final list = jsonDecode(raw) as List;
@@ -27,6 +34,15 @@ class FocusProvider extends ChangeNotifier {
     } catch (_) {
       // 解析失败：丢弃损坏数据，不阻塞启动。
     }
+  }
+
+  /// 设置自定义专注时长（秒）并持久化。
+  Future<void> setCustomSec(int sec) async {
+    if (sec <= 0) return;
+    _customSec = sec;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kCustom, sec);
+    notifyListeners();
   }
 
   Future<void> _persist() async {
