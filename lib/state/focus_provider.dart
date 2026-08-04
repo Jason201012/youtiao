@@ -59,6 +59,23 @@ class FocusProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 删除单条专注记录（按 id）。
+  void removeSession(String id) {
+    _sessions.removeWhere((s) => s.id == id);
+    _persist();
+    notifyListeners();
+  }
+
+  /// 删除今天（date-only）的全部专注记录。
+  void clearToday() {
+    final t = DateTime.now();
+    final today = DateTime(t.year, t.month, t.day);
+    _sessions.removeWhere((s) =>
+        DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == today);
+    _persist();
+    notifyListeners();
+  }
+
   /// 某天（date-only）专注总秒数。
   int totalSecOn(DateTime day) {
     final d = DateTime(day.year, day.month, day.day);

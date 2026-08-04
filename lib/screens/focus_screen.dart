@@ -7,6 +7,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/focus_share_sheet.dart';
 
 /// 专注页（番茄钟）：大圆环倒计时 + 预设切换 + 可选关联任务 + 今日统计与记录。
 class FocusScreen extends StatefulWidget {
@@ -516,9 +517,26 @@ class _RecordList extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: Text('今日记录',
-              style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.bold, color: onBg)),
+          child: Row(
+            children: [
+              Text('今日记录',
+                  style: TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold, color: onBg)),
+              const Spacer(),
+              if (list.isNotEmpty) ...[
+                IconButton(
+                  icon: const Icon(Symbols.share, size: 20),
+                  tooltip: '分享今日记录',
+                  onPressed: () => showFocusShareSheet(context),
+                ),
+                IconButton(
+                  icon: const Icon(Symbols.delete_sweep, size: 20),
+                  tooltip: '清空今日记录',
+                  onPressed: () => _confirmClear(context, focus),
+                ),
+              ],
+            ],
+          ),
         ),
         if (list.isEmpty)
           Padding(
@@ -527,41 +545,97 @@ class _RecordList extends StatelessWidget {
           )
         else
           for (final s in list)
-            Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
-              decoration: BoxDecoration(
-                color: ext.chip,
-                borderRadius: BorderRadius.circular(AppColors.cardRadius),
+            Dismissible(
+              key: ValueKey(s.id),
+              direction: DismissDirection.endToStart,
+              background: Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade400,
+                  borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                ),
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.only(right: 20),
+                child: const Icon(Symbols.delete, color: Colors.white),
               ),
-              child: Row(
-                children: [
-                  Icon(
-                    s.completed ? Symbols.local_fire_department : Symbols.timer,
-                    size: 20,
-                    color: meta,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      s.taskTitle ?? '独立专注',
-                      style: TextStyle(fontSize: 14, color: onBg),
-                      overflow: TextOverflow.ellipsis,
+              onDismissed: (_) {
+                final removed = s;
+                focus.removeSession(s.id);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Text('已删除该专注记录'),
+                    duration: const Duration(seconds: 4),
+                    action: SnackBarAction(
+                      label: '撤销',
+                      onPressed: () => focus.addSession(removed),
                     ),
                   ),
-                  Text(
-                    formatFocusDuration(s.durationSec),
-                    style: TextStyle(fontSize: 13, color: meta),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    TimeOfDay.fromDateTime(s.endedAt).format(context),
-                    style: TextStyle(fontSize: 12, color: meta),
-                  ),
-                ],
+                );
+              },
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      s.completed ? Symbols.local_fire_department : Symbols.timer,
+                      size: 20,
+                      color: meta,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        s.taskTitle ?? '独立专注',
+                        style: TextStyle(fontSize: 14, color: onBg),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      formatFocusDuration(s.durationSec),
+                      style: TextStyle(fontSize: 13, color: meta),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      TimeOfDay.fromDateTime(s.endedAt).format(context),
+                      style: TextStyle(fontSize: 12, color: meta),
+                    ),
+                  ],
+                ),
               ),
             ),
       ],
     );
+  }
+
+  Future<void> _confirmClear(BuildContext context, FocusProvider focus) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空今日记录'),
+        content: const Text('将删除今天的所有专注记录，此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      focus.clearToday();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已清空今日专注记录')),
+        );
+      }
+    }
   }
 }
