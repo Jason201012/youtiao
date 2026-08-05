@@ -6,6 +6,8 @@
 
 当前版本 **v2.1.7**（versionCode 38）　·　开源协议 **[MIT](LICENSE)**
 
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。所有版本（含当前 v2.1.7）的安装包已统一发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)** 专用仓库。点此直达最新版 👉 [v2.1.7 下载](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.1.7)
+
 ## ✨ 功能特性
 
 - 📝 **任务管理**：新增、编辑、删除，支持分类与优先级
@@ -75,10 +77,10 @@ flutter build apk --release   # 构建 Android release 包
 
 ## 📦 发行版（Release）
 
-安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，在对应版本（当前最新 `v2.1.7`）的附件中下载 `app-release-v2.1.7.apk`。
+安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。**本仓库已停止上传 APK**，所有正式安装包统一发布在专用仓库 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（因本仓库 Gitee 附件配额已用尽）。
 
-- 发行版列表：<https://gitee.com/jason1012/youtiao/releases>
-- 当前最新 `v2.1.7`（versionCode 38）
+- 📥 最新版 `v2.1.7`（versionCode 38）下载：<https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.1.7>
+- 全部发行版列表：<https://gitee.com/jason1012/youtiao-releases/releases>
 
 ## 📁 项目结构
 
