@@ -420,6 +420,7 @@ class _FocusScreenState extends State<FocusScreen> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 16),
                 if (_audioReady)
                   _SoundCard(
                     type: _soundType,
