@@ -1,0 +1,8 @@
+{
+  "version": "2.2.1",
+  "tag": "v2.2.1",
+  "name": "v2.2.1 修复检查更新（改用静态清单）",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.1/app-release-v2.2.1.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.1",
+  "notes": "修复「检查更新」：Gitee 已对匿名发行版 API 返回 403，改为读取仓库内的静态 update.json 清单检测更新，无需鉴权。"
+}

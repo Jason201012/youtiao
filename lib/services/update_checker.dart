@@ -3,11 +3,14 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Gitee 仓库信息（发行版 API）。
+/// Gitee 仓库信息。
+/// 注意：Gitee 自 2026-08 起对匿名 api/v5 访问统一返回 403，
+/// 因此「检查更新」不再调用发行版 API，改为读取仓库内的静态清单文件
+/// update.json（通过 gitee 的 raw 文件访问，公开仓库无需鉴权即可读取）。
 const String _owner = 'jason1012';
-const String _repo = 'youtiao-releases';
-const String _releasesLatestUrl =
-    'https://gitee.com/api/v5/repos/$_owner/$_repo/releases/latest';
+const String _repo = 'youtiao';
+const String _manifestUrl =
+    'https://gitee.com/$_owner/$_repo/raw/master/update.json';
 
 /// 远端发行版信息封装。
 class UpdateInfo {
@@ -67,7 +70,7 @@ class UpdateChecker {
     try {
       final resp = await http
           .get(
-            Uri.parse(_releasesLatestUrl),
+            Uri.parse(_manifestUrl),
             headers: {'User-Agent': 'youtiao-update-checker'},
           )
           .timeout(const Duration(seconds: 8));
@@ -75,29 +78,20 @@ class UpdateChecker {
         return UpdateResult(hasUpdate: false, error: 'HTTP ${resp.statusCode}');
       }
       final Map<String, dynamic> data = jsonDecode(resp.body);
-      final tag = (data['tag_name'] as String?) ?? '';
-      final version = tag.replaceAll(RegExp(r'^v'), '');
-
-      // 在 assets 里找 apk 直链。
-      String? apkUrl;
-      final assets = data['assets'];
-      if (assets is List) {
-        for (final a in assets) {
-          final name = (a['name'] as String? ?? '').toLowerCase();
-          if (name.endsWith('.apk')) {
-            apkUrl = a['browser_download_url'] as String?;
-            break;
-          }
-        }
+      final version = (data['version'] as String? ?? '').toString().trim();
+      final tag = (data['tag'] as String? ?? 'v$version').toString().trim();
+      if (version.isEmpty) {
+        return const UpdateResult(hasUpdate: false, error: '清单缺少 version 字段');
       }
 
       final info = UpdateInfo(
         tagName: tag,
         version: version,
         releaseName: data['name'] as String?,
-        releaseNotes: data['body'] as String?,
-        apkUrl: apkUrl,
-        releaseUrl: data['html_url'] as String?,
+        releaseNotes: data['notes'] as String?,
+        apkUrl: data['apkUrl'] as String?,
+        releaseUrl: data['releaseUrl'] as String? ??
+            'https://gitee.com/jason1012/youtiao-releases/releases/tag/$tag',
       );
       final has = compareVersion(local, version) > 0;
       return UpdateResult(hasUpdate: has, info: has ? info : null);

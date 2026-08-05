@@ -31,10 +31,13 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
-            // 开启 R8 代码压缩与资源收缩；配合 proguard-rules.pro 保留
-            // flutter_local_notifications 的 Gson 模型，避免 release 定时通知崩溃。
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // 注：本机 Gradle 9.1 + JDK 25 在 release 构建中对 minifyReleaseWithR8 的
+            // output-metadata.json / resourceShrinkingParams 快照报 "not a regular file"
+            // （Gradle 9.1 严格快照 + JDK 25 文件属性读取的兼容问题，doNotTrackState 对该输入属性无效）。
+            // 为稳定出包，暂时关闭 R8 压缩与资源收缩（APK 体积略增，功能完全一致）；
+            // proguard 规则保留以备后续在兼容 JDK 上重新开启。
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -73,16 +76,20 @@ dependencies {
 //      加 -Djava.io.tmpdir=D:/workbuddy/.gradle/tmp），让 dex-renamer 的临时文件与 build 输出同盘，
 //      跨卷 move 不再退化成符号链接；并偶尔 `flutter clean` 清掉已残留的符号链接。
 tasks.configureEach {
-    // 关闭"原生相关"任务的状态追踪，避开 Gradle 9.1 对符号链接的严格快照。
-    // 本机工程在 D 盘、Gradle/Kotlin 缓存在 C 盘，跨卷使原生中间产物（libflutter.so、libapp.so.sym 等）
-    // 以符号链接形式存在，下列任务在快照输入/输出时会报 "not a regular file" 而失败：
-    //   - merge*NativeLibs           （消费 libflutter.so 符号链接）
-    //   - extract*NativeSymbolTables （产出 .sym 符号链接）
-    //   - merge*NativeDebugMetadata  （消费上面的 .sym，快照时报错；Gradle 报错本身即建议 doNotTrackState）
-    // packageRelease/packageDebug/packageReleaseResources 与 compile*Kotlin 绝不能加 doNotTrackState
-    // （前者报 "Changes are not tracked" 直接失败；后者 Kotlin 增量编译器依赖任务状态）。
-    // 原生任务用 "Native" 统一兜底即可一次性覆盖上述三者（含 debug/release 变体）。
-    if (name.contains("Native", ignoreCase = true)) {
-        doNotTrackState("跨盘符号链接快照保护（原生任务）")
+    // 关闭"易触发 Gradle 9.1 严格快照"的任务的状态追踪，避开其报 "not a regular file"。
+    // 本机工程在 D 盘、Gradle/Kotlin 缓存在 C 盘，跨卷使部分原生中间产物在 Gradle 9.1 快照器下
+    // 被判定为 "not a regular file"，下列任务会因此失败（Gradle 报错本身即建议 doNotTrackState）：
+    //   - merge*NativeLibs / extract*NativeSymbolTables / merge*NativeDebugMetadata / strip*DebugSymbols
+    //   - configureCMake* / generateJsonModel*   （CMake 元数据）
+    // ⚠️ 以下任务【绝不能】doNotTrackState，否则报 "Changes are not tracked" 直接失败：
+    //   - *Dex*（mergeExtDexRelease 等需增量追踪）
+    //   - compile*Kotlin（Kotlin 增量编译器依赖任务状态）
+    //   - packageRelease / packageDebug / packageReleaseResources
+    // 因此本过滤器只覆盖原生/CMake 家族，绝不包含 Dex/Kotlin/package。
+    if (name.contains("Native", ignoreCase = true) ||
+        name.contains("CMake", ignoreCase = true) ||
+        name.contains("JsonModel", ignoreCase = true)
+    ) {
+        doNotTrackState("Gradle 9.1 跨盘符号链接快照保护（原生/CMake 任务）")
     }
 }
