@@ -9,6 +9,8 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/share_sheet.dart';
+import 'package:todolist/services/update_checker.dart';
+import 'package:todolist/widgets/update_dialog.dart';
 
 /// 首页所有分区标题共用的字号。
 /// 「逾期 / 今天 / 未来 / 每天 / 已完成」必须完全一致，避免视觉层级混乱。
@@ -36,6 +38,32 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  /// 同一进程内只自动检测一次（防止 Tab 切换导致 State 重建重复触发）。
+  static bool _autoUpdateChecked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _autoCheckUpdate();
+  }
+
+  /// 启动后自动检测一次新版本：每日最多弹一次 + 跳过的版本不再提示。
+  void _autoCheckUpdate() {
+    if (_autoUpdateChecked) return;
+    _autoUpdateChecked = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!await UpdateChecker.shouldAutoPrompt()) return;
+      final skip = await UpdateChecker.getSkipVersion();
+      final res = await UpdateChecker.check();
+      await UpdateChecker.markAutoChecked();
+      if (!mounted) return;
+      if (res.hasUpdate && res.info != null) {
+        if (skip == res.info!.version) return; // 该版本已选择跳过
+        await UpdateDialog.show(context, res.info!);
+      }
+    });
+  }
+
   /// 是否处于多选模式
   bool _selecting = false;
 

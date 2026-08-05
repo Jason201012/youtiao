@@ -12,6 +12,8 @@ import 'package:todolist/widgets/backup_sheet.dart';
 import 'package:todolist/widgets/export_sheet.dart';
 import 'package:todolist/screens/help_screen.dart';
 import 'package:todolist/screens/trash_screen.dart';
+import 'package:todolist/services/update_checker.dart';
+import 'package:todolist/widgets/update_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -37,7 +39,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '2.1.2');
+      if (mounted) setState(() => _version = '2.2.0');
+    }
+  }
+
+  /// 手动检查更新：有新版弹窗，无新版提示「已是最新」。
+  Future<void> _checkUpdateManually(BuildContext context) async {
+    final res = await UpdateChecker.check();
+    if (!mounted) return;
+    if (res.hasUpdate && res.info != null) {
+      await UpdateDialog.show(context, res.info!);
+    } else {
+      final msg = res.error != null
+          ? '检查更新失败：${res.error}'
+          : '已是最新版本 ${_version.isEmpty ? '' : _version}';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 
@@ -171,6 +188,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 24),
                     _GroupTitle('关于'),
+                    SettingsRow(
+                      icon: Symbols.system_update_alt,
+                      label: '检查更新',
+                      onTap: () => _checkUpdateManually(context),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     SettingsRow(
                         icon: Symbols.info,
                         label: '版本',

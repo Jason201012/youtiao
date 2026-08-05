@@ -4,7 +4,7 @@
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v2.1.2**（versionCode 32）　·　开源协议 **[MIT](LICENSE)**
+当前版本 **v2.2.0**（versionCode 33）　·　开源协议 **[MIT](LICENSE)**
 
 ## ✨ 功能特性
 
