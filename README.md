@@ -4,9 +4,9 @@
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v2.1.9**（versionCode 40）　·　开源协议 **[MIT](LICENSE)**
+当前版本 **v2.2.0**（versionCode 41）　·　开源协议 **[MIT](LICENSE)**
 
-> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。所有版本（含当前 v2.1.9）的安装包已统一发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)** 专用仓库。点此直达最新版 👉 [v2.1.9 下载](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.1.9)
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。所有版本（含当前 v2.2.0）的安装包已统一发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)** 专用仓库。点此直达最新版 👉 [v2.2.0 下载](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.0)
 
 ## ✨ 功能特性
 
@@ -28,6 +28,7 @@
 - 🕛 **每日任务 00:00 自动重置**：无需打开 App，每天午夜由系统闹钟后台将已完成的每日任务重置为未完成，真正实现「每天循环打卡」
 - 🎨 **设计**：Material 3 设计语言
 - ⏱️ **专注计时（番茄钟）**：新增「专注」Tab，内置番茄钟倒计时（25 / 5 / 15 分钟预设，可开始 / 暂停 / 停止），可关联某一任务，自动记录每次专注时长与今日专注统计，数据本地持久化
+- 🌊 **专注环境音（淡入淡出 + 多音叠加）**：内置白 / 粉 / 棕噪音与雨声 / 海浪 / 篝火 / 风声七种零版权环境音（程序化合成），支持多选同时叠加播放、切换时 500ms 音量渐变避免爆音，选择自动记忆
 
 ## 🛠 技术栈
 
@@ -79,7 +80,7 @@ flutter build apk --release   # 构建 Android release 包
 
 安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。**本仓库已停止上传 APK**，所有正式安装包统一发布在专用仓库 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（因本仓库 Gitee 附件配额已用尽）。
 
-- 📥 最新版 `v2.1.9`（versionCode 40）下载：<https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.1.9>
+- 📥 最新版 `v2.2.0`（versionCode 41）下载：<https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.0>
 - 全部发行版列表：<https://gitee.com/jason1012/youtiao-releases/releases>
 
 ## 📁 项目结构

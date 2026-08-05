@@ -40,7 +40,7 @@ class _FocusScreenState extends State<FocusScreen> {
   final FocusAudioService _audio = FocusAudioService.instance;
   bool _audioReady = false;
   bool _lastRunning = false;
-  FocusSoundType _soundType = FocusSoundType.off;
+  Set<FocusSoundType> _soundTypes = {};
   double _soundVol = 0.5;
 
   @override
@@ -54,7 +54,7 @@ class _FocusScreenState extends State<FocusScreen> {
     if (!mounted) return;
     setState(() {
       _audioReady = true;
-      _soundType = _audio.type;
+      _soundTypes = _audio.types;
       _soundVol = _audio.volume;
     });
     _syncAudio();
@@ -76,9 +76,20 @@ class _FocusScreenState extends State<FocusScreen> {
     _audio.setActive(running);
   }
 
-  void _pickSound(FocusSoundType t) async {
-    setState(() => _soundType = t);
-    await _audio.setType(t);
+  void _toggleSound(FocusSoundType t) async {
+    if (_soundTypes.contains(t)) {
+      _soundTypes = Set<FocusSoundType>.from(_soundTypes)..remove(t);
+    } else {
+      _soundTypes = Set<FocusSoundType>.from(_soundTypes)..add(t);
+    }
+    setState(() {});
+    await _audio.setTypes(_soundTypes);
+  }
+
+  void _clearSound() async {
+    _soundTypes = {};
+    setState(() {});
+    await _audio.setTypes({});
   }
 
   void _setVol(double v) async {
@@ -423,9 +434,10 @@ class _FocusScreenState extends State<FocusScreen> {
                 const SizedBox(height: 16),
                 if (_audioReady)
                   _SoundCard(
-                    type: _soundType,
+                    types: _soundTypes,
                     volume: _soundVol,
-                    onPick: _pickSound,
+                    onToggle: _toggleSound,
+                    onClear: _clearSound,
                     onVolume: _setVol,
                   ),
 
@@ -659,17 +671,20 @@ class _RecordList extends StatelessWidget {
   }
 }
 
-/// 环境音卡片：关闭 / 白 / 粉 / 棕 四选一 + 音量条。
+/// 环境音卡片：可多选（叠加播放）+ 音量条。
+/// 选中 [FocusSoundType.off] 表示清空全部（即关闭）。
 class _SoundCard extends StatelessWidget {
-  final FocusSoundType type;
+  final Set<FocusSoundType> types;
   final double volume;
-  final ValueChanged<FocusSoundType> onPick;
+  final ValueChanged<FocusSoundType> onToggle;
+  final VoidCallback onClear;
   final ValueChanged<double> onVolume;
 
   const _SoundCard({
-    required this.type,
+    required this.types,
     required this.volume,
-    required this.onPick,
+    required this.onToggle,
+    required this.onClear,
     required this.onVolume,
   });
 
@@ -677,7 +692,8 @@ class _SoundCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ext = appColors(context);
     final onBg = Theme.of(context).colorScheme.onBackground;
-    final types = FocusSoundType.values; // [off, white, pink, brown]
+    final all = FocusSoundType.values; // [off, white, pink, brown, ...]
+    final isOff = types.isEmpty;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -696,7 +712,7 @@ class _SoundCard extends StatelessWidget {
                   style: TextStyle(
                       fontSize: 15, fontWeight: FontWeight.bold, color: onBg)),
               const Spacer(),
-              Text('专注时播放', style: TextStyle(fontSize: 11, color: ext.meta)),
+              Text('可多选叠加', style: TextStyle(fontSize: 11, color: ext.meta)),
             ],
           ),
           const SizedBox(height: 12),
@@ -704,15 +720,16 @@ class _SoundCard extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final t in types)
+              for (final t in all)
                 ChoiceChip(
                   label: Text(t.label),
-                  selected: t == type,
-                  onSelected: (_) => onPick(t),
+                  selected: t == FocusSoundType.off ? isOff : types.contains(t),
+                  onSelected: (_) =>
+                      t == FocusSoundType.off ? onClear() : onToggle(t),
                 ),
             ],
           ),
-          if (type != FocusSoundType.off) ...[
+          if (!isOff) ...[
             const SizedBox(height: 12),
             Row(
               children: [
