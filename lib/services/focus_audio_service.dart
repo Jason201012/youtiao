@@ -1,4 +1,5 @@
-import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 专注环境音类型。
@@ -24,6 +25,8 @@ extension FocusSoundTypeX on FocusSoundType {
   }
 
   /// 对应 assets/audio 下的音频文件；[off] 无文件。
+  /// just_audio 的 [AudioSource.asset] 直接走 Flutter rootBundle 加载，
+  /// 路径需带 `assets/` 前缀，与 pubspec 中 assets 声明一致。
   String? get asset {
     switch (this) {
       case FocusSoundType.off:
@@ -67,7 +70,7 @@ class FocusAudioService {
 
   /// 读取持久化偏好并初始化播放器。应在专注页 initState 中调用一次。
   Future<void> init() async {
-    await _player.setReleaseMode(ReleaseMode.loop);
+    await _player.setLoopMode(LoopMode.one);
     final prefs = await SharedPreferences.getInstance();
     final idx = prefs.getInt(_kType) ?? FocusSoundType.off.index;
     if (idx >= 0 && idx < FocusSoundType.values.length) {
@@ -85,9 +88,7 @@ class FocusAudioService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_kType, t.index);
     if (t == FocusSoundType.off) {
-      if (_player.state == PlayerState.playing) {
-        await _player.stop();
-      }
+      if (_player.playing) await _player.stop();
     } else if (_active) {
       await _play();
     }
@@ -111,7 +112,7 @@ class FocusAudioService {
         await _play();
       }
     } else {
-      if (_player.state == PlayerState.playing) {
+      if (_player.playing) {
         await _player.pause();
       }
     }
@@ -120,7 +121,7 @@ class FocusAudioService {
   /// 专注停止（手动结束）：彻底停止，并标记不再播放。
   Future<void> stop() async {
     _active = false;
-    if (_player.state != PlayerState.stopped) {
+    if (_player.playing) {
       await _player.stop();
     }
   }
@@ -128,13 +129,14 @@ class FocusAudioService {
   Future<void> _play() async {
     final asset = _type.asset;
     if (asset == null) return;
-    // 先停后启，避免重复叠加。
-    if (_player.state != PlayerState.stopped) {
-      await _player.stop();
+    try {
+      await _player.setAudioSource(AudioSource.asset(asset));
+      await _player.setVolume(_volume);
+      await _player.play();
+    } catch (e, st) {
+      // 便于真机排查：若仍无声，可在 logcat 看到具体错误。
+      debugPrint('[FocusAudio] 环境音播放失败: $e\n$st');
     }
-    // ReleaseMode.loop 控制循环（注意：play() 的 mode 参数是 PlayerMode 而非 ReleaseMode）。
-    await _player.setReleaseMode(ReleaseMode.loop);
-    await _player.play(AssetSource(asset), volume: _volume);
   }
 
   void dispose() => _player.dispose();
