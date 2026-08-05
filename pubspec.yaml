@@ -1,7 +1,7 @@
 name: todolist
 description: Material 3 TodoList 应用（设计稿 1:1 还原）
 publish_to: 'none'
-version: 2.1.4+35
+version: 2.1.5+36
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -23,6 +23,7 @@ dependencies:
   package_info_plus: ^9.0.1
   http: ^1.2.0
   url_launcher: ^6.3.0
+  audioplayers: ^6.4.0
 
 dev_dependencies:
   flutter_test:
@@ -32,6 +33,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/audio/
 
 # 启动图标配置：会按 Android/iOS 各尺寸自动生成 mipmap/AppIcon。
 # 源文件放在 assets/icon/；其中 foreground.png 是透明底的徽标+勾，

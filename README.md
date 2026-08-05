@@ -1,10 +1,10 @@
 # 有条
 
-一款基于 Flutter 的轻量级待办 / 任务管理应用，支持分类、优先级、回收站、数据备份导出、深浅色主题、周趋势统计与定时提醒。
+一款基于 Flutter 的轻量级待办 / 任务管理应用，支持分类、优先级、回收站、数据备份导出、深浅色主题、周趋势统计、定时提醒与专注环境音。
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v2.1.4**（versionCode 35）　·　开源协议 **[MIT](LICENSE)**
+当前版本 **v2.1.5**（versionCode 36）　·　开源协议 **[MIT](LICENSE)**
 
 ## ✨ 功能特性
 
@@ -75,10 +75,10 @@ flutter build apk --release   # 构建 Android release 包
 
 ## 📦 发行版（Release）
 
-安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，在对应版本（当前最新 `v2.1.4`）的附件中下载 `app-release-v2.1.4.apk`。
+安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。如需下载正式安装包，请前往 Gitee 仓库的 **「发行版 / Releases」** 页面，在对应版本（当前最新 `v2.1.5`）的附件中下载 `app-release-v2.1.5.apk`。
 
 - 发行版列表：<https://gitee.com/jason1012/youtiao/releases>
-- 当前最新 `v2.1.4`（versionCode 35）
+- 当前最新 `v2.1.5`（versionCode 36）
 
 ## 📁 项目结构
 

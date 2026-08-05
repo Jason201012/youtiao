@@ -7,6 +7,7 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/focus_share_sheet.dart';
+import 'package:todolist/services/focus_audio_service.dart';
 
 /// 专注页（番茄钟）：大圆环倒计时 + 预设切换 + 可选关联任务 + 今日统计与记录。
 ///
@@ -35,9 +36,58 @@ class _FocusScreenState extends State<FocusScreen> {
   int get _customSec => context.read<FocusProvider>().customSec;
   int get _totalSec => _isCustom ? _customSec : _presets[_modeIndex].$1;
 
+  // —— 环境音 ——
+  final FocusAudioService _audio = FocusAudioService.instance;
+  bool _audioReady = false;
+  bool _lastRunning = false;
+  FocusSoundType _soundType = FocusSoundType.off;
+  double _soundVol = 0.5;
+
   @override
   void initState() {
     super.initState();
+    _initAudio();
+  }
+
+  Future<void> _initAudio() async {
+    await _audio.init();
+    if (!mounted) return;
+    setState(() {
+      _audioReady = true;
+      _soundType = _audio.type;
+      _soundVol = _audio.volume;
+    });
+    _syncAudio();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 番茄钟运行状态变化时同步环境音播放/暂停。
+    if (_audioReady) _syncAudio();
+  }
+
+  /// 根据专注运行状态驱动环境音：进行中则播放，否则暂停。
+  void _syncAudio() {
+    final focus = context.read<FocusProvider>();
+    final running = focus.activeRunning;
+    if (running == _lastRunning) return;
+    _lastRunning = running;
+    if (running) {
+      _audio.startIfEnabled();
+    } else {
+      _audio.pause();
+    }
+  }
+
+  void _pickSound(FocusSoundType t) async {
+    setState(() => _soundType = t);
+    await _audio.setType(t);
+  }
+
+  void _setVol(double v) async {
+    setState(() => _soundVol = v);
+    await _audio.setVolume(v);
   }
 
   void _selectMode(int index) {
@@ -161,9 +211,10 @@ class _FocusScreenState extends State<FocusScreen> {
   }
 
   /// 停止（手动结束当前番茄钟，按已逝时间补录）。
-  void _onStop(FocusProvider focus) {
+  Future<void> _onStop(FocusProvider focus) async {
     if (!focus.hasActive) return;
-    focus.stopTimer();
+    await focus.stopTimer();
+    await _audio.stop();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -373,6 +424,14 @@ class _FocusScreenState extends State<FocusScreen> {
                     ),
                   ],
                 ),
+                if (_audioReady)
+                  _SoundCard(
+                    type: _soundType,
+                    volume: _soundVol,
+                    onPick: _pickSound,
+                    onVolume: _setVol,
+                  ),
+
                 const SizedBox(height: 24),
 
                 // 今日记录
@@ -600,5 +659,81 @@ class _RecordList extends StatelessWidget {
         );
       }
     }
+  }
+}
+
+/// 环境音卡片：关闭 / 白 / 粉 / 棕 四选一 + 音量条。
+class _SoundCard extends StatelessWidget {
+  final FocusSoundType type;
+  final double volume;
+  final ValueChanged<FocusSoundType> onPick;
+  final ValueChanged<double> onVolume;
+
+  const _SoundCard({
+    required this.type,
+    required this.volume,
+    required this.onPick,
+    required this.onVolume,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final types = FocusSoundType.values; // [off, white, pink, brown]
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Symbols.music_note, size: 18, color: ext.meta),
+              const SizedBox(width: 8),
+              Text('环境音',
+                  style: TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.bold, color: onBg)),
+              const Spacer(),
+              Text('专注时播放', style: TextStyle(fontSize: 11, color: ext.meta)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final t in types)
+                ChoiceChip(
+                  label: Text(t.label),
+                  selected: t == type,
+                  onSelected: (_) => onPick(t),
+                ),
+            ],
+          ),
+          if (type != FocusSoundType.off) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Icon(Symbols.volume_down, size: 18, color: ext.meta),
+                Expanded(
+                  child: Slider(
+                    value: volume,
+                    min: 0,
+                    max: 1,
+                    onChanged: onVolume,
+                  ),
+                ),
+                Icon(Symbols.volume_up, size: 18, color: ext.meta),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
