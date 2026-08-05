@@ -34,6 +34,20 @@ class NotificationService {
   static const String _chSound = 'todo_reminder';
   static const String _chSilent = 'todo_reminder_silent';
 
+  /// 专注（番茄钟）完成通知固定 id：schedule / cancel / show 必须共用同一 id，
+  /// 这样「系统闹钟到点弹」与「应用内到点补弹」会互相覆盖而非重复成两条。
+  static const int focusDoneNotifyId = 777777;
+
+  /// 专注完成通知的 Android 样式（复用有声渠道，确保完成时能引起注意）。
+  AndroidNotificationDetails get _focusDoneAndroid => const AndroidNotificationDetails(
+        _chSound,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+      );
+
   /// 定时测试用固定 id（不与任务 id 冲突）。
   static const int _kTestTimerId = 999999;
 
@@ -469,6 +483,46 @@ class NotificationService {
     _deadlineCancelled.clear();
     return _plugin.cancelAll();
   }
+
+  /// 在 [completeAt]（墙钟时刻）调度「专注完成」系统闹钟通知。
+  /// 采用与任务提醒一致的 setAlarmClock 模式，即使 App 被划掉后台也能准点弹出；
+  /// 固定 id=[focusDoneNotifyId]，与 [showFocusDoneNow]/[cancelFocusDone] 共用，
+  /// 避免重复成两条。通知总开关关闭时不调度。
+  Future<void> scheduleFocusDone(DateTime completeAt) async {
+    if (!enabled) {
+      debugPrint('[通知] 未调度专注完成提醒：通知总开关关闭');
+      return;
+    }
+    final loc = _loc ?? tz.UTC;
+    final when = tz.TZDateTime.from(completeAt, loc);
+    final mode = await _scheduleMode;
+    try {
+      await _plugin.zonedSchedule(
+        focusDoneNotifyId,
+        '专注完成 🍅',
+        '你已完成一个番茄钟，记录已保存',
+        when,
+        NotificationDetails(android: _focusDoneAndroid),
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      debugPrint('[通知] 已调度专注完成提醒 -> $when (mode=${mode.name})');
+    } catch (e) {
+      debugPrint('[通知] 专注完成定时失败: $e');
+    }
+  }
+
+  /// 取消「专注完成」系统闹钟通知（暂停 / 提前停止 / 自然完成时调用）。
+  Future<void> cancelFocusDone() => _plugin.cancel(focusDoneNotifyId);
+
+  /// 立即弹出「专注完成」通知（应用内自然跑满时调用，与到点系统闹钟共用 id 互相覆盖）。
+  Future<void> showFocusDoneNow() => _plugin.show(
+        focusDoneNotifyId,
+        '专注完成 🍅',
+        '你已完成一个番茄钟，记录已保存',
+        NotificationDetails(android: _focusDoneAndroid),
+      );
 
   /// 挂上「每日任务当天 00:00 自动重置」的午夜闹钟（setAlarmClock，ColorOS 可靠，
   /// 不依赖 App 是否打开）。由原生 MidnightResetReceiver 在午夜触发并自循环调度。

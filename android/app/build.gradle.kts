@@ -81,7 +81,7 @@ tasks.configureEach {
     //   - merge*NativeDebugMetadata  （消费上面的 .sym，快照时报错；Gradle 报错本身即建议 doNotTrackState）
     // packageRelease/packageDebug/packageReleaseResources 与 compile*Kotlin 绝不能加 doNotTrackState
     // （前者报 "Changes are not tracked" 直接失败；后者 Kotlin 增量编译器依赖任务状态）。
-    // 原生任务与这两者无交集，用 "Native" 统一兜底即可一次性覆盖上述三者（含 debug/release 变体）。
+    // 原生任务用 "Native" 统一兜底即可一次性覆盖上述三者（含 debug/release 变体）。
     if (name.contains("Native", ignoreCase = true)) {
         doNotTrackState("跨盘符号链接快照保护（原生任务）")
     }

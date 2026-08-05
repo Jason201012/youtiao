@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
@@ -10,6 +9,9 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/focus_share_sheet.dart';
 
 /// 专注页（番茄钟）：大圆环倒计时 + 预设切换 + 可选关联任务 + 今日统计与记录。
+///
+/// 计时逻辑已下沉到 [FocusProvider]（墙钟推算 + 持久化 + 被杀后台可恢复），
+/// 本页只负责展示与派发动作，不再持有 [Timer]。
 class FocusScreen extends StatefulWidget {
   const FocusScreen({super.key});
 
@@ -33,33 +35,20 @@ class _FocusScreenState extends State<FocusScreen> {
   int get _customSec => context.read<FocusProvider>().customSec;
   int get _totalSec => _isCustom ? _customSec : _presets[_modeIndex].$1;
 
-  late int _remaining;
-  bool _running = false;
-  Timer? _timer;
-  DateTime? _startedAt;
-
   @override
   void initState() {
     super.initState();
-    _remaining = _totalSec;
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
   }
 
   void _selectMode(int index) {
-    if (_running) _stop(silent: true);
-    setState(() {
-      _modeIndex = index;
-      _remaining = _totalSec;
-    });
+    // 进行中不切换预设，避免打断计时。
+    if (context.read<FocusProvider>().hasActive) return;
+    setState(() => _modeIndex = index);
   }
 
   /// 打开自定义时长对话框：分钟 + 秒，附快捷选项，选择后切换为自定义模式。
   Future<void> _openCustomDialog() async {
+    if (context.read<FocusProvider>().hasActive) return;
     final cur = _customSec;
     final minCtl =
         TextEditingController(text: (cur ~/ 60).toString());
@@ -151,75 +140,38 @@ class _FocusScreenState extends State<FocusScreen> {
     if (result == null || !mounted) return;
     await context.read<FocusProvider>().setCustomSec(result);
     if (!mounted) return;
-    if (_running) _stop(silent: true);
-    setState(() {
-      _modeIndex = _kCustomIndex;
-      _remaining = context.read<FocusProvider>().customSec;
-    });
+    setState(() => _modeIndex = _kCustomIndex);
   }
 
-  void _startPause() {
-    if (_running) {
-      _timer?.cancel();
-      _timer = null;
-      _running = false;
-    } else {
-      if (_remaining == 0) _remaining = _totalSec;
-      _startedAt ??= DateTime.now();
-      _running = true;
-      _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
-    }
-    setState(() {});
-  }
-
-  void _tick() {
-    if (_remaining > 0) {
-      _remaining--;
-      if (_remaining == 0) {
-        _timer?.cancel();
-        _timer = null;
-        _running = false;
-        _save(_totalSec, true);
-        _startedAt = null;
+  /// 开始 / 暂停 / 恢复：根据进行中状态派发到 Provider。
+  void _onStartPause(FocusProvider focus) {
+    if (focus.hasActive) {
+      if (focus.activeRunning) {
+        focus.pauseTimer();
+      } else {
+        focus.resumeTimer();
       }
-      setState(() {});
+    } else {
+      focus.startTimer(
+        totalSec: _totalSec,
+        modeIndex: _modeIndex,
+        customSec: _customSec,
+      );
     }
   }
 
-  void _stop({bool silent = false}) {
-    _timer?.cancel();
-    _timer = null;
-    _running = false;
-    final elapsed = _totalSec - _remaining;
-    if (elapsed > 0 && _startedAt != null) {
-      _save(elapsed, _remaining == 0);
+  /// 停止（手动结束当前番茄钟，按已逝时间补录）。
+  void _onStop(FocusProvider focus) {
+    if (!focus.hasActive) return;
+    focus.stopTimer();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已记录本次专注'),
+          duration: Duration(seconds: 2),
+        ),
+      );
     }
-    _remaining = _totalSec;
-    _startedAt = null;
-    if (!silent) setState(() {});
-  }
-
-  void _save(int elapsed, bool completed) {
-    if (!mounted) return;
-    context.read<FocusProvider>().addSession(
-          FocusSession(
-            id: DateTime.now().millisecondsSinceEpoch.toString(),
-            plannedSec: _totalSec,
-            durationSec: elapsed,
-            completed: completed,
-            startedAt: _startedAt ?? DateTime.now(),
-            endedAt: DateTime.now(),
-          ),
-        );
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(completed
-            ? '专注完成 🍅 已记录'
-            : '已记录 ${formatFocusDuration(elapsed)} 专注'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
   }
 
   @override
@@ -230,9 +182,18 @@ class _FocusScreenState extends State<FocusScreen> {
     final onBg = scheme.onBackground;
     final focus = context.watch<FocusProvider>();
 
-    final progress =
-        _totalSec == 0 ? 0.0 : 1 - _remaining / _totalSec;
-    final isBreak = _modeIndex == 1 || _modeIndex == 2;
+    final hasActive = focus.hasActive;
+    final running = focus.activeRunning;
+    final ringTotal = hasActive ? focus.activeTotalSec : _totalSec;
+    final remaining = hasActive ? focus.remainingSec : _totalSec;
+    final progress = ringTotal == 0 ? 0.0 : (1 - remaining / ringTotal);
+    final isBreak = !hasActive
+        ? (_modeIndex == 1 || _modeIndex == 2)
+        : (focus.activeModeIndex == 1 || focus.activeModeIndex == 2);
+
+    // 预设高亮：进行中按 activeModeIndex，否则按本地 _modeIndex。
+    final selectedIndex = hasActive ? focus.activeModeIndex : _modeIndex;
+    final canSwitchPreset = !hasActive;
 
     return Column(
       children: [
@@ -268,13 +229,13 @@ class _FocusScreenState extends State<FocusScreen> {
                         Padding(
                           padding: const EdgeInsets.only(right: 8),
                           child: GestureDetector(
-                            onTap: () => _selectMode(i),
+                            onTap: canSwitchPreset ? () => _selectMode(i) : null,
                             child: Container(
                               height: 32,
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 14),
                               decoration: BoxDecoration(
-                                color: i == _modeIndex ? primary : ext.chip,
+                                color: i == selectedIndex ? primary : ext.chip,
                                 borderRadius:
                                     BorderRadius.circular(AppColors.chipRadius),
                               ),
@@ -284,7 +245,7 @@ class _FocusScreenState extends State<FocusScreen> {
                                   style: TextStyle(
                                     fontSize: 13,
                                     fontWeight: FontWeight.w500,
-                                    color: i == _modeIndex
+                                    color: i == selectedIndex
                                         ? Colors.white
                                         : ext.meta,
                                   ),
@@ -297,24 +258,28 @@ class _FocusScreenState extends State<FocusScreen> {
                       Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: GestureDetector(
-                          onTap: _openCustomDialog,
+                          onTap: canSwitchPreset ? _openCustomDialog : null,
                           child: Container(
                             height: 32,
                             padding: const EdgeInsets.symmetric(horizontal: 14),
                             decoration: BoxDecoration(
-                              color: _isCustom ? primary : ext.chip,
+                              color: selectedIndex == _kCustomIndex
+                                  ? primary
+                                  : ext.chip,
                               borderRadius:
                                   BorderRadius.circular(AppColors.chipRadius),
                             ),
                             child: Center(
                               child: Text(
-                                _isCustom
+                                selectedIndex == _kCustomIndex
                                     ? '自定义 ${_customSec ~/ 60}分'
                                     : '自定义',
                                 style: TextStyle(
                                   fontSize: 13,
                                   fontWeight: FontWeight.w500,
-                                  color: _isCustom ? Colors.white : ext.meta,
+                                  color: selectedIndex == _kCustomIndex
+                                      ? Colors.white
+                                      : ext.meta,
                                 ),
                               ),
                             ),
@@ -347,7 +312,7 @@ class _FocusScreenState extends State<FocusScreen> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
-                            formatFocusDuration(_remaining),
+                            formatFocusDuration(remaining),
                             style: TextStyle(
                               fontSize: 48,
                               fontWeight: FontWeight.bold,
@@ -356,9 +321,9 @@ class _FocusScreenState extends State<FocusScreen> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            _running
+                            running
                                 ? '专注中…'
-                                : (_remaining == 0 ? '已完成' : '已暂停'),
+                                : (hasActive ? '已暂停' : '准备开始'),
                             style: TextStyle(fontSize: 13, color: ext.meta),
                           ),
                         ],
@@ -377,9 +342,7 @@ class _FocusScreenState extends State<FocusScreen> {
                       width: 64,
                       height: 64,
                       child: OutlinedButton(
-                        onPressed: _running || _remaining != _totalSec
-                            ? () => _stop()
-                            : null,
+                        onPressed: hasActive ? () => _onStop(focus) : null,
                         style: OutlinedButton.styleFrom(
                           shape: const CircleBorder(),
                           side: BorderSide(color: ext.meta),
@@ -390,19 +353,19 @@ class _FocusScreenState extends State<FocusScreen> {
                       ),
                     ),
                     const SizedBox(width: 32),
-                    // 开始/暂停
+                    // 开始/暂停/恢复
                     SizedBox(
                       width: 64,
                       height: 64,
                       child: FilledButton(
-                        onPressed: _startPause,
+                        onPressed: () => _onStartPause(focus),
                         style: FilledButton.styleFrom(
                           shape: const CircleBorder(),
                           backgroundColor: primary,
                           padding: EdgeInsets.zero, // 去默认内边距让图标居中
                         ),
                         child: Icon(
-                          _running ? Symbols.pause : Symbols.play_arrow,
+                          running ? Symbols.pause : Symbols.play_arrow,
                           size: 32,
                           color: Colors.white,
                         ),
