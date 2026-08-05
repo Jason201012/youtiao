@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
@@ -10,6 +11,7 @@ import 'package:todolist/widgets/completion_ring.dart';
 import 'package:todolist/widgets/stat_card.dart';
 import 'package:todolist/widgets/category_progress.dart';
 import 'package:todolist/widgets/trend_stats.dart';
+import 'package:todolist/widgets/focus_trend_stats.dart';
 import 'package:todolist/widgets/priority_distribution.dart';
 import 'package:todolist/widgets/guard_status_card.dart';
 import 'package:todolist/widgets/kanban_board.dart';
@@ -43,6 +45,7 @@ class BoardScreen extends StatelessWidget {
         Expanded(
           child: Consumer<TaskProvider>(
             builder: (context, provider, _) {
+              final focus = context.watch<FocusProvider>();
               final rate = provider.completionRate;
               return SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(
@@ -160,6 +163,9 @@ class BoardScreen extends StatelessWidget {
                       currentStreak: provider.currentStreak,
                       longestStreak: provider.longestStreak,
                     ),
+                    const SizedBox(height: 24),
+                    // 专注趋势（周/月/年 + 今日专注 hero），与专注 Tab 呼应
+                    FocusTrendStats(focus: focus),
                     const SizedBox(height: 24),
                     // 看板三列（拖拽 / 点击切换状态）
                     const KanbanBoard(),

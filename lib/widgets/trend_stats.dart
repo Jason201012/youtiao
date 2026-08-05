@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
-
-enum _TrendPeriod { week, month, year }
+import 'package:todolist/widgets/trend_chart.dart';
 
 /// 完成趋势 + 连续打卡：顶部「连续 N 天」hero，下方周期切换（周/月/年）柱状图 + 汇总指标。
+/// 渲染委托给统一的 [TrendChart]（与专注趋势共用同一套视觉）。
 /// 数据由 [TaskProvider.currentStreak]/[TaskProvider.longestStreak] 与传入的 [tasks] 计算。
 class TrendStats extends StatefulWidget {
   final List<Task> tasks;
@@ -24,7 +24,7 @@ class TrendStats extends StatefulWidget {
 }
 
 class _TrendStatsState extends State<TrendStats> {
-  _TrendPeriod _period = _TrendPeriod.week;
+  TrendPeriod _period = TrendPeriod.week;
 
   static const _wk = ['一', '二', '三', '四', '五', '六', '日'];
 
@@ -75,8 +75,6 @@ class _TrendStatsState extends State<TrendStats> {
     final ext = appColors(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fill = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
-    final todayFill = isDark ? const Color(0xFF80C0FF) : const Color(0xFF4DA3FF);
-    final chipBg = isDark ? AppColors.darkChip : AppColors.lightChip;
     final meta = ext.meta;
     final onBg = Theme.of(context).colorScheme.onBackground;
 
@@ -87,7 +85,7 @@ class _TrendStatsState extends State<TrendStats> {
     late List<(String, String)> metrics;
 
     switch (_period) {
-      case _TrendPeriod.week:
+      case TrendPeriod.week:
         final days = _lastNDays(7);
         values = _dailyCounts(days);
         final prev = days.map((d) => d.subtract(const Duration(days: 7))).toList();
@@ -109,7 +107,7 @@ class _TrendStatsState extends State<TrendStats> {
           (best, '最佳日'),
         ];
         break;
-      case _TrendPeriod.month:
+      case TrendPeriod.month:
         final now = DateTime.now();
         final upTo = now.day;
         final days = List.generate(upTo, (i) => DateTime(now.year, now.month, i + 1));
@@ -128,7 +126,7 @@ class _TrendStatsState extends State<TrendStats> {
           ('${widget.longestStreak}', '最长连续'),
         ];
         break;
-      case _TrendPeriod.year:
+      case TrendPeriod.year:
         final months = _monthsOfYear();
         values = _monthlyCounts(months);
         labels = months.map((m) => '${m.month}月').toList();
@@ -147,125 +145,23 @@ class _TrendStatsState extends State<TrendStats> {
         break;
     }
 
-    final maxV = values.reduce((a, b) => a > b ? a : b);
-    final cmpMax = compare == null ? 0 : compare.reduce((a, b) => a > b ? a : b);
-    final scaleMax = (maxV == 0 && cmpMax == 0) ? 1 : (maxV > cmpMax ? maxV : cmpMax);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 连续打卡 hero
-        _StreakHero(
-          current: widget.currentStreak,
-          longest: widget.longestStreak,
-          todayCount: _todayCount,
-          fill: fill,
-          meta: meta,
-          onBg: onBg,
-        ),
-        const SizedBox(height: 16),
-        // 标题 + 周期切换
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              '完成趋势',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: onBg),
-            ),
-            _Segmented(
-              value: _period,
-              onChanged: (p) => setState(() => _period = p),
-              chipBg: chipBg,
-              fill: fill,
-              onBg: onBg,
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        // 柱状图：每根柱用 Expanded 均分可用宽度并铺满整行，消除右侧留白
-        SizedBox(
-          height: 96,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              for (int i = 0; i < values.length; i++)
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      Text(
-                        '${values[i]}',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: i == highlight ? todayFill : fill,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      LayoutBuilder(
-                        builder: (c2, bc) {
-                          final barW = (bc.maxWidth - 8).clamp(4.0, 30.0);
-                          return SizedBox(
-                            width: bc.maxWidth,
-                            height: 56,
-                            child: Stack(
-                              alignment: Alignment.bottomCenter,
-                              children: [
-                                if (compare != null)
-                                  Container(
-                                    width: barW,
-                                    height: (compare[i] / scaleMax) * 56,
-                                    decoration: BoxDecoration(
-                                      color: meta.withOpacity(0.22),
-                                      borderRadius:
-                                          BorderRadius.circular(AppColors.progressRadius),
-                                    ),
-                                  ),
-                                Container(
-                                  width: barW,
-                                  height: (values[i] / scaleMax) * 56,
-                                  decoration: BoxDecoration(
-                                    color: i == highlight ? todayFill : fill,
-                                    borderRadius:
-                                        BorderRadius.circular(AppColors.progressRadius),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 4),
-                      SizedBox(
-                        width: double.infinity,
-                        child: Text(
-                          labels[i],
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w500,
-                            color: meta,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        // 汇总指标
-        Row(
-          children: [
-            for (final m in metrics)
-              Expanded(
-                child: _Metric(value: m.$1, label: m.$2, valueColor: onBg, meta: meta),
-              ),
-          ],
-        ),
-      ],
+    return TrendChart(
+      title: '完成趋势',
+      period: _period,
+      onPeriod: (p) => setState(() => _period = p),
+      hero: _StreakHero(
+        current: widget.currentStreak,
+        longest: widget.longestStreak,
+        todayCount: _todayCount,
+        fill: fill,
+        meta: meta,
+        onBg: onBg,
+      ),
+      values: values,
+      labels: labels,
+      highlight: highlight,
+      compare: compare,
+      metrics: metrics,
     );
   }
 }
@@ -324,101 +220,6 @@ class _StreakHero extends StatelessWidget {
                   ),
                 ),
               ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Segmented extends StatelessWidget {
-  final _TrendPeriod value;
-  final ValueChanged<_TrendPeriod> onChanged;
-  final Color chipBg;
-  final Color fill;
-  final Color onBg;
-  const _Segmented({
-    required this.value,
-    required this.onChanged,
-    required this.chipBg,
-    required this.fill,
-    required this.onBg,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const items = [
-      ('周', _TrendPeriod.week),
-      ('月', _TrendPeriod.month),
-      ('年', _TrendPeriod.year),
-    ];
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: chipBg,
-        borderRadius: BorderRadius.circular(AppColors.chipRadius),
-      ),
-      child: Row(
-        children: [
-          for (final it in items)
-            GestureDetector(
-              onTap: () => onChanged(it.$2),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-                decoration: BoxDecoration(
-                  color: value == it.$2 ? fill : Colors.transparent,
-                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
-                ),
-                child: Text(
-                  it.$1,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: value == it.$2 ? Colors.white : onBg,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Metric extends StatelessWidget {
-  final String value;
-  final String label;
-  final Color valueColor;
-  final Color meta;
-  const _Metric({
-    required this.value,
-    required this.label,
-    required this.valueColor,
-    required this.meta,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: valueColor,
-            ),
-          ),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w500,
-              color: meta,
             ),
           ),
         ],
