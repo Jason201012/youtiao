@@ -1,5 +1,11 @@
 # 更新日志（Changelog）
 
+## v2.2.2（2026-08-05）
+
+- 发版流程自动化：新增 _build2.py 一条龙脚本，自动从 pubspec 同步 local.properties 版本，串起「改版本→构建→提交→打标签→推送→发 Gitee」，并清理历史构建垃圾
+- 版本号三处（pubspec / local.properties / Settings 兜底）与 update.json / CHANGELOG / README 随发版自动同步，彻底杜绝不一致
+- 版本升至 v2.2.2（versionCode 43）。
+
 ## v2.2.1（2026-08-05）
 
 - **修复「检查更新」HTTP 403**：Gitee 自 2026-08 起对匿名 `api/v5` 访问统一返回 403，原「检查更新」依赖的发行版 API 因此失效。改为在仓库内维护一份静态清单文件 `update.json`，App 通过 Gitee 的 raw 文件访问（公开仓库无需鉴权）读取最新版本号与下载直链，彻底绕开 API 封锁。
