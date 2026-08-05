@@ -40,9 +40,13 @@ extension FocusSoundTypeX on FocusSoundType {
 
 /// 专注环境音播放服务（单例）。
 ///
-/// 负责循环播放自产的噪音 WAV、调节音量，并将「音效类型 + 音量」持久化到
-/// [SharedPreferences]，跨会话记忆用户选择。播放生命周期由专注页根据番茄钟
-/// 运行状态（开始/暂停/恢复/停止）驱动，本类只管播放本身。
+/// 两个互相独立的维度：
+/// - [_type]：用户**选了哪种音效**（关闭 / 白 / 粉 / 棕），持久化。
+/// - [_active]：专注**是否进行中**、即「应当播放」的状态，由专注页驱动。
+///
+/// 二者解耦：无论先选音效还是先开始专注，只要两者同时为真就播放。
+/// 播放生命周期由专注页根据番茄钟运行状态调用 [setActive] 驱动，
+/// [setType] 仅改音效类型（并在进行中时立即切换音源）。
 class FocusAudioService {
   FocusAudioService._();
 
@@ -63,7 +67,7 @@ class FocusAudioService {
 
   /// 读取持久化偏好并初始化播放器。应在专注页 initState 中调用一次。
   Future<void> init() async {
-    _player.setReleaseMode(ReleaseMode.loop);
+    await _player.setReleaseMode(ReleaseMode.loop);
     final prefs = await SharedPreferences.getInstance();
     final idx = prefs.getInt(_kType) ?? FocusSoundType.off.index;
     if (idx >= 0 && idx < FocusSoundType.values.length) {
@@ -73,14 +77,17 @@ class FocusAudioService {
     await _player.setVolume(_volume);
   }
 
-  /// 切换音效类型并持久化；若当前应播放则立即切换音源。
+  /// 切换音效类型并持久化。
+  /// 若当前正处于专注进行中（[_active]），立即切换到新音源；
+  /// 若选了 [off]，则停止播放；否则仅记录类型，待专注开始再播。
   Future<void> setType(FocusSoundType t) async {
     _type = t;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_kType, t.index);
     if (t == FocusSoundType.off) {
-      _active = false;
-      await _player.stop();
+      if (_player.state == PlayerState.playing) {
+        await _player.stop();
+      }
     } else if (_active) {
       await _play();
     }
@@ -94,34 +101,40 @@ class FocusAudioService {
     await prefs.setDouble(_kVol, _volume);
   }
 
-  /// 专注开始 / 恢复：若选择了音效则循环播放。
-  Future<void> startIfEnabled() async {
-    if (_type == FocusSoundType.off) return;
-    _active = true;
-    await _play();
-  }
-
-  /// 专注暂停：暂停播放（保留位置，便于恢复时续播）。
-  Future<void> pause() async {
-    _active = false;
-    if (_player.state == PlayerState.playing) {
-      await _player.pause();
+  /// 由专注页驱动：专注进行中（[active]=true）则播放，否则暂停。
+  /// 与 [_type] 无关——即使先开始专注、后选音效，也会在选音效时补播，
+  /// 因为 [setType] 会检查 [_active]。
+  Future<void> setActive(bool active) async {
+    _active = active;
+    if (active) {
+      if (_type != FocusSoundType.off) {
+        await _play();
+      }
+    } else {
+      if (_player.state == PlayerState.playing) {
+        await _player.pause();
+      }
     }
   }
 
-  /// 专注停止（手动结束）：彻底停止。
+  /// 专注停止（手动结束）：彻底停止，并标记不再播放。
   Future<void> stop() async {
     _active = false;
-    await _player.stop();
+    if (_player.state != PlayerState.stopped) {
+      await _player.stop();
+    }
   }
 
   Future<void> _play() async {
     final asset = _type.asset;
     if (asset == null) return;
     // 先停后启，避免重复叠加。
-    await _player.stop();
-    await _player.setSource(AssetSource(asset));
-    await _player.resume();
+    if (_player.state != PlayerState.stopped) {
+      await _player.stop();
+    }
+    // ReleaseMode.loop 控制循环（注意：play() 的 mode 参数是 PlayerMode 而非 ReleaseMode）。
+    await _player.setReleaseMode(ReleaseMode.loop);
+    await _player.play(AssetSource(asset), volume: _volume);
   }
 
   void dispose() => _player.dispose();

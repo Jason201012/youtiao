@@ -73,11 +73,7 @@ class _FocusScreenState extends State<FocusScreen> {
     final running = focus.activeRunning;
     if (running == _lastRunning) return;
     _lastRunning = running;
-    if (running) {
-      _audio.startIfEnabled();
-    } else {
-      _audio.pause();
-    }
+    _audio.setActive(running);
   }
 
   void _pickSound(FocusSoundType t) async {
