@@ -73,7 +73,7 @@ class BackupSheet {
       // 与任务数据合并番茄钟专注记录，便于统一备份与恢复。
       final map = provider.backupData(includeTrash: includeTrash);
       map['focus_sessions'] = focusProvider.sessionsJson;
-      final json = jsonEncode(map);
+      final json = const JsonEncoder.withIndent('  ').convert(map);
       // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
       final file = await DataIo.saveToAppDocs(name, json);
       // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见

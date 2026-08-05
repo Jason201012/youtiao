@@ -735,9 +735,9 @@ class TaskProvider extends ChangeNotifier {
         'sound_enabled': _soundEnabled,
       };
 
-  /// 备份 JSON 字符串。
+  /// 备份 JSON 字符串（带缩进，便于人工查看与分段恢复）。
   String backupJson([bool includeTrash = true]) =>
-      jsonEncode(backupData(includeTrash: includeTrash));
+      const JsonEncoder.withIndent('  ').convert(backupData(includeTrash: includeTrash));
 
   /// 从备份 JSON 字符串恢复：覆盖全部任务与偏好，并重排通知。
   /// [includeTrash] 为 true 且备份含回收站时，用备份的回收站覆盖当前回收站。

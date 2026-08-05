@@ -17,10 +17,19 @@ class DataIo {
   static const MethodChannel _ioChannel =
       MethodChannel('com.example.todolist/file_io');
   /// 把文本内容写入 App 私有文档目录，返回生成的文件。
+  ///
+  /// 采用原子写：先写 [fileName].tmp，再 rename 覆盖目标，避免写入中途被打断
+  /// （被杀后台 / 断电）导致整文件 JSON 损坏、备份报废。rename 在同一文件系统内
+  /// 为原子操作；Windows 下 rename 不能覆盖已存在目标，故先删旧文件再 rename。
   static Future<File> saveToAppDocs(String fileName, String content) async {
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$fileName');
-    await file.writeAsString(content);
+    final tmp = File('${file.path}.tmp');
+    await tmp.writeAsString(content);
+    if (await file.exists()) {
+      await file.delete();
+    }
+    await tmp.rename(file.path);
     return file;
   }
 
