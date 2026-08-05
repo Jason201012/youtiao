@@ -8,6 +8,10 @@ enum FocusSoundType {
   white,
   pink,
   brown,
+  rain,
+  ocean,
+  campfire,
+  wind,
 }
 
 extension FocusSoundTypeX on FocusSoundType {
@@ -21,6 +25,14 @@ extension FocusSoundTypeX on FocusSoundType {
         return '粉噪音';
       case FocusSoundType.brown:
         return '棕噪音';
+      case FocusSoundType.rain:
+        return '雨声';
+      case FocusSoundType.ocean:
+        return '海浪';
+      case FocusSoundType.campfire:
+        return '篝火';
+      case FocusSoundType.wind:
+        return '风声';
     }
   }
 
@@ -37,6 +49,14 @@ extension FocusSoundTypeX on FocusSoundType {
         return 'assets/audio/pink.wav';
       case FocusSoundType.brown:
         return 'assets/audio/brown.wav';
+      case FocusSoundType.rain:
+        return 'assets/audio/rain.wav';
+      case FocusSoundType.ocean:
+        return 'assets/audio/ocean.wav';
+      case FocusSoundType.campfire:
+        return 'assets/audio/campfire.wav';
+      case FocusSoundType.wind:
+        return 'assets/audio/wind.wav';
     }
   }
 }
@@ -44,7 +64,7 @@ extension FocusSoundTypeX on FocusSoundType {
 /// 专注环境音播放服务（单例）。
 ///
 /// 两个互相独立的维度：
-/// - [_type]：用户**选了哪种音效**（关闭 / 白 / 粉 / 棕），持久化。
+/// - [_type]：用户**选了哪种音效**（关闭 / 白 / 粉 / 棕 / 雨声 / 海浪 / 篝火 / 风声），持久化。
 /// - [_active]：专注**是否进行中**、即「应当播放」的状态，由专注页驱动。
 ///
 /// 二者解耦：无论先选音效还是先开始专注，只要两者同时为真就播放。
