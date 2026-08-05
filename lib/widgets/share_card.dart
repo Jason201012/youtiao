@@ -19,7 +19,7 @@ import 'package:todolist/widgets/week_trend.dart';
 /// [hideTitles] 打开后看板明细只显示数量，不泄露任务标题（隐私优先）。
 class ShareOptions {
   final bool ring; // 完成率概览
-  final bool stats; // 数据统计（总任务/已完成/逾期/进行中）
+  final bool stats; // 数据统计（总任务/已完成/逾期）
   final bool priority; // 优先级分布
   final bool category; // 分类进度
   final bool trend; // 近 7 日完成趋势
@@ -78,7 +78,6 @@ class ShareCardData {
   final int total;
   final int completed;
   final int overdue;
-  final int inProgress;
   final Map<Priority, int> priorityCounts;
   final Map<Category, double> categoryProgress;
   final List<int> weekValues;
@@ -95,7 +94,6 @@ class ShareCardData {
     required this.total,
     required this.completed,
     required this.overdue,
-    required this.inProgress,
     required this.priorityCounts,
     required this.categoryProgress,
     required this.weekValues,
@@ -116,7 +114,6 @@ class ShareCardData {
       total: p.total,
       completed: p.completed,
       overdue: p.overdue,
-      inProgress: p.inProgress,
       priorityCounts: p.priorityCounts,
       categoryProgress: p.categoryProgress(),
       weekValues: p.weekTrend,
@@ -434,7 +431,7 @@ class _BigRingPainter extends CustomPainter {
       old.value != value || old.color != color || old.track != track;
 }
 
-/// 2×2 统计网格：总任务 / 已完成 / 逾期 / 进行中。
+/// 统计网格：总任务 / 已完成 / 逾期。
 class _StatsBlock extends StatelessWidget {
   final ShareCardData data;
   const _StatsBlock({required this.data});
@@ -477,14 +474,6 @@ class _StatsBlock extends StatelessWidget {
                 valueColor: high,
               ),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: StatCard(
-                value: '${data.inProgress}',
-                label: '进行中',
-                valueColor: accent,
-              ),
-            ),
           ],
         ),
       ],
@@ -492,7 +481,7 @@ class _StatsBlock extends StatelessWidget {
   }
 }
 
-/// 看板三列明细：待办 / 进行中 / 已完成，每列最多列 4 条标题。
+/// 看板两列明细：待办 / 已完成，每列最多列 4 条标题。
 class _KanbanBlock extends StatelessWidget {
   final ShareCardData data;
   final bool hideTitles;
@@ -500,15 +489,10 @@ class _KanbanBlock extends StatelessWidget {
 
   static const _cols = [
     (TaskStatus.todo, '待办'),
-    (TaskStatus.doing, '进行中'),
     (TaskStatus.done, '已完成'),
   ];
 
   Color _colColor(BuildContext context, TaskStatus s) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    if (s == TaskStatus.doing) {
-      return isDark ? const Color(0xFF80C0FF) : const Color(0xFF378ADD);
-    }
     if (s == TaskStatus.done) return const Color(0xFF0F6E56);
     return appColors(context).meta;
   }

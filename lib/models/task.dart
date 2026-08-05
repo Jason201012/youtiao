@@ -70,17 +70,15 @@ extension CategoryLabel on Category {
   }
 }
 
-/// 任务状态：待办 / 进行中 / 已完成。
-/// 看板页按此分为三列，可在列间拖拽或点击循环切换。
-enum TaskStatus { todo, doing, done }
+/// 任务状态：待办 / 已完成。
+/// 看板页按此分为两列，可在列间拖拽或点击切换。
+enum TaskStatus { todo, done }
 
 extension TaskStatusLabel on TaskStatus {
   String get label {
     switch (this) {
       case TaskStatus.todo:
         return '待办';
-      case TaskStatus.doing:
-        return '进行中';
       case TaskStatus.done:
         return '已完成';
     }
@@ -227,9 +225,7 @@ class Task {
       category: Category.values.byName(j['category'] as String),
       dueDate:
           j['dueDate'] == null ? null : DateTime.parse(j['dueDate'] as String),
-      status: j['status'] != null
-          ? TaskStatus.values.byName(j['status'] as String)
-          : ((j['done'] as bool? ?? false) ? TaskStatus.done : TaskStatus.todo),
+      status: _parseStatus(j['status'] as String?, j['done'] as bool?),
       completedAt: j['completedAt'] == null
           ? null
           : DateTime.parse(j['completedAt'] as String),
@@ -247,6 +243,15 @@ class Task {
           : DateTime.parse(j['repeatAnchor'] as String),
       note: j['note'] as String? ?? '',
     );
+  }
+
+  /// 解析任务状态，兼容历史数据：
+  /// - 旧版「进行中(doing)」状态统一归并为「待办(todo)」（v2.0.6 起移除 doing 概念）；
+  /// - 未知字符串回退到旧的 [done] 布尔字段。
+  static TaskStatus _parseStatus(String? s, bool? done) {
+    if (s == 'done') return TaskStatus.done;
+    if (s == 'todo' || s == 'doing' || s == null) return TaskStatus.todo;
+    return (done ?? false) ? TaskStatus.done : TaskStatus.todo;
   }
 
   /// 判断 [day]（任意时刻，内部按日期归一化）是否为该任务的「循环日」。

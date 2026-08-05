@@ -6,7 +6,7 @@ import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
 
 /// 首页列表筛选（看板统计卡点击后跳转首页并套用）。
-enum TaskFilter { all, todo, doing, done, overdue }
+enum TaskFilter { all, todo, done, overdue }
 
 /// 内存状态 + shared_preferences 持久化（任务列表与开关设置落盘，重启不丢）
 class TaskProvider extends ChangeNotifier {
@@ -295,7 +295,6 @@ class TaskProvider extends ChangeNotifier {
   int get completed => _tasks.where((t) => t.done).length;
   int get overdue =>
       _tasks.where((t) => !t.done && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
-  int get inProgress => _tasks.where((t) => t.status == TaskStatus.doing).length;
   double get completionRate => total == 0 ? 0 : completed / total;
 
   /// 各分类完成比例
@@ -450,7 +449,7 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 看板三列分组：待办 / 进行中 / 已完成（保留列表原顺序）。
+  /// 看板两列分组：待办 / 已完成（保留列表原顺序）。
   Map<TaskStatus, List<Task>> get kanbanGroups {
     final map = {for (final s in TaskStatus.values) s: <Task>[]};
     for (final t in _tasks) {
@@ -541,7 +540,7 @@ class TaskProvider extends ChangeNotifier {
     };
   }
 
-  /// 把任务在 待办/进行中/已完成 之间移动（看板拖拽 / 点击循环切换）。
+  /// 把任务在 待办/已完成 之间移动（看板拖拽 / 点击切换）。
   void setStatus(String id, TaskStatus s) {
     final i = _tasks.indexWhere((t) => t.id == id);
     if (i == -1) return;

@@ -280,8 +280,6 @@ class _HomeScreenState extends State<HomeScreen> {
         final filter = provider.taskFilter;
         final filtered = switch (filter) {
           TaskFilter.todo => tasks.where((t) => t.status == TaskStatus.todo).toList(),
-          TaskFilter.doing =>
-            tasks.where((t) => t.status == TaskStatus.doing).toList(),
           TaskFilter.done => tasks.where((t) => t.status == TaskStatus.done).toList(),
           // 与「逾期」板块口径保持一致：按「天」判断，今天到点未做不算逾期。
           TaskFilter.overdue =>
@@ -429,7 +427,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 alwaysShow: true),
                             // 未来：今天之后到期 + 无截止日期
                             ..._section(context, '未来', future, ext),
-                            // 重复：重复任务（所有规则，进行中）
+                            // 重复：重复任务（所有规则）
                             ..._section(context, '重复', repeat, ext),
                             // 已完成
                             ..._section(context, '已完成', done, ext),
@@ -448,7 +446,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-/// 首页筛选芯片行：全部 / 待办 / 进行中 / 已完成 / 逾期。
+/// 首页筛选芯片行：全部 / 待办 / 已完成 / 逾期。
 class _FilterChips extends StatelessWidget {
   final TaskProvider provider;
   const _FilterChips({required this.provider});
@@ -456,7 +454,6 @@ class _FilterChips extends StatelessWidget {
   static const List<(TaskFilter, String)> _items = [
     (TaskFilter.all, '全部'),
     (TaskFilter.todo, '待办'),
-    (TaskFilter.doing, '进行中'),
     (TaskFilter.done, '已完成'),
     (TaskFilter.overdue, '逾期'),
   ];

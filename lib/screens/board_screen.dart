@@ -113,7 +113,7 @@ class BoardScreen extends StatelessWidget {
                     // 后台提醒守护状态卡
                     GuardStatusCard(enabled: provider.backgroundGuardEnabled),
                     const SizedBox(height: AppColors.contentGap),
-                    // 统计网格 2×2（可点击跳首页筛选）
+                    // 统计网格（可点击跳首页筛选）：总任务 / 已完成 / 逾期
                     Row(
                       children: [
                         Expanded(
@@ -135,11 +135,7 @@ class BoardScreen extends StatelessWidget {
                                 provider.requestHomeWithFilter(TaskFilter.done),
                           ),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
+                        const SizedBox(width: 12),
                         Expanded(
                           child: StatCard(
                             value: '${provider.overdue}',
@@ -147,16 +143,6 @@ class BoardScreen extends StatelessWidget {
                             valueColor: AppColors.lightHigh,
                             onTap: () =>
                                 provider.requestHomeWithFilter(TaskFilter.overdue),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: StatCard(
-                            value: '${provider.inProgress}',
-                            label: '进行中',
-                            valueColor: progressColor,
-                            onTap: () =>
-                                provider.requestHomeWithFilter(TaskFilter.doing),
                           ),
                         ),
                       ],
