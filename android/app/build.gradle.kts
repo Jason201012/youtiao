@@ -73,12 +73,16 @@ dependencies {
 //      加 -Djava.io.tmpdir=D:/workbuddy/.gradle/tmp），让 dex-renamer 的临时文件与 build 输出同盘，
 //      跨卷 move 不再退化成符号链接；并偶尔 `flutter clean` 清掉已残留的符号链接。
 tasks.configureEach {
-    // 只关闭"不依赖增量变化检测"的任务的状态追踪，避开 Gradle 9.1 对符号链接的严格快照。
-    // packageRelease/packageDebug 必须保留状态追踪（否则报 Changes are not tracked）。
-    // 其余任务（Kotlin / merge*JniLib / merge*Dex / Resources / R8 / package*）保持状态追踪，
-    // 配合同盘临时目录，它们在构建里能正常产出普通文件。彻底根因是临时目录与 build 同盘。
-    if (name.contains("NativeLibs", ignoreCase = true) ||
-        name.contains("NativeSymbolTables", ignoreCase = true)) {
-        doNotTrackState("跨盘符号链接快照保护（原生库合并 / 原生符号表）")
+    // 关闭"原生相关"任务的状态追踪，避开 Gradle 9.1 对符号链接的严格快照。
+    // 本机工程在 D 盘、Gradle/Kotlin 缓存在 C 盘，跨卷使原生中间产物（libflutter.so、libapp.so.sym 等）
+    // 以符号链接形式存在，下列任务在快照输入/输出时会报 "not a regular file" 而失败：
+    //   - merge*NativeLibs           （消费 libflutter.so 符号链接）
+    //   - extract*NativeSymbolTables （产出 .sym 符号链接）
+    //   - merge*NativeDebugMetadata  （消费上面的 .sym，快照时报错；Gradle 报错本身即建议 doNotTrackState）
+    // packageRelease/packageDebug/packageReleaseResources 与 compile*Kotlin 绝不能加 doNotTrackState
+    // （前者报 "Changes are not tracked" 直接失败；后者 Kotlin 增量编译器依赖任务状态）。
+    // 原生任务与这两者无交集，用 "Native" 统一兜底即可一次性覆盖上述三者（含 debug/release 变体）。
+    if (name.contains("Native", ignoreCase = true)) {
+        doNotTrackState("跨盘符号链接快照保护（原生任务）")
     }
 }

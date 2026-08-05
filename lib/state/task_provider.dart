@@ -431,6 +431,20 @@ class TaskProvider extends ChangeNotifier {
     return list;
   }
 
+  /// 某天到期的所有任务（未删除，含已完成灰显），按截止时间升序；
+  /// 日历月/周视图展示当天任务、以及拖拽改期后定位目标日用。
+  List<Task> tasksDueOn(DateTime day) {
+    final d = _dateOnly(day);
+    final list = _tasks
+        .where((t) =>
+            t.deletedAt == null &&
+            t.dueDate != null &&
+            _dateOnly(t.dueDate!) == d)
+        .toList();
+    list.sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+    return list;
+  }
+
   // ===== 首页筛选（看板统计卡点击跳转）=====
   TaskFilter _taskFilter = TaskFilter.all;
   TaskFilter get taskFilter => _taskFilter;
