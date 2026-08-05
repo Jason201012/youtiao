@@ -6,23 +6,18 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 
-/// 看板三列：待办 / 进行中 / 已完成。
-/// - 长按卡片可拖拽到其它列，松手即改状态；
-/// - 单击卡片在 待办→进行中→已完成→待办 间循环切换（ColorOS 上更稳妥的兜底交互）。
+/// 看板两列：待办 / 已完成。
+/// - 长按卡片可拖拽到另一列，松手即改状态；
+/// - 单击卡片在 待办↔已完成 间切换（ColorOS 上更稳妥的兜底交互）。
 class KanbanBoard extends StatelessWidget {
   const KanbanBoard({super.key});
 
   static const List<(TaskStatus, String)> _cols = [
     (TaskStatus.todo, '待办'),
-    (TaskStatus.doing, '进行中'),
     (TaskStatus.done, '已完成'),
   ];
 
   static Color _colColor(BuildContext context, TaskStatus s) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    if (s == TaskStatus.doing) {
-      return isDark ? const Color(0xFF80C0FF) : const Color(0xFF378ADD);
-    }
     if (s == TaskStatus.done) return const Color(0xFF0F6E56);
     return appColors(context).meta;
   }
@@ -133,11 +128,8 @@ class _KanbanCard extends StatelessWidget {
   const _KanbanCard({required this.task, required this.provider});
 
   static void _cycle(TaskProvider p, Task t) {
-    final next = t.status == TaskStatus.todo
-        ? TaskStatus.doing
-        : t.status == TaskStatus.doing
-            ? TaskStatus.done
-            : TaskStatus.todo;
+    final next =
+        t.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
     p.setStatus(t.id, next);
   }
 
