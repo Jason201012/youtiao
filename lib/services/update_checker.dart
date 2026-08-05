@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Gitee 仓库信息（发行版 API）。
 const String _owner = 'jason1012';
-const String _repo = 'youtiao';
+const String _repo = 'youtiao-releases';
 const String _releasesLatestUrl =
     'https://gitee.com/api/v5/repos/$_owner/$_repo/releases/latest';
 
