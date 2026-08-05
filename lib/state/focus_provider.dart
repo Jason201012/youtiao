@@ -357,4 +357,77 @@ class FocusProvider extends ChangeNotifier {
     _persist();
     notifyListeners();
   }
+
+  // ===== 备份 / 导出 / 恢复（番茄钟每日专注并入「自动保存数据与导出」）=====
+
+  /// 专注会话的 JSON 列表（用于在备份时与任务数据合并）。
+  List<Map<String, dynamic>> get sessionsJson =>
+      _sessions.map((s) => s.toJson()).toList();
+
+  /// 从备份恢复专注会话列表（[list] 为 FocusSession 的 JSON 列表）。
+  /// 仅在备份含 [focus_sessions] 字段时调用；缺失则保留现有数据不覆盖。
+  Future<void> restoreSessions(List<dynamic> list) async {
+    _sessions
+      ..clear()
+      ..addAll(
+          list.map((e) => FocusSession.fromJson(e as Map<String, dynamic>)));
+    await _persist();
+    notifyListeners();
+  }
+
+  /// 导出专注会话为 CSV（日期,开始,结束,计划时长(分),实际时长(分),是否完成,关联任务）。
+  String exportCsv() {
+    final buf = StringBuffer();
+    buf.writeln('日期,开始时间,结束时间,计划时长(分),实际时长(分),是否完成,关联任务');
+    for (final s in _sessions) {
+      final started = _fmt(s.startedAt);
+      final ended = _fmt(s.endedAt);
+      final plannedMin = (s.plannedSec / 60).toStringAsFixed(0);
+      final durMin = (s.durationSec / 60).toStringAsFixed(1);
+      final done = s.completed ? '是' : '否';
+      final task = s.taskTitle == null ? '' : '"${_esc(s.taskTitle!)}"';
+      buf.writeln(
+          '"$started","$ended","$plannedMin","$durMin","$done",$task');
+    }
+    return buf.toString();
+  }
+
+  /// 导出专注会话为 Markdown，按日期分组（旧→新），每组列明细与当日累计。
+  String exportMarkdown() {
+    final buf = StringBuffer();
+    buf.writeln('# 有条 专注记录导出');
+    buf.writeln('');
+    buf.writeln('> 导出时间：${_fmt(DateTime.now())}');
+    buf.writeln('');
+    if (_sessions.isEmpty) {
+      buf.writeln('_暂无专注记录_');
+      return buf.toString();
+    }
+    final byDay = <DateTime, List<FocusSession>>{};
+    for (final s in _sessions) {
+      final d = DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day);
+      byDay.putIfAbsent(d, () => []).add(s);
+    }
+    final days = byDay.keys.toList()..sort();
+    for (final d in days) {
+      final list = byDay[d]!;
+      final totalSec = list.fold(0, (a, s) => a + s.durationSec);
+      buf.writeln('## ${_fmt(d)}（${list.length} 次 · ${formatFocusDuration(totalSec)}）');
+      for (final s in list) {
+        final flag = s.completed ? '🍅' : '·';
+        final task = s.taskTitle == null ? '' : ' ｜ ${s.taskTitle}';
+        final start = _fmt(s.startedAt).substring(11);
+        final end = _fmt(s.endedAt).substring(11);
+        buf.writeln(
+            '- $flag $start → $end ${formatFocusDuration(s.durationSec)}$task');
+      }
+      buf.writeln('');
+    }
+    return buf.toString();
+  }
+
+  static String _fmt(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
+      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  static String _esc(String s) => s.replaceAll('"', '""');
 }

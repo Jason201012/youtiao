@@ -724,7 +724,7 @@ class TaskProvider extends ChangeNotifier {
   /// 完整备份数据（任务 + 偏好 + 可选回收站），用于「备份与恢复」导出。
   /// [includeTrash] 为 true 时一并将回收站任务写入备份。
   Map<String, dynamic> backupData({bool includeTrash = true}) => {
-        'version': 1,
+        'version': 2,
         'app': '有条',
         'tasks': _tasks.map((t) => t.toJson()).toList(),
         'trash': includeTrash

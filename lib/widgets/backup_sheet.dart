@@ -1,14 +1,17 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/task_provider.dart';
 
 /// 「备份与恢复」底部弹层：提供「备份到文件」「从备份恢复」，
 /// 并可选择是否把回收站一并备份 / 恢复。
 class BackupSheet {
   static Future<void> show(BuildContext context) async {
-    final provider = context.read<TaskProvider>();
+    final taskProvider = context.read<TaskProvider>();
+    final focusProvider = context.read<FocusProvider>();
     var includeTrash = true;
     await showModalBottomSheet<void>(
       context: context,
@@ -36,10 +39,10 @@ class BackupSheet {
                 ListTile(
                   leading: const Icon(Symbols.backup),
                   title: const Text('备份到文件'),
-                  subtitle: const Text('导出完整数据（任务与设置），可分享保存'),
+                  subtitle: const Text('导出完整数据（任务、设置与专注记录），可分享保存'),
                   onTap: () {
                     Navigator.pop(ctx);
-                    _doBackup(provider, context, includeTrash);
+                    _doBackup(taskProvider, focusProvider, context, includeTrash);
                   },
                 ),
                 ListTile(
@@ -48,7 +51,7 @@ class BackupSheet {
                   subtitle: const Text('选择此前的备份文件，覆盖当前数据'),
                   onTap: () {
                     Navigator.pop(ctx);
-                    _doRestore(provider, context, includeTrash);
+                    _doRestore(taskProvider, focusProvider, context, includeTrash);
                   },
                 ),
               ],
@@ -61,12 +64,16 @@ class BackupSheet {
 
   static Future<void> _doBackup(
     TaskProvider provider,
+    FocusProvider focusProvider,
     BuildContext context,
     bool includeTrash,
   ) async {
     try {
       final name = '有条-backup-${_ts()}.json';
-      final json = provider.backupJson(includeTrash);
+      // 与任务数据合并番茄钟专注记录，便于统一备份与恢复。
+      final map = provider.backupData(includeTrash: includeTrash);
+      map['focus_sessions'] = focusProvider.sessionsJson;
+      final json = jsonEncode(map);
       // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
       final file = await DataIo.saveToAppDocs(name, json);
       // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见
@@ -101,6 +108,7 @@ class BackupSheet {
 
   static Future<void> _doRestore(
     TaskProvider provider,
+    FocusProvider focusProvider,
     BuildContext context,
     bool includeTrash,
   ) async {
@@ -110,7 +118,7 @@ class BackupSheet {
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('从备份恢复？'),
-        content: const Text('这将用备份文件覆盖当前所有任务与设置，且不可撤销。'),
+        content: const Text('这将用备份文件覆盖当前所有任务、设置与专注记录，且不可撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(d, false),
@@ -125,7 +133,13 @@ class BackupSheet {
     );
     if (ok != true) return;
     try {
+      final data = jsonDecode(raw) as Map<String, dynamic>;
       await provider.restoreFromJson(raw, includeTrash: includeTrash);
+      // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
+      final focusList = data['focus_sessions'];
+      if (focusList is List) {
+        await focusProvider.restoreSessions(focusList);
+      }
       if (context.mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('已从备份恢复')));

@@ -2,13 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/task_provider.dart';
 
 /// 「导出数据」底部弹层：选择导出为 CSV 或 Markdown 可读副本，
 /// 并可选择是否把回收站任务一并导出。
 class ExportSheet {
   static Future<void> show(BuildContext context) async {
-    final provider = context.read<TaskProvider>();
+    final taskProvider = context.read<TaskProvider>();
+    final focusProvider = context.read<FocusProvider>();
     var includeTrash = false;
     await showModalBottomSheet<void>(
       context: context,
@@ -36,19 +38,19 @@ class ExportSheet {
                 ListTile(
                   leading: const Icon(Symbols.table_chart),
                   title: const Text('导出为 CSV'),
-                  subtitle: const Text('表格格式，可用 Excel / 表格软件打开'),
+                  subtitle: const Text('表格格式，含任务与专注记录，可用 Excel 打开'),
                   onTap: () {
                     Navigator.pop(ctx);
-                    _doExport(provider, context, 'csv', includeTrash);
+                    _doExport(taskProvider, focusProvider, context, 'csv', includeTrash);
                   },
                 ),
                 ListTile(
                   leading: const Icon(Symbols.description),
                   title: const Text('导出为 Markdown'),
-                  subtitle: const Text('文本清单，便于阅读与粘贴'),
+                  subtitle: const Text('文本清单，含任务与专注记录，便于阅读粘贴'),
                   onTap: () {
                     Navigator.pop(ctx);
-                    _doExport(provider, context, 'md', includeTrash);
+                    _doExport(taskProvider, focusProvider, context, 'md', includeTrash);
                   },
                 ),
               ],
@@ -61,15 +63,20 @@ class ExportSheet {
 
   static Future<void> _doExport(
     TaskProvider provider,
+    FocusProvider focusProvider,
     BuildContext context,
     String kind,
     bool includeTrash,
   ) async {
     final isCsv = kind == 'csv';
     try {
-      final content = isCsv
+      final contentTask = isCsv
           ? provider.exportCsv(includeTrash: includeTrash)
           : provider.exportMarkdown(includeTrash: includeTrash);
+      final contentFocus =
+          isCsv ? focusProvider.exportCsv() : focusProvider.exportMarkdown();
+      // 任务内容之后追加专注记录段落（CSV 追加独立表头，MD 追加独立标题）。
+      final content = '$contentTask\n$contentFocus';
       final name =
           '有条-${isCsv ? 'tasks' : 'export'}-${_ts()}.${isCsv ? 'csv' : 'md'}';
       // 1) App 私有目录留一份，供「分享」按钮兜底
