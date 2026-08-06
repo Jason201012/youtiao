@@ -358,5 +358,17 @@ void main() {
       expect(p.todayEventTotal, 1); // 只有每天循环任务计入当日
       expect(p.overdue, 1); // 只有普通逾期任务算逾期，循环任务不重复计入
     });
+
+    test('之前设置的每日任务也计入当天（截止日早于今天仍算当日事件）', () async {
+      final today = DateTime.now();
+      // 模拟「几天前创建并设为每天」的任务：截止日设在 5 天前、repeat=daily
+      final p = await buildWith([
+        mk('1', repeating: true, due: today.subtract(const Duration(days: 5)), title: '几天前设的每天'),
+        mk('2', repeating: true, title: '几天前设的无截止每天'),
+      ]);
+      // 两条都是每天重复，与创建/截止日期无关，都应计入当日事件
+      expect(p.todayEventTotal, 2);
+      expect(p.overdue, 0); // 每日任务不计入逾期
+    });
   });
 }
