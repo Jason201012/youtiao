@@ -140,22 +140,27 @@ class Task {
     this.note = '',
   });
 
+  // 哨兵：区分"未传该参数（保留旧值）"与"显式传 null（清空该字段）"。
+  // 否则 copyWith(dueDate: null) 会被 `?? this.dueDate` 误判为"保留旧值"，
+  // 导致取消完成/恢复/清空截止时间等意图清空的操作实际无效。
+  static const Object _kKeep = Object();
+
   Task copyWith({
     String? id,
     String? title,
     Priority? priority,
     Category? category,
-    DateTime? dueDate,
+    Object? dueDate = _kKeep,
     TaskStatus? status,
-    DateTime? completedAt,
+    Object? completedAt = _kKeep,
     int? subtaskTotal,
     int? subtaskDone,
-    DateTime? deletedAt,
+    Object? deletedAt = _kKeep,
     RepeatType? repeat,
     List<int>? repeatWeekdays,
     int? repeatInterval,
-    int? repeatMinute,
-    DateTime? repeatAnchor,
+    Object? repeatMinute = _kKeep,
+    Object? repeatAnchor = _kKeep,
     String? note,
   }) =>
       Task(
@@ -163,17 +168,21 @@ class Task {
         title: title ?? this.title,
         priority: priority ?? this.priority,
         category: category ?? this.category,
-        dueDate: dueDate ?? this.dueDate,
+        dueDate: dueDate == _kKeep ? this.dueDate : dueDate as DateTime?,
         status: status ?? this.status,
-        completedAt: completedAt ?? this.completedAt,
+        completedAt:
+            completedAt == _kKeep ? this.completedAt : completedAt as DateTime?,
         subtaskTotal: subtaskTotal ?? this.subtaskTotal,
         subtaskDone: subtaskDone ?? this.subtaskDone,
-        deletedAt: deletedAt ?? this.deletedAt,
+        deletedAt: deletedAt == _kKeep ? this.deletedAt : deletedAt as DateTime?,
         repeat: repeat ?? this.repeat,
         repeatWeekdays: repeatWeekdays ?? this.repeatWeekdays,
         repeatInterval: repeatInterval ?? this.repeatInterval,
-        repeatMinute: repeatMinute ?? this.repeatMinute,
-        repeatAnchor: repeatAnchor ?? this.repeatAnchor,
+        repeatMinute:
+            repeatMinute == _kKeep ? this.repeatMinute : repeatMinute as int?,
+        repeatAnchor: repeatAnchor == _kKeep
+            ? this.repeatAnchor
+            : repeatAnchor as DateTime?,
         note: note ?? this.note,
       );
 
