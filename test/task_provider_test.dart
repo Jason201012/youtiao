@@ -4,11 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'test_helpers.dart';
 
 /// 在 headless 测试里把 flutter_local_notifications 的 method channel 置为 no-op，
 /// 并给 shared_preferences 一个内存实现，避免删除类操作触碰真实插件而抛 MissingPluginException。
 void _installMocks() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  useMemoryDatabase();
   SharedPreferencesStorePlatform.instance = InMemorySharedPreferencesStore.empty();
   const ch = MethodChannel('dexterous.com/flutter/local_notifications');
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

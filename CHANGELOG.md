@@ -1,5 +1,10 @@
 # 更新日志（Changelog）
 
+## v2.2.4（2026-08-06）
+
+- **本地存储迁移至 SQLite**：任务、回收站与专注记录原先全部以单个 JSON 字符串存于 SharedPreferences，现已迁入 sqflite 数据库（tasks / trash / focus_sessions 三张表）。旧版 SharedPreferences 中的 JSON 会在首次启动时自动迁移到数据库并清除旧 key，老用户数据无缝升级、不丢失。
+- 版本升至 v2.2.4（versionCode 45）。
+
 ## v2.2.3（2026-08-06）
 
 - **修复「检查更新」跳转浏览器下载**：改为应用内直接下载 APK（http 流式下载到外部缓存，带实时进度条），下载完成后经 FileProvider + 系统安装器直接安装，不再跳转到外部浏览器；仅保留「浏览器下载」作为失败兜底。

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:todolist/services/local_database.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
@@ -11,7 +12,6 @@ enum TaskFilter { all, todo, done, overdue }
 /// 内存状态 + shared_preferences 持久化（任务列表与开关设置落盘，重启不丢）
 class TaskProvider extends ChangeNotifier {
   static const String _kTasks = 'tasks';
-  static const String _kTrash = 'trash';
   static const String _kTheme = 'theme_mode';
   static const String _kFollowSystem = 'follow_system';
   static const String _kNotify = 'notifications_enabled';
@@ -31,7 +31,7 @@ class TaskProvider extends ChangeNotifier {
   void setFollowSystem(bool v) {
     _followSystem = v;
     notifyListeners();
-    _persist();
+    _persistSettings();
   }
 
   /// 手动选择浅色/深色：自动退出「跟随系统」。
@@ -39,7 +39,7 @@ class TaskProvider extends ChangeNotifier {
     _followSystem = false;
     _themeMode = dark ? ThemeMode.dark : ThemeMode.light;
     notifyListeners();
-    _persist();
+    _persistSettings();
   }
 
   // ===== 通知总开关 =====
@@ -57,7 +57,7 @@ class TaskProvider extends ChangeNotifier {
       NotificationService.instance.cancelAll();
     }
     notifyListeners();
-    _persist();
+    _persistSettings();
   }
 
   /// 请求通知权限并返回是否授予（设置页「发送测试通知」前调用，
@@ -79,7 +79,7 @@ class TaskProvider extends ChangeNotifier {
       _rescheduleAllActive();
     }
     notifyListeners();
-    _persist();
+    _persistSettings();
   }
 
   /// 后台提醒守护开关：开启则拉起前台服务（进程常驻），关闭则停止。
@@ -93,36 +93,32 @@ class TaskProvider extends ChangeNotifier {
       await BackgroundService.instance.stop();
     }
     notifyListeners();
-    _persist();
+    _persistSettings();
   }
 
-  // ===== 持久化（shared_preferences）=====
+  // ===== 持久化（shared_preferences + sqflite）=====
   /// 启动时调用：从本地读取任务列表与开关设置；首次启动则保留 7 条 mock 并落盘。
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_kTasks);
-    if (raw == null) {
-      await _persist(); // 首次启动：写入初始 mock
-    } else {
-      try {
-        final list = jsonDecode(raw) as List;
-        _tasks
-          ..clear()
-          ..addAll(list.map((e) => Task.fromJson(e as Map<String, dynamic>)));
-      } catch (_) {
-        await _persist(); // 解析失败则回退到内存初始值
-      }
+    // 确保数据库已打开（首次启动会建表）。
+    final db = LocalDatabase.instance;
+    await db.db;
+    // —— 从旧版 SharedPreferences JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
+    if (await db.tasksEmpty && prefs.getString(_kTasks) != null) {
+      await db.migrateTasksFromPrefs(prefs);
     }
-    final rawTrash = prefs.getString(_kTrash);
-    if (rawTrash != null) {
-      try {
-        final list = jsonDecode(rawTrash) as List;
-        _trash
-          ..clear()
-          ..addAll(list.map((e) => Task.fromJson(e as Map<String, dynamic>)));
-      } catch (_) {
-        // 回收站解析失败则忽略，不影响正常任务
-      }
+    final loadedTasks = await db.loadTasks();
+    final loadedTrash = await db.loadTrash();
+    if (loadedTasks.isEmpty && loadedTrash.isEmpty) {
+      // 全新安装：保留内置 7 条 mock 并落库。
+      await _persist();
+    } else {
+      _tasks
+        ..clear()
+        ..addAll(loadedTasks);
+      _trash
+        ..clear()
+        ..addAll(loadedTrash);
     }
     final themeIdx = prefs.getInt(_kTheme);
     if (themeIdx != null &&
@@ -189,18 +185,20 @@ class TaskProvider extends ChangeNotifier {
     WidgetsBinding.instance.addObserver(_LifecycleObserver(this));
   }
 
-  /// 把当前任务列表与开关设置写入本地。
-  Future<void> _persist() async {
+  /// 仅持久化开关/主题等偏好（写入 SharedPreferences）。任务数据由 [_persist] 落 SQLite。
+  Future<void> _persistSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-        _kTasks, jsonEncode(_tasks.map((t) => t.toJson()).toList()));
-    await prefs.setString(
-        _kTrash, jsonEncode(_trash.map((t) => t.toJson()).toList()));
     await prefs.setInt(_kTheme, _themeMode.index);
     await prefs.setBool(_kFollowSystem, _followSystem);
     await prefs.setBool(_kNotify, _notificationsEnabled);
     await prefs.setBool(_kSound, _soundEnabled);
     await prefs.setBool(_kGuard, _backgroundGuard);
+  }
+
+  /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
+  Future<void> _persist() async {
+    await _persistSettings();
+    await LocalDatabase.instance.replaceTasks(_tasks, _trash);
   }
 
   /// 载入后重算自增 id 起点，避免新任务 id 与已有（含回收站）冲突。

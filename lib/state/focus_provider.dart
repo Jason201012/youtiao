@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/focus_session.dart';
+import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/notification_service.dart';
 
 /// 专注会话的持久化与统计。独立于 TaskProvider，避免相互耦合；
@@ -47,18 +48,17 @@ class FocusProvider extends ChangeNotifier {
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_kFocus);
     final saved = prefs.getInt(_kCustom);
     if (saved != null && saved > 0) _customSec = saved;
-    if (raw == null) return;
-    try {
-      final list = jsonDecode(raw) as List;
-      _sessions
-        ..clear()
-        ..addAll(list.map((e) => FocusSession.fromJson(e as Map<String, dynamic>)));
-    } catch (_) {
-      // 解析失败：丢弃损坏数据，不阻塞启动。
+    // —— 专注会话从旧版 SP JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
+    final db = LocalDatabase.instance;
+    await db.db;
+    if (await db.focusEmpty && prefs.getString(_kFocus) != null) {
+      await db.migrateFocusFromPrefs(prefs);
     }
+    _sessions
+      ..clear()
+      ..addAll(await db.loadFocus());
     // 恢复进行中的番茄钟：杀后台 / 重启后据此恢复，避免时长丢失。
     final rawA = prefs.getString(_kActive);
     if (rawA != null) {
@@ -102,11 +102,7 @@ class FocusProvider extends ChangeNotifier {
   }
 
   Future<void> _persist() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _kFocus,
-      jsonEncode(_sessions.map((s) => s.toJson()).toList()),
-    );
+    await LocalDatabase.instance.replaceFocus(_sessions);
   }
 
   /// 持久化进行中的番茄钟运行态；无进行中则删除该 key。

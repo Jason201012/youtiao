@@ -4,9 +4,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'test_helpers.dart';
 
 void _installMocks() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  useMemoryDatabase();
   SharedPreferencesStorePlatform.instance = InMemorySharedPreferencesStore.empty();
   const ch = MethodChannel('dexterous.com/flutter/local_notifications');
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

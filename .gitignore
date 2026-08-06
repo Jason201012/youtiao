@@ -98,3 +98,8 @@ key.properties
 
 # 发版产物（APK 不进 git，仅作发行版附件）
 dist/
+
+# 构建符号链接规避产生的临时/备份目录（不进 git，已移入 .workbuddy/junk_archive/）
+_build_junk_*/
+_build_bak_*/
+_agradle_bak_*/
