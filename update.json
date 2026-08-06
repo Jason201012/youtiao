@@ -1,8 +1,8 @@
 {
-  "version": "2.2.4",
-  "tag": "v2.2.4",
-  "name": "v2.2.4",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.4/app-release-v2.2.4.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.4",
-  "notes": "本地存储迁移至 SQLite（sqflite）：任务、回收站与专注记录原先全部以单个 JSON 字符串存于 SharedPreferences，现已迁入 sqflite 数据库（tasks / trash / focus_sessions 三张表）。旧版 SharedPreferences 中的 JSON 会在首次启动时自动迁移到数据库并清除旧 key，老用户数据无缝升级、不丢失。版本升至 v2.2.4（versionCode 45）。"
+  "version": "2.2.5",
+  "tag": "v2.2.5",
+  "name": "v2.2.5",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.5/app-release-v2.2.5.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.5",
+  "notes": "深化专注 Tab：① 专注页新增「专注历史趋势图」（日/周/月专注时长走势）；② 开始专注前可「关联任务」（也可留空＝独立专注），完成后写入会话；③ 新增「任务专注统计」按关联任务聚合累计时长与次数；④ 新增锁屏常驻进度通知，专注进行中持续显示剩余时间并每秒刷新；⑤ 专注结束自动记日历：应用内日历对应日期显示该次专注，设置新增「专注结束记入系统日历」开关（默认关闭），开启后写入系统日历事件。版本升至 v2.2.5（versionCode 46）。"
 }
