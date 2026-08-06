@@ -118,4 +118,52 @@ void main() {
       expect(p.exportMarkdown(), contains('专注记录导出'));
     });
   });
+
+  group('任务关联统计', () {
+    test('taskStats 按关联任务聚合累计时长/次数，并按时长降序', () {
+      final p = FocusProvider();
+      final t = DateTime.now();
+      p.addSession(FocusSession(
+        id: '1', taskId: 'a', taskTitle: '写代码', plannedSec: 600, durationSec: 600,
+        completed: true, startedAt: t.subtract(const Duration(seconds: 600)), endedAt: t));
+      p.addSession(FocusSession(
+        id: '2', taskId: 'a', taskTitle: '写代码', plannedSec: 300, durationSec: 300,
+        completed: true, startedAt: t.subtract(const Duration(seconds: 300)), endedAt: t));
+      p.addSession(FocusSession(
+        id: '3', taskId: 'b', taskTitle: '读书', plannedSec: 100, durationSec: 100,
+        completed: true, startedAt: t.subtract(const Duration(seconds: 100)), endedAt: t));
+      p.addSession(mk(4, 50)); // 独立专注，无 taskId
+      final stats = p.taskStats;
+      expect(stats.length, 2);
+      expect(stats.first.taskId, 'a');
+      expect(stats.first.totalSec, 900);
+      expect(stats.first.count, 2);
+      expect(stats.last.taskId, 'b');
+      expect(stats.last.totalSec, 100);
+    });
+
+    test('startTimer 接收关联任务，stopTimer 会话写入 taskId/taskTitle', () async {
+      final p = FocusProvider();
+      await p.startTimer(totalSec: 100, modeIndex: 0, customSec: 100,
+          taskId: 'a', taskTitle: '写代码');
+      expect(p.activeTaskId, 'a');
+      p.activeSegmentStartEpochMs =
+          DateTime.now().subtract(const Duration(seconds: 40)).millisecondsSinceEpoch;
+      p.activeRunning = true;
+      await p.stopTimer();
+      expect(p.sessions.first.taskId, 'a');
+      expect(p.sessions.first.taskTitle, '写代码');
+      expect(p.sessions.first.durationSec, 40);
+    });
+
+    test('sessionsOn 返回某天结束的会话', () {
+      final p = FocusProvider();
+      final today = DateTime.now();
+      final y = today.subtract(const Duration(days: 1));
+      p.addSession(mk(1, 600, endedAt: today));
+      p.addSession(mk(2, 300, endedAt: y));
+      expect(p.sessionsOn(today).length, 1);
+      expect(p.sessionsOn(y).length, 1);
+    });
+  });
 }

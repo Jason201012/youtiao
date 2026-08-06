@@ -7,7 +7,10 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/focus_share_sheet.dart';
+import 'package:todolist/widgets/focus_trend_stats.dart';
+import 'package:todolist/widgets/focus_task_stats.dart';
 import 'package:todolist/services/focus_audio_service.dart';
+import 'package:todolist/state/task_provider.dart';
 
 /// 专注页（番茄钟）：大圆环倒计时 + 预设切换 + 可选关联任务 + 今日统计与记录。
 ///
@@ -42,6 +45,10 @@ class _FocusScreenState extends State<FocusScreen> {
   bool _lastRunning = false;
   Set<FocusSoundType> _soundTypes = {};
   double _soundVol = 0.5;
+
+  /// 关联任务选择（开始专注前可选；null = 独立专注）。
+  String? _selectedTaskId;
+  String? _selectedTaskTitle;
 
   @override
   void initState() {
@@ -213,6 +220,8 @@ class _FocusScreenState extends State<FocusScreen> {
         totalSec: _totalSec,
         modeIndex: _modeIndex,
         customSec: _customSec,
+        taskId: _selectedTaskId,
+        taskTitle: _selectedTaskTitle,
       );
     }
   }
@@ -275,6 +284,10 @@ class _FocusScreenState extends State<FocusScreen> {
                   onBg: onBg,
                   meta: ext.meta,
                 ),
+                const SizedBox(height: 16),
+
+                // 专注历史趋势图
+                FocusTrendStats(focus: focus),
                 const SizedBox(height: 16),
 
                 // 预设切换
@@ -347,7 +360,19 @@ class _FocusScreenState extends State<FocusScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 28),
+                const SizedBox(height: 20),
+
+                // 关联任务选择（开始专注前可选）
+                _TaskPicker(
+                  selectedTaskId: _selectedTaskId,
+                  onPick: canSwitchPreset
+                      ? (id, title) => setState(() {
+                            _selectedTaskId = id;
+                            _selectedTaskTitle = title;
+                          })
+                      : (_, __) {},
+                ),
+                const SizedBox(height: 24),
 
                 // 大圆环倒计时
                 SizedBox(
@@ -440,6 +465,11 @@ class _FocusScreenState extends State<FocusScreen> {
                     onClear: _clearSound,
                     onVolume: _setVol,
                   ),
+
+                const SizedBox(height: 16),
+
+                // 专注与任务关联统计
+                FocusTaskStats(focus: focus),
 
                 const SizedBox(height: 24),
 
@@ -750,4 +780,95 @@ class _SoundCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 关联任务选择器：横向 chip 列表，含「独立专注」与各个任务；开始前可选。
+class _TaskPicker extends StatelessWidget {
+  final String? selectedTaskId;
+  final void Function(String? id, String? title) onPick;
+  const _TaskPicker({required this.selectedTaskId, required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final meta = ext.meta;
+    final primary = Theme.of(context).colorScheme.primary;
+    final tasks = context.watch<TaskProvider>().tasks;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text('关联任务（可选）',
+              style: TextStyle(fontSize: 13, color: meta)),
+        ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              _TaskChip(
+                label: '独立专注',
+                selected: selectedTaskId == null,
+                primary: primary,
+                meta: meta,
+                ext: ext,
+                onTap: () => onPick(null, null),
+              ),
+              for (final t in tasks)
+                _TaskChip(
+                  label: t.title,
+                  selected: selectedTaskId == t.id,
+                  primary: primary,
+                  meta: meta,
+                  ext: ext,
+                  onTap: () => onPick(t.id, t.title),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TaskChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color primary;
+  final Color meta;
+  final AppColorsExt ext;
+  final VoidCallback onTap;
+  const _TaskChip({
+    required this.label,
+    required this.selected,
+    required this.primary,
+    required this.meta,
+    required this.ext,
+    required this.onTap,
+  });
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            height: 32,
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            decoration: BoxDecoration(
+              color: selected ? primary : ext.chip,
+              borderRadius: BorderRadius.circular(AppColors.chipRadius),
+            ),
+            child: Center(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: selected ? Colors.white : meta,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
 }

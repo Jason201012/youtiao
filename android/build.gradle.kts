@@ -32,6 +32,17 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// 强制所有子项目（含 add_2_calendar 等 Flutter 插件）Kotlin 编译目标为 JVM 17，
+// 否则插件模块在 JDK 25 下 Kotlin 目标(25) 与 Java 目标(17) 不一致，报
+// "Inconsistent JVM Target Compatibility" 而构建失败。
+subprojects {
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }

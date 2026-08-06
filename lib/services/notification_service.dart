@@ -34,9 +34,16 @@ class NotificationService {
   static const String _chSound = 'todo_reminder';
   static const String _chSilent = 'todo_reminder_silent';
 
+  /// 专注进行中常驻通知渠道（锁屏可见、无声、无角标）。
+  static const String _chFocusProgress = 'focus_progress';
+
   /// 专注（番茄钟）完成通知固定 id：schedule / cancel / show 必须共用同一 id，
   /// 这样「系统闹钟到点弹」与「应用内到点补弹」会互相覆盖而非重复成两条。
   static const int focusDoneNotifyId = 777777;
+
+  /// 专注进行中常驻进度通知固定 id（与完成提醒 [focusDoneNotifyId] 区分，
+  /// 避免互相取消）。锁屏可见剩余时间，暂停/停止/完成时取消。
+  static const int focusProgressNotifyId = 777778;
 
   /// 专注完成通知的 Android 样式（复用有声渠道，确保完成时能引起注意）。
   AndroidNotificationDetails get _focusDoneAndroid => const AndroidNotificationDetails(
@@ -119,6 +126,14 @@ class NotificationService {
       description: '任务截止时间提醒（无声音）',
       importance: Importance.high,
       playSound: false,
+    ));
+    await plugin.createNotificationChannel(const AndroidNotificationChannel(
+      _chFocusProgress,
+      '专注进行中',
+      description: '专注计时常驻通知（锁屏显示剩余时间）',
+      importance: Importance.defaultImportance,
+      playSound: false,
+      showBadge: false,
     ));
   }
 
@@ -523,6 +538,54 @@ class NotificationService {
         '你已完成一个番茄钟，记录已保存',
         NotificationDetails(android: _focusDoneAndroid),
       );
+
+  /// 专注进行中的常驻进度通知：锁屏可见剩余时间，每秒刷新。
+  /// [ongoing]=true 使其成为不会被自动划掉的前台式通知；完成/暂停/停止时由
+  /// [cancelFocusProgress] 取消。与完成提醒（[focusDoneNotifyId]）互不干扰。
+  Future<void> showFocusProgress({
+    required int remainingSec,
+    required int totalSec,
+    String? taskTitle,
+  }) async {
+    final r = remainingSec.clamp(0, 359999);
+    final rh = r ~/ 3600;
+    final rm = (r % 3600) ~/ 60;
+    final rs = r % 60;
+    final remStr = rh > 0
+        ? '$rh:${rm.toString().padLeft(2, '0')}:${rs.toString().padLeft(2, '0')}'
+        : '${rm.toString().padLeft(2, '0')}:${rs.toString().padLeft(2, '0')}';
+    final title = taskTitle == null ? '专注进行中' : '专注中 · $taskTitle';
+    final percent = totalSec <= 0
+        ? 0
+        : ((1 - remainingSec / totalSec) * 100).round().clamp(0, 100);
+    final android = AndroidNotificationDetails(
+      _chFocusProgress,
+      '专注进行中',
+      channelDescription: '专注计时常驻通知（锁屏显示剩余时间）',
+      importance: Importance.defaultImportance,
+      priority: Priority.low,
+      ongoing: true,
+      autoCancel: false,
+      showProgress: true,
+      maxProgress: 100,
+      progress: percent,
+      playSound: false,
+      channelShowBadge: false,
+    );
+    try {
+      await _plugin.show(
+        focusProgressNotifyId,
+        title,
+        '剩余 $remStr',
+        NotificationDetails(android: android),
+      );
+    } catch (e) {
+      debugPrint('[通知] 专注进度通知失败: $e');
+    }
+  }
+
+  /// 取消专注进行中的常驻进度通知（暂停 / 停止 / 自然完成 / 启动时清理残留）。
+  Future<void> cancelFocusProgress() => _plugin.cancel(focusProgressNotifyId);
 
   /// 挂上「每日任务当天 00:00 自动重置」的午夜闹钟（setAlarmClock，ColorOS 可靠，
   /// 不依赖 App 是否打开）。由原生 MidnightResetReceiver 在午夜触发并自循环调度。

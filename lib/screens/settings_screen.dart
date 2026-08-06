@@ -3,6 +3,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -39,7 +40,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '2.2.4');
+      if (mounted) setState(() => _version = '2.2.5');
     }
   }
 
@@ -115,6 +116,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       label: '后台提醒守护',
                       switchValue: provider.backgroundGuardEnabled,
                       onSwitchChanged: (v) => provider.setBackgroundGuard(v),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    Consumer<FocusProvider>(
+                      builder: (context, focus, _) => SettingsRow(
+                        icon: Symbols.calendar_month,
+                        label: '专注结束记入系统日历',
+                        switchValue: focus.sysCalendarEnabled,
+                        onSwitchChanged: (v) => focus.setSysCalendarEnabled(v),
+                      ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(

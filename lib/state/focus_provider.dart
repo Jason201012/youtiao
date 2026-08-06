@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/calendar_exporter.dart';
 
 /// 专注会话的持久化与统计。独立于 TaskProvider，避免相互耦合；
 /// 仅依赖 shared_preferences，key 为 [ _kFocus ]。
@@ -19,6 +20,7 @@ class FocusProvider extends ChangeNotifier {
   static const String _kFocus = 'focus_sessions';
   static const String _kCustom = 'focus_custom_sec';
   static const String _kActive = 'focus_active_timer';
+  static const String _kSysCal = 'focus_sys_calendar';
 
   final List<FocusSession> _sessions = [];
 
@@ -40,6 +42,14 @@ class FocusProvider extends ChangeNotifier {
   /// 启动时的自定义秒数（custom 模式用）。
   int activeCustomSec = 0;
 
+  /// 进行中番茄钟关联的任务（可选）；完成/停止时写入会话。
+  String? activeTaskId;
+  String? activeTaskTitle;
+
+  /// 专注结束是否自动记入系统日历（设置项，默认关闭）。
+  bool _sysCalendarEnabled = false;
+  bool get sysCalendarEnabled => _sysCalendarEnabled;
+
   Timer? _tickTimer;
 
   /// 所有会话（按结束时间倒序，最新在前）。
@@ -50,6 +60,7 @@ class FocusProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getInt(_kCustom);
     if (saved != null && saved > 0) _customSec = saved;
+    _sysCalendarEnabled = prefs.getBool(_kSysCal) ?? false;
     // —— 专注会话从旧版 SP JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
     final db = LocalDatabase.instance;
     await db.db;
@@ -70,6 +81,8 @@ class FocusProvider extends ChangeNotifier {
         activeRunning = m['running'] as bool? ?? false;
         activeModeIndex = m['modeIndex'] as int? ?? 0;
         activeCustomSec = m['customSec'] as int? ?? 0;
+        activeTaskId = m['taskId'] as String?;
+        activeTaskTitle = m['taskTitle'] as String?;
         if (activeTotalSec > 0 &&
             activeRunning &&
             activeSegmentStartEpochMs != null) {
@@ -88,6 +101,10 @@ class FocusProvider extends ChangeNotifier {
       } catch (_) {
         // 损坏则丢弃运行态，不影响其它功能。
       }
+    }
+    // 清理可能残留的「进行中」常驻通知（上次异常退出/被杀后未取消）。
+    if (!hasActive) {
+      await NotificationService.instance.cancelFocusProgress();
     }
     notifyListeners();
   }
@@ -121,6 +138,8 @@ class FocusProvider extends ChangeNotifier {
         'running': activeRunning,
         'modeIndex': activeModeIndex,
         'customSec': activeCustomSec,
+        'taskId': activeTaskId,
+        'taskTitle': activeTaskTitle,
       }),
     );
   }
@@ -157,6 +176,8 @@ class FocusProvider extends ChangeNotifier {
     required int totalSec,
     required int modeIndex,
     required int customSec,
+    String? taskId,
+    String? taskTitle,
   }) async {
     final now = DateTime.now();
     _tickTimer?.cancel();
@@ -166,9 +187,16 @@ class FocusProvider extends ChangeNotifier {
     activeRunning = true;
     activeModeIndex = modeIndex;
     activeCustomSec = customSec;
+    activeTaskId = taskId;
+    activeTaskTitle = taskTitle;
     _startTick();
     await _persistActive();
     await _scheduleCompletion();
+    await NotificationService.instance.showFocusProgress(
+      remainingSec: remainingSec,
+      totalSec: activeTotalSec,
+      taskTitle: activeTaskTitle,
+    );
     notifyListeners();
   }
 
@@ -185,6 +213,7 @@ class FocusProvider extends ChangeNotifier {
     activeRunning = false;
     _tickTimer?.cancel();
     await _cancelCompletion();
+    await NotificationService.instance.cancelFocusProgress();
     await _persistActive();
     notifyListeners();
   }
@@ -208,17 +237,22 @@ class FocusProvider extends ChangeNotifier {
     _tickTimer?.cancel();
     if (elapsed > 0) {
       final now = DateTime.now();
-      addSession(FocusSession(
+      final s = FocusSession(
         id: now.millisecondsSinceEpoch.toString(),
+        taskId: activeTaskId,
+        taskTitle: activeTaskTitle,
         plannedSec: activeTotalSec,
         durationSec: elapsed,
         completed: false,
         startedAt: now.subtract(Duration(seconds: elapsed)),
         endedAt: now,
-      ));
+      );
+      addSession(s);
+      _maybeExportToCalendar(s);
     }
     _resetActive();
     await _cancelCompletion();
+    await NotificationService.instance.cancelFocusProgress();
     await _persistActive();
     notifyListeners();
   }
@@ -242,6 +276,12 @@ class FocusProvider extends ChangeNotifier {
     if (remainingSec <= 0) {
       _completeNaturally();
     } else {
+      // 每次心跳刷新锁屏/通知上的剩余时间（常驻进度通知）。
+      NotificationService.instance.showFocusProgress(
+        remainingSec: remainingSec,
+        totalSec: activeTotalSec,
+        taskTitle: activeTaskTitle,
+      );
       notifyListeners();
     }
   }
@@ -255,14 +295,19 @@ class FocusProvider extends ChangeNotifier {
     final ended = start.add(Duration(seconds: total));
     _resetActive();
     await _cancelCompletion();
-    addSession(FocusSession(
+    await NotificationService.instance.cancelFocusProgress();
+    final s = FocusSession(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
+      taskId: activeTaskId,
+      taskTitle: activeTaskTitle,
       plannedSec: total,
       durationSec: total,
       completed: true,
       startedAt: start,
       endedAt: ended,
-    ));
+    );
+    addSession(s);
+    _maybeExportToCalendar(s);
     await NotificationService.instance.showFocusDoneNow();
     notifyListeners();
   }
@@ -275,15 +320,20 @@ class FocusProvider extends ChangeNotifier {
         : DateTime.now().subtract(Duration(seconds: total));
     final ended = start.add(Duration(seconds: total));
     _resetActive();
-    addSession(FocusSession(
+    final s = FocusSession(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
+      taskId: activeTaskId,
+      taskTitle: activeTaskTitle,
       plannedSec: total,
       durationSec: total,
       completed: true,
       startedAt: start,
       endedAt: ended,
-    ));
+    );
+    addSession(s);
+    _maybeExportToCalendar(s);
     await _cancelCompletion();
+    await NotificationService.instance.cancelFocusProgress();
     notifyListeners();
   }
 
@@ -352,6 +402,60 @@ class FocusProvider extends ChangeNotifier {
     _sessions.clear();
     _persist();
     notifyListeners();
+  }
+
+  /// 按关联任务聚合的专注统计（仅含带 taskId 的会话）。
+  /// 返回按累计时长降序的列表，供「专注与任务关联统计」展示。
+  List<TaskFocusStat> get taskStats {
+    final map = <String, TaskFocusStat>{};
+    for (final s in _sessions) {
+      if (s.taskId == null) continue;
+      final existing = map[s.taskId!];
+      if (existing == null) {
+        map[s.taskId!] = TaskFocusStat(
+          taskId: s.taskId!,
+          title: s.taskTitle ?? '任务',
+          totalSec: s.durationSec,
+          count: 1,
+        );
+      } else {
+        map[s.taskId!] = TaskFocusStat(
+          taskId: existing.taskId,
+          title: existing.title,
+          totalSec: existing.totalSec + s.durationSec,
+          count: existing.count + 1,
+        );
+      }
+    }
+    final list = map.values.toList()
+      ..sort((a, b) => b.totalSec.compareTo(a.totalSec));
+    return list;
+  }
+
+  /// 某天（date-only）结束的专注会话列表（供日历显示）。
+  List<FocusSession> sessionsOn(DateTime day) {
+    final d = DateTime(day.year, day.month, day.day);
+    return _sessions.where((s) {
+      final sd = DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day);
+      return sd == d;
+    }).toList();
+  }
+
+  /// 设置「专注结束自动记入系统日历」开关并持久化。
+  Future<void> setSysCalendarEnabled(bool v) async {
+    _sysCalendarEnabled = v;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kSysCal, v);
+    notifyListeners();
+  }
+
+  /// 若开启系统日历同步，则在专注结束时写入一条系统日历事件（失败静默）。
+  void _maybeExportToCalendar(FocusSession s) {
+    if (!_sysCalendarEnabled) return;
+    exportFocusToSystemCalendar(s).catchError((_) {
+      // 权限未授予 / 平台不支持等情况不应影响专注记录本身。
+      return;
+    });
   }
 
   // ===== 备份 / 导出 / 恢复（番茄钟每日专注并入「自动保存数据与导出」）=====
@@ -426,4 +530,18 @@ class FocusProvider extends ChangeNotifier {
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   static String _esc(String s) => s.replaceAll('"', '""');
+}
+
+/// 单个任务的专注聚合统计。
+class TaskFocusStat {
+  final String taskId;
+  final String title;
+  final int totalSec;
+  final int count;
+  const TaskFocusStat({
+    required this.taskId,
+    required this.title,
+    required this.totalSec,
+    required this.count,
+  });
 }

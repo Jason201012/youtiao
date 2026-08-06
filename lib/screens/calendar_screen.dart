@@ -4,6 +4,8 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
@@ -259,6 +261,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final isToday = _sameDay(date, today);
     final dueTasks = provider.tasksDueOn(date);
     final isFuture = date.isAfter(today);
+    final focusMin =
+        (Provider.of<FocusProvider>(context, listen: false).totalSecOn(date) / 60)
+            .round();
+    final focusLabel =
+        focusMin >= 60 ? '${(focusMin / 60).toStringAsFixed(1)}h' : '${focusMin}分';
     final strong = level >= 3;
     final textColor =
         strong ? Colors.white : (isFuture ? ext.meta.withAlpha(150) : onBg);
@@ -302,6 +309,18 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       child: Text('+${dueTasks.length - 2}',
                           style: TextStyle(fontSize: 10, color: ext.meta)),
                     ),
+                if (focusMin > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1, left: 2),
+                    child: Row(
+                      children: [
+                        Icon(Symbols.timer, size: 9, color: ext.meta),
+                        const SizedBox(width: 2),
+                        Text(focusLabel,
+                            style: TextStyle(fontSize: 10, color: ext.meta)),
+                      ],
+                    ),
+                  ),
                 ],
             ],
           ),
@@ -548,20 +567,23 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 ),
                 const Divider(height: 16),
                 Expanded(
-                  child: tasks.isEmpty
-                      ? Center(
-                          child: Text('当天没有到期任务',
-                              style: TextStyle(color: AppColors.lightMeta)))
-                      : ListView.separated(
-                          controller: controller,
-                          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                          itemCount: tasks.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 10),
-                          itemBuilder: (_, idx) {
-                            final t = tasks[idx];
-                            final pColor = _priorityColor(t.priority, isDark);
-                            return Row(
+                  child: ListView(
+                    controller: controller,
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                    children: [
+                      if (tasks.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 20),
+                          child: Center(
+                              child: Text('当天没有到期任务',
+                                  style: TextStyle(
+                                      color: AppColors.lightMeta))),
+                        )
+                      else
+                        for (final t in tasks)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: Row(
                               children: [
                                 SizedBox(
                                   width: 22,
@@ -578,7 +600,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                     width: 10,
                                     height: 10,
                                     decoration: BoxDecoration(
-                                        color: pColor,
+                                        color: _priorityColor(t.priority, isDark),
                                         borderRadius: BorderRadius.circular(3))),
                                 const SizedBox(width: 12),
                                 Expanded(
@@ -605,9 +627,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                   ),
                                 ),
                               ],
-                            );
-                          },
-                        ),
+                            ),
+                          ),
+                      _focusSectionForDay(context, date, onBg),
+                    ],
+                  ),
                 ),
               ],
             );
@@ -663,4 +687,71 @@ Color _priorityColor(Priority p, bool isDark) {
   if (p == Priority.medium)
     return isDark ? AppColors.darkMedium : AppColors.lightMedium;
   return isDark ? AppColors.darkLow : AppColors.lightLow;
+}
+
+/// 某天的专注记录区块（在日历「日期详情」底部展示）：列出当天结束的专注会话。
+Widget _focusSectionForDay(BuildContext context, DateTime date, Color onBg) {
+  final focus = Provider.of<FocusProvider>(context, listen: false);
+  final sessions = focus.sessionsOn(date);
+  if (sessions.isEmpty) return const SizedBox.shrink();
+  final ext = appColors(context);
+  final meta = AppColors.lightMeta;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const SizedBox(height: 16),
+      Row(
+        children: [
+          Icon(Symbols.timer, size: 16, color: ext.meta),
+          const SizedBox(width: 6),
+          Text('专注记录',
+              style: TextStyle(
+                  fontSize: 15, fontWeight: FontWeight.bold, color: onBg)),
+          const Spacer(),
+          Text('${sessions.length} 次',
+              style: TextStyle(fontSize: 12, color: meta)),
+        ],
+      ),
+      const SizedBox(height: 8),
+      for (final s in sessions)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+            decoration: BoxDecoration(
+              color: ext.chip,
+              borderRadius: BorderRadius.circular(AppColors.cardRadius),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  s.completed ? Symbols.local_fire_department : Symbols.timer,
+                  size: 18,
+                  color: ext.meta,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(s.taskTitle ?? '独立专注',
+                          style: TextStyle(fontSize: 13, color: onBg),
+                          overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${TimeOfDay.fromDateTime(s.startedAt).format(context)} → '
+                        '${TimeOfDay.fromDateTime(s.endedAt).format(context)}',
+                        style: TextStyle(fontSize: 11, color: meta),
+                      ),
+                    ],
+                  ),
+                ),
+                Text(formatFocusDuration(s.durationSec),
+                    style: TextStyle(fontSize: 13, color: meta)),
+              ],
+            ),
+          ),
+        ),
+    ],
+  );
 }
