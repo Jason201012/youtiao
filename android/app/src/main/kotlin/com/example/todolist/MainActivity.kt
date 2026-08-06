@@ -9,15 +9,18 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.todolist/exact_alarm"
     private val CHANNEL_IO = "com.example.todolist/file_io"
     private val CHANNEL_BG = "com.example.todolist/background_service"
     private val CHANNEL_MIDNIGHT = "com.example.todolist/midnight_reset"
+    private val CHANNEL_INSTALL = "com.example.todolist/installer"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -227,5 +230,40 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 应用内更新：接收 APK 文件路径，经 FileProvider 生成 content:// uri 后
+        // 唤起系统安装器（Android 7+ 不允许以 file:// 跨应用传递，否则抛 FileUriExposedException）。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_INSTALL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("NO_PATH", "path 为空", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            installApk(File(path))
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("INSTALL_FAILED", e.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun installApk(apk: File) {
+        val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+        } else {
+            Uri.fromFile(apk)
+        }
+        val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = uri
+            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(intent)
     }
 }

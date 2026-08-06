@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'package:todolist/services/update_checker.dart';
 
-/// 发现新版本时的弹窗：展示版本与更新说明，提供下载 / 稍后 / 跳过此版本。
+import 'package:todolist/services/update_checker.dart';
+import 'package:todolist/widgets/update_download_dialog.dart';
+
+/// 发现新版本时的弹窗：展示版本与更新说明，提供「应用内更新」/「稍后」/「跳过此版本」。
 class UpdateDialog {
   static Future<void> show(BuildContext context, UpdateInfo info) async {
     if (!context.mounted) return;
@@ -54,17 +55,12 @@ class UpdateDialog {
             child: const Text('稍后'),
           ),
           FilledButton(
-            onPressed: () async {
+            onPressed: () {
               Navigator.pop(ctx);
-              final url = info.apkUrl ?? info.releaseUrl;
-              if (url != null) {
-                final uri = Uri.parse(url);
-                if (await canLaunchUrl(uri)) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              }
+              // 应用内下载并安装，不再跳转到浏览器。
+              UpdateDownloadDialog.show(context, info);
             },
-            child: const Text('立即下载'),
+            child: const Text('立即更新'),
           ),
         ],
       ),

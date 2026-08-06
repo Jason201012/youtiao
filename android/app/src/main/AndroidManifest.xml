@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- 应用内更新检测：访问 Gitee 发行版 API 判断是否有新版本 -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 应用内下载并安装 APK：Android 8+ 安装未知来源应用必须声明，否则系统安装器直接拒绝 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <!-- 精确闹钟权限：ColorOS 等国产 ROM 对 setAlarmClock 也限制，必须用精确模式才能准点提醒 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <!-- 开机重排闹钟：守护服务进程重启后，把之前的定时提醒重新挂上 -->
@@ -84,6 +86,18 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- 应用内更新：把下载到外部缓存的 APK 经 FileProvider 暴露给系统安装器
+             （Android 7+ 禁止以 file:// 跨应用传递，必须用 content:// + 授权）。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

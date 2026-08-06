@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 应用内更新：下载的 APK 放在外部缓存目录的 updates/ 子目录，
+         经 FileProvider 暴露给系统安装器（Android 7+ 禁止 file:// 跨应用传递）。 -->
+    <external-cache-path name="updates" path="updates/" />
+</paths>
