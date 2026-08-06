@@ -286,10 +286,6 @@ class _FocusScreenState extends State<FocusScreen> {
                 ),
                 const SizedBox(height: 16),
 
-                // 专注历史趋势图
-                FocusTrendStats(focus: focus),
-                const SizedBox(height: 16),
-
                 // 预设切换
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
@@ -465,6 +461,11 @@ class _FocusScreenState extends State<FocusScreen> {
                     onClear: _clearSound,
                     onVolume: _setVol,
                   ),
+
+                const SizedBox(height: 16),
+
+                // 专注历史趋势图（置于计时钟下方）
+                FocusTrendStats(focus: focus),
 
                 const SizedBox(height: 16),
 

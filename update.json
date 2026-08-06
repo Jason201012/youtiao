@@ -1,8 +1,8 @@
 {
-  "version": "2.2.5",
-  "tag": "v2.2.5",
-  "name": "v2.2.5",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.5/app-release-v2.2.5.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.5",
-  "notes": "深化专注 Tab：① 专注页新增「专注历史趋势图」（日/周/月专注时长走势）；② 开始专注前可「关联任务」（也可留空＝独立专注），完成后写入会话；③ 新增「任务专注统计」按关联任务聚合累计时长与次数；④ 新增锁屏常驻进度通知，专注进行中持续显示剩余时间并每秒刷新；⑤ 专注结束自动记日历：应用内日历对应日期显示该次专注，设置新增「专注结束记入系统日历」开关（默认关闭），开启后写入系统日历事件。版本升至 v2.2.5（versionCode 46）。"
+  "version": "2.2.6",
+  "tag": "v2.2.6",
+  "name": "v2.2.6",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.6/app-release-v2.2.6.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.6",
+  "notes": "专注页布局优化：将「专注历史趋势图」下移到大圆环计时钟下方，计时更靠前突出、趋势走势紧随其后。版本升至 v2.2.6（versionCode 47）。"
 }
