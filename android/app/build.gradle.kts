@@ -75,21 +75,29 @@ dependencies {
 //      真正修复见下方：把 Gradle 临时目录也放到 D 盘（gradle.properties 的 org.gradle.jvmargs
 //      加 -Djava.io.tmpdir=D:/workbuddy/.gradle/tmp），让 dex-renamer 的临时文件与 build 输出同盘，
 //      跨卷 move 不再退化成符号链接；并偶尔 `flutter clean` 清掉已残留的符号链接。
+//   4) compileFlutterBuildRelease 对 flutter_assets/NOTICES.Z、processReleaseManifestForPackage 对
+//      packaged_manifests 下的 AndroidManifest.xml 快照失败，报 "not a regular file"。
+//      ⚠️ 这些文件实际上是【Windows reparse-point 符号链接】（Git Bash 的 ls/find -type l 检测不到，
+//      因为它们不是 POSIX 符号链接）。根因是工程在 D 盘、Gradle/Kotlin 缓存在 C 盘、Flutter SDK 在 C 盘，
+//      跨卷时 Gradle/Flutter 的硬链接（hardlink）创建失败，退化成 reparse 符号链接；Gradle 9.1 严格快照
+//      拒绝访问 reparse 点，故报错。
+//   根治方向：把 GRADLE_USER_HOME 设到 D 盘，使 Gradle/Kotlin 缓存与 build/ 同卷。跨卷时硬链接退化成
+//   reparse 符号链接的根因消失，缓存→build 的 staging 均为常规文件，merge*/process* 等消费任务不再报
+//   "not a regular file"。仅 Flutter 自身构建任务（compileFlutterBuild*/copyFlutterAssets*，产出在
+//   build 内部、仍可能含符号链接）需要 doNotTrackState 跳过其输出快照。
+//   ⚠️ 以下任务【绝不能】doNotTrackState，否则报 "Changes are not tracked" 直接失败：
+//   - *Dex*（mergeExtDexRelease 等需增量追踪）
+//   - *Kotlin*（Kotlin 增量编译器依赖任务状态，含 compile*Kotlin）
+//   - packageRelease / packageDebug / packageReleaseResources（打包任务）
+//   - merge* 系列（mergeReleaseJniLibFolders 等增量合并器）
+//   - process* 系列（processReleaseResources 等必须追踪增量变更；D: 同卷下其输入已是常规文件，无需 untrack）
+//   故白名单严格限定为：Native / CMake / JsonModel（原生）/ Flutter（Flutter 构建任务）。
 tasks.configureEach {
-    // 关闭"易触发 Gradle 9.1 严格快照"的任务的状态追踪，避开其报 "not a regular file"。
-    // 本机工程在 D 盘、Gradle/Kotlin 缓存在 C 盘，跨卷使部分原生中间产物在 Gradle 9.1 快照器下
-    // 被判定为 "not a regular file"，下列任务会因此失败（Gradle 报错本身即建议 doNotTrackState）：
-    //   - merge*NativeLibs / extract*NativeSymbolTables / merge*NativeDebugMetadata / strip*DebugSymbols
-    //   - configureCMake* / generateJsonModel*   （CMake 元数据）
-    // ⚠️ 以下任务【绝不能】doNotTrackState，否则报 "Changes are not tracked" 直接失败：
-    //   - *Dex*（mergeExtDexRelease 等需增量追踪）
-    //   - compile*Kotlin（Kotlin 增量编译器依赖任务状态）
-    //   - packageRelease / packageDebug / packageReleaseResources
-    // 因此本过滤器只覆盖原生/CMake 家族，绝不包含 Dex/Kotlin/package。
     if (name.contains("Native", ignoreCase = true) ||
         name.contains("CMake", ignoreCase = true) ||
-        name.contains("JsonModel", ignoreCase = true)
+        name.contains("JsonModel", ignoreCase = true) ||
+        name.contains("Flutter", ignoreCase = true)
     ) {
-        doNotTrackState("Gradle 9.1 跨盘符号链接快照保护（原生/CMake 任务）")
+        doNotTrackState("Gradle 9.1 跨盘符号链接快照保护（原生/CMake/Flutter 生产任务）")
     }
 }

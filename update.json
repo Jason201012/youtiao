@@ -1,8 +1,8 @@
 {
-  "version": "2.2.2",
-  "tag": "v2.2.2",
-  "name": "v2.2.2",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.2/app-release-v2.2.2.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.2",
-  "notes": "发版流程自动化：新增 _build2.py 一条龙脚本，自动从 pubspec 同步 local.properties 版本，串起「改版本→构建→提交→打标签→推送→发 Gitee」，并清理历史构建垃圾\n版本号三处（pubspec / local.properties / Settings 兜底）与 update.json / CHANGELOG / README 随发版自动同步，彻底杜绝不一致"
+  "version": "2.2.3",
+  "tag": "v2.2.3",
+  "name": "v2.2.3",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.3/app-release-v2.2.3.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.3",
+  "notes": "修复「检查更新」跳转浏览器下载的问题：改为应用内直接下载 APK（http 流式下载到外部缓存，带实时进度条），下载完成后通过 FileProvider + 系统安装器直接安装，不再跳转到外部浏览器。仅保留「浏览器下载」作为失败兜底。"
 }
