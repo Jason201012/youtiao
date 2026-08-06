@@ -370,5 +370,32 @@ void main() {
       expect(p.todayEventTotal, 2);
       expect(p.overdue, 0); // 每日任务不计入逾期
     });
+
+    test('每日任务+未来截止日（如用户截图 2026-08-15）仍计入当天', () async {
+      // 精确复现用户场景：repeat=daily, dueDate=未来9天后, 分类=生活, 有备注
+      final today = DateTime.now();
+      final futureDue = today.add(const Duration(days: 9));
+      final p = await buildWith([
+        Task(
+          id: '1',
+          title: '哈哈哈',
+          priority: Priority.medium,
+          category: Category.life,
+          dueDate: futureDue,
+          repeat: RepeatType.daily,
+          repeatMinute: 420, // 07:00
+          note: 'hg',
+        ),
+      ]);
+      // 核心断言：每天重复的任务无论截止日是未来还是过去，都计入当天事件
+      expect(p.todayEventTotal, 1, reason: '每天重复任务(含未来截止日)必须计入当日事件');
+      expect(p.todayCompleted, 0); // 未完成
+      // 不应被标为逾期
+      expect(p.overdue, 0, reason: '每天重复任务不应计入逾期');
+      // 验证看板全量分组中该任务在待办列
+      final kanban = p.kanbanGroups;
+      expect(kanban[TaskStatus.todo]!.length, 1);
+      expect(kanban[TaskStatus.todo]!.first.title, '哈哈哈');
+    });
   });
 }
