@@ -1,8 +1,8 @@
 {
-  "version": "2.2.6",
-  "tag": "v2.2.6",
-  "name": "v2.2.6",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.6/app-release-v2.2.6.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.6",
-  "notes": "专注页布局优化：将「专注历史趋势图」下移到大圆环计时钟下方，计时更靠前突出、趋势走势紧随其后。版本升至 v2.2.6（versionCode 47）。"
+  "version": "2.2.7",
+  "tag": "v2.2.7",
+  "name": "v2.2.7",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.7/app-release-v2.2.7.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.7",
+  "notes": "看板概览改为当日口径：完成率卡片与统计网格的「已完成 / 总任务」改为「当日已完成 / 当日事件总数」，只统计截止今天或今天为循环日的任务（不含已删除），逾期指标不变。版本升至 v2.2.7（versionCode 48）。"
 }

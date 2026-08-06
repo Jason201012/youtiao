@@ -295,6 +295,33 @@ class TaskProvider extends ChangeNotifier {
       _tasks.where((t) => !t.done && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
   double get completionRate => total == 0 ? 0 : completed / total;
 
+  /// 判断任务是否为「今天的事务」：未删除，且（截止日期为今天 或 今天为循环日）。
+  bool _isEventToday(Task t, DateTime now) {
+    if (t.deletedAt != null) return false;
+    final today = DateTime(now.year, now.month, now.day);
+    if (t.dueDate != null) {
+      final d = DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
+      if (d == today) return true;
+    }
+    return t.repeatsOn(today);
+  }
+
+  /// 当日事件总数：截止今天或今天循环出现的任务数（不含已删除）。
+  int get todayEventTotal {
+    final now = DateTime.now();
+    return _tasks.where((t) => _isEventToday(t, now)).length;
+  }
+
+  /// 当日已完成：当日事件中已完成的任务数。
+  int get todayCompleted {
+    final now = DateTime.now();
+    return _tasks.where((t) => _isEventToday(t, now) && t.done).length;
+  }
+
+  /// 当日任务完成率：当日已完成 / 当日事件总数。
+  double get todayCompletionRate =>
+      todayEventTotal == 0 ? 0 : todayCompleted / todayEventTotal;
+
   /// 各分类完成比例
   Map<Category, double> categoryProgress() {
     final Map<Category, int> total = {};

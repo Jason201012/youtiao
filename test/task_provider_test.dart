@@ -307,4 +307,44 @@ void main() {
       expect(md, contains('买菜'));
     });
   });
+
+  group('当日口径统计', () {
+    test('todayEventTotal 仅统计截止今天或循环今日的任务', () async {
+      final today = DateTime.now();
+      final p = await buildWith([
+        mk('1', due: today, title: '今天截止'),
+        mk('2', due: today.subtract(const Duration(days: 1)), title: '昨天截止'),
+        mk('3', repeating: true, title: '每天'),
+        mk('4', title: '无截止'),
+      ]);
+      expect(p.todayEventTotal, 2); // 今天截止 + 每天循环
+    });
+
+    test('todayCompleted 仅统计当日事件中已完成', () async {
+      final today = DateTime.now();
+      final p = await buildWith([
+        mk('1', due: today, status: TaskStatus.done, title: '今天已完成'),
+        mk('2', due: today, title: '今天未完成'),
+        mk('3', repeating: true, status: TaskStatus.done, title: '每天已完成'),
+        mk('4', status: TaskStatus.done, title: '无截止已完成'),
+      ]);
+      expect(p.todayEventTotal, 3); // 今天截止(2) + 每天循环(1)
+      expect(p.todayCompleted, 2); // 今天已完成 + 每天已完成
+      expect(p.todayCompletionRate, closeTo(2 / 3, 1e-9));
+    });
+
+    test('todayEventTotal 排除已删除（deletedAt 非空）任务', () async {
+      final today = DateTime.now();
+      final deleted = Task(
+        id: '2',
+        title: '已删',
+        priority: Priority.medium,
+        category: Category.work,
+        dueDate: today,
+        deletedAt: DateTime.now(),
+      );
+      final p = await buildWith([mk('1', due: today, title: '今天'), deleted]);
+      expect(p.todayEventTotal, 1);
+    });
+  });
 }

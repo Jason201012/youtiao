@@ -46,7 +46,7 @@ class BoardScreen extends StatelessWidget {
           child: Consumer<TaskProvider>(
             builder: (context, provider, _) {
               final focus = context.watch<FocusProvider>();
-              final rate = provider.completionRate;
+              final rate = provider.todayCompletionRate;
               return SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(
                   AppColors.pagePadX,
@@ -91,17 +91,18 @@ class BoardScreen extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Text('已完成',
+                                Text('当日已完成',
                                     style: TextStyle(
                                         fontSize: 13,
                                         fontWeight: FontWeight.w500,
                                         color: ext.meta)),
-                                Text('${provider.completed} / ${provider.total}',
+                                Text(
+                                    '${provider.todayCompleted} / ${provider.todayEventTotal}',
                                     style: TextStyle(
                                         fontSize: 30,
                                         fontWeight: FontWeight.bold,
                                         color: progressColor)),
-                                Text('任务完成率',
+                                Text('当日任务完成率',
                                     style: TextStyle(
                                         fontSize: 13,
                                         fontWeight: FontWeight.w500,
@@ -116,13 +117,13 @@ class BoardScreen extends StatelessWidget {
                     // 后台提醒守护状态卡
                     GuardStatusCard(enabled: provider.backgroundGuardEnabled),
                     const SizedBox(height: AppColors.contentGap),
-                    // 统计网格（可点击跳首页筛选）：总任务 / 已完成 / 逾期
+                    // 统计网格（可点击跳首页筛选）：当日事件总数 / 当日已完成 / 逾期
                     Row(
                       children: [
                         Expanded(
                           child: StatCard(
-                            value: '${provider.total}',
-                            label: '总任务',
+                            value: '${provider.todayEventTotal}',
+                            label: '当日事件总数',
                             valueColor: onBg,
                             onTap: () =>
                                 provider.requestHomeWithFilter(TaskFilter.all),
@@ -131,8 +132,8 @@ class BoardScreen extends StatelessWidget {
                         const SizedBox(width: 12),
                         Expanded(
                           child: StatCard(
-                            value: '${provider.completed}',
-                            label: '已完成',
+                            value: '${provider.todayCompleted}',
+                            label: '当日已完成',
                             valueColor: progressColor,
                             onTap: () =>
                                 provider.requestHomeWithFilter(TaskFilter.done),
