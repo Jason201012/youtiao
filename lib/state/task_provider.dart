@@ -292,7 +292,7 @@ class TaskProvider extends ChangeNotifier {
   int get total => _tasks.length;
   int get completed => _tasks.where((t) => t.done).length;
   int get overdue =>
-      _tasks.where((t) => !t.done && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
+      _tasks.where((t) => !t.done && !t.isRepeating && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
   double get completionRate => total == 0 ? 0 : completed / total;
 
   /// 判断任务是否为「今天的事务」：未删除，且（截止日期为今天 或 今天为循环日）。

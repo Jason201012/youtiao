@@ -1,8 +1,8 @@
 {
-  "version": "2.2.7",
-  "tag": "v2.2.7",
-  "name": "v2.2.7",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.7/app-release-v2.2.7.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.7",
-  "notes": "看板概览改为当日口径：完成率卡片与统计网格的「已完成 / 总任务」改为「当日已完成 / 当日事件总数」，只统计截止今天或今天为循环日的任务（不含已删除），逾期指标不变。版本升至 v2.2.7（versionCode 48）。"
+  "version": "2.2.8",
+  "tag": "v2.2.8",
+  "name": "v2.2.8",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.2.8/app-release-v2.2.8.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.2.8",
+  "notes": "看板「逾期」统计与首页对齐：循环任务（重复≠不重复）不再被误标为逾期。说明：看板「当日事件」自 v2.2.7 起已把循环任务计入当天（与创建日无关）；本次修正逾期口径一致性。版本升至 v2.2.8（versionCode 49）。"
 }

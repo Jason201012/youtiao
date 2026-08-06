@@ -346,5 +346,17 @@ void main() {
       final p = await buildWith([mk('1', due: today, title: '今天'), deleted]);
       expect(p.todayEventTotal, 1);
     });
+
+    test('循环任务计入当日事件且不被标逾期（过去截止日也不算逾期）', () async {
+      final today = DateTime.now();
+      final p = await buildWith([
+        // 每天重复、截止日设在 3 天前：应在「当日事件」中，但不算「逾期」
+        mk('1', repeating: true, due: today.subtract(const Duration(days: 3)), title: '每天(过去截止)'),
+        // 普通一次性任务、截止日 3 天前：既不在当日事件，也算逾期
+        mk('2', due: today.subtract(const Duration(days: 3)), title: '普通逾期'),
+      ]);
+      expect(p.todayEventTotal, 1); // 只有每天循环任务计入当日
+      expect(p.overdue, 1); // 只有普通逾期任务算逾期，循环任务不重复计入
+    });
   });
 }
