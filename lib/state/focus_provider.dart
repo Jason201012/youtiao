@@ -53,6 +53,22 @@ class FocusProvider extends ChangeNotifier {
   String? activeTaskId;
   String? activeTaskTitle;
 
+  /// 由任务行「专注」按钮设置的「待选任务」：跳到专注页后预选到 [_TaskPicker]。
+  /// 不持久化，仅在本次跨页面跳转期间临时携带。
+  String? pendingTaskId;
+  String? pendingTaskTitle;
+
+  /// 供任务行点击后请求「跳转到专注 Tab」的回调（由 [MainScaffold] 注册）。
+  /// 设为静态以便任意持有 [FocusProvider] 的地方（如任务行）便捷调用。
+  static VoidCallback? jumpToFocusTab;
+
+  /// 任务行点「专注」时调用：暂存待选任务，并请求跳转到专注页。
+  void requestTask(String id, String title) {
+    pendingTaskId = id;
+    pendingTaskTitle = title;
+    jumpToFocusTab?.call();
+  }
+
   /// 专注会话记录后的回调：(taskId, durationSec)。由 main 接线到
   /// TaskProvider.addFocusSec，把专注时长回填到关联任务的累计专注字段。
   /// 仅在会话带 taskId 时触发。

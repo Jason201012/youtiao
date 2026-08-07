@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/checkin.dart';
 import 'package:todolist/services/local_database.dart';
+import 'package:todolist/services/notification_service.dart';
 
 /// 习惯 / 打卡的状态层：管理习惯列表、每日打卡记录、连续天数统计与持久化。
 ///
@@ -46,6 +47,7 @@ class HabitProvider extends ChangeNotifier {
     required String emoji,
     required int colorValue,
     required List<int> weekdays,
+    int? reminderMinute,
   }) async {
     final id = DateTime.now().millisecondsSinceEpoch.toString();
     final h = Habit(
@@ -54,20 +56,52 @@ class HabitProvider extends ChangeNotifier {
       emoji: emoji,
       colorValue: colorValue,
       weekdays: weekdays,
+      reminderMinute: reminderMinute,
       createdAt: DateTime.now(),
     );
     _habits.add(h);
     await _persistHabits();
+    // 若设置了提醒，立即调度每日打卡提醒（失败静默，不影响建习惯）。
+    if (reminderMinute != null) {
+      await NotificationService.instance.scheduleHabitReminder(h);
+    }
     notifyListeners();
   }
 
-  /// 删除习惯及其全部打卡记录。
+  /// 更新某习惯的每日提醒时间（null = 取消提醒）。先取消旧提醒，再按新值调度/保持静默。
+  Future<void> setReminder(Habit habit, int? minute) async {
+    final updated =
+        habit.copyWith(reminderMinute: minute, clearReminder: minute == null);
+    final idx = _habits.indexWhere((h) => h.id == habit.id);
+    if (idx == -1) return;
+    _habits[idx] = updated;
+    await _persistHabits();
+    // 取消旧的（无论改/删都先清干净），再按新值重新挂。
+    await NotificationService.instance.cancelHabitReminder(habit.id);
+    if (minute != null) {
+      await NotificationService.instance.scheduleHabitReminder(updated);
+    }
+    notifyListeners();
+  }
+
+  /// 删除习惯及其全部打卡记录（同时取消其提醒通知）。
   Future<void> deleteHabit(String id) async {
     _habits.removeWhere((h) => h.id == id);
     _checkIns.removeWhere((c) => c.habitId == id);
+    await NotificationService.instance.cancelHabitReminder(id);
     await _persistHabits();
     await _persistCheckIns();
     notifyListeners();
+  }
+
+  /// App 启动时调度全部习惯的提醒（仅对已设提醒时间的活动习惯）。
+  /// 由 main 在 habit.load() 后调用一次。失败单个静默不影响其它。
+  Future<void> scheduleAllReminders() async {
+    for (final h in _habits) {
+      if (h.archived || h.reminderMinute == null) continue;
+      await NotificationService.instance
+          .scheduleHabitReminder(h, checkedToday: isCheckedToday(h));
+    }
   }
 
   /// 今天是否已打卡（按 date-only 判定）。

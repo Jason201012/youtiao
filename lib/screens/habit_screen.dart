@@ -89,6 +89,12 @@ class HabitScreen extends StatelessWidget {
 
 String _wdLabel(int wd) => ['一', '二', '三', '四', '五', '六', '日'][wd - 1];
 
+String _fmtMinute(int minute) {
+  final h = minute ~/ 60;
+  final m = minute % 60;
+  return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+}
+
 class _SectionTitle extends StatelessWidget {
   final String text;
   const _SectionTitle(this.text);
@@ -200,8 +206,49 @@ class _HabitTile extends StatelessWidget {
         ),
         title: Text(habit.title,
             style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text('连续 $streak 天 · $freq',
-            style: TextStyle(color: ext.meta, fontSize: 12)),
+        subtitle: Row(
+          children: [
+            Text('连续 $streak 天 · $freq',
+                style: TextStyle(color: ext.meta, fontSize: 12)),
+            if (habit.reminderMinute != null) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () async {
+                  final cur = habit.reminderMinute!;
+                  final picked = await showTimePicker(
+                    context: context,
+                    initialTime:
+                        TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
+                  );
+                  if (picked != null) {
+                    context.read<HabitProvider>().setReminder(
+                        habit, picked.hour * 60 + picked.minute);
+                  }
+                },
+                onLongPress: () =>
+                    context.read<HabitProvider>().setReminder(habit, null),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: ext.chip,
+                    borderRadius:
+                        BorderRadius.circular(AppColors.chipRadius),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Symbols.alarm, size: 12, color: ext.meta),
+                      const SizedBox(width: 3),
+                      Text(_fmtMinute(habit.reminderMinute!),
+                          style: TextStyle(fontSize: 11, color: ext.meta)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
         trailing: GestureDetector(
           onTap: () =>
               context.read<HabitProvider>().toggleCheckInToday(habit),
@@ -316,6 +363,15 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   String _emoji = _emojis.first;
   int _colorValue = _palette.first.value;
   final Set<int> _weekdays = {};
+  /// 每日提醒时间（分钟数，null = 不提醒）。
+  int? _reminderMinute;
+
+  String _formatReminder() {
+    if (_reminderMinute == null) return '未设置';
+    final h = _reminderMinute! ~/ 60;
+    final m = _reminderMinute! % 60;
+    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+  }
 
   @override
   void dispose() {
@@ -441,6 +497,39 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               );
             }),
           ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              const Text('每日提醒',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () async {
+                  final picked = await showTimePicker(
+                    context: context,
+                    initialTime: TimeOfDay.fromDateTime(
+                      DateTime(2020, 1, 1,
+                          (_reminderMinute ?? 21 * 60) ~/ 60,
+                          (_reminderMinute ?? 21 * 60) % 60),
+                    ),
+                  );
+                  if (picked != null) {
+                    setState(() =>
+                        _reminderMinute = picked.hour * 60 + picked.minute);
+                  }
+                },
+                icon: Icon(Symbols.alarm, size: 18, color: primary),
+                label: Text(_formatReminder(),
+                    style: TextStyle(color: primary)),
+              ),
+              if (_reminderMinute != null)
+                IconButton(
+                  icon: Icon(Symbols.close, size: 18, color: ext.meta),
+                  tooltip: '清除提醒',
+                  onPressed: () => setState(() => _reminderMinute = null),
+                ),
+            ],
+          ),
           const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
@@ -454,6 +543,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       emoji: _emoji,
                       colorValue: _colorValue,
                       weekdays: _weekdays.toList(),
+                      reminderMinute: _reminderMinute,
                     );
                 Navigator.pop(context);
               },

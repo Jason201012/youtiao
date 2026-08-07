@@ -54,6 +54,18 @@ class _FocusScreenState extends State<FocusScreen> {
   void initState() {
     super.initState();
     _initAudio();
+    // 从任务行「专注」按钮跳转过来时，预选该任务（消费 pending 后清空）。
+    final focus = context.read<FocusProvider>();
+    if (focus.pendingTaskId != null) {
+      _selectedTaskId = focus.pendingTaskId;
+      _selectedTaskTitle = focus.pendingTaskTitle;
+      focus.pendingTaskId = null;
+      focus.pendingTaskTitle = null;
+    } else if (focus.hasActive && focus.activeTaskId != null) {
+      // 切走再切回时页面 state 已重建：从进行中的会话恢复已关联任务，避免显示成「独立专注」。
+      _selectedTaskId = focus.activeTaskId;
+      _selectedTaskTitle = focus.activeTaskTitle;
+    }
   }
 
   Future<void> _initAudio() async {
@@ -439,6 +451,31 @@ class _FocusScreenState extends State<FocusScreen> {
                                 : (hasActive ? '已暂停' : '准备开始'),
                             style: TextStyle(fontSize: 13, color: ext.meta),
                           ),
+                          if (hasActive && focus.activeTaskTitle != null) ...[
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: ext.chip,
+                                borderRadius:
+                                    BorderRadius.circular(AppColors.chipRadius),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Symbols.timer,
+                                      size: 13, color: ext.meta),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    focus.activeTaskTitle!,
+                                    style: TextStyle(
+                                        fontSize: 12, color: ext.meta),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ],

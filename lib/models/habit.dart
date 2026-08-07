@@ -10,6 +10,9 @@ class Habit {
   final int colorValue;
   /// 需要打卡的星期（1=周一 … 7=周日）；空列表表示「每天」。
   final List<int> weekdays;
+  /// 每日提醒时间（自 00:00 起的分钟数）；null 表示不提醒。
+  /// 提醒按 [weekdays] 过滤：空列表=每天固定时刻；非空=每个所选星期各一次。
+  final int? reminderMinute;
   final DateTime createdAt;
   final bool archived;
 
@@ -19,6 +22,7 @@ class Habit {
     this.emoji = '✅',
     this.colorValue = 0xFF0061A4,
     this.weekdays = const [],
+    this.reminderMinute,
     required this.createdAt,
     this.archived = false,
   });
@@ -33,6 +37,7 @@ class Habit {
         'emoji': emoji,
         'color': colorValue,
         'weekdays': weekdays,
+        'reminderMinute': reminderMinute,
         'createdAt': createdAt.toIso8601String(),
         'archived': archived,
       };
@@ -43,17 +48,24 @@ class Habit {
         emoji: j['emoji'] as String? ?? '✅',
         colorValue: j['color'] as int? ?? 0xFF0061A4,
         weekdays: (j['weekdays'] as List?)?.map((e) => e as int).toList() ?? [],
+        reminderMinute: j['reminderMinute'] as int?,
         createdAt: j['createdAt'] is String
             ? DateTime.parse(j['createdAt'] as String)
             : DateTime.now(),
         archived: j['archived'] as bool? ?? false,
       );
 
+  /// 复制并覆盖部分字段。
+  ///
+  /// 注意 [reminderMinute] 是可空字段，传 null 无法与「不修改」区分，
+  /// 因此清除提醒必须显式传 `clearReminder: true`。
   Habit copyWith({
     String? title,
     String? emoji,
     int? colorValue,
     List<int>? weekdays,
+    int? reminderMinute,
+    bool clearReminder = false,
     bool? archived,
   }) =>
       Habit(
@@ -62,6 +74,8 @@ class Habit {
         emoji: emoji ?? this.emoji,
         colorValue: colorValue ?? this.colorValue,
         weekdays: weekdays ?? this.weekdays,
+        reminderMinute:
+            clearReminder ? null : (reminderMinute ?? this.reminderMinute),
         createdAt: createdAt,
         archived: archived ?? this.archived,
       );

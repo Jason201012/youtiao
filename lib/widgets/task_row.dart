@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
+import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 
@@ -151,6 +153,20 @@ class TaskRow extends StatelessWidget {
           const SizedBox(width: 12),
           // 截止信息 + 每日提醒标识 + 累计专注
           _MetaInfo(task: task, ext: ext),
+          if (!task.done) ...[
+            const SizedBox(width: 6),
+            // 「专注」按钮：直接进入专注页并预选本任务
+            IconButton(
+              onPressed: () {
+                final focus = context.read<FocusProvider>();
+                focus.requestTask(task.id, task.title);
+              },
+              icon: Icon(Symbols.timer, size: 20, color: primary),
+              tooltip: '开始专注',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            ),
+          ],
         ],
       ),
     );

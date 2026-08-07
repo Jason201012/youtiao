@@ -31,6 +31,12 @@ void main() async {
   await _safeLoad(theme, 'ThemeProvider');
   final habit = HabitProvider();
   await _safeLoad(habit, 'HabitProvider');
+  // 启动后调度全部已设提醒的习惯（失败单个静默，不影响其它功能）。
+  try {
+    await habit.scheduleAllReminders();
+  } catch (e) {
+    debugPrint('[HabitProvider] 调度习惯提醒失败：$e');
+  }
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);
@@ -148,6 +154,8 @@ class _MainScaffoldState extends State<MainScaffold> {
     // 看板统计卡点击后，由 provider 回调切回首页并套用筛选。
     Provider.of<TaskProvider>(context, listen: false).onRequestHome =
         () => setState(() => _index = 0);
+    // 任务行「专注」按钮请求跳到专注 Tab（index=3）；FocusProvider 静态回调。
+    FocusProvider.jumpToFocusTab = () => setState(() => _index = 3);
   }
 
   @override

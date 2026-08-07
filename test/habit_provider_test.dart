@@ -136,6 +136,51 @@ void main() {
     expect(hp.habitCount, 2);
   });
 
+  test('addHabit 带提醒时间并可改/可清除', () async {
+    final hp = HabitProvider();
+    await hp.load();
+    await hp.addHabit(
+      title: '喝水',
+      emoji: '💧',
+      colorValue: 1,
+      weekdays: [],
+      reminderMinute: 9 * 60, // 09:00
+    );
+    var h = hp.habits.first;
+    expect(h.reminderMinute, 540);
+
+    // 改时间
+    await hp.setReminder(h, 21 * 60 + 30);
+    h = hp.habits.first;
+    expect(h.reminderMinute, 1290);
+
+    // 重新加载后仍在（已落库）
+    final hp2 = HabitProvider();
+    await hp2.load();
+    expect(hp2.habits.first.reminderMinute, 1290);
+
+    // 清除
+    await hp.setReminder(h, null);
+    expect(hp.habits.first.reminderMinute, isNull);
+    final hp3 = HabitProvider();
+    await hp3.load();
+    expect(hp3.habits.first.reminderMinute, isNull);
+  });
+
+  test('scheduleAllReminders 不抛异常（无提醒也安全）', () async {
+    final hp = HabitProvider();
+    await hp.load();
+    await hp.addHabit(title: '无提醒', emoji: 'N', colorValue: 1, weekdays: []);
+    await hp.addHabit(
+      title: '有提醒',
+      emoji: 'Y',
+      colorValue: 1,
+      weekdays: [1, 3, 5],
+      reminderMinute: 8 * 60,
+    );
+    await expectLater(hp.scheduleAllReminders(), completes);
+  });
+
   test('activeHabits 过滤归档', () async {
     final hp = HabitProvider();
     await hp.load();

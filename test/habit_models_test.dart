@@ -46,6 +46,40 @@ void main() {
       expect(c.id, 'x');
       expect(c.emoji, '✅');
     });
+
+    test('reminderMinute 往返一致，缺省为 null', () {
+      final h = Habit(
+        id: 'r1',
+        title: '喝水',
+        reminderMinute: 21 * 60 + 30, // 21:30
+        createdAt: DateTime(2024, 1, 1),
+      );
+      final back = Habit.fromJson(h.toJson());
+      expect(back.reminderMinute, 1290);
+
+      // 旧数据（无该字段）解析为 null，不崩
+      final legacy = Habit.fromJson({'id': 'r2', 'title': 't'});
+      expect(legacy.reminderMinute, isNull);
+    });
+
+    test('copyWith 改提醒时间 / clearReminder 才能清空', () {
+      final h = Habit(
+        id: 'r3',
+        title: 't',
+        reminderMinute: 480,
+        createdAt: DateTime(2024),
+      );
+      // 改时间
+      expect(h.copyWith(reminderMinute: 1260).reminderMinute, 1260);
+      // 传 null 视为「不修改」，保留原值（避免可空字段语义歧义）
+      expect(h.copyWith(reminderMinute: null).reminderMinute, 480);
+      // 显式清除
+      expect(h.copyWith(clearReminder: true).reminderMinute, isNull);
+      // 清除时不影响其他字段
+      final cleared = h.copyWith(clearReminder: true);
+      expect(cleared.id, 'r3');
+      expect(cleared.title, 't');
+    });
   });
 
   group('CheckIn 序列化', () {

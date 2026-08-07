@@ -6,6 +6,7 @@ import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/models/task.dart' hide Priority;
 import 'package:todolist/models/focus_session.dart';
+import 'package:todolist/models/habit.dart';
 
 /// 本地通知服务（flutter_local_notifications）。
 /// 按任务 dueDate 在本地调度一次性提醒；受 enabled 开关控制。
@@ -491,6 +492,117 @@ class NotificationService {
   Future<void> cancelRepeatReminder(String id) async {
     for (var d = 0; d <= 7; d++) {
       await _plugin.cancel(_repeatNotifyIdOf(id, d));
+    }
+  }
+
+  /// 习惯 id 是毫秒时间戳字符串（13 位，约 1.7e12），**不能**像任务 id 那样直接
+  /// int.tryParse——通知插件要求 id 落在 int32 范围内，否则抛
+  /// `Invalid argument (id): must fit within the size of a 32-bit integer`。
+  /// 这里把 id 折叠到 10 万个槽位（习惯数量为个位数，碰撞可忽略）。
+  static int _habitSlotOf(String id) => (id.hashCode & 0x7fffffff) % 100000;
+
+  /// 习惯提醒使用独立的 id 段（80 万起 + 槽位*10 + 星期索引），与任务的
+  /// 「截止提醒 / 重复提醒」区分开，避免互相 cancel 掉。dayIndex：每天提醒用 0；
+  /// 按星期提醒用 1..7。最大值 800000+99999*10+7 ≈ 180 万，远小于 int32 上限。
+  /// schedule / cancel 必须走同一函数，否则删除习惯时取消会错位。
+  static int _habitNotifyIdOf(String id, int dayIndex) =>
+      800000 + _habitSlotOf(id) * 10 + dayIndex;
+
+  /// 为习惯调度每日打卡提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
+  /// [checkedToday] 为 true（今天已打卡）且提醒时刻尚未到来时，跳过今日这一次，
+  /// 挂到下一个循环日，避免「已完成仍弹提醒」。返回 true 表示已提交。
+  ///
+  /// - [weekdays] 为空：每天同一时刻（[DateTimeComponents.time]）。
+  /// - [weekdays] 非空：按所选星期逐个挂 [DateTimeComponents.dayOfWeekAndTime]。
+  Future<bool> scheduleHabitReminder(Habit habit, {bool checkedToday = false}) async {
+    if (!enabled) {
+      debugPrint('[通知] 未调度习惯提醒 id=${habit.id}：通知总开关关闭');
+      return false;
+    }
+    if (habit.reminderMinute == null) {
+      debugPrint('[通知] 未调度习惯提醒 id=${habit.id}：未设提醒时间');
+      return false;
+    }
+    try {
+      final loc = _loc ?? tz.UTC;
+      final m = habit.reminderMinute!;
+      final hh = m ~/ 60;
+      final mm = m % 60;
+      final now = tz.TZDateTime.now(loc);
+      final chId = _chSound; // 习惯提醒统一用有声渠道，引起注意
+      final androidDetail = AndroidNotificationDetails(
+        chId,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+      );
+      final detail = NotificationDetails(android: androidDetail);
+      final mode = await _scheduleMode;
+      final body = '${habit.emoji} ${habit.title} · 该打卡啦';
+      final skipToday = checkedToday;
+
+      if (habit.weekdays.isEmpty) {
+        var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+        when = skipToday
+            ? when.add(const Duration(days: 1))
+            : (when.isAfter(now) ? when : when.add(const Duration(days: 1)));
+        await _plugin.zonedSchedule(
+          _habitNotifyIdOf(habit.id, 0),
+          '习惯打卡',
+          body,
+          when,
+          detail,
+          androidScheduleMode: mode,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+          matchDateTimeComponents: DateTimeComponents.time,
+        );
+        debugPrint('[通知] 已调度习惯提醒 id=${habit.id} 每天 '
+            '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
+            '(skipToday=$skipToday, 首次=$when)');
+        return true;
+      }
+
+      for (final wd in habit.weekdays) {
+        // 计算「下一个该星期 @ hh:mm」的真实时刻。skipToday 且恰为今天则再往后跳一周。
+        var candidate = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+        while (candidate.weekday != wd || !candidate.isAfter(now)) {
+          candidate = candidate.add(const Duration(days: 1));
+        }
+        await _plugin.zonedSchedule(
+          _habitNotifyIdOf(habit.id, wd),
+          '习惯打卡',
+          body,
+          candidate,
+          detail,
+          androidScheduleMode: mode,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+          matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+        );
+      }
+      debugPrint('[通知] 已调度习惯提醒 id=${habit.id} 每周 ${habit.weekdays} '
+          '@ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
+          '(skipToday=$skipToday)');
+      return true;
+    } catch (e, s) {
+      debugPrint('[通知] 习惯提醒调度失败 id=${habit.id}: $e');
+      debugPrint('$s');
+      return false;
+    }
+  }
+
+  /// 取消某习惯的全部每日提醒通知（每天用 dayIndex=0；按星期用 1..7）。
+  /// 取消失败（插件未初始化 / 平台不支持）不应阻断删除习惯等主流程，故整体吞异常。
+  Future<void> cancelHabitReminder(String id) async {
+    try {
+      for (var d = 0; d <= 7; d++) {
+        await _plugin.cancel(_habitNotifyIdOf(id, d));
+      }
+    } catch (e) {
+      debugPrint('[通知] 取消习惯提醒失败 id=$id: $e');
     }
   }
 
