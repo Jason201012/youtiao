@@ -1,8 +1,8 @@
 {
-  "version": "2.3.0",
-  "tag": "v2.3.0",
-  "name": "v2.3.0",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.0/app-release-v2.3.0.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.0",
-  "notes": "无截止日期任务归入「今天」段：首页与看板「当日事件总数」现在把没有截止日期的非循环任务视为当天事务（此前被归入「未来」段）；因截止日期为空恒等于「今天」，跨天自动顺延到第二天，无需额外重置。循环（每天）任务与逾期口径保持不变。版本升至 v2.3.0（versionCode 51）。"
+  "version": "2.3.1",
+  "tag": "v2.3.1",
+  "name": "v2.3.1",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.1/app-release-v2.3.1.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1",
+  "notes": "新增番茄钟循环专注：专注 / 短休 / 长休自动循环，阶段运行态持久化（杀后台或重启后自动续跑下一阶段）；三阶段时长与「每几轮长休一次」可在设置中自定义（默认 专注 25 / 短休 5 / 长休 15，每 4 轮长休）；锁屏进度通知按阶段显示「专注中 / 休息中」；统计口径收敛到专注阶段（今日专注只计专注时长、完成番茄只计专注段）。版本升至 v2.3.1（versionCode 52）。"
 }
