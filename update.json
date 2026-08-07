@@ -1,8 +1,8 @@
 {
-  "version": "2.3.1",
-  "tag": "v2.3.1",
+  "version": "2.3.2",
+  "tag": "v2.3.2",
   "name": "v2.3.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.1/app-release-v2.3.1.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1",
-  "notes": "新增番茄钟循环专注：专注 / 短休 / 长休自动循环，阶段运行态持久化（杀后台或重启后自动续跑下一阶段）；三阶段时长与「每几轮长休一次」可在设置中自定义（默认 专注 25 / 短休 5 / 长休 15，每 4 轮长休）；锁屏进度通知按阶段显示「专注中 / 休息中」；统计口径收敛到专注阶段（今日专注只计专注时长、完成番茄只计专注段）。版本升至 v2.3.1（versionCode 52）。"
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.2/app-release-v2.3.2-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.2",
+  "notes": "# 有条 v2.3.2 · APK 大幅瘦身\n\n本版核心：安装包从 **85MB 缩减到约 37MB（↓57%）**，下载更快、更省流量。\n\n## 瘦身做了什么\n- **只编 64 位原生库（arm64-v8a）**：原安装包为兼容所有设备，打包了 arm64 / armeabi-v7a(32位) / x86_64(模拟器) 三套原生库；现代手机（含主流安卓机）均为 64 位，故仅保留 arm64，原生库体积由 55.8MB 降至 19.1MB。\n- **环境音循环时长 120s → 50s**：雨声 / 海浪 / 篝火 / 风声四个长循环按原算法重合成（单声道 22050Hz 不变，无缝循环），素材体积由 23.0MB 降至 11.2MB。\n- Dart 代码体积维持不变（当前构建环境下 R8 压缩会崩，故不启用）。\n\n## 兼容性说明\n- 本安装包为 **arm64 专用**，适用于 2019 年后的 64 位安卓设备（主流机型均支持）。\n- 极少数的 **32 位老设备** 无法安装本包，可前往 [v2.3.1 下载页](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1) 获取上一个通用版（含 32 位支持）兜底。\n\n## 其他\n- 功能与 v2.3.1 完全一致（番茄钟循环专注等），本次仅做体积优化，无行为变更。\n"
 }
