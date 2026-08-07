@@ -1,5 +1,13 @@
 # 更新日志（Changelog）
 
+## v2.3.6（2026-08-07）热修复
+
+- **🔥 修复启动卡 splash 白屏**：v2.3.5 新增的 `ThemeProvider` / `HabitProvider` 在 `main()` 中串行加载，任一抛出未捕获异常会导致 `runApp()` 永远不被调用，app 卡在启动页无法进入。
+  - `main()` 全部 `await load()` 加 `_safeLoad()` try-catch 容错：单个 Provider 加载失败时打印日志并跳过，不影响其他模块，**确保 runApp() 始终被调用**。
+  - `HabitProvider.load()` / `_persistHabits()` / `_persistCheckIns()` 加独立 try-catch：DB 升级（version 1→2）或新表查询异常时优雅降级（习惯功能暂不可用，但主界面正常）。
+  - `DynamicColorBuilder` 内的 `buildThemes()` 加 try-catch + 默认主题 fallback：动态取色异常时不崩溃。
+- 版本升至 v2.3.6（versionCode 57）。
+
 ## v2.3.5（2026-08-07）
 
 - **主题自定义 / Material You**：应用主题现在可由用户自定义。

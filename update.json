@@ -1,8 +1,1 @@
-{
-  "version": "2.3.5",
-  "tag": "v2.3.5",
-  "name": "v2.3.5",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.5/app-release-v2.3.5-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.5",
-  "notes": "# 有条 v2.3.5（主题自定义 · Material You · 习惯打卡 / 成就）\n\n## 新增\n- **主题自定义 / Material You**：\n  - 跟随系统动态取色（Material You / dynamic_color），自动采用系统壁纸配色。\n  - 种子色主题：6 种预设色板 + 默认品牌色，可手动选定。\n  - 纯黑背景开关；设置页新增「跟随系统 / 深色模式 / Material You 跟随取色 / 纯黑背景 / 主题色板」控件。\n- **习惯打卡 / 成就**（新增第 6 个底部导航「习惯」）：\n  - 习惯模型：标题 / emoji / 颜色 / 每周打卡日，按日期去重打卡。\n  - 习惯页：今日 / 连续 / 累计概览，圆形勾选打卡，连续天数与最长连击统计。\n  - 成就系统：8 项成就按当前数据自动解锁高亮。\n  - 数据层：SQLite 新增 habits / check_ins 表（整段 JSON 存储，version 升 2），旧库自动迁移。\n\n## 体积\n- 本包为 arm64 专用（约 37MB）。现代手机（含 Realme）均为 64 位；极少数 32 位老设备可仍用 [v2.3.1 的 universal 包](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1) 兜底。\n\n## 校验\n- flutter analyze 无问题；flutter test 全绿（112 项）。\n"
-}
+{"version": "2.3.6", "tag": "v2.3.6", "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/attach-files/779425-download/app-release-v2.3.6-arm64.apk", "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.6", "notes": "v2.3.6 热修复：修复启动卡 splash 白屏（main() 容错 + HabitProvider 防御性 try-catch + DynamicColorBuilder fallback）"}

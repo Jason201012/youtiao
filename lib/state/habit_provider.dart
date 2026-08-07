@@ -20,17 +20,23 @@ class HabitProvider extends ChangeNotifier {
       _habits.where((h) => !h.archived).toList();
 
   Future<void> load() async {
-    final db = LocalDatabase.instance;
-    // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。
-    if (!LocalDatabase.testUseMemory) {
-      await db.db;
+    try {
+      final db = LocalDatabase.instance;
+      // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。
+      if (!LocalDatabase.testUseMemory) {
+        await db.db;
+      }
+      _habits
+        ..clear()
+        ..addAll(await db.loadHabits());
+      _checkIns
+        ..clear()
+        ..addAll(await db.loadCheckIns());
+    } catch (e, stack) {
+      debugPrint('HabitProvider 加载失败（习惯/打卡暂不可用）：$e\n$stack');
+      _habits.clear();
+      _checkIns.clear();
     }
-    _habits
-      ..clear()
-      ..addAll(await db.loadHabits());
-    _checkIns
-      ..clear()
-      ..addAll(await db.loadCheckIns());
     notifyListeners();
   }
 
@@ -160,8 +166,18 @@ class HabitProvider extends ChangeNotifier {
     return streak;
   }
 
-  Future<void> _persistHabits() =>
-      LocalDatabase.instance.replaceHabits(_habits);
-  Future<void> _persistCheckIns() =>
-      LocalDatabase.instance.replaceCheckIns(_checkIns);
+  Future<void> _persistHabits() async {
+    try {
+      await LocalDatabase.instance.replaceHabits(_habits);
+    } catch (e) {
+      debugPrint('HabitProvider 持久化 habits 失败：$e');
+    }
+  }
+  Future<void> _persistCheckIns() async {
+    try {
+      await LocalDatabase.instance.replaceCheckIns(_checkIns);
+    } catch (e) {
+      debugPrint('HabitProvider 持久化 checkIns 失败：$e');
+    }
+  }
 }
