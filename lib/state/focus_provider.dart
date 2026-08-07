@@ -22,6 +22,13 @@ class FocusProvider extends ChangeNotifier {
   static const String _kActive = 'focus_active_timer';
   static const String _kSysCal = 'focus_sys_calendar';
 
+  // —— 番茄循环配置（持久化）——
+  static const String _kPomoEnabled = 'focus_pomo_enabled';
+  static const String _kPomoFocus = 'focus_pomo_focus_sec';
+  static const String _kPomoShort = 'focus_pomo_short_sec';
+  static const String _kPomoLong = 'focus_pomo_long_sec';
+  static const String _kPomoRounds = 'focus_pomo_rounds';
+
   final List<FocusSession> _sessions = [];
 
   /// 自定义专注时长（秒），默认 30 分钟。
@@ -46,6 +53,26 @@ class FocusProvider extends ChangeNotifier {
   String? activeTaskId;
   String? activeTaskTitle;
 
+  // —— 番茄循环：运行态阶段（持久化，杀后台 / 切 Tab 不丢）——
+  /// 当前阶段：专注 / 短休 / 长休。非循环单次计时恒为 [FocusPhase.focus]。
+  FocusPhase activePhase = FocusPhase.focus;
+  /// 本轮回合内已完成的专注数（用于决定下次是短休还是长休）。
+  int focusDoneInCycle = 0;
+  /// 第几轮（长休后 +1，仅用于展示）。
+  int cycleNo = 1;
+
+  // —— 番茄循环：配置（持久化）——
+  bool _pomodoroEnabled = false;
+  bool get pomodoroEnabled => _pomodoroEnabled;
+  int _pomoFocusSec = 25 * 60;
+  int get pomoFocusSec => _pomoFocusSec;
+  int _pomoShortSec = 5 * 60;
+  int get pomoShortSec => _pomoShortSec;
+  int _pomoLongSec = 15 * 60;
+  int get pomoLongSec => _pomoLongSec;
+  int _pomoRounds = 4;
+  int get pomoRounds => _pomoRounds;
+
   /// 专注结束是否自动记入系统日历（设置项，默认关闭）。
   bool _sysCalendarEnabled = false;
   bool get sysCalendarEnabled => _sysCalendarEnabled;
@@ -61,6 +88,16 @@ class FocusProvider extends ChangeNotifier {
     final saved = prefs.getInt(_kCustom);
     if (saved != null && saved > 0) _customSec = saved;
     _sysCalendarEnabled = prefs.getBool(_kSysCal) ?? false;
+    // —— 番茄循环配置（无则保持默认）——
+    _pomodoroEnabled = prefs.getBool(_kPomoEnabled) ?? false;
+    final pf = prefs.getInt(_kPomoFocus);
+    if (pf != null && pf > 0) _pomoFocusSec = pf;
+    final ps = prefs.getInt(_kPomoShort);
+    if (ps != null && ps > 0) _pomoShortSec = ps;
+    final pl = prefs.getInt(_kPomoLong);
+    if (pl != null && pl > 0) _pomoLongSec = pl;
+    final pr = prefs.getInt(_kPomoRounds);
+    if (pr != null && pr > 0) _pomoRounds = pr;
     // —— 专注会话从旧版 SP JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
     final db = LocalDatabase.instance;
     await db.db;
@@ -83,6 +120,11 @@ class FocusProvider extends ChangeNotifier {
         activeCustomSec = m['customSec'] as int? ?? 0;
         activeTaskId = m['taskId'] as String?;
         activeTaskTitle = m['taskTitle'] as String?;
+        // 恢复阶段运行态（无则默认专注 / 第 1 轮）。
+        activePhase = FocusPhase.values.byName(
+            (m['phase'] as String?) ?? 'focus');
+        focusDoneInCycle = m['focusDoneInCycle'] as int? ?? 0;
+        cycleNo = m['cycleNo'] as int? ?? 1;
         if (activeTotalSec > 0 &&
             activeRunning &&
             activeSegmentStartEpochMs != null) {
@@ -118,6 +160,49 @@ class FocusProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 番茄循环各阶段时长（秒）：专注 / 短休 / 长休。
+  int phaseDuration(FocusPhase phase) {
+    switch (phase) {
+      case FocusPhase.focus:
+        return _pomoFocusSec;
+      case FocusPhase.shortBreak:
+        return _pomoShortSec;
+      case FocusPhase.longBreak:
+        return _pomoLongSec;
+    }
+  }
+
+  /// 预设 chip 高亮用的 modeIndex 映射：专注→0，短休→1，长休→2。
+  int _modeIndexOfPhase(FocusPhase phase) =>
+      phase == FocusPhase.focus ? 0 : (phase == FocusPhase.shortBreak ? 1 : 2);
+
+  /// 开启 / 关闭番茄循环并持久化。关闭时不清空进行中的计时。
+  Future<void> setPomodoroEnabled(bool v) async {
+    _pomodoroEnabled = v;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kPomoEnabled, v);
+    notifyListeners();
+  }
+
+  /// 设置番茄循环时长配置（秒）并持久化。参数非法则忽略对应项。
+  Future<void> setPomodoroConfig({
+    int? focusSec,
+    int? shortSec,
+    int? longSec,
+    int? rounds,
+  }) async {
+    if (focusSec != null && focusSec > 0) _pomoFocusSec = focusSec;
+    if (shortSec != null && shortSec > 0) _pomoShortSec = shortSec;
+    if (longSec != null && longSec > 0) _pomoLongSec = longSec;
+    if (rounds != null && rounds > 0) _pomoRounds = rounds;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kPomoFocus, _pomoFocusSec);
+    await prefs.setInt(_kPomoShort, _pomoShortSec);
+    await prefs.setInt(_kPomoLong, _pomoLongSec);
+    await prefs.setInt(_kPomoRounds, _pomoRounds);
+    notifyListeners();
+  }
+
   Future<void> _persist() async {
     await LocalDatabase.instance.replaceFocus(_sessions);
   }
@@ -140,6 +225,9 @@ class FocusProvider extends ChangeNotifier {
         'customSec': activeCustomSec,
         'taskId': activeTaskId,
         'taskTitle': activeTaskTitle,
+        'phase': activePhase.name,
+        'focusDoneInCycle': focusDoneInCycle,
+        'cycleNo': cycleNo,
       }),
     );
   }
@@ -172,10 +260,63 @@ class FocusProvider extends ChangeNotifier {
   // —— 控制 ——
 
   /// 开始一个新的番茄钟（覆盖任何既有的进行中状态）。
+  /// 非循环单次计时：阶段恒为 [FocusPhase.focus]。
   Future<void> startTimer({
     required int totalSec,
     required int modeIndex,
     required int customSec,
+    String? taskId,
+    String? taskTitle,
+  }) async {
+    await _startCore(
+      totalSec: totalSec,
+      modeIndex: modeIndex,
+      customSec: customSec,
+      phase: FocusPhase.focus,
+      taskId: taskId,
+      taskTitle: taskTitle,
+    );
+  }
+
+  /// 开始一个番茄循环：从专注阶段起算，重置回合数。
+  Future<void> startPomodoroCycle({String? taskId, String? taskTitle}) async {
+    await _beginPhase(
+      FocusPhase.focus,
+      taskId: taskId,
+      taskTitle: taskTitle,
+      resetCycle: true,
+    );
+  }
+
+  /// 进入番茄循环的某个阶段（不重置回合计数，除非 [resetCycle]）。
+  /// 自动接管计时起点、系统闹钟与进度通知。
+  Future<void> _beginPhase(
+    FocusPhase phase, {
+    String? taskId,
+    String? taskTitle,
+    bool resetCycle = false,
+  }) async {
+    if (resetCycle) {
+      focusDoneInCycle = 0;
+      cycleNo = 1;
+    }
+    await _startCore(
+      totalSec: phaseDuration(phase),
+      modeIndex: _modeIndexOfPhase(phase),
+      customSec: phaseDuration(phase),
+      phase: phase,
+      taskId: taskId,
+      taskTitle: taskTitle,
+    );
+  }
+
+  /// 计时启动的公共内核：设置运行态、挂系统闹钟、弹进度通知。
+  /// [phase] 写回 [activePhase]，使阶段语义贯穿整个运行态。
+  Future<void> _startCore({
+    required int totalSec,
+    required int modeIndex,
+    required int customSec,
+    required FocusPhase phase,
     String? taskId,
     String? taskTitle,
   }) async {
@@ -187,6 +328,7 @@ class FocusProvider extends ChangeNotifier {
     activeRunning = true;
     activeModeIndex = modeIndex;
     activeCustomSec = customSec;
+    activePhase = phase;
     activeTaskId = taskId;
     activeTaskTitle = taskTitle;
     _startTick();
@@ -196,6 +338,7 @@ class FocusProvider extends ChangeNotifier {
       remainingSec: remainingSec,
       totalSec: activeTotalSec,
       taskTitle: activeTaskTitle,
+      phase: activePhase,
     );
     notifyListeners();
   }
@@ -231,6 +374,7 @@ class FocusProvider extends ChangeNotifier {
   }
 
   /// 手动停止：按已逝时间补录一条（未完成），并清空进行中状态、取消完成通知。
+  /// 手动停止视为放弃当前循环，回合计数一并清零。
   Future<void> stopTimer() async {
     if (!hasActive) return;
     final elapsed = activeTotalSec - remainingSec;
@@ -244,6 +388,7 @@ class FocusProvider extends ChangeNotifier {
         plannedSec: activeTotalSec,
         durationSec: elapsed,
         completed: false,
+        phase: activePhase,
         startedAt: now.subtract(Duration(seconds: elapsed)),
         endedAt: now,
       );
@@ -264,6 +409,9 @@ class FocusProvider extends ChangeNotifier {
     activeRunning = false;
     activeModeIndex = 0;
     activeCustomSec = 0;
+    activePhase = FocusPhase.focus;
+    focusDoneInCycle = 0;
+    cycleNo = 1;
   }
 
   void _startTick() {
@@ -281,45 +429,38 @@ class FocusProvider extends ChangeNotifier {
         remainingSec: remainingSec,
         totalSec: activeTotalSec,
         taskTitle: activeTaskTitle,
+        phase: activePhase,
       );
       notifyListeners();
     }
   }
 
   /// 应用内自然跑满：补录完成会话、取消系统闹钟、立即补弹通知（同 id 覆盖不重复）。
+  ///
+  /// 若开启番茄循环则自动进入下一阶段（专注↔休息），形成连续循环；
+  /// 否则维持原行为：补录后清空进行中状态。
   Future<void> _completeNaturally() async {
-    final total = activeTotalSec;
-    final start = activeSegmentStartEpochMs != null
-        ? DateTime.fromMillisecondsSinceEpoch(activeSegmentStartEpochMs!)
-        : DateTime.now().subtract(Duration(seconds: total));
-    final ended = start.add(Duration(seconds: total));
-    _resetActive();
-    await _cancelCompletion();
-    await NotificationService.instance.cancelFocusProgress();
-    final s = FocusSession(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      taskId: activeTaskId,
-      taskTitle: activeTaskTitle,
-      plannedSec: total,
-      durationSec: total,
-      completed: true,
-      startedAt: start,
-      endedAt: ended,
-    );
-    addSession(s);
-    _maybeExportToCalendar(s);
-    await NotificationService.instance.showFocusDoneNow();
-    notifyListeners();
+    await _recordAndAdvance(silent: false);
   }
 
-  /// 被杀后台期间跑满：补录完成会话（系统闹钟已在完成时刻弹出，这里只取消防重复）。
+  /// 被杀后台期间跑满：补录完成会话并自动推进（系统闹钟已在完成时刻弹出，不再补弹）。
   Future<void> _completeSilently() async {
+    await _recordAndAdvance(silent: true);
+  }
+
+  /// 跑满一个阶段后的统一收尾：补录完成会话，并按是否开启番茄循环决定走向。
+  ///
+  /// - 番茄循环开启：根据 [activePhase] 与回合计数算出下一阶段并自动进入；
+  ///   专注完成提示"该休息"，休息结束提示"开始下一个番茄"。[silent] 为 true 时
+  ///   不弹「完成」通知（系统闹钟已在完成时刻弹出）。
+  /// - 番茄循环关闭：维持原行为，清空进行中状态（不自动开始下一段）。
+  Future<void> _recordAndAdvance({required bool silent}) async {
+    final phase = activePhase;
     final total = activeTotalSec;
     final start = activeSegmentStartEpochMs != null
         ? DateTime.fromMillisecondsSinceEpoch(activeSegmentStartEpochMs!)
         : DateTime.now().subtract(Duration(seconds: total));
     final ended = start.add(Duration(seconds: total));
-    _resetActive();
     final s = FocusSession(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       taskId: activeTaskId,
@@ -327,13 +468,45 @@ class FocusProvider extends ChangeNotifier {
       plannedSec: total,
       durationSec: total,
       completed: true,
+      phase: phase,
       startedAt: start,
       endedAt: ended,
     );
     addSession(s);
     _maybeExportToCalendar(s);
+
+    if (_pomodoroEnabled) {
+      FocusPhase next;
+      String? body;
+      if (phase == FocusPhase.focus) {
+        focusDoneInCycle += 1;
+        next = nextPhaseFrom(FocusPhase.focus, focusDoneInCycle, _pomoRounds);
+        body = next == FocusPhase.longBreak
+            ? '专注完成 🍅 本轮已 $focusDoneInCycle/$_pomoRounds，去长休息一下吧'
+            : '专注完成 🍅 该短休息一下啦';
+      } else {
+        if (phase == FocusPhase.longBreak) {
+          focusDoneInCycle = 0;
+          cycleNo += 1;
+        }
+        next = FocusPhase.focus;
+        body = '休息结束 ☕ 开始下一个番茄';
+      }
+      if (!silent) {
+        await NotificationService.instance.showFocusDoneNow(body: body);
+      }
+      // 自动进入下一阶段（接管计时、系统闹钟与进度通知）。
+      await _beginPhase(next, taskId: activeTaskId, taskTitle: activeTaskTitle);
+      return;
+    }
+
+    // 非番茄循环：原行为。
+    _resetActive();
     await _cancelCompletion();
     await NotificationService.instance.cancelFocusProgress();
+    if (!silent) {
+      await NotificationService.instance.showFocusDoneNow();
+    }
     notifyListeners();
   }
 
@@ -374,7 +547,7 @@ class FocusProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 某天（date-only）专注总秒数。
+  /// 某天（date-only）专注总秒数（含休息阶段，历史口径）。
   int totalSecOn(DateTime day) {
     final d = DateTime(day.year, day.month, day.day);
     return _sessions
@@ -383,18 +556,32 @@ class FocusProvider extends ChangeNotifier {
         .fold(0, (sum, s) => sum + s.durationSec);
   }
 
-  /// 今日专注总秒数。
+  /// 某天（date-only）**专注阶段**总秒数（不含休息，番茄统计口径）。
+  int focusSecOn(DateTime day) {
+    final d = DateTime(day.year, day.month, day.day);
+    return _sessions
+        .where((s) =>
+            s.phase == FocusPhase.focus &&
+            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d)
+        .fold(0, (sum, s) => sum + s.durationSec);
+  }
+
+  /// 今日专注总秒数（含休息阶段，历史口径）。
   int get todayTotalSec => totalSecOn(DateTime.now());
+
+  /// 今日**专注阶段**总秒数（不含休息，推荐用于「今日专注」展示）。
+  int get todayFocusSec => focusSecOn(DateTime.now());
 
   /// 累计专注总秒数。
   int get totalSec => _sessions.fold(0, (sum, s) => sum + s.durationSec);
 
-  /// 今日完成的番茄数（跑满预设时长）。
+  /// 今日完成的番茄数（跑满预设时长的**专注**阶段；休息不计入）。
   int get todayCompleted =>
       _sessions.where((s) {
         final d = DateTime.now();
         final today = DateTime(d.year, d.month, d.day);
         return s.completed &&
+            s.phase == FocusPhase.focus &&
             DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == today;
       }).length;
 

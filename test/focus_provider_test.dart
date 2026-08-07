@@ -166,4 +166,84 @@ void main() {
       expect(p.sessionsOn(y).length, 1);
     });
   });
+
+  group('番茄循环阶段切换 nextPhaseFrom', () {
+    test('专注后：未满回合→短休，满回合→长休', () {
+      expect(nextPhaseFrom(FocusPhase.focus, 1, 4), FocusPhase.shortBreak);
+      expect(nextPhaseFrom(FocusPhase.focus, 3, 4), FocusPhase.shortBreak);
+      expect(nextPhaseFrom(FocusPhase.focus, 4, 4), FocusPhase.longBreak);
+      expect(nextPhaseFrom(FocusPhase.focus, 8, 4), FocusPhase.longBreak);
+    });
+    test('休息后永远回到专注', () {
+      expect(nextPhaseFrom(FocusPhase.shortBreak, 4, 4), FocusPhase.focus);
+      expect(nextPhaseFrom(FocusPhase.longBreak, 4, 4), FocusPhase.focus);
+    });
+    test('rounds<1 时按 1 处理（每次专注后长休）', () {
+      expect(nextPhaseFrom(FocusPhase.focus, 1, 0), FocusPhase.longBreak);
+      expect(nextPhaseFrom(FocusPhase.focus, 2, 0), FocusPhase.longBreak);
+    });
+  });
+
+  group('FocusPhase 序列化', () {
+    test('FocusSession 含 phase 且可往返；缺省回退 focus', () {
+      final now = DateTime.now();
+      final s = FocusSession(
+        id: 'x',
+        plannedSec: 100,
+        durationSec: 100,
+        completed: true,
+        phase: FocusPhase.shortBreak,
+        startedAt: now,
+        endedAt: now,
+      );
+      final j = s.toJson();
+      expect(j['phase'], 'shortBreak');
+      expect(FocusSession.fromJson(j).phase, FocusPhase.shortBreak);
+
+      final noPhase = FocusSession.fromJson({
+        'id': 'y',
+        'plannedSec': 1,
+        'durationSec': 1,
+        'completed': true,
+        'startedAt': now.toIso8601String(),
+        'endedAt': now.toIso8601String(),
+      });
+      expect(noPhase.phase, FocusPhase.focus);
+    });
+  });
+
+  group('番茄循环配置持久化', () {
+    test('setPomodoroEnabled / setPomodoroConfig 更新 getter', () async {
+      final p = FocusProvider();
+      await p.setPomodoroEnabled(true);
+      expect(p.pomodoroEnabled, isTrue);
+      await p.setPomodoroConfig(
+          focusSec: 30 * 60, shortSec: 7 * 60, longSec: 20 * 60, rounds: 3);
+      expect(p.pomoFocusSec, 30 * 60);
+      expect(p.pomoShortSec, 7 * 60);
+      expect(p.pomoLongSec, 20 * 60);
+      expect(p.pomoRounds, 3);
+    });
+  });
+
+  group('番茄统计口径', () {
+    test('todayFocusSec / todayCompleted 仅计专注阶段', () {
+      final p = FocusProvider();
+      final t = DateTime.now();
+      // 专注阶段（完成）
+      p.addSession(FocusSession(
+        id: '1', plannedSec: 600, durationSec: 600, completed: true,
+        phase: FocusPhase.focus,
+        startedAt: t.subtract(const Duration(seconds: 600)), endedAt: t));
+      // 短休阶段（完成，不应计入专注时长与番茄数）
+      p.addSession(FocusSession(
+        id: '2', plannedSec: 300, durationSec: 300, completed: true,
+        phase: FocusPhase.shortBreak,
+        startedAt: t.subtract(const Duration(seconds: 300)), endedAt: t));
+      expect(p.todayFocusSec, 600);
+      expect(p.todayCompleted, 1);
+      // 总时长仍含休息
+      expect(p.todayTotalSec, 900);
+    });
+  });
 }

@@ -24,8 +24,8 @@ class _FocusTrendStatsState extends State<FocusTrendStats> {
 
   static DateTime _d(DateTime d) => DateTime(d.year, d.month, d.day);
 
-  /// 某天（date-only）专注分钟数（四舍五入）。
-  int _minOn(DateTime day) => (widget.focus.totalSecOn(day) / 60).round();
+  /// 某天（date-only）专注分钟数（四舍五入，仅计专注阶段、不含休息）。
+  int _minOn(DateTime day) => (widget.focus.focusSecOn(day) / 60).round();
 
   List<DateTime> _lastNDays(int n) {
     final today = _d(DateTime.now());
@@ -143,7 +143,7 @@ class _FocusTrendStatsState extends State<FocusTrendStats> {
       period: _period,
       onPeriod: (p) => setState(() => _period = p),
       hero: _FocusHero(
-        todayMin: widget.focus.todayTotalSec ~/ 60,
+        todayMin: widget.focus.todayFocusSec ~/ 60,
         totalHours: widget.focus.totalSec / 3600,
         todayTomatoes: widget.focus.todayCompleted,
         color: focusColor,

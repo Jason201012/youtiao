@@ -131,17 +131,11 @@ class FocusShareCard extends StatelessWidget {
                   margin: const EdgeInsets.only(bottom: 10),
                   child: Row(
                     children: [
-                      Icon(
-                        s.completed
-                            ? Symbols.local_fire_department
-                            : Symbols.timer,
-                        size: 18,
-                        color: s.completed ? accent : ext.meta,
-                      ),
+                      _sharePhaseIcon(s, accent, ext),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
-                          s.completed ? '完成一个番茄' : '专注片段',
+                          _sharePhaseLabel(s),
                           style: TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
@@ -297,5 +291,32 @@ class _Footer extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// 分享卡明细行图标：专注完成🔥 / 专注片段⏱ / 休息☕。
+Widget _sharePhaseIcon(
+    FocusSession s, Color accent, AppColorsExt ext) {
+  switch (s.phase) {
+    case FocusPhase.focus:
+      return Icon(
+        s.completed ? Symbols.local_fire_department : Symbols.timer,
+        size: 18,
+        color: s.completed ? accent : ext.meta,
+      );
+    case FocusPhase.shortBreak:
+    case FocusPhase.longBreak:
+      return Icon(Symbols.local_cafe, size: 18, color: ext.meta);
+  }
+}
+
+/// 分享卡明细行文案：按阶段区分。
+String _sharePhaseLabel(FocusSession s) {
+  switch (s.phase) {
+    case FocusPhase.focus:
+      return s.completed ? '完成一个番茄' : '专注片段';
+    case FocusPhase.shortBreak:
+    case FocusPhase.longBreak:
+      return '休息一段';
   }
 }

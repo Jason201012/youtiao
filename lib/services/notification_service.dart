@@ -5,6 +5,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/models/task.dart' hide Priority;
+import 'package:todolist/models/focus_session.dart';
 
 /// 本地通知服务（flutter_local_notifications）。
 /// 按任务 dueDate 在本地调度一次性提醒；受 enabled 开关控制。
@@ -503,7 +504,8 @@ class NotificationService {
   /// 采用与任务提醒一致的 setAlarmClock 模式，即使 App 被划掉后台也能准点弹出；
   /// 固定 id=[focusDoneNotifyId]，与 [showFocusDoneNow]/[cancelFocusDone] 共用，
   /// 避免重复成两条。通知总开关关闭时不调度。
-  Future<void> scheduleFocusDone(DateTime completeAt) async {
+  /// [body] 可自定义文案（番茄循环用于提示"该休息 / 开始下一个番茄"）。
+  Future<void> scheduleFocusDone(DateTime completeAt, {String? body}) async {
     if (!enabled) {
       debugPrint('[通知] 未调度专注完成提醒：通知总开关关闭');
       return;
@@ -515,7 +517,7 @@ class NotificationService {
       await _plugin.zonedSchedule(
         focusDoneNotifyId,
         '专注完成 🍅',
-        '你已完成一个番茄钟，记录已保存',
+        body ?? '你已完成一个番茄钟，记录已保存',
         when,
         NotificationDetails(android: _focusDoneAndroid),
         androidScheduleMode: mode,
@@ -532,20 +534,23 @@ class NotificationService {
   Future<void> cancelFocusDone() => _plugin.cancel(focusDoneNotifyId);
 
   /// 立即弹出「专注完成」通知（应用内自然跑满时调用，与到点系统闹钟共用 id 互相覆盖）。
-  Future<void> showFocusDoneNow() => _plugin.show(
+  /// [body] 可自定义文案（番茄循环用于提示"该休息 / 开始下一个番茄"）。
+  Future<void> showFocusDoneNow({String? body}) => _plugin.show(
         focusDoneNotifyId,
         '专注完成 🍅',
-        '你已完成一个番茄钟，记录已保存',
+        body ?? '你已完成一个番茄钟，记录已保存',
         NotificationDetails(android: _focusDoneAndroid),
       );
 
   /// 专注进行中的常驻进度通知：锁屏可见剩余时间，每秒刷新。
   /// [ongoing]=true 使其成为不会被自动划掉的前台式通知；完成/暂停/停止时由
   /// [cancelFocusProgress] 取消。与完成提醒（[focusDoneNotifyId]）互不干扰。
+  /// [phase] 用于切换标题文案：专注阶段显示"专注中"，休息阶段显示"休息中"。
   Future<void> showFocusProgress({
     required int remainingSec,
     required int totalSec,
     String? taskTitle,
+    FocusPhase phase = FocusPhase.focus,
   }) async {
     final r = remainingSec.clamp(0, 359999);
     final rh = r ~/ 3600;
@@ -554,7 +559,9 @@ class NotificationService {
     final remStr = rh > 0
         ? '$rh:${rm.toString().padLeft(2, '0')}:${rs.toString().padLeft(2, '0')}'
         : '${rm.toString().padLeft(2, '0')}:${rs.toString().padLeft(2, '0')}';
-    final title = taskTitle == null ? '专注进行中' : '专注中 · $taskTitle';
+    final verb = phase.isBreak ? '休息中' : '专注中';
+    final title = taskTitle == null ? '$verb' : '$verb · $taskTitle';
+    final bodyText = phase.isBreak ? '休息剩余 $remStr' : '剩余 $remStr';
     final percent = totalSec <= 0
         ? 0
         : ((1 - remainingSec / totalSec) * 100).round().clamp(0, 100);
@@ -576,7 +583,7 @@ class NotificationService {
       await _plugin.show(
         focusProgressNotifyId,
         title,
-        '剩余 $remStr',
+        bodyText,
         NotificationDetails(android: android),
       );
     } catch (e) {

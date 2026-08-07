@@ -208,6 +208,7 @@ class _FocusScreenState extends State<FocusScreen> {
   }
 
   /// 开始 / 暂停 / 恢复：根据进行中状态派发到 Provider。
+  /// 番茄循环开启时，未开始则启动整个循环（从专注阶段起算）。
   void _onStartPause(FocusProvider focus) {
     if (focus.hasActive) {
       if (focus.activeRunning) {
@@ -215,6 +216,11 @@ class _FocusScreenState extends State<FocusScreen> {
       } else {
         focus.resumeTimer();
       }
+    } else if (focus.pomodoroEnabled) {
+      focus.startPomodoroCycle(
+        taskId: _selectedTaskId,
+        taskTitle: _selectedTaskTitle,
+      );
     } else {
       focus.startTimer(
         totalSec: _totalSec,
@@ -254,9 +260,15 @@ class _FocusScreenState extends State<FocusScreen> {
     final ringTotal = hasActive ? focus.activeTotalSec : _totalSec;
     final remaining = hasActive ? focus.remainingSec : _totalSec;
     final progress = ringTotal == 0 ? 0.0 : (1 - remaining / ringTotal);
-    final isBreak = !hasActive
-        ? (_modeIndex == 1 || _modeIndex == 2)
-        : (focus.activeModeIndex == 1 || focus.activeModeIndex == 2);
+
+    // 当前阶段：番茄循环开启时取运行态阶段（未开始则默认专注）；关闭时按预设推断。
+    final effectivePhase = focus.pomodoroEnabled
+        ? (hasActive ? focus.activePhase : FocusPhase.focus)
+        : (_modeIndex == 1 || _modeIndex == 2
+            ? FocusPhase.shortBreak
+            : FocusPhase.focus);
+    final isBreak = effectivePhase.isBreak;
+    final phaseLabel = effectivePhase.label;
 
     // 预设高亮：进行中按 activeModeIndex，否则按本地 _modeIndex。
     final selectedIndex = hasActive ? focus.activeModeIndex : _modeIndex;
@@ -276,43 +288,88 @@ class _FocusScreenState extends State<FocusScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // 今日统计
+                // 今日统计（仅计专注阶段时长；番茄数 = 专注阶段跑满次数）
                 _StatRow(
-                  totalSec: focus.todayTotalSec,
+                  totalSec: focus.todayFocusSec,
                   completed: focus.todayCompleted,
                   ext: ext,
                   onBg: onBg,
                   meta: ext.meta,
                 ),
+                const SizedBox(height: 12),
+
+                // 番茄循环开关 + 设置
+                _PomodoroToggle(
+                  focus: focus,
+                  onOpenSettings: () => _openPomodoroSettings(context, focus),
+                ),
                 const SizedBox(height: 16),
 
-                // 预设切换
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      for (var i = 0; i < _presets.length; i++)
+                // 预设切换：番茄循环开启时显示三阶段（只读、高亮当前阶段）；
+                // 关闭时显示可交互预设 + 自定义。
+                if (focus.pomodoroEnabled)
+                  _PhaseChips(focus: focus, ext: ext, primary: primary, meta: ext.meta)
+                else
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        for (var i = 0; i < _presets.length; i++)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: GestureDetector(
+                              onTap:
+                                  canSwitchPreset ? () => _selectMode(i) : null,
+                              child: Container(
+                                height: 32,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 14),
+                                decoration: BoxDecoration(
+                                  color:
+                                      i == selectedIndex ? primary : ext.chip,
+                                  borderRadius:
+                                      BorderRadius.circular(AppColors.chipRadius),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    _presets[i].$2,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                      color: i == selectedIndex
+                                          ? Colors.white
+                                          : ext.meta,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        // 自定义
                         Padding(
                           padding: const EdgeInsets.only(right: 8),
                           child: GestureDetector(
-                            onTap: canSwitchPreset ? () => _selectMode(i) : null,
+                            onTap: canSwitchPreset ? _openCustomDialog : null,
                             child: Container(
                               height: 32,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 14),
+                              padding: const EdgeInsets.symmetric(horizontal: 14),
                               decoration: BoxDecoration(
-                                color: i == selectedIndex ? primary : ext.chip,
+                                color: selectedIndex == _kCustomIndex
+                                    ? primary
+                                    : ext.chip,
                                 borderRadius:
                                     BorderRadius.circular(AppColors.chipRadius),
                               ),
                               child: Center(
                                 child: Text(
-                                  _presets[i].$2,
+                                  selectedIndex == _kCustomIndex
+                                      ? '自定义 ${_customSec ~/ 60}分'
+                                      : '自定义',
                                   style: TextStyle(
                                     fontSize: 13,
                                     fontWeight: FontWeight.w500,
-                                    color: i == selectedIndex
+                                    color: selectedIndex == _kCustomIndex
                                         ? Colors.white
                                         : ext.meta,
                                   ),
@@ -321,41 +378,9 @@ class _FocusScreenState extends State<FocusScreen> {
                             ),
                           ),
                         ),
-                      // 自定义
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: GestureDetector(
-                          onTap: canSwitchPreset ? _openCustomDialog : null,
-                          child: Container(
-                            height: 32,
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            decoration: BoxDecoration(
-                              color: selectedIndex == _kCustomIndex
-                                  ? primary
-                                  : ext.chip,
-                              borderRadius:
-                                  BorderRadius.circular(AppColors.chipRadius),
-                            ),
-                            child: Center(
-                              child: Text(
-                                selectedIndex == _kCustomIndex
-                                    ? '自定义 ${_customSec ~/ 60}分'
-                                    : '自定义',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w500,
-                                  color: selectedIndex == _kCustomIndex
-                                      ? Colors.white
-                                      : ext.meta,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
                 const SizedBox(height: 20),
 
                 // 关联任务选择（开始专注前可选）
@@ -369,6 +394,15 @@ class _FocusScreenState extends State<FocusScreen> {
                       : (_, __) {},
                 ),
                 const SizedBox(height: 24),
+
+                // 番茄循环进度：第 N 轮 + 回合圆点（仅循环开启时显示）
+                if (focus.pomodoroEnabled)
+                  _CycleIndicator(
+                    focus: focus,
+                    meta: ext.meta,
+                    primary: primary,
+                  ),
+                if (focus.pomodoroEnabled) const SizedBox(height: 12),
 
                 // 大圆环倒计时
                 SizedBox(
@@ -401,7 +435,7 @@ class _FocusScreenState extends State<FocusScreen> {
                           const SizedBox(height: 4),
                           Text(
                             running
-                                ? '专注中…'
+                                ? '${phaseLabel}中…'
                                 : (hasActive ? '已暂停' : '准备开始'),
                             style: TextStyle(fontSize: 13, color: ext.meta),
                           ),
@@ -643,11 +677,7 @@ class _RecordList extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    Icon(
-                      s.completed ? Symbols.local_fire_department : Symbols.timer,
-                      size: 20,
-                      color: meta,
-                    ),
+                    _phaseIcon(s.phase, s.completed, ext, meta),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
@@ -872,4 +902,239 @@ class _TaskChip extends StatelessWidget {
           ),
         ),
       );
+}
+
+/// 番茄循环开关卡片：开启后专注页进入"专注↔休息"自动循环模式。
+class _PomodoroToggle extends StatelessWidget {
+  final FocusProvider focus;
+  final VoidCallback onOpenSettings;
+  const _PomodoroToggle(
+      {required this.focus, required this.onOpenSettings});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final primary = Theme.of(context).colorScheme.primary;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Row(
+        children: [
+          Icon(Symbols.repeat, size: 18, color: ext.meta),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('番茄循环',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: onBg)),
+                Text(
+                  focus.pomodoroEnabled
+                      ? '自动在 专注 / 休息 间循环'
+                      : '单次计时，手动开始每段',
+                  style: TextStyle(fontSize: 11, color: ext.meta),
+                ),
+              ],
+            ),
+          ),
+          if (focus.pomodoroEnabled)
+            IconButton(
+              icon: Icon(Symbols.settings, size: 20, color: ext.meta),
+              tooltip: '循环设置',
+              onPressed: onOpenSettings,
+            ),
+          Switch(
+            value: focus.pomodoroEnabled,
+            onChanged: (v) => focus.setPomodoroEnabled(v),
+            activeColor: primary,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 番茄循环下的阶段指示 chips：三阶段只读展示，高亮当前运行阶段。
+class _PhaseChips extends StatelessWidget {
+  final FocusProvider focus;
+  final AppColorsExt ext;
+  final Color primary;
+  final Color meta;
+  const _PhaseChips({
+    required this.focus,
+    required this.ext,
+    required this.primary,
+    required this.meta,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final phases = [
+      (FocusPhase.focus, '专注', focus.pomoFocusSec),
+      (FocusPhase.shortBreak, '短休', focus.pomoShortSec),
+      (FocusPhase.longBreak, '长休', focus.pomoLongSec),
+    ];
+    final active = focus.hasActive ? focus.activePhase : FocusPhase.focus;
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          for (final p in phases)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Container(
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  color: p.$1 == active ? primary : ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                ),
+                child: Center(
+                  child: Text(
+                    '${p.$2} ${p.$3 ~/ 60}分',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: p.$1 == active ? Colors.white : meta,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 番茄循环回合进度：第 N 轮 + 圆点（已完成的专注段高亮）。
+class _CycleIndicator extends StatelessWidget {
+  final FocusProvider focus;
+  final Color meta;
+  final Color primary;
+  const _CycleIndicator({
+    required this.focus,
+    required this.meta,
+    required this.primary,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final rounds = focus.pomoRounds;
+    final done = focus.hasActive ? focus.focusDoneInCycle : 0;
+    return Column(
+      children: [
+        Text('第 ${focus.cycleNo} 轮 · 每 $rounds 个专注后长休',
+            style: TextStyle(fontSize: 12, color: meta)),
+        const SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            for (var i = 0; i < rounds; i++)
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: i < done ? primary : meta.withOpacity(0.3),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// 今日记录中按阶段选择图标：专注完成用🔥，专注片段用⏱，休息用☕。
+Widget _phaseIcon(FocusPhase phase, bool completed, AppColorsExt ext, Color meta) {
+  switch (phase) {
+    case FocusPhase.focus:
+      return Icon(
+        completed ? Symbols.local_fire_department : Symbols.timer,
+        size: 20,
+        color: completed ? ext.accent : meta,
+      );
+    case FocusPhase.shortBreak:
+    case FocusPhase.longBreak:
+      return Icon(Symbols.local_cafe, size: 20, color: meta);
+  }
+}
+
+/// 数字输入小部件（番茄循环设置弹窗用）。
+class _NumField extends StatelessWidget {
+  final String label;
+  final TextEditingController ctl;
+  const _NumField({required this.label, required this.ctl});
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: TextField(
+          controller: ctl,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: label,
+            border: const OutlineInputBorder(),
+          ),
+        ),
+      );
+}
+
+/// 打开番茄循环设置对话框：专注 / 短休 / 长休时长（分钟）与每轮个数。
+Future<void> _openPomodoroSettings(BuildContext context, FocusProvider focus) async {
+  final focusMin = TextEditingController(text: '${focus.pomoFocusSec ~/ 60}');
+  final shortMin = TextEditingController(text: '${focus.pomoShortSec ~/ 60}');
+  final longMin = TextEditingController(text: '${focus.pomoLongSec ~/ 60}');
+  final roundsCtl = TextEditingController(text: '${focus.pomoRounds}');
+
+  final result = await showDialog<Map<String, int>>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('番茄循环设置'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _NumField(label: '专注时长（分钟）', ctl: focusMin),
+            _NumField(label: '短休时长（分钟）', ctl: shortMin),
+            _NumField(label: '长休时长（分钟）', ctl: longMin),
+            _NumField(label: '每几轮长休一次', ctl: roundsCtl),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(null),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () {
+            Navigator.of(ctx).pop({
+              'focus': int.tryParse(focusMin.text) ?? 0,
+              'short': int.tryParse(shortMin.text) ?? 0,
+              'long': int.tryParse(longMin.text) ?? 0,
+              'rounds': int.tryParse(roundsCtl.text) ?? 0,
+            });
+          },
+          child: const Text('保存'),
+        ),
+      ],
+    ),
+  );
+
+  if (result == null || !context.mounted) return;
+  await focus.setPomodoroConfig(
+    focusSec: result['focus']! * 60,
+    shortSec: result['short']! * 60,
+    longSec: result['long']! * 60,
+    rounds: result['rounds'],
+  );
 }
