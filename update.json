@@ -1,8 +1,8 @@
 {
-  "version": "2.3.3",
-  "tag": "v2.3.3",
-  "name": "v2.3.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.3/app-release-v2.3.3-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.3",
-  "notes": "# 有条 v2.3.3（子任务清单）\n\n## 新增\n- **子任务清单**：任务可拆分为可勾选的细项并跟踪进度。\n  - 新建 / 编辑任务弹层新增「子任务」分区：输入框添加、点文案改名、勾选框标记完成、✕ 删除。\n  - 任务行在有子任务时显示「✓ 已完成/总数」进度徽标 + 细进度条。\n  - 数据模型用 `List<SubTask>` 取代原有的两个整数字段，进度由列表派生；复用 SQLite 存储，**无需数据库迁移**，旧数据自动兼容。\n\n## 体积\n- 本包为 **arm64 专用**（37MB）。现代手机（含 Realme）均为 64 位；极少数 32 位老设备可仍用 [v2.3.1 的 universal 包](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1) 兜底。\n\n## 校验\n- `flutter analyze` 无问题；`flutter test` 全绿（76 项）。\n"
+  "version": "2.3.4",
+  "tag": "v2.3.4",
+  "name": "v2.3.4",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.4/app-release-v2.3.4-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.4",
+  "notes": "# 有条 v2.3.4（标签 · 专注回填 · 拖拽排序）\n\n## 新增\n- **标签（Tags）**：任务支持用户自定义自由标签（如「紧急」「会议」），用于检索与筛选。\n  - 新建 / 编辑任务弹层新增「标签」分区：输入框回车或加号成 chip、可单独删除；下方展示全库已有标签供一键快捷添加。\n  - 首页搜索命中范围扩展至标签（标题 / 分类 / 优先级 / 备注 / 重复规则 + 标签）。\n  - 首页新增「标签筛选」芯片行：存在标签时显示，点击切换筛选、再点取消；与分段筛选、拖拽重排互斥于全量视图。\n  - 任务行在有标签时显示「#标签」小圆角块。\n  - `Task.tags` 序列化进任务 JSON，复用 SQLite 存储，**无需数据库迁移**，旧数据缺省空列表兼容。\n- **专注时长回填任务**：专注会话（带关联任务）结束后，时长自动累加进任务的「累计专注」字段，任务行右侧显示「🍅 N分钟」。专注 Provider 经 `onFocusRecorded` 回调联动任务 Provider 的 `addFocusSec`；无关联任务或独立专注不受影响。\n- **拖拽排序**：首页各分区（逾期 / 今天 / 未来 / 每天 / 已完成）支持长按左侧拖拽手柄手动重排，顺序写入任务 `order` 字段持久化（手动顺序优先于日期排序）。新建任务自动落点至对应分区末尾，不破坏既有手动顺序。\n\n## 体积\n- 本包为 **arm64 专用**（约 37MB）。现代手机（含 Realme）均为 64 位；极少数 32 位老设备可仍用 [v2.3.1 的 universal 包](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1) 兜底。\n\n## 校验\n- `flutter analyze` 无问题；`flutter test` 全绿（88 项）。\n"
 }
