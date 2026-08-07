@@ -1,8 +1,8 @@
 {
-  "version": "2.3.2",
-  "tag": "v2.3.2",
+  "version": "2.3.3",
+  "tag": "v2.3.3",
   "name": "v2.3.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.2/app-release-v2.3.2-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.2",
-  "notes": "# 有条 v2.3.2 · APK 大幅瘦身\n\n本版核心：安装包从 **85MB 缩减到约 37MB（↓57%）**，下载更快、更省流量。\n\n## 瘦身做了什么\n- **只编 64 位原生库（arm64-v8a）**：原安装包为兼容所有设备，打包了 arm64 / armeabi-v7a(32位) / x86_64(模拟器) 三套原生库；现代手机（含主流安卓机）均为 64 位，故仅保留 arm64，原生库体积由 55.8MB 降至 19.1MB。\n- **环境音循环时长 120s → 50s**：雨声 / 海浪 / 篝火 / 风声四个长循环按原算法重合成（单声道 22050Hz 不变，无缝循环），素材体积由 23.0MB 降至 11.2MB。\n- Dart 代码体积维持不变（当前构建环境下 R8 压缩会崩，故不启用）。\n\n## 兼容性说明\n- 本安装包为 **arm64 专用**，适用于 2019 年后的 64 位安卓设备（主流机型均支持）。\n- 极少数的 **32 位老设备** 无法安装本包，可前往 [v2.3.1 下载页](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1) 获取上一个通用版（含 32 位支持）兜底。\n\n## 其他\n- 功能与 v2.3.1 完全一致（番茄钟循环专注等），本次仅做体积优化，无行为变更。\n"
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases/releases/download/v2.3.3/app-release-v2.3.3-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.3",
+  "notes": "# 有条 v2.3.3（子任务清单）\n\n## 新增\n- **子任务清单**：任务可拆分为可勾选的细项并跟踪进度。\n  - 新建 / 编辑任务弹层新增「子任务」分区：输入框添加、点文案改名、勾选框标记完成、✕ 删除。\n  - 任务行在有子任务时显示「✓ 已完成/总数」进度徽标 + 细进度条。\n  - 数据模型用 `List<SubTask>` 取代原有的两个整数字段，进度由列表派生；复用 SQLite 存储，**无需数据库迁移**，旧数据自动兼容。\n\n## 体积\n- 本包为 **arm64 专用**（37MB）。现代手机（含 Realme）均为 64 位；极少数 32 位老设备可仍用 [v2.3.1 的 universal 包](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.3.1) 兜底。\n\n## 校验\n- `flutter analyze` 无问题；`flutter test` 全绿（76 项）。\n"
 }
