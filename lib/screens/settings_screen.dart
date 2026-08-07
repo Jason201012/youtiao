@@ -40,7 +40,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '2.3.2');
+      if (mounted) setState(() => _version = '2.3.3');
     }
   }
 

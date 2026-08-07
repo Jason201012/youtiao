@@ -90,8 +90,9 @@ class TaskRow extends StatelessWidget {
     }
 
     final hasNote = task.note.isNotEmpty;
+    final hasSub = task.subtasks.isNotEmpty;
     final content = Container(
-      height: hasNote ? 78 : 64,
+      height: (hasNote || hasSub) ? 78 : 64,
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
@@ -134,6 +135,10 @@ class TaskRow extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
+                ],
+                if (hasSub) ...[
+                  const SizedBox(height: 5),
+                  _SubProgress(task: task, ext: ext),
                 ],
               ],
             ),
@@ -215,6 +220,48 @@ class _MetaInfo extends StatelessWidget {
           if (i > 0) const SizedBox(width: 8),
           children[i],
         ],
+      ],
+    );
+  }
+}
+
+/// 任务行内的子任务进度：『✓ done/total』文案 + 一条细进度条。
+class _SubProgress extends StatelessWidget {
+  final Task task;
+  final AppColorsExt ext;
+  const _SubProgress({required this.task, required this.ext});
+
+  @override
+  Widget build(BuildContext context) {
+    final total = task.subtaskTotal;
+    final done = task.subtaskDone;
+    final ratio = total == 0 ? 0.0 : done / total;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Symbols.checklist, size: 13, color: ext.meta),
+            const SizedBox(width: 4),
+            Text(
+              '$done/$total',
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        SizedBox(
+          width: 120,
+          child: LinearProgressIndicator(
+            value: ratio,
+            minHeight: 3,
+            backgroundColor: ext.track,
+            valueColor: AlwaysStoppedAnimation<Color>(ext.accent),
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
       ],
     );
   }

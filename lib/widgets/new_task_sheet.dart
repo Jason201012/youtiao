@@ -28,9 +28,15 @@ class TaskSheet extends StatefulWidget {
 class _TaskSheetState extends State<TaskSheet> {
   final _titleController = TextEditingController();
   final _noteController = TextEditingController();
+  final _subtaskController = TextEditingController();
+  final _subtaskEditController = TextEditingController();
   Priority _priority = Priority.medium;
   Category _category = Category.work;
   DateTime? _dueDate;
+
+  /// 子任务列表（编辑模式从任务预填）。
+  List<SubTask> _subtasks = [];
+  int? _editingIndex;
 
   /// 重复规则与提醒时刻 / 星期 / 间隔。
   RepeatType _repeat = RepeatType.none;
@@ -58,6 +64,7 @@ class _TaskSheetState extends State<TaskSheet> {
           ? TimeOfDay(hour: t.repeatMinute! ~/ 60, minute: t.repeatMinute! % 60)
           : const TimeOfDay(hour: 7, minute: 0);
       _noteController.text = t.note;
+      _subtasks = t.subtasks.map((s) => s.copyWith()).toList();
     }
   }
 
@@ -65,6 +72,8 @@ class _TaskSheetState extends State<TaskSheet> {
   void dispose() {
     _titleController.dispose();
     _noteController.dispose();
+    _subtaskController.dispose();
+    _subtaskEditController.dispose();
     super.dispose();
   }
 
@@ -143,6 +152,51 @@ class _TaskSheetState extends State<TaskSheet> {
     if (picked != null) setState(() => _repeatTime = picked);
   }
 
+  void _addSubtask() {
+    final title = _subtaskController.text.trim();
+    if (title.isEmpty) return;
+    setState(() {
+      _subtasks.add(SubTask(
+        id: '${DateTime.now().millisecondsSinceEpoch}_${_subtasks.length}',
+        title: title,
+      ));
+      _subtaskController.clear();
+    });
+  }
+
+  void _removeSubtask(int i) {
+    setState(() {
+      _subtasks.removeAt(i);
+      if (_editingIndex == i) {
+        _editingIndex = null;
+        _subtaskEditController.clear();
+      } else if (_editingIndex != null && _editingIndex! > i) {
+        _editingIndex = _editingIndex! - 1;
+      }
+    });
+  }
+
+  void _toggleSubtask(int i, bool? v) {
+    setState(() => _subtasks[i] = _subtasks[i].copyWith(done: v ?? false));
+  }
+
+  void _startEditSubtask(int i) {
+    _editingIndex = i;
+    _subtaskEditController.text = _subtasks[i].title;
+    setState(() {});
+  }
+
+  void _commitEditSubtask(int i) {
+    final title = _subtaskEditController.text.trim();
+    setState(() {
+      if (title.isNotEmpty) {
+        _subtasks[i] = _subtasks[i].copyWith(title: title);
+      }
+      _editingIndex = null;
+      _subtaskEditController.clear();
+    });
+  }
+
   void _save() {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
@@ -168,6 +222,7 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
         note: _noteController.text.trim(),
+        subtasks: List.from(_subtasks),
       ));
     } else {
       provider.addTask(Task(
@@ -182,6 +237,7 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
         note: _noteController.text.trim(),
+        subtasks: List.from(_subtasks),
       ));
     }
     Navigator.pop(context);
@@ -271,6 +327,106 @@ class _TaskSheetState extends State<TaskSheet> {
             ),
             style: TextStyle(color: scheme.onSurface, fontSize: 15),
           ),
+          const SizedBox(height: 18),
+          // 子任务
+          _SectionLabel('子任务'),
+          const SizedBox(height: 8),
+          // 添加输入行
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _subtaskController,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _addSubtask(),
+                  decoration: InputDecoration(
+                    hintText: '添加子任务，回车确认',
+                    hintStyle: TextStyle(color: ext.meta),
+                    filled: true,
+                    fillColor: ext.chip,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  ),
+                  style: TextStyle(color: scheme.onSurface, fontSize: 15),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filled(
+                onPressed: _addSubtask,
+                icon: const Icon(Symbols.add),
+                style: IconButton.styleFrom(
+                  backgroundColor: scheme.primary,
+                  foregroundColor: scheme.onPrimary,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          if (_subtasks.isNotEmpty)
+            ..._subtasks.asMap().entries.map((entry) {
+              final i = entry.key;
+              final s = entry.value;
+              return Container(
+                margin: const EdgeInsets.only(top: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                ),
+                child: Row(
+                  children: [
+                    Checkbox(
+                      value: s.done,
+                      onChanged: (v) => _toggleSubtask(i, v),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: _editingIndex == i
+                          ? TextField(
+                              controller: _subtaskEditController,
+                              autofocus: true,
+                              onSubmitted: (_) => _commitEditSubtask(i),
+                              decoration: const InputDecoration(
+                                border: InputBorder.none,
+                                isCollapsed: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                              style: TextStyle(
+                                  color: scheme.onSurface, fontSize: 15),
+                            )
+                          : GestureDetector(
+                              onTap: () => _startEditSubtask(i),
+                              child: Text(
+                                s.title,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  color: s.done ? ext.meta : scheme.onSurface,
+                                  decoration: s.done
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                ),
+                              ),
+                            ),
+                    ),
+                    IconButton(
+                      onPressed: () => _removeSubtask(i),
+                      icon: Icon(Symbols.close, size: 18, color: ext.meta),
+                      style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        padding: EdgeInsets.zero,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
           const SizedBox(height: 18),
           // 优先级
           _SectionLabel('优先级'),

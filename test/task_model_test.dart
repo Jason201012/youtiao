@@ -295,4 +295,85 @@ void main() {
       expect(k.deletedAt, DateTime(2026, 1, 3));
     });
   });
+
+  group('SubTask 序列化往返', () {
+    test('toJson / fromJson 保留字段', () {
+      final s = SubTask(id: 's1', title: '买菜', done: true);
+      final j = s.toJson();
+      final s2 = SubTask.fromJson(j);
+      expect(s2.id, 's1');
+      expect(s2.title, '买菜');
+      expect(s2.done, isTrue);
+    });
+    test('fromJson 缺省值安全', () {
+      final s = SubTask.fromJson(<String, dynamic>{});
+      expect(s.id, '');
+      expect(s.title, '');
+      expect(s.done, isFalse);
+    });
+    test('copyWith 仅覆盖传入字段', () {
+      final s = SubTask(id: 's1', title: 'a');
+      final c = s.copyWith(done: true);
+      expect(c.id, 's1');
+      expect(c.title, 'a');
+      expect(c.done, isTrue);
+    });
+  });
+
+  group('Task 子任务（派生进度 / 序列化 / 兼容）', () {
+    final subs = [
+      SubTask(id: 'a', title: '步骤1', done: true),
+      SubTask(id: 'b', title: '步骤2', done: false),
+      SubTask(id: 'c', title: '步骤3', done: true),
+    ];
+    test('subtaskTotal / subtaskDone 由列表派生', () {
+      final t = Task(
+        id: '1',
+        title: 't',
+        priority: Priority.low,
+        category: Category.life,
+        subtasks: subs,
+      );
+      expect(t.subtaskTotal, 3);
+      expect(t.subtaskDone, 2);
+    });
+    test('toJson 序列化 subtasks，fromJson 还原', () {
+      final t = Task(
+        id: '1',
+        title: 't',
+        priority: Priority.low,
+        category: Category.life,
+        subtasks: subs,
+      );
+      final j = t.toJson();
+      expect(j['subtasks'], isA<List>());
+      expect((j['subtasks'] as List).length, 3);
+      final t2 = Task.fromJson(j);
+      expect(t2.subtaskTotal, 3);
+      expect(t2.subtaskDone, 2);
+      expect(t2.subtasks[1].title, '步骤2');
+      expect(t2.subtasks[1].done, isFalse);
+    });
+    test('fromJson 缺 subtasks 字段回退空列表（旧数据兼容）', () {
+      final t = Task.fromJson({
+        'id': '1',
+        'title': 't',
+        'priority': 'low',
+        'category': 'life',
+      });
+      expect(t.subtasks, isEmpty);
+      expect(t.subtaskTotal, 0);
+      expect(t.subtaskDone, 0);
+    });
+    test('copyWith 替换 subtasks', () {
+      final t = Task(
+        id: '1',
+        title: 't',
+        priority: Priority.low,
+        category: Category.life,
+      );
+      final c = t.copyWith(subtasks: subs);
+      expect(c.subtaskTotal, 3);
+    });
+  });
 }

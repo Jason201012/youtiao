@@ -85,6 +85,34 @@ extension TaskStatusLabel on TaskStatus {
   }
 }
 
+/// 子任务条目：可勾选的细项，用于把一个任务拆成若干步骤并跟踪进度。
+/// 纯数据，序列化进 [Task.toJson] 的 `subtasks` 列表，复用任务的 SQLite JSON 存储，无需额外迁移。
+class SubTask {
+  final String id;
+  final String title;
+  final bool done;
+
+  const SubTask({required this.id, required this.title, this.done = false});
+
+  SubTask copyWith({String? title, bool? done}) => SubTask(
+        id: id,
+        title: title ?? this.title,
+        done: done ?? this.done,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'done': done,
+      };
+
+  factory SubTask.fromJson(Map<String, dynamic> j) => SubTask(
+        id: (j['id'] as String?) ?? '',
+        title: (j['title'] as String?) ?? '',
+        done: (j['done'] as bool?) ?? false,
+      );
+}
+
 class Task {
   final String id;
   final String title;
@@ -93,12 +121,21 @@ class Task {
   final DateTime? dueDate;
   final TaskStatus status;
   final DateTime? completedAt;
-  final int subtaskTotal;
-  final int subtaskDone;
+
+  /// 子任务列表（可勾选细项）。取代旧的 subtaskTotal/subtaskDone 两个整数字段；
+  /// 进度由 [subtaskTotal]/[subtaskDone] 派生，保持对外可读语义不变。
+  final List<SubTask> subtasks;
+
   final DateTime? deletedAt;
 
   /// 是否完成：由 [status] 派生，保持对外只读语义一致。
   bool get done => status == TaskStatus.done;
+
+  /// 子任务总数（由 [subtasks] 派生）。
+  int get subtaskTotal => subtasks.length;
+
+  /// 已勾选的子任务数（由 [subtasks] 派生）。
+  int get subtaskDone => subtasks.where((s) => s.done).length;
 
   /// 重复规则：控制任务在哪些天循环出现 / 提醒。默认 [RepeatType.none]（一次性）。
   final RepeatType repeat;
@@ -129,8 +166,7 @@ class Task {
     this.dueDate,
     this.status = TaskStatus.todo,
     this.completedAt,
-    this.subtaskTotal = 0,
-    this.subtaskDone = 0,
+    this.subtasks = const [],
     this.deletedAt,
     this.repeat = RepeatType.none,
     this.repeatWeekdays = const [],
@@ -153,8 +189,7 @@ class Task {
     Object? dueDate = _kKeep,
     TaskStatus? status,
     Object? completedAt = _kKeep,
-    int? subtaskTotal,
-    int? subtaskDone,
+    List<SubTask>? subtasks,
     Object? deletedAt = _kKeep,
     RepeatType? repeat,
     List<int>? repeatWeekdays,
@@ -172,8 +207,7 @@ class Task {
         status: status ?? this.status,
         completedAt:
             completedAt == _kKeep ? this.completedAt : completedAt as DateTime?,
-        subtaskTotal: subtaskTotal ?? this.subtaskTotal,
-        subtaskDone: subtaskDone ?? this.subtaskDone,
+        subtasks: subtasks ?? this.subtasks,
         deletedAt: deletedAt == _kKeep ? this.deletedAt : deletedAt as DateTime?,
         repeat: repeat ?? this.repeat,
         repeatWeekdays: repeatWeekdays ?? this.repeatWeekdays,
@@ -196,8 +230,7 @@ class Task {
         'status': status.name,
         'done': done, // 保留旧字段，兼容历史备份/读取
         'completedAt': completedAt?.toIso8601String(),
-        'subtaskTotal': subtaskTotal,
-        'subtaskDone': subtaskDone,
+        'subtasks': subtasks.map((s) => s.toJson()).toList(),
         'deletedAt': deletedAt?.toIso8601String(),
         'repeat': repeat.name,
         'repeatWeekdays': repeatWeekdays,
@@ -238,8 +271,7 @@ class Task {
       completedAt: j['completedAt'] == null
           ? null
           : DateTime.parse(j['completedAt'] as String),
-      subtaskTotal: j['subtaskTotal'] as int? ?? 0,
-      subtaskDone: j['subtaskDone'] as int? ?? 0,
+      subtasks: _parseSubtasks(j['subtasks']),
       deletedAt: j['deletedAt'] == null
           ? null
           : DateTime.parse(j['deletedAt'] as String),
@@ -261,6 +293,18 @@ class Task {
     if (s == 'done') return TaskStatus.done;
     if (s == 'todo' || s == 'doing' || s == null) return TaskStatus.todo;
     return (done ?? false) ? TaskStatus.done : TaskStatus.todo;
+  }
+
+  /// 解析子任务列表；旧数据无 `subtasks` 字段时回退为空列表（向后兼容）。
+  static List<SubTask> _parseSubtasks(dynamic raw) {
+    if (raw is! List) return const <SubTask>[];
+    final out = <SubTask>[];
+    for (final e in raw) {
+      if (e is Map) {
+        out.add(SubTask.fromJson(Map<String, dynamic>.from(e)));
+      }
+    }
+    return out;
   }
 
   /// 判断 [day]（任意时刻，内部按日期归一化）是否为该任务的「循环日」。
