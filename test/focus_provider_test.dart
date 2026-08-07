@@ -246,4 +246,31 @@ void main() {
       expect(p.todayTotalSec, 900);
     });
   });
+
+  group('onFocusRecorded 回调（专注回填到任务，v2.3.4 新增）', () {
+    test('addSession 带 taskId 时触发回调，传 (taskId, durationSec)', () {
+      final p = FocusProvider();
+      String? gotId;
+      int? gotSec;
+      p.onFocusRecorded = (id, sec) {
+        gotId = id;
+        gotSec = sec;
+      };
+      final now = DateTime.now();
+      p.addSession(FocusSession(
+        id: 's', taskId: 't-1', taskTitle: '写代码', plannedSec: 600,
+        durationSec: 600, completed: true, phase: FocusPhase.focus,
+        startedAt: now.subtract(const Duration(seconds: 600)), endedAt: now));
+      expect(gotId, 't-1');
+      expect(gotSec, 600);
+    });
+
+    test('addSession 无 taskId 时不触发回调', () {
+      final p = FocusProvider();
+      var calls = 0;
+      p.onFocusRecorded = (_, __) => calls++;
+      p.addSession(mk(1, 600));
+      expect(calls, 0);
+    });
+  });
 }

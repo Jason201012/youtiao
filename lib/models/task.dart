@@ -158,6 +158,19 @@ class Task {
   /// 任务备注 / 解释：对任务的补充说明（链接、思路、细节等），可选，默认空串。
   final String note;
 
+  /// 标签：用户自定义自由文本标签（如「紧急」「会议」），用于搜索与筛选。
+  /// 存为字符串列表，序列化为 JSON 的 `tags`；旧数据缺省为空列表（向后兼容）。
+  final List<String> tags;
+
+  /// 累计专注时长（秒）：由专注会话回填（见 FocusProvider.onFocusRecorded /
+  /// TaskProvider.addFocusSec），用于任务行展示「已专注 X 分钟」。序列化为
+  /// [`focusSecTotal`]，旧数据缺省为 0。
+  final int focusSecTotal;
+
+  /// 同一分区内的手动排序权重（越小越靠前）。拖拽排序时由 TaskProvider 重算并持久化。
+  /// 序列化为 `order`（double），缺省为 0.0。
+  final double order;
+
   const Task({
     required this.id,
     required this.title,
@@ -174,6 +187,9 @@ class Task {
     this.repeatMinute,
     this.repeatAnchor,
     this.note = '',
+    this.tags = const [],
+    this.focusSecTotal = 0,
+    this.order = 0.0,
   });
 
   // 哨兵：区分"未传该参数（保留旧值）"与"显式传 null（清空该字段）"。
@@ -197,6 +213,9 @@ class Task {
     Object? repeatMinute = _kKeep,
     Object? repeatAnchor = _kKeep,
     String? note,
+    List<String>? tags,
+    int? focusSecTotal,
+    double? order,
   }) =>
       Task(
         id: id ?? this.id,
@@ -218,6 +237,9 @@ class Task {
             ? this.repeatAnchor
             : repeatAnchor as DateTime?,
         note: note ?? this.note,
+        tags: tags ?? this.tags,
+        focusSecTotal: focusSecTotal ?? this.focusSecTotal,
+        order: order ?? this.order,
       );
 
   /// 序列化为 JSON（用于 shared_preferences 持久化）
@@ -238,6 +260,9 @@ class Task {
         'repeatMinute': repeatMinute,
         'repeatAnchor': repeatAnchor?.toIso8601String(),
         'note': note,
+        'tags': tags,
+        'focusSecTotal': focusSecTotal,
+        'order': order,
       };
 
   /// 从 JSON 反序列化（兼容旧版仅含 [done] 布尔的备份，以及 v1.9.4 之前
@@ -260,6 +285,10 @@ class Task {
     final List<int> weekdays = wdRaw is List
         ? wdRaw.whereType<int>().toList()
         : const <int>[];
+    final tagsRaw = j['tags'];
+    final List<String> tags = tagsRaw is List
+        ? tagsRaw.whereType<String>().toList()
+        : const <String>[];
     return Task(
       id: j['id'] as String,
       title: j['title'] as String,
@@ -283,6 +312,9 @@ class Task {
           ? null
           : DateTime.parse(j['repeatAnchor'] as String),
       note: j['note'] as String? ?? '',
+      tags: tags,
+      focusSecTotal: j['focusSecTotal'] as int? ?? 0,
+      order: (j['order'] as num?)?.toDouble() ?? 0.0,
     );
   }
 

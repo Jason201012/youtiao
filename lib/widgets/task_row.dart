@@ -91,8 +91,9 @@ class TaskRow extends StatelessWidget {
 
     final hasNote = task.note.isNotEmpty;
     final hasSub = task.subtasks.isNotEmpty;
+    final hasTag = task.tags.isNotEmpty;
     final content = Container(
-      height: (hasNote || hasSub) ? 78 : 64,
+      height: (hasNote || hasSub || hasTag) ? 78 : 64,
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
@@ -107,7 +108,7 @@ class TaskRow extends StatelessWidget {
         children: [
           leading,
           if (!selecting) const SizedBox(width: 12),
-          // 标题（+ 备注预览）
+          // 标题（+ 备注预览 + 标签 + 子任务进度）
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -140,11 +141,15 @@ class TaskRow extends StatelessWidget {
                   const SizedBox(height: 5),
                   _SubProgress(task: task, ext: ext),
                 ],
+                if (hasTag) ...[
+                  const SizedBox(height: 5),
+                  _TagChips(task: task, ext: ext),
+                ],
               ],
             ),
           ),
           const SizedBox(width: 12),
-          // 截止信息 + 每日提醒标识
+          // 截止信息 + 每日提醒标识 + 累计专注
           _MetaInfo(task: task, ext: ext),
         ],
       ),
@@ -183,6 +188,15 @@ String _dueLabel(DateTime? due) {
   return '${due.month}月${due.day}日$time';
 }
 
+/// 累计专注时长格式化：<60 分钟显示「N分钟」，否则「N小时M分」。
+String _focusLabel(int sec) {
+  final m = (sec / 60).round();
+  if (m < 60) return '$m分钟';
+  final h = m ~/ 60;
+  final mm = m % 60;
+  return mm == 0 ? '${h}小时' : '${h}小时$mm分';
+}
+
 /// 任务行右侧信息：每日提醒标识（🔁 HH:mm）+ 截止时间。
 class _MetaInfo extends StatelessWidget {
   final Task task;
@@ -213,6 +227,21 @@ class _MetaInfo extends StatelessWidget {
         style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
       ),
     );
+    if (task.focusSecTotal > 0) {
+      children.add(
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Symbols.timer, size: 14, color: ext.meta),
+            const SizedBox(width: 2),
+            Text(
+              _focusLabel(task.focusSecTotal),
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
+            ),
+          ],
+        ),
+      );
+    }
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -263,6 +292,35 @@ class _SubProgress extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// 任务行内的标签 chips：每个标签显示为「#标签」小圆角块。
+class _TagChips extends StatelessWidget {
+  final Task task;
+  final AppColorsExt ext;
+  const _TagChips({required this.task, required this.ext});
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      children: task.tags
+          .where((t) => t.isNotEmpty)
+          .map((tag) => Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                ),
+                child: Text(
+                  '#$tag',
+                  style: TextStyle(fontSize: 12, color: ext.meta),
+                ),
+              ))
+          .toList(),
     );
   }
 }

@@ -53,6 +53,11 @@ class FocusProvider extends ChangeNotifier {
   String? activeTaskId;
   String? activeTaskTitle;
 
+  /// 专注会话记录后的回调：(taskId, durationSec)。由 main 接线到
+  /// TaskProvider.addFocusSec，把专注时长回填到关联任务的累计专注字段。
+  /// 仅在会话带 taskId 时触发。
+  void Function(String taskId, int durationSec)? onFocusRecorded;
+
   // —— 番茄循环：运行态阶段（持久化，杀后台 / 切 Tab 不丢）——
   /// 当前阶段：专注 / 短休 / 长休。非循环单次计时恒为 [FocusPhase.focus]。
   FocusPhase activePhase = FocusPhase.focus;
@@ -526,6 +531,9 @@ class FocusProvider extends ChangeNotifier {
 
   void addSession(FocusSession s) {
     _sessions.add(s);
+    if (s.taskId != null) {
+      onFocusRecorded?.call(s.taskId!, s.durationSec);
+    }
     _persist();
     notifyListeners();
   }

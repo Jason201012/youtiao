@@ -38,6 +38,10 @@ class _TaskSheetState extends State<TaskSheet> {
   List<SubTask> _subtasks = [];
   int? _editingIndex;
 
+  /// 标签列表（编辑模式从任务预填）。
+  List<String> _tags = [];
+  final _tagController = TextEditingController();
+
   /// 重复规则与提醒时刻 / 星期 / 间隔。
   RepeatType _repeat = RepeatType.none;
   TimeOfDay _repeatTime = const TimeOfDay(hour: 7, minute: 0);
@@ -65,6 +69,7 @@ class _TaskSheetState extends State<TaskSheet> {
           : const TimeOfDay(hour: 7, minute: 0);
       _noteController.text = t.note;
       _subtasks = t.subtasks.map((s) => s.copyWith()).toList();
+      _tags = List.from(t.tags);
     }
   }
 
@@ -74,6 +79,7 @@ class _TaskSheetState extends State<TaskSheet> {
     _noteController.dispose();
     _subtaskController.dispose();
     _subtaskEditController.dispose();
+    _tagController.dispose();
     super.dispose();
   }
 
@@ -164,6 +170,28 @@ class _TaskSheetState extends State<TaskSheet> {
     });
   }
 
+  /// 添加标签：回车或加号触发；[raw] 非空时用于「已有标签」快捷添加。
+  void _addTag({String? raw}) {
+    final tag = (raw ?? _tagController.text).trim();
+    if (tag.isEmpty) return;
+    if (_tags.contains(tag)) {
+      _tagController.clear();
+      return;
+    }
+    setState(() {
+      _tags.add(tag);
+      _tagController.clear();
+    });
+  }
+
+  void _removeTag(String tag) {
+    setState(() => _tags.remove(tag));
+  }
+
+  /// 供快捷添加的「已有标签」（全库标签中尚未被本任务使用的）。
+  List<String> _suggestedTags(TaskProvider provider) =>
+      provider.allTags.where((t) => !_tags.contains(t)).toList();
+
   void _removeSubtask(int i) {
     setState(() {
       _subtasks.removeAt(i);
@@ -222,6 +250,7 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
         note: _noteController.text.trim(),
+        tags: List.from(_tags),
         subtasks: List.from(_subtasks),
       ));
     } else {
@@ -237,6 +266,7 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
         note: _noteController.text.trim(),
+        tags: List.from(_tags),
         subtasks: List.from(_subtasks),
       ));
     }
@@ -247,6 +277,7 @@ class _TaskSheetState extends State<TaskSheet> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final ext = appColors(context);
+    final provider = Provider.of<TaskProvider>(context, listen: false);
     final canSave = _titleController.text.trim().isNotEmpty;
     return Container(
       constraints: BoxConstraints(
@@ -427,6 +458,97 @@ class _TaskSheetState extends State<TaskSheet> {
                 ),
               );
             }).toList(),
+          const SizedBox(height: 18),
+          // 标签
+          _SectionLabel('标签'),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _tagController,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _addTag(),
+                  decoration: InputDecoration(
+                    hintText: '添加标签，回车确认（如 紧急、会议）',
+                    hintStyle: TextStyle(color: ext.meta),
+                    filled: true,
+                    fillColor: ext.chip,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  ),
+                  style: TextStyle(color: scheme.onSurface, fontSize: 15),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filled(
+                onPressed: _addTag,
+                icon: const Icon(Symbols.add),
+                style: IconButton.styleFrom(
+                  backgroundColor: scheme.primary,
+                  foregroundColor: scheme.onPrimary,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ],
+          ),
+          if (_tags.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: _tags
+                    .map((tag) => Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: ext.chip,
+                            borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('#$tag',
+                                  style: TextStyle(fontSize: 13, color: ext.meta)),
+                              const SizedBox(width: 4),
+                              GestureDetector(
+                                onTap: () => _removeTag(tag),
+                                child: Icon(Symbols.close, size: 16, color: ext.meta),
+                              ),
+                            ],
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ),
+          if (_suggestedTags(provider).isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: _suggestedTags(provider)
+                    .map((tag) => GestureDetector(
+                          onTap: () => _addTag(raw: tag),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: ext.chip.withOpacity(0.6),
+                              borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                            ),
+                            child: Text('+#$tag',
+                                style: TextStyle(fontSize: 13, color: ext.meta)),
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ),
           const SizedBox(height: 18),
           // 优先级
           _SectionLabel('优先级'),

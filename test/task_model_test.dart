@@ -376,4 +376,68 @@ void main() {
       expect(c.subtaskTotal, 3);
     });
   });
+
+  group('Task 标签 / 专注累计 / 手动排序字段', () {
+    test('tags / focusSecTotal / order 序列化往返', () {
+      final t = Task(
+        id: '1',
+        title: 't',
+        priority: Priority.low,
+        category: Category.life,
+        tags: const ['工作', '紧急'],
+        focusSecTotal: 1500,
+        order: 3.5,
+      );
+      final j = t.toJson();
+      final t2 = Task.fromJson(j);
+      expect(t2.tags, const ['工作', '紧急']);
+      expect(t2.focusSecTotal, 1500);
+      expect(t2.order, 3.5);
+    });
+
+    test('缺省值安全（旧数据无新字段回退空标签/0时长/0顺序）', () {
+      final t = Task.fromJson({
+        'id': '1',
+        'title': 't',
+        'priority': 'low',
+        'category': 'life',
+      });
+      expect(t.tags, isEmpty);
+      expect(t.focusSecTotal, 0);
+      expect(t.order, 0.0);
+    });
+
+    test('tags 容忍非字符串元素', () {
+      final t = Task.fromJson({
+        'id': '1',
+        'title': 't',
+        'priority': 'low',
+        'category': 'life',
+        'tags': [1, 'a', null, 'b'],
+      });
+      expect(t.tags, const ['a', 'b']);
+    });
+
+    test('copyWith 仅覆盖传入的新字段', () {
+      final t = Task(
+        id: '1',
+        title: 't',
+        priority: Priority.low,
+        category: Category.life,
+        tags: const ['x'],
+        focusSecTotal: 10,
+        order: 2,
+      );
+      final c = t.copyWith(
+        tags: const ['y', 'z'],
+        focusSecTotal: 0,
+        order: 9,
+      );
+      expect(c.tags, const ['y', 'z']);
+      expect(c.focusSecTotal, 0);
+      expect(c.order, 9.0);
+      // 未传字段保留旧值
+      expect(c.title, 't');
+    });
+  });
 }

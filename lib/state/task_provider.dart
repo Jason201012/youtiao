@@ -556,11 +556,18 @@ class TaskProvider extends ChangeNotifier {
     final overdue = active
         .where((t) => (dayDiff(t.dueDate) ?? 0) < 0)
         .toList()
-      ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!)); // 拖最久的排前
+      ..sort((a, b) {
+        // 手动排序 order 优先；其次截止时间早的排前（拖最久的排前）。
+        final c = a.order.compareTo(b.order);
+        if (c != 0) return c;
+        return a.dueDate!.compareTo(b.dueDate!);
+      });
     final today = active
         .where((t) => dayDiff(t.dueDate) == 0 || t.dueDate == null)
         .toList()
       ..sort((a, b) {
+        final c = a.order.compareTo(b.order);
+        if (c != 0) return c;
         // 无截止日期的排到今天列表末尾，不影响有日期任务的按时排序
         if (a.dueDate == null && b.dueDate == null) return 0;
         if (a.dueDate == null) return 1;
@@ -571,13 +578,22 @@ class TaskProvider extends ChangeNotifier {
       final d = dayDiff(t.dueDate);
       return d != null && d > 0;
     }).toList()
-      ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
-    // 重复任务单独成段，按提醒时刻升序。
+      ..sort((a, b) {
+        final c = a.order.compareTo(b.order);
+        if (c != 0) return c;
+        return a.dueDate!.compareTo(b.dueDate!);
+      });
+    // 重复任务单独成段，按提醒时刻升序（order 优先）。
     final repeat = _tasks.where((t) => t.isRepeating && !t.done).toList()
-      ..sort((a, b) => (a.repeatMinute ?? 24 * 60)
-          .compareTo(b.repeatMinute ?? 24 * 60));
-    // 已完成统一进「已完成」。
-    final done = _tasks.where((t) => t.done).toList();
+      ..sort((a, b) {
+        final c = a.order.compareTo(b.order);
+        if (c != 0) return c;
+        return (a.repeatMinute ?? 24 * 60)
+            .compareTo(b.repeatMinute ?? 24 * 60);
+      });
+    // 已完成统一进「已完成」（order 优先）。
+    final done = _tasks.where((t) => t.done).toList()
+      ..sort((a, b) => a.order.compareTo(b.order));
     return {
       'overdue': overdue,
       'today': today,
@@ -585,6 +601,76 @@ class TaskProvider extends ChangeNotifier {
       'repeat': repeat,
       'done': done,
     };
+  }
+
+  /// 按「天」计算截止日期相对今天的差值（忽略时分秒）。
+  /// 负数=逾期，0=今天，正数=未来，null=无截止。供分区与拖拽落点复用。
+  static int? _dayDiff(DateTime? due) {
+    if (due == null) return null;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return DateTime(due.year, due.month, due.day).difference(today).inDays;
+  }
+
+  /// 判断某任务在首页属于哪个分区（逾期/今天/未来/每天/已完成）。
+  /// 与 [homeTasks] 的分组口径一致，供新建任务落点与拖拽写回 order 使用。
+  String _sectionNameOf(Task t) {
+    if (t.done) return 'done';
+    if (t.isRepeating) return 'repeat';
+    final d = _dayDiff(t.dueDate);
+    if (d == null) return 'today';
+    if (d < 0) return 'overdue';
+    if (d == 0) return 'today';
+    return 'future';
+  }
+
+  /// 所有任务上出现过的标签（去重、按出现顺序），供首页「标签筛选」与编辑页联想。
+  List<String> get allTags {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final t in _tasks) {
+      for (final tag in t.tags) {
+        if (tag.isNotEmpty && seen.add(tag)) out.add(tag);
+      }
+    }
+    return out;
+  }
+
+  /// 专注会话回填：把某次专注时长（秒）累加到关联任务的 [Task.focusSecTotal]，
+  /// 并持久化。任务已删除（不在 _tasks）则忽略。回调自 FocusProvider.addSession。
+  void addFocusSec(String taskId, int sec) {
+    if (sec <= 0) return;
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    _tasks[i] = _tasks[i].copyWith(
+      focusSecTotal: _tasks[i].focusSecTotal + sec,
+    );
+    notifyListeners();
+    _persist();
+  }
+
+  /// 拖拽重排某分区内的任务顺序：把分区当前显示列表的 [oldIndex] 移到 [newIndex]，
+  /// 并把它及其后续任务的 [Task.order] 顺次写为 1,2,3…，使手动顺序持久化（order 优先于日期排序）。
+  void reorderTasks(String section, int oldIndex, int newIndex) {
+    final list = homeTasks[section];
+    if (list == null || list.isEmpty) return;
+    if (oldIndex < 0 || oldIndex >= list.length) return;
+    if (newIndex < 0 || newIndex > list.length) return;
+    final reordered = List<Task>.from(list);
+    // Flutter ReorderableListView 的 newIndex 系「移除后」下标，下移需 -1 对齐。
+    final insertAt = oldIndex < newIndex ? newIndex - 1 : newIndex;
+    if (insertAt < 0 || insertAt >= reordered.length) return;
+    final moved = reordered.removeAt(oldIndex);
+    reordered.insert(insertAt, moved);
+    for (var i = 0; i < reordered.length; i++) {
+      final t = reordered[i];
+      final idx = _tasks.indexWhere((x) => x.id == t.id);
+      if (idx != -1) {
+        _tasks[idx] = _tasks[idx].copyWith(order: (i + 1).toDouble());
+      }
+    }
+    notifyListeners();
+    _persist();
   }
 
   /// 把任务在 待办/已完成 之间移动（看板拖拽 / 点击切换）。
@@ -628,7 +714,14 @@ class TaskProvider extends ChangeNotifier {
   int _idSeq = 8;
   /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间或每日提醒则调度。
   void addTask(Task task) {
-    final newTask = task.copyWith(id: (_idSeq++).toString());
+    var newTask = task.copyWith(id: (_idSeq++).toString());
+    // 落点到对应分区的末尾：取该分区现有最大 order + 1，避免新建任务跳到手动排序的区顶。
+    final section = _sectionNameOf(newTask);
+    double maxOrder = 0;
+    for (final t in _tasks) {
+      if (_sectionNameOf(t) == section && t.order > maxOrder) maxOrder = t.order;
+    }
+    newTask = newTask.copyWith(order: maxOrder + 1);
     _tasks.insert(0, newTask);
     _scheduleRemindersFor(newTask);
     notifyListeners();

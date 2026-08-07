@@ -22,6 +22,8 @@ void main() async {
   await provider.load();
   final focus = FocusProvider();
   await focus.load();
+  // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
+  focus.onFocusRecorded = (taskId, sec) => provider.addFocusSec(taskId, sec);
   // 启动前台守护（若用户在设置里开启）：保证划掉后台后定时提醒仍准时送达
   if (provider.backgroundGuardEnabled) {
     await BackgroundService.instance.start();

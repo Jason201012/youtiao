@@ -24,6 +24,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // 仅出 arm64-v8a：目标机 RMX3350 为 arm64，且单 ABI 可把 APK 控制在 ~85MB，
+        // 与 Gitee 发行版 1GB 配额（约 11 个版本）的轮转预判一致；fat APK 会更快触顶。
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {

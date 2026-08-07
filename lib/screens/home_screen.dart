@@ -73,6 +73,9 @@ class _HomeScreenState extends State<HomeScreen> {
   /// 是否进入搜索模式
   bool _searching = false;
 
+  /// 当前标签筛选（null 表示不过滤）。点击标签芯片切换；再次点击同一标签取消。
+  String? _tagFilter;
+
   /// 搜索关键字输入框
   final TextEditingController _searchCtl = TextEditingController();
 
@@ -117,7 +120,7 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.onSearchingChanged?.call(false);
   }
 
-  /// 任务是否命中搜索关键字：标题 / 分类 / 优先级 / 备注 / 重复规则（忽略大小写）。
+  /// 任务是否命中搜索关键字：标题 / 分类 / 优先级 / 备注 / 重复规则 / 标签（忽略大小写）。
   bool _matchesQuery(Task t) {
     final q = _searchCtl.text.trim().toLowerCase();
     if (q.isEmpty) return false;
@@ -128,7 +131,8 @@ class _HomeScreenState extends State<HomeScreen> {
         t.priority.name.toLowerCase().contains(q) ||
         t.note.toLowerCase().contains(q) ||
         t.repeat.label.toLowerCase().contains(q) ||
-        t.repeatSummary.toLowerCase().contains(q);
+        t.repeatSummary.toLowerCase().contains(q) ||
+        t.tags.any((tag) => tag.toLowerCase().contains(q));
   }
 
   static String _prioLabel(Priority p) =>
@@ -166,19 +170,46 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// 单个任务行（含滑动/多选/编辑），两个分区与筛选列表共用。
-  Widget _tile(BuildContext context, Task t) {
+  /// [dragIndex] 非 null 时在左侧显示一个拖拽手柄（仅首页默认视图、无标签筛选时启用），
+  /// 用于手动重排；其余场景走普通 Padding。
+  Widget _tile(BuildContext context, Task t, {Key? key, int? dragIndex}) {
     final provider = context.read<TaskProvider>();
+    final dismissible = _DismissibleTask(
+      task: t,
+      selecting: _selecting,
+      selected: _selected.contains(t.id),
+      onToggle: () => provider.toggleDone(t.id),
+      onLongPress: () => _enterSelect(t),
+      onEdit: () => TaskSheet.show(context, task: t),
+      onSelect: () => _toggleSelect(t.id),
+      onDeleted: (removed) => _showUndoSnackBar(context, provider, removed),
+    );
+    if (dragIndex == null) {
+      return Padding(
+        key: key,
+        padding: const EdgeInsets.only(bottom: AppColors.contentGap),
+        child: dismissible,
+      );
+    }
+    final ext = appColors(context);
     return Padding(
+      key: key,
       padding: const EdgeInsets.only(bottom: AppColors.contentGap),
-      child: _DismissibleTask(
-        task: t,
-        selecting: _selecting,
-        selected: _selected.contains(t.id),
-        onToggle: () => provider.toggleDone(t.id),
-        onLongPress: () => _enterSelect(t),
-        onEdit: () => TaskSheet.show(context, task: t),
-        onSelect: () => _toggleSelect(t.id),
-        onDeleted: (removed) => _showUndoSnackBar(context, provider, removed),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          ReorderableDragStartListener(
+            index: dragIndex,
+            child: Container(
+              width: 26,
+              height: 56,
+              alignment: Alignment.center,
+              child: Icon(Symbols.drag_indicator, size: 20, color: ext.meta),
+            ),
+          ),
+          const SizedBox(width: 2),
+          Expanded(child: dismissible),
+        ],
       ),
     );
   }
@@ -187,24 +218,56 @@ class _HomeScreenState extends State<HomeScreen> {
   ///
   /// - 任务为空时整段隐藏，避免首页出现一排「0」的空标题；
   /// - [alwaysShow] 为 true 的分区（「今天」）即使为空也保留标题，让页面不至于全空；
-  /// - [countColor] 用于给「逾期」的计数一点醒目色，标题字号/字重/颜色所有分区完全一致。
+  /// - [countColor] 用于给「逾期」的计数一点醒目色，标题字号/字重/颜色所有分区完全一致；
+  /// - [reorderable] 为 true 时（仅默认全量视图、无标签筛选）把任务行包进
+  ///   [ReorderableListView]，左侧拖拽手柄即可手动重排，顺序写入任务的 [Task.order]。
   List<Widget> _section(
     BuildContext context,
     String title,
+    String sectionKey,
     List<Task> items,
     AppColorsExt ext, {
     Color? countColor,
     bool alwaysShow = false,
+    bool reorderable = false,
   }) {
-    if (items.isEmpty && !alwaysShow) return const [];
+    // 标签筛选：仅保留含该标签的任务（reorderable 时 _tagFilter 必为 null）。
+    final shown = _tagFilter == null
+        ? items
+        : items.where((t) => t.tags.contains(_tagFilter)).toList();
+    if (shown.isEmpty && !alwaysShow) return const [];
+    final provider = context.read<TaskProvider>();
+    final header = _SectionHeader(
+      title: title,
+      count: shown.length,
+      chipColor: ext.chip,
+      metaColor: countColor ?? ext.meta,
+    );
+    final tiles = shown
+        .map((t) => _tile(
+              context,
+              t,
+              key: Key(t.id),
+              dragIndex: reorderable ? items.indexOf(t) : null,
+            ))
+        .toList();
+    if (reorderable) {
+      return [
+        header,
+        ReorderableListView(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          buildDefaultDragHandles: false,
+          onReorder: (oldIndex, newIndex) =>
+              provider.reorderTasks(sectionKey, oldIndex, newIndex),
+          children: tiles,
+        ),
+        const SizedBox(height: 8),
+      ];
+    }
     return [
-      _SectionHeader(
-        title: title,
-        count: items.length,
-        chipColor: ext.chip,
-        metaColor: countColor ?? ext.meta,
-      ),
-      ...items.map((t) => _tile(context, t)),
+      header,
+      ...tiles,
       const SizedBox(height: 8),
     ];
   }
@@ -318,6 +381,9 @@ class _HomeScreenState extends State<HomeScreen> {
         final visible = filter == TaskFilter.all
             ? [...overdue, ...today, ...future, ...repeat, ...done]
             : filtered;
+
+        // 拖拽重排仅在默认全量视图、无标签筛选时启用（与 _section 的 reorderable 对齐）。
+        final canReorder = filter == TaskFilter.all && _tagFilter == null;
 
         final appBar = _searching
             ? SizedBox(
@@ -447,21 +513,38 @@ class _HomeScreenState extends State<HomeScreen> {
                           // 筛选芯片：默认「全部」；看板统计卡点击会套用对应筛选
                           _FilterChips(provider: provider),
                           const SizedBox(height: 12),
+                          // 标签筛选芯片：存在标签且非搜索态时才显示
+                          if (filter == TaskFilter.all &&
+                              !_searching &&
+                              provider.allTags.isNotEmpty) ...[
+                            _TagFilterChips(
+                              allTags: provider.allTags,
+                              active: _tagFilter,
+                              onTap: (tag) => setState(() {
+                                _tagFilter = _tagFilter == tag ? null : tag;
+                              }),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           if (filter == TaskFilter.all) ...[
+                            // 拖拽重排仅在默认全量视图、无标签筛选时启用
                             // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
-                            ..._section(context, '逾期', overdue, ext,
-                                countColor: error),
+                            ..._section(context, '逾期', 'overdue', overdue, ext,
+                                countColor: error, reorderable: canReorder),
                             // 今天：今天到期（唯一常驻分区，为空也保留标题）
-                            ..._section(context, '今天', today, ext,
-                                alwaysShow: true),
+                            ..._section(context, '今天', 'today', today, ext,
+                                alwaysShow: canReorder, reorderable: canReorder),
                             // 未来：今天之后到期 + 无截止日期
-                            ..._section(context, '未来', future, ext),
+                            ..._section(context, '未来', 'future', future, ext,
+                                reorderable: canReorder),
                             // 重复：重复任务（所有规则）
-                            ..._section(context, '重复', repeat, ext),
+                            ..._section(context, '重复', 'repeat', repeat, ext,
+                                reorderable: canReorder),
                             // 已完成
-                            ..._section(context, '已完成', done, ext),
+                            ..._section(context, '已完成', 'done', done, ext,
+                                reorderable: canReorder),
                           ] else ...[
-                            ...filtered.map((t) => _tile(context, t)),
+                            ...filtered.map((t) => _tile(context, t, key: Key(t.id))),
                           ],
                         ],
                       ),
@@ -471,6 +554,58 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
       },
+    );
+  }
+}
+
+/// 首页标签筛选芯片行：列出所有已用标签，点击切换筛选（再次点击同一标签取消）。
+class _TagFilterChips extends StatelessWidget {
+  final List<String> allTags;
+  final String? active;
+  final void Function(String tag) onTap;
+  const _TagFilterChips({
+    required this.allTags,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final primary = Theme.of(context).colorScheme.primary;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final selectedText = isDark ? AppColors.lightChip : Colors.white;
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final tag in allTags)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () => onTap(tag),
+                child: Container(
+                  height: 32,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: active == tag ? primary : ext.chip,
+                    borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                  ),
+                  child: Center(
+                    child: Text(
+                      '#$tag',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: active == tag ? selectedText : ext.meta,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

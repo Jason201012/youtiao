@@ -421,4 +421,83 @@ void main() {
       expect(p.overdue, 0);
     });
   });
+
+  group('标签 / 专注回填 / 拖拽排序（v2.3.4 新增）', () {
+    test('allTags 去重并按出现顺序汇集', () async {
+      final p = await buildWith([
+        Task(id: '1', title: 't', priority: Priority.low, category: Category.work,
+            tags: const ['工作', '紧急']),
+        Task(id: '2', title: 't', priority: Priority.low, category: Category.work,
+            tags: const ['紧急', '阅读']),
+        Task(id: '3', title: 't', priority: Priority.low, category: Category.work,
+            tags: const []),
+      ]);
+      expect(p.allTags, const ['工作', '紧急', '阅读']);
+    });
+
+    test('addFocusSec 累加专注秒数到关联任务并持久化', () async {
+      final p = await buildWith([
+        mk('1', due: todayNoon()),
+      ]);
+      p.addFocusSec('1', 600);
+      expect(p.tasks.first.focusSecTotal, 600);
+      p.addFocusSec('1', 300);
+      expect(p.tasks.first.focusSecTotal, 900);
+    });
+
+    test('addFocusSec 对 sec<=0 或任务不存在时忽略', () async {
+      final p = await buildWith([mk('1', due: todayNoon())]);
+      p.addFocusSec('1', 0);
+      p.addFocusSec('1', -5);
+      expect(p.tasks.first.focusSecTotal, 0);
+      p.addFocusSec('999', 600); // 不存在的任务
+      expect(p.tasks.first.focusSecTotal, 0);
+    });
+
+    test('homeTasks 分区内按 order 优先排序', () async {
+      final today = DateTime.now();
+      final p = await buildWith([
+        Task(id: 'a', title: 'a', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 2),
+        Task(id: 'b', title: 'b', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 5),
+        Task(id: 'c', title: 'c', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 1),
+      ]);
+      // order 1,2,5 → c, a, b（即便 b 的 id 在列表里更靠前）
+      expect(p.homeTasks['today']!.map((t) => t.id), ['c', 'a', 'b']);
+    });
+
+    test('reorderTasks 重排后把 order 顺写为 1,2,3…', () async {
+      final today = DateTime.now();
+      final p = await buildWith([
+        Task(id: 'a', title: 'a', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 1),
+        Task(id: 'b', title: 'b', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 2),
+        Task(id: 'c', title: 'c', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 3),
+      ]);
+      // a 从 0 移到末尾：对应 ReorderableListView 的 oldIndex=0, newIndex=3(移除后)
+      p.reorderTasks('today', 0, 3);
+      final ids = p.homeTasks['today']!.map((t) => t.id).toList();
+      expect(ids, ['b', 'c', 'a']);
+      // 落点 order 已重写为 1,2,3
+      final orders = p.homeTasks['today']!.map((t) => t.order).toList();
+      expect(orders, [1, 2, 3]);
+    });
+
+    test('reorderTasks 边界安全：越界索引直接返回', () async {
+      final today = DateTime.now();
+      final p = await buildWith([
+        Task(id: 'a', title: 'a', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 1),
+        Task(id: 'b', title: 'b', priority: Priority.low, category: Category.work,
+            dueDate: today, order: 2),
+      ]);
+      p.reorderTasks('today', 9, 0); // oldIndex 越界
+      p.reorderTasks('today', 0, 99); // newIndex 越界
+      expect(p.homeTasks['today']!.map((t) => t.id), ['a', 'b']);
+    });
+  });
 }
