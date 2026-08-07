@@ -652,6 +652,26 @@ class TaskProvider extends ChangeNotifier {
     _persist();
   }
 
+  /// 按 id 取任务（详情页实时读取用）。找不到返回 null。
+  Task? byId(String id) {
+    for (final t in _tasks) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  /// 切换某任务的某个子任务勾选态，并持久化。
+  void toggleSubTask(String taskId, String subId) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final subs = _tasks[i].subtasks.map((s) {
+      return s.id == subId ? s.copyWith(done: !s.done) : s;
+    }).toList();
+    _tasks[i] = _tasks[i].copyWith(subtasks: subs);
+    notifyListeners();
+    _persist();
+  }
+
   void toggleDone(String id) {
     final i = _tasks.indexWhere((t) => t.id == id);
     if (i == -1) return;

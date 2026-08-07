@@ -140,6 +140,20 @@ class HabitProvider extends ChangeNotifier {
   int checkInCount(Habit habit) =>
       _checkIns.where((c) => c.habitId == habit.id).length;
 
+  /// 返回某习惯在近 [days] 天内（含今天）已打卡的 date-only 集合，供热力图着色。
+  Set<DateTime> checkedDays(Habit habit, int days) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final start = today.subtract(Duration(days: days - 1));
+    final set = <DateTime>{};
+    for (final c in _checkIns) {
+      if (c.habitId != habit.id) continue;
+      final d = DateTime(c.date.year, c.date.month, c.date.day);
+      if (!d.isBefore(start)) set.add(d);
+    }
+    return set;
+  }
+
   /// 某习惯当前连续打卡天数（今天未打卡则从昨天起算，避免「还没打卡就显断」）。
   int currentStreak(Habit habit) =>
       _streakFor(_datesOf(habit), allowTodayGap: true);

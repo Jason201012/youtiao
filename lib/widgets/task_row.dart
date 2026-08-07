@@ -15,6 +15,7 @@ class TaskRow extends StatelessWidget {
   final Task task;
   final VoidCallback? onToggle;
   final VoidCallback? onLongPress;
+  final VoidCallback? onTap;
   final bool selecting;
   final bool selected;
   final VoidCallback? onSelect;
@@ -23,6 +24,7 @@ class TaskRow extends StatelessWidget {
     required this.task,
     this.onToggle,
     this.onLongPress,
+    this.onTap,
     this.selecting = false,
     this.selected = false,
     this.onSelect,
@@ -110,44 +112,16 @@ class TaskRow extends StatelessWidget {
         children: [
           leading,
           if (!selecting) const SizedBox(width: 12),
-          // 标题（+ 备注预览 + 标签 + 子任务进度）
+          // 标题（+ 备注预览 + 标签 + 子任务进度）。普通模式下整块可点击打开详情。
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  task.title,
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w500,
-                    color: titleColor,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (hasNote) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    task.note,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w400,
-                      color: ext.meta,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-                if (hasSub) ...[
-                  const SizedBox(height: 5),
-                  _SubProgress(task: task, ext: ext),
-                ],
-                if (hasTag) ...[
-                  const SizedBox(height: 5),
-                  _TagChips(task: task, ext: ext),
-                ],
-              ],
+            child: _TitleBlock(
+              task: task,
+              ext: ext,
+              titleColor: titleColor,
+              hasNote: hasNote,
+              hasSub: hasSub,
+              hasTag: hasTag,
+              onTap: onTap,
             ),
           ),
           const SizedBox(width: 12),
@@ -211,6 +185,74 @@ String _focusLabel(int sec) {
   final h = m ~/ 60;
   final mm = m % 60;
   return mm == 0 ? '${h}小时' : '${h}小时$mm分';
+}
+
+/// 任务行标题区：标题 + 备注预览 + 子任务进度 + 标签。
+/// 普通模式下整块可点击打开详情（[onTap]）；多选 / 无 onTap 时仅展示。
+class _TitleBlock extends StatelessWidget {
+  final Task task;
+  final AppColorsExt ext;
+  final Color titleColor;
+  final bool hasNote;
+  final bool hasSub;
+  final bool hasTag;
+  final VoidCallback? onTap;
+  const _TitleBlock({
+    required this.task,
+    required this.ext,
+    required this.titleColor,
+    required this.hasNote,
+    required this.hasSub,
+    required this.hasTag,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final column = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          task.title,
+          style: TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+            color: titleColor,
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        if (hasNote) ...[
+          const SizedBox(height: 3),
+          Text(
+            task.note,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w400,
+              color: ext.meta,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+        if (hasSub) ...[
+          const SizedBox(height: 5),
+          _SubProgress(task: task, ext: ext),
+        ],
+        if (hasTag) ...[
+          const SizedBox(height: 5),
+          _TagChips(task: task, ext: ext),
+        ],
+      ],
+    );
+    if (onTap == null) return column;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: column,
+    );
+  }
 }
 
 /// 任务行右侧信息：每日提醒标识（🔁 HH:mm）+ 截止时间。

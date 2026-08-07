@@ -590,6 +590,17 @@ class FocusProvider extends ChangeNotifier {
         .fold(0, (sum, s) => sum + s.durationSec);
   }
 
+  /// 近 7 日（含今天，由旧到新）每日**专注阶段**总秒数，供可视化使用。
+  List<int> last7FocusSecs() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final list = <int>[];
+    for (var i = 6; i >= 0; i--) {
+      list.add(focusSecOn(today.subtract(Duration(days: i))));
+    }
+    return list;
+  }
+
   /// 今日专注总秒数（含休息阶段，历史口径）。
   int get todayTotalSec => totalSecOn(DateTime.now());
 

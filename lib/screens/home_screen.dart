@@ -8,6 +8,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
 import 'package:todolist/services/update_checker.dart';
 import 'package:todolist/widgets/update_dialog.dart';
@@ -737,6 +738,13 @@ class _DismissibleTask extends StatelessWidget {
       task: task,
       onToggle: selecting ? null : onToggle,
       onLongPress: selecting ? null : onLongPress,
+      onTap: selecting
+          ? null
+          : () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => TaskDetailScreen(taskId: task.id),
+                ),
+              ),
       selecting: selecting,
       selected: selected,
       onSelect: selecting ? onSelect : null,

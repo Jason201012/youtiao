@@ -500,4 +500,80 @@ void main() {
       expect(p.homeTasks['today']!.map((t) => t.id), ['a', 'b']);
     });
   });
+
+  group('子任务 byId / toggleSubTask（v2.3.8 新增）', () {
+    test('byId 命中返回任务，未命中返回 null', () async {
+      final p = await buildWith([mk('1'), mk('2')]);
+      expect(p.byId('1')?.id, '1');
+      expect(p.byId('9'), isNull);
+    });
+
+    test('toggleSubTask 只翻转目标子任务，并刷新派生聚合', () async {
+      final task = Task(
+        id: '1',
+        title: 'T1',
+        priority: Priority.medium,
+        category: Category.work,
+        subtasks: [
+          SubTask(id: 's1', title: '步骤一', done: false),
+          SubTask(id: 's2', title: '步骤二', done: false),
+          SubTask(id: 's3', title: '步骤三', done: true),
+        ],
+      );
+      final p = await buildWith([task]);
+      expect(p.byId('1')!.subtaskTotal, 3);
+      expect(p.byId('1')!.subtaskDone, 1); // s3 初始已勾
+      p.toggleSubTask('1', 's1');
+      final t2 = p.byId('1')!;
+      expect(t2.subtaskDone, 2);
+      expect(t2.subtasks.firstWhere((s) => s.id == 's1').done, isTrue);
+      expect(t2.subtasks.firstWhere((s) => s.id == 's2').done, isFalse);
+      // 再次翻转回到原状
+      p.toggleSubTask('1', 's1');
+      expect(p.byId('1')!.subtaskDone, 1);
+    });
+
+    test('toggleSubTask 不影响其它任务；任务不存在时安全返回', () async {
+      final a = Task(
+        id: 'a',
+        title: 'A',
+        priority: Priority.medium,
+        category: Category.work,
+        subtasks: [SubTask(id: 'x', title: 'x', done: false)],
+      );
+      final b = Task(
+        id: 'b',
+        title: 'B',
+        priority: Priority.medium,
+        category: Category.work,
+        subtasks: [SubTask(id: 'y', title: 'y', done: false)],
+      );
+      final p = await buildWith([a, b]);
+      p.toggleSubTask('a', 'x');
+      expect(p.byId('a')!.subtaskDone, 1);
+      expect(p.byId('b')!.subtaskDone, 0); // b 不受影响
+      p.toggleSubTask('nope', 'x'); // 任务不存在，安全返回
+      expect(p.byId('a')!.subtaskDone, 1);
+    });
+
+    test('toggleSubTask 经 backupJson 往返持久化一致', () async {
+      final task = Task(
+        id: '1',
+        title: 'T1',
+        priority: Priority.medium,
+        category: Category.work,
+        subtasks: [
+          SubTask(id: 's1', title: 'x', done: false),
+          SubTask(id: 's2', title: 'y', done: false),
+        ],
+      );
+      final p = await buildWith([task]);
+      p.toggleSubTask('1', 's2');
+      final json = p.backupJson();
+      final p2 = TaskProvider();
+      await p2.restoreFromJson(json);
+      expect(p2.byId('1')!.subtaskDone, 1);
+      expect(p2.byId('1')!.subtasks.firstWhere((s) => s.id == 's2').done, isTrue);
+    });
+  });
 }

@@ -274,4 +274,53 @@ void main() {
       expect(calls, 0);
     });
   });
+
+  group('last7FocusSecs 近 7 日聚合（v2.3.8 新增）', () {
+    test('空数据返回 7 个 0，顺序为旧→新（list[6]=今天）', () {
+      final p = FocusProvider();
+      final out = p.last7FocusSecs();
+      expect(out.length, 7);
+      expect(out, [0, 0, 0, 0, 0, 0, 0]);
+    });
+
+    test('跨天会话按结束日归属到对应索引；超出 7 日窗口不计入', () {
+      final p = FocusProvider();
+      final today = DateTime.now();
+      final d2 = today.subtract(const Duration(days: 2));
+      final d8 = today.subtract(const Duration(days: 8));
+      p.addSession(mk(1, 600, endedAt: today));
+      p.addSession(mk(2, 300, endedAt: today)); // 今天共 900 -> index 6
+      p.addSession(mk(3, 120, endedAt: d2)); // 两天前 -> index 4
+      p.addSession(mk(4, 999, endedAt: d8)); // 8 天前，不入窗口
+      final out = p.last7FocusSecs();
+      expect(out[6], 900); // 今天
+      expect(out[4], 120); // 两天前
+      expect(out[0], 0); // 6 天前为空
+    });
+
+    test('仅统计专注阶段（休息不计入）', () {
+      final p = FocusProvider();
+      final t = DateTime.now();
+      p.addSession(FocusSession(
+        id: '1',
+        plannedSec: 600,
+        durationSec: 600,
+        completed: true,
+        phase: FocusPhase.focus,
+        startedAt: t.subtract(const Duration(seconds: 600)),
+        endedAt: t,
+      ));
+      p.addSession(FocusSession(
+        id: '2',
+        plannedSec: 300,
+        durationSec: 300,
+        completed: true,
+        phase: FocusPhase.shortBreak,
+        startedAt: t.subtract(const Duration(seconds: 300)),
+        endedAt: t,
+      ));
+      final out = p.last7FocusSecs();
+      expect(out[6], 600); // 只算专注阶段
+    });
+  });
 }
