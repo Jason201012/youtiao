@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/services/local_database.dart';
 import 'test_helpers.dart';
 
 void _installMocks() {

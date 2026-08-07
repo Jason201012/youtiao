@@ -18,6 +18,7 @@ class AppBottomNav extends StatelessWidget {
     (Symbols.dashboard, '看板'),
     (Symbols.calendar_month, '日历'),
     (Symbols.timer, '专注'),
+    (Symbols.emoji_events, '习惯'),
     (Symbols.settings, '设置'),
   ];
 

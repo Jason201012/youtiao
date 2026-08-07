@@ -3,6 +3,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -40,7 +41,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '2.3.4');
+      if (mounted) setState(() => _version = '2.3.5');
     }
   }
 
@@ -78,23 +79,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _GroupTitle('通用'),
-                    SettingsRow(
-                      icon: Symbols.brightness_auto,
-                      label: '跟随系统',
-                      switchValue: provider.followSystem,
-                      onSwitchChanged: (v) => provider.setFollowSystem(v),
-                    ),
-                    const SizedBox(height: AppColors.contentGap),
-                    SettingsRow(
-                      icon: Symbols.palette,
-                      label: '深色模式',
-                      switchValue: provider.followSystem
-                          ? MediaQuery.platformBrightnessOf(context) ==
-                              Brightness.dark
-                          : provider.themeMode == ThemeMode.dark,
-                      onSwitchChanged: provider.followSystem
-                          ? null
-                          : (v) => provider.setThemeMode(v),
+                    Consumer<ThemeProvider>(
+                      builder: (context, theme, _) => Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SettingsRow(
+                            icon: Symbols.brightness_auto,
+                            label: '跟随系统',
+                            switchValue: theme.followSystem,
+                            onSwitchChanged: (v) => theme.setFollowSystem(v),
+                          ),
+                          const SizedBox(height: AppColors.contentGap),
+                          SettingsRow(
+                            icon: Symbols.palette,
+                            label: '深色模式',
+                            switchValue: theme.followSystem
+                                ? MediaQuery.platformBrightnessOf(context) ==
+                                    Brightness.dark
+                                : theme.dark,
+                            onSwitchChanged: theme.followSystem
+                                ? null
+                                : (v) => theme.setDark(v),
+                          ),
+                          const SizedBox(height: AppColors.contentGap),
+                          SettingsRow(
+                            icon: Symbols.auto_awesome,
+                            label: 'Material You 跟随取色',
+                            switchValue: theme.useDynamic,
+                            onSwitchChanged: (v) => theme.setUseDynamic(v),
+                          ),
+                          const SizedBox(height: AppColors.contentGap),
+                          SettingsRow(
+                            icon: Symbols.contrast,
+                            label: '纯黑背景（深色模式）',
+                            switchValue: theme.pureBlack,
+                            onSwitchChanged: (v) => theme.setPureBlack(v),
+                          ),
+                          const SizedBox(height: AppColors.contentGap),
+                          const _ThemeColorRow(),
+                        ],
+                      ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(
@@ -241,6 +265,94 @@ class _GroupTitle extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: AppColors.contentGap),
       child: Text(text,
           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: ext.meta)),
+    );
+  }
+}
+
+/// 主题色选择行：默认（品牌色）+ 预设种子色。选中以白边 + 对勾标识。
+class _ThemeColorRow extends StatelessWidget {
+  const _ThemeColorRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 10),
+            child: Row(
+              children: [
+                Icon(Symbols.palette, size: 20, color: ext.meta),
+                const SizedBox(width: 12),
+                Text('主题色', style: TextStyle(fontSize: 15, color: ext.meta)),
+              ],
+            ),
+          ),
+          Consumer<ThemeProvider>(
+            builder: (context, theme, _) {
+              final children = <Widget>[
+                _Swatch(
+                  label: '默认',
+                  color: AppColors.lightPrimary,
+                  selected: theme.seedColor == null,
+                  onTap: () => theme.setSeedColor(null),
+                ),
+              ];
+              for (final c in ThemeProvider.seedPresets) {
+                children.add(_Swatch(
+                  color: c,
+                  selected: theme.seedColorValue == c.value,
+                  onTap: () => theme.setSeedColor(c),
+                ));
+              }
+              return Wrap(spacing: 12, runSpacing: 12, children: children);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Swatch extends StatelessWidget {
+  final String? label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+  const _Swatch({
+    this.label,
+    required this.color,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: selected
+              ? Border.all(color: Colors.white, width: 3)
+              : Border.all(color: Colors.white24, width: 1),
+        ),
+        child: selected
+            ? const Icon(Icons.check, color: Colors.white, size: 20)
+            : (label != null
+                ? Center(
+                    child: Text(label!,
+                        style: const TextStyle(color: Colors.white, fontSize: 10)),
+                  )
+                : null),
+      ),
     );
   }
 }

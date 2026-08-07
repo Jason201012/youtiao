@@ -12,35 +12,9 @@ enum TaskFilter { all, todo, done, overdue }
 /// 内存状态 + shared_preferences 持久化（任务列表与开关设置落盘，重启不丢）
 class TaskProvider extends ChangeNotifier {
   static const String _kTasks = 'tasks';
-  static const String _kTheme = 'theme_mode';
-  static const String _kFollowSystem = 'follow_system';
   static const String _kNotify = 'notifications_enabled';
   static const String _kSound = 'sound_enabled';
   static const String _kGuard = 'background_guard';
-
-  ThemeMode _themeMode = ThemeMode.light;
-  ThemeMode get themeMode => _themeMode;
-
-  bool _followSystem = true;
-  bool get followSystem => _followSystem;
-
-  /// 实际生效的主题模式：跟随系统时用系统亮度，否则用手动 light/dark。
-  ThemeMode get effectiveThemeMode =>
-      _followSystem ? ThemeMode.system : _themeMode;
-
-  void setFollowSystem(bool v) {
-    _followSystem = v;
-    notifyListeners();
-    _persistSettings();
-  }
-
-  /// 手动选择浅色/深色：自动退出「跟随系统」。
-  void setThemeMode(bool dark) {
-    _followSystem = false;
-    _themeMode = dark ? ThemeMode.dark : ThemeMode.light;
-    notifyListeners();
-    _persistSettings();
-  }
 
   // ===== 通知总开关 =====
   bool _notificationsEnabled = true;
@@ -120,13 +94,6 @@ class TaskProvider extends ChangeNotifier {
         ..clear()
         ..addAll(loadedTrash);
     }
-    final themeIdx = prefs.getInt(_kTheme);
-    if (themeIdx != null &&
-        themeIdx >= 0 &&
-        themeIdx < ThemeMode.values.length) {
-      _themeMode = ThemeMode.values[themeIdx];
-    }
-    _followSystem = prefs.getBool(_kFollowSystem) ?? true;
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
     _soundEnabled = prefs.getBool(_kSound) ?? true;
     _backgroundGuard = prefs.getBool(_kGuard) ?? true;
@@ -188,8 +155,6 @@ class TaskProvider extends ChangeNotifier {
   /// 仅持久化开关/主题等偏好（写入 SharedPreferences）。任务数据由 [_persist] 落 SQLite。
   Future<void> _persistSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_kTheme, _themeMode.index);
-    await prefs.setBool(_kFollowSystem, _followSystem);
     await prefs.setBool(_kNotify, _notificationsEnabled);
     await prefs.setBool(_kSound, _soundEnabled);
     await prefs.setBool(_kGuard, _backgroundGuard);
@@ -212,11 +177,6 @@ class TaskProvider extends ChangeNotifier {
   }
 
   // ===== 首页筛选状态（已移除搜索 / 筛选功能）=====
-
- void toggleTheme() {
-    // 手动切换即退出跟随系统
-    setThemeMode(_themeMode != ThemeMode.dark);
-  }
 
   // ===== Mock 数据（7 条，分类进度：工作 75% / 生活 100% / 学习 50%）=====
   final List<Task> _tasks = [
@@ -856,7 +816,6 @@ class TaskProvider extends ChangeNotifier {
         'trash': includeTrash
             ? _trash.map((t) => t.toJson()).toList()
             : <Map<String, dynamic>>[],
-        'theme_mode': _themeMode.index,
         'notifications_enabled': _notificationsEnabled,
         'sound_enabled': _soundEnabled,
       };
@@ -878,10 +837,6 @@ class TaskProvider extends ChangeNotifier {
       _trash
         ..clear()
         ..addAll(trashList.map((e) => Task.fromJson(e as Map<String, dynamic>)));
-    }
-    final themeIdx = data['theme_mode'];
-    if (themeIdx is int && themeIdx >= 0 && themeIdx < ThemeMode.values.length) {
-      _themeMode = ThemeMode.values[themeIdx];
     }
     if (data['notifications_enabled'] is bool) {
       _notificationsEnabled = data['notifications_enabled'];

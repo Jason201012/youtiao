@@ -4,6 +4,8 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/models/focus_session.dart';
+import 'package:todolist/models/habit.dart';
+import 'package:todolist/models/checkin.dart';
 
 /// 本地关系型存储（sqflite）。
 ///
@@ -27,6 +29,8 @@ class LocalDatabase {
   static const String kTasks = 'tasks';
   static const String kTrash = 'trash';
   static const String kFocus = 'focus_sessions';
+  static const String kHabits = 'habits';
+  static const String kCheckIns = 'check_ins';
 
   /// 旧版 SharedPreferences 中的 key（迁移后会被清除）。
   static const String kPrefTasks = 'tasks';
@@ -53,12 +57,16 @@ class LocalDatabase {
   static final Map<String, String> _memTasks = {};
   static final Map<String, String> _memTrash = {};
   static final Map<String, String> _memFocus = {};
+  static final Map<String, String> _memHabits = {};
+  static final Map<String, String> _memCheckIns = {};
 
   /// 测试用：清空内存后端，避免静态 Map 在用例之间串味。
   static void resetMemoryForTest() {
     _memTasks.clear();
     _memTrash.clear();
     _memFocus.clear();
+    _memHabits.clear();
+    _memCheckIns.clear();
   }
 
   Database? _db;
@@ -69,29 +77,63 @@ class LocalDatabase {
     final dbPath = _testPathOverride != null ? base : p.join(base, kDbName);
     _db = await openDatabase(
       dbPath,
-      version: 1,
+      version: 2,
       onCreate: (database, _) async {
-        await database.execute('''
-          CREATE TABLE $kTasks (
-            id TEXT PRIMARY KEY,
-            data TEXT NOT NULL
-          )
-        ''');
-        await database.execute('''
-          CREATE TABLE $kTrash (
-            id TEXT PRIMARY KEY,
-            data TEXT NOT NULL
-          )
-        ''');
-        await database.execute('''
-          CREATE TABLE $kFocus (
-            id TEXT PRIMARY KEY,
-            data TEXT NOT NULL
-          )
-        ''');
+        await _createTables(database);
+      },
+      onUpgrade: (database, oldVersion, newVersion) async {
+        // v1 → v2：新增 habits / check_ins 两张表（旧库无数据可丢，直接建表）。
+        if (oldVersion < 2) {
+          await database.execute('''
+            CREATE TABLE $kHabits (
+              id TEXT PRIMARY KEY,
+              data TEXT NOT NULL
+            )
+          ''');
+          await database.execute('''
+            CREATE TABLE $kCheckIns (
+              id TEXT PRIMARY KEY,
+              data TEXT NOT NULL
+            )
+          ''');
+        }
       },
     );
     return _db!;
+  }
+
+  /// 建表（v2 起的完整表集合：tasks / trash / focus_sessions / habits / check_ins）。
+  static Future<void> _createTables(Database database) async {
+    await database.execute('''
+      CREATE TABLE $kTasks (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE $kTrash (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE $kFocus (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE $kHabits (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE $kCheckIns (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    ''');
   }
 
   Future<void> close() async {
@@ -211,6 +253,85 @@ class LocalDatabase {
         await txn.insert(kFocus, {
           'id': s.id,
           'data': jsonEncode(s.toJson()),
+        });
+      }
+    });
+  }
+
+  // ===== 习惯 / 打卡 =====
+
+  Future<bool> get habitsEmpty async {
+    if (testUseMemory) return _memHabits.isEmpty;
+    final d = await db;
+    final row = await d.rawQuery('SELECT COUNT(*) AS n FROM $kHabits');
+    return (row.first['n'] as int) == 0;
+  }
+
+  Future<List<Habit>> loadHabits() async {
+    if (testUseMemory) {
+      return _memHabits.values
+          .map((j) =>
+              Habit.fromJson(jsonDecode(j) as Map<String, dynamic>))
+          .toList();
+    }
+    final d = await db;
+    final rows = await d.query(kHabits);
+    return rows
+        .map((r) =>
+            Habit.fromJson(jsonDecode(r['data'] as String) as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> replaceHabits(List<Habit> habits) async {
+    if (testUseMemory) {
+      _memHabits.clear();
+      for (final h in habits) {
+        _memHabits[h.id] = jsonEncode(h.toJson());
+      }
+      return;
+    }
+    final d = await db;
+    await d.transaction((txn) async {
+      await txn.delete(kHabits);
+      for (final h in habits) {
+        await txn.insert(kHabits, {
+          'id': h.id,
+          'data': jsonEncode(h.toJson()),
+        });
+      }
+    });
+  }
+
+  Future<List<CheckIn>> loadCheckIns() async {
+    if (testUseMemory) {
+      return _memCheckIns.values
+          .map((j) =>
+              CheckIn.fromJson(jsonDecode(j) as Map<String, dynamic>))
+          .toList();
+    }
+    final d = await db;
+    final rows = await d.query(kCheckIns);
+    return rows
+        .map((r) => CheckIn.fromJson(
+            jsonDecode(r['data'] as String) as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> replaceCheckIns(List<CheckIn> checkIns) async {
+    if (testUseMemory) {
+      _memCheckIns.clear();
+      for (final c in checkIns) {
+        _memCheckIns[c.id] = jsonEncode(c.toJson());
+      }
+      return;
+    }
+    final d = await db;
+    await d.transaction((txn) async {
+      await txn.delete(kCheckIns);
+      for (final c in checkIns) {
+        await txn.insert(kCheckIns, {
+          'id': c.id,
+          'data': jsonEncode(c.toJson()),
         });
       }
     });
