@@ -70,14 +70,14 @@ void main() {
         mk('1', due: now().subtract(const Duration(days: 1))), // 逾期
         mk('2', due: todayNoon()), // 今天
         mk('3', due: now().add(const Duration(days: 2))), // 未来
-        mk('4', due: null), // 未来（无截止）
+        mk('4', due: null), // 今天（无截止）
         mk('5', repeating: true), // 每天
         mk('6', status: TaskStatus.done), // 已完成
       ]);
       final s = p.sectionCounts;
       expect(s['overdue'], 1);
-      expect(s['today'], 1);
-      expect(s['future'], 2); // id3 + id4(null)
+      expect(s['today'], 2); // id2(今天) + id4(无截止)
+      expect(s['future'], 1); // id3(未来)
       expect(s['repeat'], 1);
       expect(s['done'], 1);
       // 五段互不重叠且覆盖全部 6 条
@@ -87,7 +87,7 @@ void main() {
   });
 
   group('homeTasks 首页分区列表', () {
-    test('逾期按截止时间升序；无截止排未来末尾', () async {
+    test('逾期按截止时间升序；无截止归今天段', () async {
       final p = await buildWith([
         mk('1', due: now().subtract(const Duration(days: 2))),
         mk('2', due: now().subtract(const Duration(days: 1))),
@@ -96,8 +96,10 @@ void main() {
       final overdue = p.homeTasks['overdue']!;
       expect(overdue.first.id, '1'); // 更早到期排前
       expect(overdue.last.id, '2');
-      final future = p.homeTasks['future']!;
-      expect(future.single.id, '3');
+      // 无截止日期不再进「未来」，归入「今天」段
+      final today = p.homeTasks['today']!;
+      expect(today.single.id, '3');
+      expect(p.homeTasks['future'], isEmpty);
     });
     test('重复任务独占 repeat 段', () async {
       final p = await buildWith([mk('7', repeating: true)]);
@@ -309,7 +311,7 @@ void main() {
   });
 
   group('当日口径统计', () {
-    test('todayEventTotal 仅统计截止今天或循环今日的任务', () async {
+    test('todayEventTotal 统计截止今天/循环今日/无截止的任务', () async {
       final today = DateTime.now();
       final p = await buildWith([
         mk('1', due: today, title: '今天截止'),
@@ -317,10 +319,10 @@ void main() {
         mk('3', repeating: true, title: '每天'),
         mk('4', title: '无截止'),
       ]);
-      expect(p.todayEventTotal, 2); // 今天截止 + 每天循环
+      expect(p.todayEventTotal, 3); // 今天截止 + 每天循环 + 无截止(视为当天)
     });
 
-    test('todayCompleted 仅统计当日事件中已完成', () async {
+    test('todayCompleted 统计当日事件（含无截止）中已完成', () async {
       final today = DateTime.now();
       final p = await buildWith([
         mk('1', due: today, status: TaskStatus.done, title: '今天已完成'),
@@ -328,9 +330,9 @@ void main() {
         mk('3', repeating: true, status: TaskStatus.done, title: '每天已完成'),
         mk('4', status: TaskStatus.done, title: '无截止已完成'),
       ]);
-      expect(p.todayEventTotal, 3); // 今天截止(2) + 每天循环(1)
-      expect(p.todayCompleted, 2); // 今天已完成 + 每天已完成
-      expect(p.todayCompletionRate, closeTo(2 / 3, 1e-9));
+      expect(p.todayEventTotal, 4); // 今天截止(2) + 每天循环(1) + 无截止(1)
+      expect(p.todayCompleted, 3); // 今天已完成 + 每天已完成 + 无截止已完成
+      expect(p.todayCompletionRate, closeTo(3 / 4, 1e-9));
     });
 
     test('todayEventTotal 排除已删除（deletedAt 非空）任务', () async {
@@ -396,6 +398,27 @@ void main() {
       final kanban = p.kanbanGroups;
       expect(kanban[TaskStatus.todo]!.length, 1);
       expect(kanban[TaskStatus.todo]!.first.title, '哈哈哈');
+    });
+
+    test('无截止日期任务视为当天，且跨天始终顺延（恒为今天）', () async {
+      // 无截止日期的非循环任务，无论哪一天都计入「今日事件」，
+      // 因此跨天时会自然顺延到第二天（无需任何重置，dueDate==null 恒等于「今天」）。
+      final p = await buildWith([
+        mk('1', due: null, title: '无截止待办'),
+        mk('2', due: null, status: TaskStatus.done, title: '无截止已完成'),
+      ]);
+      // 看板当日统计：两条无截止都算今天（含已完成）
+      expect(p.todayEventTotal, 2);
+      expect(p.todayCompleted, 1);
+      // 首页分组：无截止的未完成任务进「今天」段；已完成的归「已完成」段，不进「未来」
+      expect(p.sectionCounts['today'], 1); // 仅未完成的 id1
+      expect(p.sectionCounts['done'], 1); // 已完成的 id2
+      expect(p.sectionCounts['future'], 0);
+      final todayList = p.homeTasks['today']!;
+      expect(todayList.map((t) => t.id), ['1']);
+      expect(p.homeTasks['future'], isEmpty);
+      // 且不会误标逾期（无截止 non-repeating 绝不逾期）
+      expect(p.overdue, 0);
     });
   });
 }

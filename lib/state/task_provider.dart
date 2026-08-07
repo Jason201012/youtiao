@@ -295,13 +295,17 @@ class TaskProvider extends ChangeNotifier {
       _tasks.where((t) => !t.done && !t.isRepeating && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
   double get completionRate => total == 0 ? 0 : completed / total;
 
-  /// 判断任务是否为「今天的事务」：未删除，且（截止日期为今天 或 今天为循环日）。
+  /// 判断任务是否为「今天的事务」：未删除，且（无截止日期 / 截止日期为今天 / 今天为循环日）。
+  /// 无截止日期视为当天，并始终跟随当前日期（跨天自动顺延到第二天）。
   bool _isEventToday(Task t, DateTime now) {
     if (t.deletedAt != null) return false;
     final today = DateTime(now.year, now.month, now.day);
     if (t.dueDate != null) {
       final d = DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
       if (d == today) return true;
+    } else if (!t.isRepeating) {
+      // 非循环且无截止日期 → 视为当天（始终跟随当前日期，跨天自动顺延到第二天）
+      return true;
     }
     return t.repeatsOn(today);
   }
@@ -519,9 +523,12 @@ class TaskProvider extends ChangeNotifier {
 
     final active = _tasks.where((t) => !t.done && !t.isRepeating);
     final overdue = active.where((t) => (dayDiff(t.dueDate) ?? 0) < 0).length;
-    final today = active.where((t) => dayDiff(t.dueDate) == 0).length;
-    final future =
-        active.where((t) => t.dueDate == null || dayDiff(t.dueDate)! > 0).length;
+    final today =
+        active.where((t) => dayDiff(t.dueDate) == 0 || t.dueDate == null).length;
+    final future = active.where((t) {
+      final d = dayDiff(t.dueDate);
+      return d != null && d > 0;
+    }).length;
     final repeat = _tasks.where((t) => t.isRepeating && !t.done).length;
     final done = _tasks.where((t) => t.done).length;
     return {
@@ -551,19 +558,20 @@ class TaskProvider extends ChangeNotifier {
         .toList()
       ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!)); // 拖最久的排前
     final today = active
-        .where((t) => dayDiff(t.dueDate) == 0)
+        .where((t) => dayDiff(t.dueDate) == 0 || t.dueDate == null)
         .toList()
-      ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
-    final future = active.where((t) {
-      final d = dayDiff(t.dueDate);
-      return d == null || d > 0;
-    }).toList()
       ..sort((a, b) {
+        // 无截止日期的排到今天列表末尾，不影响有日期任务的按时排序
         if (a.dueDate == null && b.dueDate == null) return 0;
         if (a.dueDate == null) return 1;
         if (b.dueDate == null) return -1;
         return a.dueDate!.compareTo(b.dueDate!);
       });
+    final future = active.where((t) {
+      final d = dayDiff(t.dueDate);
+      return d != null && d > 0;
+    }).toList()
+      ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
     // 重复任务单独成段，按提醒时刻升序。
     final repeat = _tasks.where((t) => t.isRepeating && !t.done).toList()
       ..sort((a, b) => (a.repeatMinute ?? 24 * 60)

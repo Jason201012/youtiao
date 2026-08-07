@@ -268,7 +268,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         // —— 首页分区口径（按日期切分）——
         // 1) 未完成 + 非每日提醒的任务，按截止日期分成「逾期 / 今天 / 未来」三段；
-        //    无截止日期的任务归入「未来」（视为尚未安排，不占用「今天」的注意力）。
+        //    无截止日期的任务归入「今天」（视为当天就要做，且始终跟随当前日期，跨天自动顺延到第二天）。
         // 2) 未完成 + 开启每日提醒的任务单独归入「每天」，不参与日期切分（它每天都要做）。
         // 3) 已完成的任务统一进「已完成」，不按日期切分。
         // 四类互不重叠，任何一个任务在首页只会出现在一个板块里。
@@ -280,23 +280,24 @@ class _HomeScreenState extends State<HomeScreen> {
             .toList()
           ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
 
-        // 今天：截止日期就是今天，按当天时刻升序
+        // 今天：截止日期就是今天，或没有截止日期（无截止视为当天，始终跟随当前日期，跨天自动顺延）。
         final today = active
-            .where((t) => _dueDayDiff(t.dueDate) == 0)
+            .where((t) => _dueDayDiff(t.dueDate) == 0 || t.dueDate == null)
             .toList()
-          ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
-
-        // 未来：截止日期在今天之后，或没有截止日期（无截止排在最后）
-        final future = active.where((t) {
-          final d = _dueDayDiff(t.dueDate);
-          return d == null || d > 0;
-        }).toList()
           ..sort((a, b) {
+            // 无截止日期的排到今天列表末尾，不破坏有日期任务的按时排序
             if (a.dueDate == null && b.dueDate == null) return 0;
             if (a.dueDate == null) return 1;
             if (b.dueDate == null) return -1;
             return a.dueDate!.compareTo(b.dueDate!);
           });
+
+        // 未来：仅含截止日期在今天之后的任务（无截止已归入「今天」）。
+        final future = active.where((t) {
+          final d = _dueDayDiff(t.dueDate);
+          return d != null && d > 0;
+        }).toList()
+          ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
 
         // 重复：重复任务（所有规则），按提醒时刻升序（未设时刻的排最后）
         final repeat = tasks.where((t) => t.isRepeating && !t.done).toList()
