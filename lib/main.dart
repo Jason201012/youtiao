@@ -144,18 +144,40 @@ class MainScaffold extends StatefulWidget {
   State<MainScaffold> createState() => _MainScaffoldState();
 }
 
-class _MainScaffoldState extends State<MainScaffold> {
+class _MainScaffoldState extends State<MainScaffold>
+    with WidgetsBindingObserver {
   int _index = 0;
   bool _homeSearching = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // 看板统计卡点击后，由 provider 回调切回首页并套用筛选。
     Provider.of<TaskProvider>(context, listen: false).onRequestHome =
         () => setState(() => _index = 0);
     // 任务行「专注」按钮请求跳到专注 Tab（index=3）；FocusProvider 静态回调。
     FocusProvider.jumpToFocusTab = () => setState(() => _index = 3);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 进程即将转入后台/被杀：把主题首选项重新落盘，规避 shared_preferences.apply()
+    // 在激进 ROM 上杀进程时丢写（纯黑背景等唯一非默认项最易暴露）。
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      try {
+        Provider.of<ThemeProvider>(context, listen: false).persist();
+      } catch (_) {
+        // 持久化失败不影响退出。
+      }
+    }
   }
 
   @override

@@ -1,5 +1,15 @@
 # 更新日志（Changelog）
 
+## v2.3.9（2026-08-08）
+
+- **🔥 修复「纯黑背景」开关重启后不持久**：开启纯黑背景、退出再进 App 又变回非纯黑。根因：`shared_preferences_android` 底层写盘用 `apply()` 而非 `commit()`（内存即时、磁盘异步，进程被杀前不保证刷盘），叠加设置开关回调为 `void Function(bool)`，纯黑写盘未被 await，关 App 太快会丢写。因纯黑是唯一「非默认值」项，其它开关丢写无感，故仅纯黑表现为丢持久化。
+  - `settings_row.dart`：`onSwitchChanged` 改为 `Future<void> Function(bool)?`，`Switch.onChanged` 内 `await`，点一下立即触发落盘。
+  - `theme_provider.dart`：新增 `persist()`，把全部主题首选项重新落盘。
+  - `main.dart`：`MainScaffold` 加 `WidgetsBindingObserver`，在 `paused`/`detached`（进程将死）时调 `theme.persist()` 兜底刷盘。
+  - `task_provider.dart`：`setNotificationsEnabled`/`setSoundEnabled` 由 `void` 改 `Future<void>` 并 `await` 落盘（与同类一致）。
+  - 新增 3 个主题测试：跨实例 round-trip、动态取色分支纯黑、`persist()` 全量落盘。`flutter test` 全绿（126 项）。
+- 版本升至 v2.3.9（versionCode 60）。
+
 ## v2.3.8（2026-08-07）
 
 - **任务详情页**：单击任务进入详情页，分区查看优先级色条 / 标题 / 完成状态、备注全文、标签、截止与重复规则、累计专注时长；子任务清单可逐项勾选（实时刷新 done/total 进度）；底部操作栏支持编辑、开始专注、归档与删除。

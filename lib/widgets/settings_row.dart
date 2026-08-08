@@ -12,7 +12,9 @@ class SettingsRow extends StatelessWidget {
   final bool showArrow;
   final VoidCallback? onTap;
   final bool? switchValue;
-  final ValueChanged<bool>? onSwitchChanged;
+  // 返回 Future：调用方 await，确保首选项落盘（shared_preferences 内部用 apply()，
+  // 进程被杀前若未刷盘会丢写；await 可在点击时立即触发 apply()，并闭合「写盘前被杀」窗口。
+  final Future<void> Function(bool)? onSwitchChanged;
   const SettingsRow({
     super.key,
     required this.icon,
@@ -50,7 +52,11 @@ class SettingsRow extends StatelessWidget {
             if (switchValue != null)
               Switch(
                 value: switchValue!,
-                onChanged: onSwitchChanged,
+                onChanged: onSwitchChanged == null
+                    ? null
+                    : (v) async {
+                        await onSwitchChanged?.call(v);
+                      },
                 splashRadius: 0,
               )
             else ...[

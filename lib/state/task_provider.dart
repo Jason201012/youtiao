@@ -19,7 +19,7 @@ class TaskProvider extends ChangeNotifier {
   // ===== 通知总开关 =====
   bool _notificationsEnabled = true;
   bool get notificationsEnabled => _notificationsEnabled;
-  void setNotificationsEnabled(bool v) {
+  Future<void> setNotificationsEnabled(bool v) async {
     _notificationsEnabled = v;
     NotificationService.instance.enabled = v;
     if (v) {
@@ -31,7 +31,7 @@ class TaskProvider extends ChangeNotifier {
       NotificationService.instance.cancelAll();
     }
     notifyListeners();
-    _persistSettings();
+    await _persistSettings();
   }
 
   /// 请求通知权限并返回是否授予（设置页「发送测试通知」前调用，
@@ -46,14 +46,14 @@ class TaskProvider extends ChangeNotifier {
   // ===== 后台提醒守护（前台服务保活）=====
   bool _backgroundGuard = true;
   bool get backgroundGuardEnabled => _backgroundGuard;
-  void setSoundEnabled(bool v) {
+  Future<void> setSoundEnabled(bool v) async {
     _soundEnabled = v;
     // 重新调度所有提醒（截止 + 每日），应用新的声音设置
     if (_notificationsEnabled) {
       _rescheduleAllActive();
     }
     notifyListeners();
-    _persistSettings();
+    await _persistSettings();
   }
 
   /// 后台提醒守护开关：开启则拉起前台服务（进程常驻），关闭则停止。

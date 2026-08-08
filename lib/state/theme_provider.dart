@@ -97,6 +97,18 @@ class ThemeProvider extends ChangeNotifier {
     await prefs.setBool(_kPureBlack, v);
   }
 
+  /// 把当前内存值重新落盘。进程即将被杀（AppLifecycleState.paused/detached）时调用，
+  /// 最大化解 shared_preferences.apply() 在进程死亡前的刷盘机会（ColorOS 等激进杀进程
+  /// 的 ROM 下 apply() 异步写盘容易在杀进程时丢失，尤其唯一非默认项「纯黑背景」最易暴露）。
+  Future<void> persist() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kFollowSystem, _followSystem);
+    await prefs.setBool(_kMode, _dark);
+    await prefs.setBool(_kUseDynamic, _useDynamic);
+    await prefs.setInt(_kSeed, _seedColor);
+    await prefs.setBool(_kPureBlack, _pureBlack);
+  }
+
   /// 设置自定义种子色；传 null 表示恢复「默认品牌色」。
   Future<void> setSeedColor(Color? c) async {
     _seedColor = c == null ? -1 : c.value;
