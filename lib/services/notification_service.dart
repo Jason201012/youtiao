@@ -294,7 +294,7 @@ class NotificationService {
       await _plugin.zonedSchedule(
         _notifyIdOf(task.id),
         '任务提醒',
-        task.title,
+        task.title.isNotEmpty ? task.title : '无标题任务',
         when,
         detail,
         androidScheduleMode: mode,
@@ -312,7 +312,7 @@ class NotificationService {
           // 任务在到期前已完成/被取消则不再弹：应用内兜底定时器不受系统 AlarmManager
           // cancel 影响，必须用 _deadlineCancelled 二次校验拦截。
           if (_deadlineCancelled.contains(id)) return;
-          _plugin.show(_notifyIdOf(id), '任务提醒', task.title, detail);
+          _plugin.show(_notifyIdOf(id), '任务提醒', task.title.isNotEmpty ? task.title : '无标题任务', detail);
         });
       }
       return true;
@@ -393,7 +393,7 @@ class NotificationService {
           await _plugin.zonedSchedule(
             _repeatNotifyIdOf(task.id, 0),
             task.repeatSummary,
-            task.title,
+            task.title.isNotEmpty ? task.title : '无标题任务',
             when,
             detail,
             androidScheduleMode: mode,
@@ -441,7 +441,7 @@ class NotificationService {
           await _plugin.zonedSchedule(
             _repeatNotifyIdOf(task.id, 0),
             task.repeatSummary,
-            task.title,
+            task.title.isNotEmpty ? task.title : '无标题任务',
             when,
             detail,
             androidScheduleMode: mode,

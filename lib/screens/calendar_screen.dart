@@ -356,7 +356,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     color: pColor, borderRadius: BorderRadius.circular(2))),
           if (!dense) const SizedBox(width: 6),
           Expanded(
-            child: Text(task.title,
+            child: Text(task.title.isNotEmpty ? task.title : '(无标题)',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -390,7 +390,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             borderRadius: BorderRadius.circular(8),
             border: Border.all(color: pColor.withAlpha(160), width: 1),
           ),
-          child: Text(task.title,
+          child: Text(task.title.isNotEmpty ? task.title : '(无标题)',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(

@@ -440,4 +440,42 @@ void main() {
       expect(c.title, 't');
     });
   });
+
+  group('Task.fromJson 标题空值防御（v2.3.10 修复）', () {
+    test('title 为 null 时回退为空串', () {
+      final t = Task.fromJson({
+        'id': '1',
+        'priority': 'medium',
+        'category': 'life',
+        'status': 'todo',
+        'done': false,
+        'title': null,
+      });
+      expect(t.title, '');
+    });
+
+    test('title 键缺失时回退为空串', () {
+      final t = Task.fromJson({
+        'id': '2',
+        'priority': 'low',
+        'category': 'work',
+        'status': 'todo',
+        'done': false,
+      });
+      expect(t.title, '');
+    });
+
+    test('空串标题不崩溃，toJson 往返一致', () {
+      final t = Task(
+        id: '3',
+        title: '',
+        priority: Priority.high,
+        category: Category.study,
+      );
+      final j = t.toJson();
+      final t2 = Task.fromJson(j);
+      expect(t2.title, '');
+      expect(t2.id, '3');
+    });
+  });
 }

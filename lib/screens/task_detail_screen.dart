@@ -81,7 +81,7 @@ class TaskDetailScreen extends StatelessWidget {
                 ),
                 Expanded(
                   child: Text(
-                    task.title,
+                    task.title.isNotEmpty ? task.title : '(无标题)',
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w600,

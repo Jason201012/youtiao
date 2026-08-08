@@ -291,7 +291,7 @@ class Task {
         : const <String>[];
     return Task(
       id: j['id'] as String,
-      title: j['title'] as String,
+      title: (j['title'] as String?) ?? '',
       priority: Priority.values.byName(j['priority'] as String),
       category: Category.values.byName(j['category'] as String),
       dueDate:

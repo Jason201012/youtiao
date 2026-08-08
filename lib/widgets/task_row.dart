@@ -209,12 +209,13 @@ class _TitleBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final displayTitle = task.title.isNotEmpty ? task.title : '(无标题)';
     final column = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Text(
-          task.title,
+          displayTitle,
           style: TextStyle(
             fontSize: 15,
             fontWeight: FontWeight.w500,
