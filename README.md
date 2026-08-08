@@ -4,9 +4,9 @@
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v2.4.0**（versionCode 61）　·　开源协议 **[MIT](LICENSE)**
+当前版本 **v2.4.1**（versionCode 62）　·　开源协议 **[MIT](LICENSE)**
 
-> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。所有版本（含当前 v2.4.0）的安装包已统一发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)** 专用仓库。点此直达最新版 👉 [v2.4.0 下载](https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.4.0)
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**；最新版 v2.4.1 起统一发布在承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。点此直达最新版 👉 [v2.4.1 下载](https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.1)
 
 ## ✨ 功能特性
 
@@ -79,10 +79,11 @@ flutter build apk --release   # 构建 Android release 包
 
 ## 📦 发行版（Release）
 
-安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。**本仓库已停止上传 APK**，所有正式安装包统一发布在专用仓库 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（因本仓库 Gitee 附件配额已用尽）。
+安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。**本仓库已停止上传 APK**，历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（配额已满）；最新版 v2.4.1 起承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。
 
-- 📥 最新版 `v2.4.0`（versionCode 61）下载：<https://gitee.com/jason1012/youtiao-releases/releases/tag/v2.4.0>
-- 全部发行版列表：<https://gitee.com/jason1012/youtiao-releases/releases>
+- 📥 最新版 `v2.4.1`（versionCode 62）下载：<https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.1>
+- 全部发行版列表（最新）：<https://gitee.com/jason1012/youtiao-releases-2/releases>
+- 历史发行版（≤v2.4.0）：<https://gitee.com/jason1012/youtiao-releases/releases>
 
 ## 📁 项目结构
 
