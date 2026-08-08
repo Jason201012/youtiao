@@ -112,8 +112,14 @@ class TaskRow extends StatelessWidget {
         children: [
           leading,
           if (!selecting) const SizedBox(width: 12),
-          // 标题（+ 备注预览 + 标签 + 子任务进度）。普通模式下整块可点击打开详情。
-          Expanded(
+          // 标题（+ 备注预览 + 标签 + 子任务进度）。
+          // 正式修复：用固定宽度 SizedBox 替代 Expanded，绕过弹性布局的零宽度约束。
+          // 根因：ReorderableListView + shrinkWrap 嵌套滚动场景下，Row 的弹性插槽收到零宽度，
+          // 导致 Expanded/Flexible(tight)/Flexible(loose)/UnconstrainedBox 全部异常。
+          // 宽度选 80px：中文 3-5 字约 63-105px，够常见标题+省略号；
+          // 同时为右侧 MetaInfo（时间/循环图标）+ 专注按钮预留最大空间，避免溢出卡片边界。
+          SizedBox(
+            width: 80,
             child: _TitleBlock(
               task: task,
               ext: ext,
@@ -124,9 +130,15 @@ class TaskRow extends StatelessWidget {
               onTap: onTap,
             ),
           ),
-          const SizedBox(width: 12),
-          // 截止信息 + 每日提醒标识 + 累计专注
-          _MetaInfo(task: task, ext: ext),
+          // 截止信息 + 每日提醒标识 + 累计专注。
+          // 未完成任务：用 Expanded 包裹，MetaInfo 填满标题+按钮之间的剩余空间，
+          //   超长内容走 Text ellipsis 省略。
+          // 已完成任务：隐藏时间信息（已完成无需展示截止/提醒/专注时长），
+          //   整块不渲染，避免布局空白/溢出两难。
+          if (!task.done) ...[
+            const SizedBox(width: 12),
+            Expanded(child: _MetaInfo(task: task, ext: ext)),
+          ],
           if (!task.done) ...[
             const SizedBox(width: 6),
             // 「专注」按钮：直接进入专注页并预选本任务
@@ -256,7 +268,9 @@ class _TitleBlock extends StatelessWidget {
   }
 }
 
-/// 任务行右侧信息：每日提醒标识（🔁 HH:mm）+ 截止时间。
+/// 任务行右侧信息：每日提醒标识 + 截止时间 + 累计专注。
+/// 用单行 Text 拼接所有信息（图标用 Unicode 字符内联），避免嵌套 Row 导致的
+/// 图标文字重叠 / 溢出卡边问题。外层 Expanded 约束下 ellipsis 必定生效。
 class _MetaInfo extends StatelessWidget {
   final Task task;
   final AppColorsExt ext;
@@ -264,51 +278,23 @@ class _MetaInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final children = <Widget>[];
+    final parts = <String>[];
     if (task.isRepeating && task.repeatFull.isNotEmpty) {
-      children.add(
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Symbols.repeat, size: 14, color: ext.meta),
-            const SizedBox(width: 2),
-            Text(
-              task.repeatFull,
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
-            ),
-          ],
-        ),
-      );
+      parts.add('↻ ${task.repeatFull}');
     }
-    children.add(
-      Text(
-        _dueLabel(task.dueDate),
-        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
-      ),
-    );
+    parts.add(_dueLabel(task.dueDate));
     if (task.focusSecTotal > 0) {
-      children.add(
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Symbols.timer, size: 14, color: ext.meta),
-            const SizedBox(width: 2),
-            Text(
-              _focusLabel(task.focusSecTotal),
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
-            ),
-          ],
-        ),
-      );
+      parts.add('⏱ ${_focusLabel(task.focusSecTotal)}');
     }
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (var i = 0; i < children.length; i++) ...[
-          if (i > 0) const SizedBox(width: 8),
-          children[i],
-        ],
-      ],
+    return Text(
+      parts.join('  '),
+      style: TextStyle(
+        fontSize: 12,
+        fontWeight: FontWeight.w500,
+        color: ext.meta,
+      ),
+      overflow: TextOverflow.ellipsis,
+      maxLines: 1,
     );
   }
 }
