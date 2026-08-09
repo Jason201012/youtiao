@@ -1,1 +1,7 @@
-{"version": "2.4.3", "tag": "v2.4.3", "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.3/app-release-v2.4.3-arm64.apk", "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.3", "notes": "v2.4.3：新增「今日聚合视图」，把任务、专注、习惯三处的当天信息收拢到一屏。①首页新增「今日」摘要卡（日期+今日完成/专注分钟/已打卡），位于本周回顾卡之前，点击进入独立今日页；②今日页含 2×2 核心指标（待办/已完成/专注分钟/番茄数）、可直接勾选的今日待办、就地打卡的今日习惯（含连续天数）、今日专注进度条与会话明细；③内置分享长图，浅/深色一键切换，3 倍密度导出到相册或系统分享。零新增存储，全部字段从现有三套数据实时聚合，升级无需数据迁移；不新增第 7 个 tab，沿用「首页卡+独立页」两屏方案。flutter analyze 0 issue，flutter test 140 项全绿。"}
+{
+  "version": "2.4.4",
+  "tag": "v2.4.4",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.4/app-release-v2.4.4-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.4",
+  "notes": "v2.4.4：①自然语言快速录入——首页右下角 FAB 唤起快速录入，一句话解析截止时间/优先级/分类/标签（支持「下周三」自然周语义与重复规则）；②全局搜索升级——覆盖任务+习惯并按分组展示，点习惯结果直达习惯 Tab；③月报/年报——首页右上角「月报/年报」入口进入独立回顾页，含本期完成/专注分/番茄数/习惯达成率 4 指标+环比、按天(月报)/按月(年报)趋势、专注去向 Top、习惯达成、分类分布，内置浅/深色分享长图；④成就墙分组——习惯/任务/专注/综合四组，计数型带进度条与「32/50」进度，底部「即将解锁」提示。零新增存储，全部基于现有三套数据实时聚合，升级无需迁移；不新增第 7 个 tab。flutter analyze 0 issue，flutter test 240 项全绿。"
+}
