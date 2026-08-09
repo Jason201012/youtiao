@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/review.dart';
 import 'package:todolist/models/today.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -19,6 +20,7 @@ import 'package:todolist/screens/today_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
 import 'package:todolist/services/update_checker.dart';
+import 'package:todolist/services/search_index.dart';
 import 'package:todolist/widgets/update_dialog.dart';
 
 /// 首页所有分区标题共用的字号。
@@ -36,11 +38,18 @@ int? _dueDayDiff(DateTime? due) {
   return DateTime(due.year, due.month, due.day).difference(today).inDays;
 }
 
+/// 1=周一 … 7=周日 → 中文单字（搜索习惯频率文案用）。
+String _wdLabel(int w) =>
+    ['一', '二', '三', '四', '五', '六', '日'][(w - 1).clamp(0, 6)];
+
 class HomeScreen extends StatefulWidget {
   /// 搜索态变化回调：用于让宿主 Scaffold 在搜索时隐藏「新增任务」FAB。
   final void Function(bool)? onSearchingChanged;
 
-  const HomeScreen({super.key, this.onSearchingChanged});
+  /// 搜索结果中点「习惯」时，通知宿主切到「习惯」Tab（index 4）。
+  final void Function()? onOpenHabit;
+
+  const HomeScreen({super.key, this.onSearchingChanged, this.onOpenHabit});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -129,23 +138,8 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.onSearchingChanged?.call(false);
   }
 
-  /// 任务是否命中搜索关键字：标题 / 分类 / 优先级 / 备注 / 重复规则 / 标签（忽略大小写）。
-  bool _matchesQuery(Task t) {
-    final q = _searchCtl.text.trim().toLowerCase();
-    if (q.isEmpty) return false;
-    return t.title.toLowerCase().contains(q) ||
-        t.category.label.toLowerCase().contains(q) ||
-        t.category.name.toLowerCase().contains(q) ||
-        _prioLabel(t.priority).contains(q) ||
-        t.priority.name.toLowerCase().contains(q) ||
-        t.note.toLowerCase().contains(q) ||
-        t.repeat.label.toLowerCase().contains(q) ||
-        t.repeatSummary.toLowerCase().contains(q) ||
-        t.tags.any((tag) => tag.toLowerCase().contains(q));
-  }
-
-  static String _prioLabel(Priority p) =>
-      p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
+  // 搜索匹配逻辑已下沉到 GlobalSearch（lib/services/search_index.dart），
+  // 纯 Dart、可单测，不在此处重复实现。
 
   @override
   void dispose() {
@@ -284,18 +278,27 @@ class _HomeScreenState extends State<HomeScreen> {
   /// 搜索结果视图：空关键字显示提示，有结果则扁平列出命中任务（复用现有任务行）。
   Widget _buildSearchResults(BuildContext context, TaskProvider provider) {
     final ext = appColors(context);
-    final onBg = Theme.of(context).colorScheme.onBackground;
     final query = _searchCtl.text.trim();
     if (query.isEmpty) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text('输入关键字搜索任务',
+          child: Text('输入关键字搜索任务 / 习惯',
               style: TextStyle(color: ext.meta, fontSize: 14)),
         ),
       );
     }
-    final results = provider.tasks.where(_matchesQuery).toList();
+    final habits = context.read<HabitProvider>().habits;
+    final result = GlobalSearch.query(query, tasks: provider.tasks, habits: habits);
+    if (result.total == 0) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 40),
+          child: Text('没有匹配的结果',
+              style: TextStyle(color: ext.meta, fontSize: 14)),
+        ),
+      );
+    }
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         AppColors.pagePadX,
@@ -308,19 +311,31 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
-            child: Text('找到 ${results.length} 条',
+            child: Text('找到 ${result.total} 条',
                 style: TextStyle(color: ext.meta, fontSize: 13)),
           ),
-          if (results.isEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 40),
-              child: Center(
-                child: Text('没有匹配的任务',
-                    style: TextStyle(color: ext.meta, fontSize: 14)),
-              ),
-            )
-          else
-            ...results.map((t) => _tile(context, t)),
+          if (result.tasks.isNotEmpty) ...[
+            _SectionHeader(
+              title: '任务',
+              count: result.tasks.length,
+              chipColor: ext.chip,
+              metaColor: ext.meta,
+            ),
+            ...result.tasks.map((t) => _tile(context, t)),
+            const SizedBox(height: 8),
+          ],
+          if (result.habits.isNotEmpty) ...[
+            _SectionHeader(
+              title: '习惯',
+              count: result.habits.length,
+              chipColor: ext.chip,
+              metaColor: ext.meta,
+            ),
+            ...result.habits.map(
+              (h) => _SearchHabitRow(habit: h, onTap: widget.onOpenHabit),
+            ),
+            const SizedBox(height: 8),
+          ],
         ],
       ),
     );
@@ -418,7 +433,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           onChanged: (_) => setState(() {}),
                           style: TextStyle(fontSize: 16, color: onBg),
                           decoration: InputDecoration(
-                            hintText: '搜索任务 / 分类 / 优先级',
+                            hintText: '搜索任务 / 习惯',
                             hintStyle: TextStyle(fontSize: 16, color: ext.meta),
                             border: InputBorder.none,
                             isCollapsed: true,
@@ -752,6 +767,48 @@ class _SectionHeader extends StatelessWidget {
                     fontSize: 12, fontWeight: FontWeight.w500, color: metaColor)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 搜索结果中的习惯行：复用习惯卡片的视觉（emoji 圆头像 + 标题 + 连续天数/频率），
+/// 点击整体跳到「习惯」Tab（由 HomeScreen.onOpenHabit 驱动）。
+class _SearchHabitRow extends StatelessWidget {
+  final Habit habit;
+  final VoidCallback? onTap;
+  const _SearchHabitRow({required this.habit, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final hp = context.watch<HabitProvider>();
+    final streak = hp.currentStreak(habit);
+    final freq = habit.weekdays.isEmpty
+        ? '每天'
+        : '每周 ${habit.weekdays.map(_wdLabel).join(' ')}';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppColors.contentGap),
+      child: Material(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppColors.cardRadius),
+          onTap: onTap,
+          child: ListTile(
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            leading: CircleAvatar(
+              backgroundColor: Color(habit.colorValue),
+              child: Text(habit.emoji, style: const TextStyle(fontSize: 20)),
+            ),
+            title: Text(habit.title,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            subtitle: Text('连续 $streak 天 · $freq',
+                style: TextStyle(color: ext.meta, fontSize: 12)),
+            trailing: Icon(Symbols.chevron_right, color: ext.meta, size: 20),
+          ),
+        ),
       ),
     );
   }

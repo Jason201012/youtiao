@@ -184,6 +184,7 @@ class _MainScaffoldState extends State<MainScaffold>
     final pages = [
       HomeScreen(
         onSearchingChanged: (v) => setState(() => _homeSearching = v),
+        onOpenHabit: () => setState(() => _index = 4),
       ),
       const BoardScreen(),
       const CalendarScreen(),
