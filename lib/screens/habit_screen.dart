@@ -23,14 +23,7 @@ class HabitScreen extends StatelessWidget {
     final focus = context.watch<FocusProvider>();
     final primary = Theme.of(context).colorScheme.primary;
 
-    final ctx = AchievementContext(
-      totalCheckIns: habit.totalCheckIns,
-      longestStreak: habit.overallLongestStreak,
-      currentStreak: habit.overallCurrentStreak,
-      habitCount: habit.habitCount,
-      completedTasks: task.completed,
-      focusMinutes: focus.totalSec ~/ 60,
-    );
+    final ctx = AchievementContext.fromProviders(task, focus, habit);
 
     final total = habit.activeHabits.length;
     final todayDone =
@@ -281,45 +274,155 @@ class _AchievementGrid extends StatelessWidget {
     final primary = Theme.of(context).colorScheme.primary;
     final width =
         (MediaQuery.of(context).size.width - AppColors.pagePadX * 2 - 12) / 2;
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: allAchievements.map((a) {
-        final unlocked = a.unlocked(ctx);
-        return Container(
-          width: width,
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: unlocked ? ext.chip : Colors.transparent,
-            border: Border.all(color: ext.navBorder),
-            borderRadius: BorderRadius.circular(AppColors.cardRadius),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Text(a.emoji,
-                      style: TextStyle(
-                          fontSize: 22,
-                          color: unlocked ? null : ext.meta)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(a.title,
-                        style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: unlocked ? null : ext.meta)),
+
+    final groups = achievementsByGroup();
+    final children = <Widget>[];
+    groups.forEach((g, list) {
+      children.add(_SectionTitle(g.label));
+      children.add(const SizedBox(height: 12));
+      children.add(
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: list
+              .map((a) => _AchievementCell(
+                    a: a,
+                    ctx: ctx,
+                    primary: primary,
+                    ext: ext,
+                    width: width,
+                  ))
+              .toList(),
+        ),
+      );
+      children.add(const SizedBox(height: 24));
+    });
+
+    // 即将解锁：取最接近解锁的若干未解锁成就，以紧凑芯片呈现（避免与分组卡片重复）。
+    final next = nextAchievements(ctx, limit: 3);
+    if (next.isNotEmpty) {
+      children.add(const _SectionTitle('即将解锁'));
+      children.add(const SizedBox(height: 12));
+      children.add(
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: next
+              .map(
+                (a) => Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: ext.chip,
+                    borderRadius: BorderRadius.circular(AppColors.chipRadius),
                   ),
-                  if (unlocked)
-                    Icon(Icons.verified, size: 16, color: primary),
-                ],
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(a.emoji, style: const TextStyle(fontSize: 14)),
+                      const SizedBox(width: 6),
+                      Text(
+                        a.progressLabel(ctx) ?? a.title,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: ext.meta,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+              .toList(),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+}
+
+class _AchievementCell extends StatelessWidget {
+  final Achievement a;
+  final AchievementContext ctx;
+  final Color primary;
+  final AppColorsExt ext;
+  final double width;
+  const _AchievementCell({
+    required this.a,
+    required this.ctx,
+    required this.primary,
+    required this.ext,
+    required this.width,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final unlocked = a.unlocked(ctx);
+    final progress = a.progress(ctx);
+    final showProgress = a.hasProgress;
+    return Container(
+      width: width,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: unlocked ? ext.chip : Colors.transparent,
+        border: Border.all(color: ext.navBorder),
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(a.emoji,
+                  style: TextStyle(
+                      fontSize: 22, color: unlocked ? null : ext.meta)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(a.title,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: unlocked ? null : ext.meta)),
               ),
-              const SizedBox(height: 6),
-              Text(a.desc, style: TextStyle(fontSize: 12, color: ext.meta)),
+              if (unlocked) Icon(Icons.verified, size: 16, color: primary),
             ],
           ),
-        );
-      }).toList(),
+          const SizedBox(height: 6),
+          Text(a.desc, style: TextStyle(fontSize: 12, color: ext.meta)),
+          if (showProgress) ...[
+            const SizedBox(height: 8),
+            Container(
+              height: 6,
+              decoration: BoxDecoration(
+                color: ext.track,
+                borderRadius: BorderRadius.circular(AppColors.progressRadius),
+              ),
+              child: FractionallySizedBox(
+                widthFactor: progress.clamp(0, 1),
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: primary,
+                    borderRadius: BorderRadius.circular(AppColors.progressRadius),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              a.progressLabel(ctx) ?? '',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: ext.meta,
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/review.dart';
 import 'package:todolist/models/focus_session.dart';
+import 'package:todolist/models/habit.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -105,7 +106,7 @@ class WeeklyFocusBlock extends StatelessWidget {
             )
           else
             for (int i = 0; i < r.focusTop.length; i++)
-              _FocusRow(
+              FocusRankRow(
                 rank: i + 1,
                 stat: r.focusTop[i],
                 accent: accent,
@@ -119,14 +120,17 @@ class WeeklyFocusBlock extends StatelessWidget {
   }
 }
 
-class _FocusRow extends StatelessWidget {
+/// 专注去向单行（带排名徽章 + 任务名 + 时长 + 次数）。
+/// 抽成公开组件，月报年报的 [PeriodFocusBlock] 可直接复用。
+class FocusRankRow extends StatelessWidget {
   final int rank;
   final TaskFocusStat stat;
   final Color accent;
   final Color onBg;
   final Color meta;
   final bool isLast;
-  const _FocusRow({
+  const FocusRankRow({
+    super.key,
     required this.rank,
     required this.stat,
     required this.accent,
@@ -203,8 +207,11 @@ class WeeklyHabitBlock extends StatelessWidget {
             )
           else
             for (int i = 0; i < r.habits.length; i++)
-              _HabitRow(
-                stat: r.habits[i],
+              HabitProgressRow(
+                habit: r.habits[i].habit,
+                done: r.habits[i].done,
+                expected: r.habits[i].expected,
+                rate: r.habits[i].rate,
                 isLast: i == r.habits.length - 1,
                 onBg: onBg,
                 meta: ext.meta,
@@ -215,13 +222,23 @@ class WeeklyHabitBlock extends StatelessWidget {
   }
 }
 
-class _HabitRow extends StatelessWidget {
-  final HabitWeekStat stat;
+/// 习惯打卡单行（emoji + 标题 + done/expected + 进度条）。
+/// 抽成公开组件并接收原语（habit/done/expected/rate），
+/// 月报年报的 [PeriodHabitBlock] 可直接复用，无需关心 HabitWeekStat / HabitPeriodStat 差异。
+class HabitProgressRow extends StatelessWidget {
+  final Habit habit;
+  final int done;
+  final int expected;
+  final double rate;
   final bool isLast;
   final Color onBg;
   final Color meta;
-  const _HabitRow({
-    required this.stat,
+  const HabitProgressRow({
+    super.key,
+    required this.habit,
+    required this.done,
+    required this.expected,
+    required this.rate,
     required this.isLast,
     required this.onBg,
     required this.meta,
@@ -232,7 +249,7 @@ class _HabitRow extends StatelessWidget {
     final ext = appColors(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final accent = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
-    final color = Color(stat.habit.colorValue);
+    final color = Color(habit.colorValue);
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
       child: Column(
@@ -240,11 +257,11 @@ class _HabitRow extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(stat.habit.emoji, style: const TextStyle(fontSize: 16)),
+              Text(habit.emoji, style: const TextStyle(fontSize: 16)),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  stat.habit.title,
+                  habit.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: onBg),
@@ -252,11 +269,11 @@ class _HabitRow extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Text(
-                '${stat.done}/${stat.expected}',
+                '$done/$expected',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: stat.expected == 0 ? meta : color,
+                  color: expected == 0 ? meta : color,
                 ),
               ),
             ],
@@ -269,7 +286,7 @@ class _HabitRow extends StatelessWidget {
               borderRadius: BorderRadius.circular(AppColors.progressRadius),
             ),
             child: FractionallySizedBox(
-              widthFactor: stat.rate.clamp(0, 1),
+              widthFactor: rate.clamp(0, 1),
               alignment: Alignment.centerLeft,
               child: Container(
                 decoration: BoxDecoration(

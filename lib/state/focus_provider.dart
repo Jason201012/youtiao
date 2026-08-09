@@ -121,7 +121,11 @@ class FocusProvider extends ChangeNotifier {
     if (pr != null && pr > 0) _pomoRounds = pr;
     // —— 专注会话从旧版 SP JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
     final db = LocalDatabase.instance;
-    await db.db;
+    // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。
+    // 与 HabitProvider.load() 保持一致，避免宿主环境下 databaseFactory 未初始化。
+    if (!LocalDatabase.testUseMemory) {
+      await db.db;
+    }
     if (await db.focusEmpty && prefs.getString(_kFocus) != null) {
       await db.migrateFocusFromPrefs(prefs);
     }

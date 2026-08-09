@@ -154,6 +154,23 @@ class HabitProvider extends ChangeNotifier {
     return set;
   }
 
+  /// 返回某习惯在 [start, end]（date-only，含端点）内已打卡的日期集合。
+  ///
+  /// 与 [checkedDays] 的「近 N 天」口径互补：月报 / 年报需要任意历史区间，
+  /// 这里只是换一种读法，不新增任何存储。
+  Set<DateTime> checkedDaysBetween(Habit habit, DateTime start, DateTime end) {
+    final s = DateTime(start.year, start.month, start.day);
+    final e = DateTime(end.year, end.month, end.day);
+    final set = <DateTime>{};
+    for (final c in _checkIns) {
+      if (c.habitId != habit.id) continue;
+      final d = DateTime(c.date.year, c.date.month, c.date.day);
+      if (d.isBefore(s) || d.isAfter(e)) continue;
+      set.add(d);
+    }
+    return set;
+  }
+
   /// 某习惯当前连续打卡天数（今天未打卡则从昨天起算，避免「还没打卡就显断」）。
   int currentStreak(Habit habit) =>
       _streakFor(_datesOf(habit), allowTodayGap: true);

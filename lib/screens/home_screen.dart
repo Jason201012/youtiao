@@ -16,6 +16,7 @@ import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/review_card.dart';
 import 'package:todolist/widgets/today_card.dart';
 import 'package:todolist/screens/review_screen.dart';
+import 'package:todolist/screens/period_review_screen.dart';
 import 'package:todolist/screens/today_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
@@ -496,6 +497,16 @@ class _HomeScreenState extends State<HomeScreen> {
                         onPressed: _enterSearch,
                         icon: Icon(Symbols.search, size: 24, color: onBg),
                         tooltip: '搜索',
+                        splashRadius: 20,
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const PeriodReviewScreen(),
+                          ),
+                        ),
+                        icon: Icon(Symbols.calendar_month, size: 24, color: onBg),
+                        tooltip: '月报 / 年报',
                         splashRadius: 20,
                       ),
                       IconButton(
