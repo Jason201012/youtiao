@@ -2,12 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/models/review.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/widgets/review_card.dart';
+import 'package:todolist/screens/review_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
 import 'package:todolist/services/update_checker.dart';
@@ -524,6 +529,27 @@ class _HomeScreenState extends State<HomeScreen> {
                               onTap: (tag) => setState(() {
                                 _tagFilter = _tagFilter == tag ? null : tag;
                               }),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          // 本周回顾摘要卡：仅默认全量视图、非搜索态显示，点击进入完整周报页。
+                          if (filter == TaskFilter.all && !_searching) ...[
+                            Builder(
+                              builder: (context) {
+                                final r = WeeklyReview.fromProviders(
+                                  provider,
+                                  context.read<FocusProvider>(),
+                                  context.read<HabitProvider>(),
+                                );
+                                return WeeklyReviewCard(
+                                  review: r,
+                                  onTap: () => Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => const ReviewScreen(),
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
                             const SizedBox(height: 12),
                           ],

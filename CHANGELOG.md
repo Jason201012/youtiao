@@ -1,5 +1,15 @@
 # 更新日志（Changelog）
 
+## v2.4.2（2026-08-09）
+
+- **✨ 新增「回顾周报」模块（低成本高获得感）**：零新存储，全部从任务 / 专注 / 习惯三套 Provider 公开状态聚合计算，不新增任何表或字段。
+  - 首页新增「本周回顾」摘要卡（本周完成数 / 专注分钟 / 习惯达成率 + 周区间），仅默认全量视图、非搜索态显示；点击进入独立周报页。
+  - 周报页（`review_screen`）含：2×2 核心指标（本周完成 / 专注分钟 / 番茄数 / 习惯达成率）、本周 Mon–Sun 每日完成趋势（含上周环比）、专注去向 Top3、习惯达成率进度条、分类完成分布。
+  - 内置分享长图（`ReviewShareCard`）：强制浅 / 深色主题 + 关闭系统字体缩放，支持保存到相册或系统分享；分享面板支持明暗一键切换。
+  - 入口沿用「首页摘要卡 + 独立页」两屏方案，不新增第 7 个底部 tab（保持 Material 3 导航节奏）。
+  - 新增文件：`models/review.dart`、`widgets/review_card.dart`、`screens/review_screen.dart`、`widgets/review_share_sheet.dart`；改动：`screens/home_screen.dart` 接入摘要卡。`flutter analyze` 0 issue，`flutter test` 全绿（131 项）。
+- 版本升至 v2.4.2（versionCode 63）。
+
 ## v2.4.1（2026-08-08）
 
 - **🔥 修复「重复」分区任务标题不显示（渲染层根因）**：v2.4.0 修复了数据层 `title` 的 null 兜底，但用户升级后重复区部分任务（如「背单词」）仍整行空白。经多轮真机诊断（黄底探针→码点显影→红块→边界标记→固定宽度对照），锁定真正根因为**布局层**：首页各分区用 `ReorderableListView`（shrinkWrap + NeverScrollable）嵌套在 `SingleChildScrollView` 中，该嵌套滚动约束下任务行 `Row` 的弹性插槽收到**零宽度**，导致标题 `Expanded` 被压扁到不可见（重复区布局最先暴露此问题）。
