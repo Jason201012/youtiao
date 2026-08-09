@@ -8,10 +8,9 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
-import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/bottom_nav.dart';
 import 'package:todolist/widgets/new_task_fab.dart';
-import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/widgets/quick_entry_sheet.dart';
 import 'package:todolist/screens/home_screen.dart';
 import 'package:todolist/screens/board_screen.dart';
 import 'package:todolist/screens/calendar_screen.dart';
@@ -198,7 +197,7 @@ class _MainScaffoldState extends State<MainScaffold>
       // FAB 仅首页，且搜索时隐藏（搜索页不需要新增任务的加号）
       floatingActionButton: _index == 0 && !_homeSearching
           ? NewTaskFab(
-              onPressed: () => TaskSheet.show(context),
+              onPressed: () => QuickEntrySheet.show(context),
             )
           : null,
       // 搜索时隐藏底部导航（搜索页不需要切换 Tab）

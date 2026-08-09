@@ -1,0 +1,277 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:todolist/models/task.dart';
+import 'package:todolist/services/task_parser.dart';
+
+/// 固定时间基准：2026-08-09 10:00，**周日**（weekday = 7）。
+/// 特意选周日，因为「下周三」在周日这天最容易算错整整一周。
+final _base = DateTime(2026, 8, 9, 10, 0);
+
+ParsedTask _p(String input) => TaskParser.parse(input, now: _base);
+
+void main() {
+  group('综合场景', () {
+    test('设计稿示例：明天下午3点 交周报 !高 #工作', () {
+      final r = _p('明天下午3点 交周报 !高 #工作');
+      expect(r.title, '交周报');
+      expect(r.dueDate, DateTime(2026, 8, 10, 15, 0));
+      expect(r.priority, Priority.high);
+      expect(r.category, Category.work);
+      expect(r.tags, isEmpty); // 「工作」命中分类，不重复塞进标签
+      expect(r.repeat, RepeatType.none);
+      expect(r.isValid, isTrue);
+      expect(r.hasStructuredInfo, isTrue);
+    });
+
+    test('纯标题：没有任何标记时原样返回', () {
+      final r = _p('给妈妈打电话');
+      expect(r.title, '给妈妈打电话');
+      expect(r.dueDate, isNull);
+      expect(r.priority, isNull);
+      expect(r.category, isNull);
+      expect(r.tags, isEmpty);
+      expect(r.hasStructuredInfo, isFalse);
+    });
+
+    test('空输入：标题为空且不可用', () {
+      expect(_p('').isValid, isFalse);
+      expect(_p('   ').isValid, isFalse);
+    });
+
+    test('标题内多余空白被压缩', () {
+      final r = _p('明天   整理    书桌');
+      expect(r.title, '整理 书桌');
+    });
+  });
+
+  group('日期', () {
+    test('相对日：今天/明天/后天/大后天', () {
+      expect(_p('今天 A').dueDate, DateTime(2026, 8, 9, 9, 0));
+      expect(_p('明天 A').dueDate, DateTime(2026, 8, 10, 9, 0));
+      expect(_p('后天 A').dueDate, DateTime(2026, 8, 11, 9, 0));
+      expect(_p('大后天 A').dueDate, DateTime(2026, 8, 12, 9, 0));
+    });
+
+    test('N天后 / N周后', () {
+      expect(_p('3天后 A').dueDate, DateTime(2026, 8, 12, 9, 0));
+      expect(_p('2周后 A').dueDate, DateTime(2026, 8, 23, 9, 0));
+    });
+
+    test('裸写周X：取最近的那一个，今天即今天', () {
+      // base 是周日(7)
+      expect(_p('周三 A').dueDate, DateTime(2026, 8, 12, 9, 0));
+      expect(_p('周日 A').dueDate, DateTime(2026, 8, 9, 9, 0));
+      expect(_p('星期五 A').dueDate, DateTime(2026, 8, 14, 9, 0));
+      expect(_p('礼拜一 A').dueDate, DateTime(2026, 8, 10, 9, 0));
+    });
+
+    test('下周X 按自然周算（周一为周首），不是简单加7天', () {
+      // 本周一 = 8/3，下周一 = 8/10
+      expect(_p('下周一 A').dueDate, DateTime(2026, 8, 10, 9, 0));
+      expect(_p('下周三 A').dueDate, DateTime(2026, 8, 12, 9, 0));
+      expect(_p('下下周三 A').dueDate, DateTime(2026, 8, 19, 9, 0));
+      expect(_p('本周三 A').dueDate, DateTime(2026, 8, 5, 9, 0));
+    });
+
+    test('绝对日期：N月N日 / N月N号 / N/N', () {
+      expect(_p('8月15日 A').dueDate, DateTime(2026, 8, 15, 9, 0));
+      expect(_p('8月15号 A').dueDate, DateTime(2026, 8, 15, 9, 0));
+      expect(_p('9/1 A').dueDate, DateTime(2026, 9, 1, 9, 0));
+    });
+
+    test('绝对日期今年已过则顺延到明年', () {
+      expect(_p('1月1日 A').dueDate, DateTime(2027, 1, 1, 9, 0));
+    });
+
+    test('非法日期不解析，原文留在标题里', () {
+      final r = _p('2月30日 A');
+      expect(r.dueDate, isNull);
+      expect(r.title, contains('2月30日'));
+    });
+  });
+
+  group('时间', () {
+    test('24 小时制 HH:mm', () {
+      expect(_p('明天 15:30 A').dueDate, DateTime(2026, 8, 10, 15, 30));
+    });
+
+    test('N点 / N点半 / N点N分', () {
+      expect(_p('明天 9点 A').dueDate, DateTime(2026, 8, 10, 9, 0));
+      expect(_p('明天 9点半 A').dueDate, DateTime(2026, 8, 10, 9, 30));
+      expect(_p('明天 9点45分 A').dueDate, DateTime(2026, 8, 10, 9, 45));
+    });
+
+    test('上下午修正 12 小时制', () {
+      expect(_p('明天下午3点 A').dueDate, DateTime(2026, 8, 10, 15, 0));
+      expect(_p('明天晚上8点 A').dueDate, DateTime(2026, 8, 10, 20, 0));
+      expect(_p('明天上午9点 A').dueDate, DateTime(2026, 8, 10, 9, 0));
+      expect(_p('明天中午12点 A').dueDate, DateTime(2026, 8, 10, 12, 0));
+      expect(_p('明天凌晨2点 A').dueDate, DateTime(2026, 8, 10, 2, 0));
+    });
+
+    test('只有时段词时落到该时段代表时刻', () {
+      expect(_p('明天下午 A').dueDate, DateTime(2026, 8, 10, 15, 0));
+      expect(_p('明天晚上 A').dueDate, DateTime(2026, 8, 10, 20, 0));
+    });
+
+    test('只给时间不给日期：今天已过则顺延到明天', () {
+      // base 是 10:00
+      expect(_p('14点 A').dueDate, DateTime(2026, 8, 9, 14, 0)); // 今天还没到
+      expect(_p('8点 A').dueDate, DateTime(2026, 8, 10, 8, 0)); // 今天已过 → 明天
+    });
+
+    test('无时间时默认落在早上 9 点', () {
+      expect(_p('明天 A').dueDate, DateTime(2026, 8, 10, 9, 0));
+    });
+  });
+
+  group('优先级', () {
+    test('文字式', () {
+      expect(_p('A !高').priority, Priority.high);
+      expect(_p('A !急').priority, Priority.high);
+      expect(_p('A !重要').priority, Priority.high);
+      expect(_p('A !中').priority, Priority.medium);
+      expect(_p('A !低').priority, Priority.low);
+    });
+
+    test('感叹号数量式：!!! 高 / !! 中', () {
+      expect(_p('A !!!').priority, Priority.high);
+      expect(_p('A !!').priority, Priority.medium);
+    });
+
+    test('单个裸感叹号不解析，避免误伤正常文案', () {
+      final r = _p('终于写完了!');
+      expect(r.priority, isNull);
+      expect(r.title, '终于写完了!');
+    });
+
+    test('中文全角感叹号同样生效', () {
+      expect(_p('A ！高').priority, Priority.high);
+    });
+  });
+
+  group('标签与分类', () {
+    test('多个标签', () {
+      final r = _p('开会 #项目A #紧急');
+      expect(r.title, '开会');
+      expect(r.tags, ['项目A', '紧急']);
+    });
+
+    test('命中内置分类时设为 category 而非 tag', () {
+      expect(_p('A #学习').category, Category.study);
+      expect(_p('A #生活').category, Category.life);
+      expect(_p('A #学习').tags, isEmpty);
+    });
+
+    test('第二个分类词退化为普通标签', () {
+      final r = _p('A #工作 #生活');
+      expect(r.category, Category.work);
+      expect(r.tags, ['生活']);
+    });
+
+    test('标签不会吞掉后面的优先级标记', () {
+      final r = _p('A #工作!高');
+      expect(r.category, Category.work);
+      expect(r.priority, Priority.high);
+      expect(r.title, 'A');
+    });
+  });
+
+  group('重复规则', () {
+    test('每天', () {
+      final r = _p('每天 喝水');
+      expect(r.repeat, RepeatType.daily);
+      expect(r.title, '喝水');
+    });
+
+    test('每工作日', () {
+      expect(_p('每工作日 打卡').repeat, RepeatType.weekday);
+    });
+
+    test('每隔N天', () {
+      final r = _p('每隔3天 浇花');
+      expect(r.repeat, RepeatType.interval);
+      expect(r.repeatInterval, 3);
+      expect(r.title, '浇花');
+    });
+
+    test('每周一三五', () {
+      final r = _p('每周一三五 健身');
+      expect(r.repeat, RepeatType.weekly);
+      expect(r.repeatWeekdays, [1, 3, 5]);
+      expect(r.title, '健身');
+    });
+
+    test('「每周X」不会被「周X」日期规则截胡', () {
+      final r = _p('每周三 例会');
+      expect(r.repeat, RepeatType.weekly);
+      expect(r.repeatWeekdays, [3]);
+      expect(r.title, '例会');
+    });
+
+    test('重复任务没写日期时截止时间落在当天 23:59', () {
+      expect(_p('每天 喝水').dueDate, DateTime(2026, 8, 9, 23, 59));
+    });
+
+    test('重复 + 时间 → 生成 repeatMinute', () {
+      final r = _p('每天 晚上9点 复盘');
+      expect(r.repeat, RepeatType.daily);
+      expect(r.repeatMinute, 21 * 60);
+      expect(r.title, '复盘');
+    });
+  });
+
+  group('识别片段（供 UI 高亮）', () {
+    test('片段按原串位置升序，且类型齐全', () {
+      final r = _p('明天下午3点 交周报 !高 #工作');
+      expect(r.segments.map((s) => s.kind).toList(), [
+        TokenKind.date,
+        TokenKind.time,
+        TokenKind.priority,
+        TokenKind.category,
+      ]);
+      for (var i = 1; i < r.segments.length; i++) {
+        expect(r.segments[i].start, greaterThanOrEqualTo(r.segments[i - 1].end));
+      }
+    });
+
+    test('片段带有可展示的规范化文案', () {
+      final r = _p('明天下午3点 A');
+      expect(r.segments.first.label, '明天');
+      expect(r.segments[1].label, '15:00');
+    });
+  });
+
+  group('toTask 映射', () {
+    test('缺省优先级为中、分类为工作', () {
+      final t = _p('随手记一笔').toTask();
+      expect(t.title, '随手记一笔');
+      expect(t.priority, Priority.medium);
+      expect(t.category, Category.work);
+      expect(t.dueDate, isNull);
+      expect(t.repeat, RepeatType.none);
+      expect(t.id, isEmpty); // 交给 TaskProvider 生成
+    });
+
+    test('完整字段透传', () {
+      final t = _p('明天下午3点 交周报 !高 #工作 #紧急').toTask();
+      expect(t.title, '交周报');
+      expect(t.priority, Priority.high);
+      expect(t.category, Category.work);
+      expect(t.dueDate, DateTime(2026, 8, 10, 15, 0));
+      expect(t.tags, ['紧急']);
+    });
+
+    test('每隔N天会带上锚点日（date-only）', () {
+      final t = _p('每隔3天 浇花').toTask();
+      expect(t.repeat, RepeatType.interval);
+      expect(t.repeatInterval, 3);
+      expect(t.repeatAnchor, DateTime(2026, 8, 9));
+    });
+
+    test('每周重复缺省至少落一个星期', () {
+      final t = _p('每周 复盘').toTask();
+      expect(t.repeat, RepeatType.weekly);
+      expect(t.repeatWeekdays, isNotEmpty);
+    });
+  });
+}

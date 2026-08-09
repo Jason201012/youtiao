@@ -10,14 +10,19 @@ import 'package:todolist/theme/app_theme.dart';
 /// 传入 [task] 为编辑模式（预填并调用 updateTask），否则为新建模式（调用 addTask）。
 class TaskSheet extends StatefulWidget {
   final Task? task;
-  const TaskSheet({super.key, this.task});
 
-  static Future<void> show(BuildContext context, {Task? task}) {
+  /// 新建模式下的预填草稿（典型来源：快速录入解析出的结果）。
+  /// 与 [task] 的区别：[draft] 只把字段填好，保存时仍走新建路径。
+  final Task? draft;
+
+  const TaskSheet({super.key, this.task, this.draft});
+
+  static Future<void> show(BuildContext context, {Task? task, Task? draft}) {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => TaskSheet(task: task),
+      builder: (_) => TaskSheet(task: task, draft: draft),
     );
   }
 
@@ -54,8 +59,9 @@ class _TaskSheetState extends State<TaskSheet> {
   @override
   void initState() {
     super.initState();
-    if (_isEdit) {
-      final t = widget.task!;
+    // 编辑模式取原任务，新建模式取草稿（快速录入转入时会带上解析结果）
+    final t = widget.task ?? widget.draft;
+    if (t != null) {
       _titleController.text = t.title;
       _priority = t.priority;
       _category = t.category;
