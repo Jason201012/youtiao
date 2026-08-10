@@ -1,7 +1,7 @@
 {
-  "version": "2.4.4",
-  "tag": "v2.4.4",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.4/app-release-v2.4.4-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.4",
-  "notes": "v2.4.4：①自然语言快速录入——首页右下角 FAB 唤起快速录入，一句话解析截止时间/优先级/分类/标签（支持「下周三」自然周语义与重复规则）；②全局搜索升级——覆盖任务+习惯并按分组展示，点习惯结果直达习惯 Tab；③月报/年报——首页右上角「月报/年报」入口进入独立回顾页，含本期完成/专注分/番茄数/习惯达成率 4 指标+环比、按天(月报)/按月(年报)趋势、专注去向 Top、习惯达成、分类分布，内置浅/深色分享长图；④成就墙分组——习惯/任务/专注/综合四组，计数型带进度条与「32/50」进度，底部「即将解锁」提示。零新增存储，全部基于现有三套数据实时聚合，升级无需迁移；不新增第 7 个 tab。flutter analyze 0 issue，flutter test 240 项全绿。"
+  "version": "2.4.5",
+  "tag": "v2.4.5",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.5/app-release-v2.4.5-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.5",
+  "notes": "v2.4.5：①习惯打卡热力图——习惯页新增「打卡热力图」卡片（近 18 周密度网格，单习惯二值高亮 / 多习惯聚合分级着色）与「连续天数」排行区（火焰徽章），习惯条目副标题改用 StreakBadge；②数据备份与导出补齐习惯盲区——本地备份包 / CSV / Markdown 现已纳入习惯与打卡记录（此前仅任务 + 专注，恢复会丢习惯），备份 schema 升 v3，老备份无 habits 字段时跳过恢复不丢现有习惯。零新增存储，全部基于现有三套数据实时聚合，升级无需迁移；flutter analyze 0 issue，flutter test 247 项全绿。"
 }
