@@ -1,7 +1,7 @@
 {
-  "version": "2.4.6",
-  "tag": "v2.4.6",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.6/app-release-v2.4.6-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.6",
-  "notes": "v2.4.6：①AI 周报/月报自动文案——回顾周报与月报/年报页新增「AI 小结」卡片，本地模板式自然语言生成（纯 Dart、复用 Provider 公开状态内存现算、零新增存储、不接 LLM），空数据返回鼓励语不崩；分享长图同步纳入 AI 小结，导出即带本期一句话总结。②修复分享卡 Inter 字体溢出（真实生产 bug）：强制浅色 Inter 主题下数值卡底部 0.647px 溢出、页脚 gitee 链接 77px 右溢出，修 StatCard 内边距(14→12)与页脚链接 Expanded+省略号约束。③修复习惯 id 撞车（真实数据损坏）：addHabit 同毫秒重复调用拿到相同时间戳 id 导致习惯静默丢失/打卡串号，改为叠加进程内自增序号保证唯一。flutter analyze 0 issue，flutter test 253 项全绿。"
+  "version": "2.4.7",
+  "tag": "v2.4.7",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.7/app-release-v2.4.7-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.7",
+  "notes": "v2.4.7：①首次启动引导页（新装必看）——全新安装首次打开进入 3 屏轻量引导：屏1 欢迎 + 本地优先理念（数据只存你手机、无需账号、不上传云端，建立隐私信任）；屏2 核心能力地图（速记建单 / 习惯热力图 / 看板 / 全局搜索 / 专注计时 / 日历 六宫格，全部为 App 已有功能）；屏3 开启提醒说明 + 通知权限引导（针对 ColorOS 精确闹钟权限）+「保留示例 / 从零开始」二选一接管首启示例任务。右上「跳过」随时可走，标记位存 shared_preferences，看过即不再弹。②纯本地、零云端依赖，引导文案严格不提及同步 / 云账号，与 App 本地优先定位一致。flutter analyze 0 issue，flutter test 全绿（新增 onboarding 用例 6 项）。"
 }
