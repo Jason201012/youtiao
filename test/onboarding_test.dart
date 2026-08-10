@@ -32,12 +32,12 @@ void main() {
     expect(prefs.getBool('onboarding_seen'), isTrue);
   });
 
-  testWidgets('渲染跳过、页码与「下一步」按钮（屏1 文案）', (tester) async {
+  testWidgets('渲染页码与「下一步」按钮（屏1 文案，无跳过按钮）', (tester) async {
     await tester.pumpWidget(_app(OnboardingProvider(), TaskProvider(), onFinished: () {}));
     await tester.pumpAndSettle();
-    expect(find.text('跳过 ›'), findsOneWidget);
     expect(find.text('下一步'), findsOneWidget);
     expect(find.text('有条'), findsOneWidget);
+    expect(find.text('跳过 ›'), findsNothing); // 不可跳过
     // 屏1「数据只存在你手机上\n无需账号 · 不上传云端」是单个多行 Text，
     // find.text 为精确全串匹配，故用 textContaining 校验关键短语。
     expect(find.textContaining('数据只存在你手机上'), findsOneWidget);
@@ -61,19 +61,6 @@ void main() {
     // 末页主按钮文案为「开始使用」
     expect(find.text('开始使用'), findsOneWidget);
     expect(find.text('下一步'), findsNothing);
-  });
-
-  testWidgets('点击跳过 → 回调触发且标记已看过', (tester) async {
-    var finished = false;
-    final ob = OnboardingProvider();
-    await tester.pumpWidget(_app(ob, TaskProvider(), onFinished: () => finished = true));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('跳过 ›'));
-    await tester.pumpAndSettle();
-
-    expect(finished, isTrue);
-    expect(ob.hasSeenIntro, isTrue);
   });
 
   testWidgets('屏3 选「从零开始」→ 开始使用 清空示例任务', (tester) async {

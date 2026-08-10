@@ -5,10 +5,10 @@
 
 ## 验收总目标
 
-1. 全新安装首次打开显示 3 屏可跳过引导；之后任何启动都不再显示（标志位持久化）。
+1. 全新安装首次打开显示 3 屏不可跳过引导；必须走到末页「开始使用」才进主页；之后任何启动都不再显示（标志位持久化）。
 2. 引导内可一次性完成通知权限授权，并说明 ColorOS 精确闹钟权限。
 3. 首启提供「保留示例 / 从零开始」选择，决定 7 条 mock 任务是否保留。
-4. 任意屏「跳过」立即进入主页且不强制任何权限。
+4. 通知权限在末页引导、不强求；完成页点「开始使用」才落 home 并置标志位。
 5. 交互/文案符合 App 现有主题（主色 `#0061A4`、Inter、lightTheme）。
 
 ---
@@ -33,13 +33,13 @@
   - Widget 测试：`hasSeenIntro==false` 时根组件首帧渲染 `OnboardingScreen`；`true` 时渲染 `HomeScreen`（用 `MaterialApp(theme: lightTheme)` 包裹，避免 `appColors` 的 Null check）。
   - 集成测试：模拟首启→完成→重启，第二次不再显示引导。
 
-### T3 · 引导页外壳（Pager + 跳过 + 页码）
-- 新增 `lib/screens/onboarding_screen.dart`：一个 `PageView`(3 页) + 顶部「跳过 ›」+ 底部页码(1/2/3) + 主按钮（前两页「下一步」、末页「开始使用」）。
-- 「跳过」与「开始使用」都调用 `OnboardingProvider.complete(...)` 并 `Navigator.pushReplacement` 到主页。
+### T3 · 引导页外壳（Pager + 页码）
+- 新增 `lib/screens/onboarding_screen.dart`：一个 `PageView`(3 页) + 底部页码(1/2/3) + 主按钮（前两页「下一步」、末页「开始使用」）。无跳过按钮，必须走到末页。
+- 「开始使用」调用 `OnboardingProvider.complete(...)` 并 `Navigator.pushReplacement` 到主页。
 - 测试用例：
-  - 渲染 TopBar「跳过」、3 个 `PageView` 子页、底部页码与按钮。
+  - 渲染 3 个 `PageView` 子页、底部页码与按钮；不存在「跳过」按钮。
   - 点击「下一步」翻到下一页；末页按钮文案为「开始使用」。
-  - 点击「跳过」→ `complete()` 被调用且路由跳到主页。
+  - 逐屏翻到末页点「开始使用」→ `complete()` 被调用且路由跳到主页。
 
 ### T4 · 屏 1 欢迎 / 本地优先
 - 组件：Logo（圆角方块 + 对勾）、App 名「有条」、主标语、副文案（数据只存手机 / 无需账号·不上传云端）。
@@ -62,7 +62,7 @@
 
 ### T7 · 无障碍 / 主题回归
 - 三屏均套 `lightTheme`（并验证 `darkTheme` 下不崩，遵循现有 `appColors(context)` 主题扩展要求）。
-- 文本对比度符合 WCAG AA；按钮可聚焦、`Semantics` 标注「跳过 / 下一步 / 开始使用」。
+- 文本对比度符合 WCAG AA；按钮可聚焦、`Semantics` 标注「下一步 / 开始使用」。
 - 门禁：全量 `flutter analyze` 0 issue；`flutter test` 全绿（含本模块用例）。
 
 ---
@@ -72,7 +72,7 @@
 | 文件 | 动作 | 说明 |
 |------|------|------|
 | `lib/state/onboarding_provider.dart` | 新增 | 标志位 + SP 持久化 + 首启 mock 处理 |
-| `lib/screens/onboarding_screen.dart` | 新增 | 3 屏 Pager + 跳过 + 页码 + 完成逻辑 |
+| `lib/screens/onboarding_screen.dart` | 新增 | 3 屏 Pager + 页码 + 完成逻辑（不可跳过） |
 | `lib/widgets/onboarding_*_page.dart` | 新增（可选） | 将屏 1/2/3 拆为独立 widget，便于测试 |
 | `lib/main.dart` / 路由 | 修改 | 启动判 `hasSeenIntro` 决定首屏 |
 | `test/onboarding_provider_test.dart` | 新增 | T1 用例 |

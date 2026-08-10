@@ -6,14 +6,14 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/theme/app_theme.dart';
 
-/// 首次启动引导页：3 屏可跳过的轻量引导。
+/// 首次启动引导页：3 屏轻量引导（**不可跳过**，必须走到末页「开始使用」）。
 ///
 /// - 屏 1 欢迎 / 本地优先（数据只存手机、无需账号）
 /// - 屏 2 核心能力（全部为 App 真实已有功能）
 /// - 屏 3 开启提醒说明 + 示例任务选择（保留示例 / 从零开始）+ 开始使用
 ///
-/// 任意屏右上「跳过」或末页「开始使用」都会调用 [OnboardingProvider.complete]
-/// 并进入主页，之后任何启动都不再显示（标志位已持久化）。
+/// 仅末页「开始使用」会调用 [OnboardingProvider.complete] 并进入主页，
+/// 之后任何启动都不再显示（标志位已持久化）。
 ///
 /// [onFinished] 供测试注入：非 null 时完成流程只回调它、不真正导航到主页，
 /// 避免 widget 测试去构建沉重的 [MainScaffold]。
@@ -78,8 +78,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
   }
 
-  void _skip() => _finish();
-
   /// 完成引导：按选择清空/保留示例任务 → 请求权限 → 标记已看 → 进主页。
   Future<void> _finish() async {
     final task = Provider.of<TaskProvider>(context, listen: false);
@@ -123,18 +121,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 右上角「跳过」（任意屏均可一键跳过）
-            Align(
-              alignment: Alignment.topRight,
-              child: Semantics(
-                button: true,
-                label: '跳过引导',
-                child: TextButton(
-                  onPressed: _skip,
-                  child: const Text('跳过 ›'),
-                ),
-              ),
-            ),
             // 三屏内容
             Expanded(
               child: PageView(

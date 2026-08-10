@@ -89,7 +89,7 @@
 
   <header class="doc">
     <h1>「有条」首次启动引导页 · 设计稿 v0.1</h1>
-    <p>轻量、可跳过的 3 屏首启引导（欢迎/本地优先 → 核心能力 → 开启提醒+开始）。配色与字号严格沿用 App 真实主题（主色 #0061A4 / 背景 #FAF8FD / 表面 #F3EDF7 / 正文 #1A1C1E / 次要 #49454F，字体 Inter）。</p>
+    <p>轻量、不可跳过的 3 屏首启引导（必须走到末页「开始使用」才进主页；欢迎/本地优先 → 核心能力 → 开启提醒+开始）。配色与字号严格沿用 App 真实主题（主色 #0061A4 / 背景 #FAF8FD / 表面 #F3EDF7 / 正文 #1A1C1E / 次要 #49454F，字体 Inter）。</p>
     <span class="tag">本稿为 HTML 高保真原型（Ardot 画布 MCP 当前会话未连接，改用可审阅原型交付）</span>
   </header>
 
@@ -100,7 +100,7 @@
     <div class="phone">
       <div class="screen">
         <div class="statusbar"><span>9:41</span><span class="dots"><i></i><i></i><i></i></span></div>
-        <div class="skip">跳过 ›</div>
+        <div class="skip">引导页 · 不可跳过</div>
         <div class="body center">
           <div class="logo">
             <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
@@ -120,7 +120,7 @@
     <div class="phone">
       <div class="screen">
         <div class="statusbar"><span>9:41</span><span class="dots"><i></i><i></i><i></i></span></div>
-        <div class="skip">跳过 ›</div>
+        <div class="skip">引导页 · 不可跳过</div>
         <div class="body">
           <div class="pagetitle">这个 App 能帮你</div>
           <div class="features">
@@ -143,7 +143,7 @@
     <div class="phone">
       <div class="screen">
         <div class="statusbar"><span>9:41</span><span class="dots"><i></i><i></i><i></i></span></div>
-        <div class="skip">跳过 ›</div>
+        <div class="skip">引导页 · 不可跳过</div>
         <div class="body">
           <div class="bell">
             <svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>
@@ -177,7 +177,7 @@
         <li><b>组件</b>：Logo、App 名、主标语、副文案</li>
         <li><b>文案</b>：有条 / 本地优先的待办·习惯·专注 / 数据只存在你手机上 · 无需账号·不上传云端</li>
         <li><b>状态</b>：页码 1/3；右下「下一步」进入屏 2</li>
-        <li><b>跳过</b>：右上「跳过 ›」直接落 home（置标志位）</li>
+        <li><b>完成</b>：必须走到末页「开始使用」才进 home（置标志位）</li>
       </ul>
     </div>
     <div class="note-card">
@@ -186,7 +186,7 @@
         <li><b>组件</b>：标题 + 6 行能力卡（图标+标题+一句说明）</li>
         <li><b>能力</b>：均取自 App 真实功能（已核实存在）</li>
         <li><b>状态</b>：页码 2/3；「下一步」进入屏 3</li>
-        <li><b>跳过</b>：同样可一键跳过</li>
+        <li><b>完成</b>：同屏 3，必须点「开始使用」</li>
       </ul>
     </div>
     <div class="note-card">
@@ -233,7 +233,7 @@
       <line x1="455" y1="194" x2="455" y2="210" stroke="#49454F" stroke-width="1.5"/>
       <line x1="455" y1="210" x2="660" y2="210" stroke="#49454F" stroke-width="1.5" marker-end="url(#ar)"/>
       <line x1="660" y1="210" x2="660" y2="134" stroke="#49454F" stroke-width="1.5"/>
-      <text x="600" y="205" font-size="11" fill="#49454F" text-anchor="middle">完成/跳过</text>
+      <text x="600" y="205" font-size="11" fill="#49454F" text-anchor="middle">完成</text>
     </svg>
   </div>
 
