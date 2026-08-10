@@ -13,6 +13,12 @@ class HabitProvider extends ChangeNotifier {
   final List<Habit> _habits = [];
   final List<CheckIn> _checkIns = [];
 
+  /// 进程内自增序号，叠加到习惯 id 上，避免同一毫秒内连续建习惯时 id 撞车
+  /// （撞 id 会导致 _memHabits 按 id 存 Map 时后者覆盖前者，静默丢习惯，
+  /// 且两个习惯对象的打卡会串号）。与 [NotificationService._habitSlotOf] 用
+  /// hashCode 折叠无关，改 id 格式不影响通知槽位映射。
+  static int _habitSeq = 0;
+
   /// 全部习惯（含归档）。UI 可按需过滤。
   List<Habit> get habits => List.unmodifiable(_habits);
 
@@ -49,7 +55,7 @@ class HabitProvider extends ChangeNotifier {
     required List<int> weekdays,
     int? reminderMinute,
   }) async {
-    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final id = '${DateTime.now().microsecondsSinceEpoch}.${_habitSeq++}';
     final h = Habit(
       id: id,
       title: title,

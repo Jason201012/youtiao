@@ -4,6 +4,7 @@ import 'package:todolist/models/review.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/models/review_narrative.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/stat_card.dart';
@@ -31,6 +32,60 @@ class ReviewSection extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppColors.cardRadius),
       ),
       child: child,
+    );
+  }
+}
+
+/// 「AI 小结」卡片：把 [buildWeeklyNarrative] / [buildPeriodNarrative] 生成的自然语言
+/// 总结用统一的 ReviewSection 外壳 + auto_awesome 图标呈现，与普通板块视觉一致。
+class NarrativeCard extends StatelessWidget {
+  final String text;
+  final String title;
+  final EdgeInsets padding;
+  const NarrativeCard({
+    super.key,
+    required this.text,
+    this.title = 'AI 小结',
+    this.padding = const EdgeInsets.all(16),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accent = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
+    return ReviewSection(
+      padding: padding,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Symbols.auto_awesome, size: 16, color: accent),
+              const SizedBox(width: 6),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: accent,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: onBg,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -484,6 +539,8 @@ class ReviewShareCard extends StatelessWidget {
     final blocks = <Widget>[
       _Header(weekRange: review.weekRangeLabel),
       const SizedBox(height: 14),
+      NarrativeCard(text: buildWeeklyNarrative(review)),
+      const SizedBox(height: 12),
       ReviewSection(child: WeeklyMetrics(review)),
     ];
     void add(Widget w) {
@@ -581,13 +638,17 @@ class _Footer extends StatelessWidget {
                 color: ext.meta,
               ),
             ),
-            const Spacer(),
-            Text(
-              'gitee.com/jason1012/youtiao',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-                color: ext.meta.withOpacity(0.75),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'gitee.com/jason1012/youtiao',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                  color: ext.meta.withOpacity(0.75),
+                ),
+                textAlign: TextAlign.end,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],

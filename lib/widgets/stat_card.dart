@@ -21,7 +21,7 @@ class StatCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ext = appColors(context);
     final child = Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(AppColors.cardRadius),

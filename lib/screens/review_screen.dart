@@ -5,6 +5,7 @@ import 'package:todolist/models/review.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
+import 'package:todolist/models/review_narrative.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
@@ -72,6 +73,8 @@ class ReviewScreen extends StatelessWidget {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  NarrativeCard(text: buildWeeklyNarrative(r)),
                   const SizedBox(height: 12),
                   ReviewSection(child: WeeklyMetrics(r)),
                   const SizedBox(height: 12),

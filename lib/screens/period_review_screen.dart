@@ -5,6 +5,7 @@ import 'package:todolist/models/period_review.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
+import 'package:todolist/models/review_narrative.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
@@ -146,6 +147,8 @@ class _PeriodReviewScreenState extends State<PeriodReviewScreen> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  NarrativeCard(text: buildPeriodNarrative(r)),
                   const SizedBox(height: 12),
                   ReviewSection(child: PeriodMetrics(r)),
                   const SizedBox(height: 12),

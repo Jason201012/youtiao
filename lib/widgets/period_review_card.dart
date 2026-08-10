@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/period_review.dart';
+import 'package:todolist/models/review_narrative.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -463,6 +464,8 @@ class PeriodReviewShareCard extends StatelessWidget {
     final blocks = <Widget>[
       _Header(title: review.title, range: review.rangeLabel),
       const SizedBox(height: 14),
+      NarrativeCard(text: buildPeriodNarrative(review)),
+      const SizedBox(height: 12),
       ReviewSection(child: PeriodMetrics(review)),
     ];
     void add(Widget w) {
@@ -557,13 +560,17 @@ class _Footer extends StatelessWidget {
                 color: ext.meta,
               ),
             ),
-            const Spacer(),
-            Text(
-              'gitee.com/jason1012/youtiao',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-                color: ext.meta.withOpacity(0.75),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'gitee.com/jason1012/youtiao',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                  color: ext.meta.withOpacity(0.75),
+                ),
+                textAlign: TextAlign.end,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
