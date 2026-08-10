@@ -6,7 +6,6 @@ import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/models/task.dart';
-import 'package:todolist/models/habit.dart';
 import 'test_helpers.dart';
 
 /// 进入搜索态并输入关键字，渲染分组结果。
@@ -52,6 +51,7 @@ void main() {
         focus: FocusProvider(),
         theme: theme,
         habit: hp,
+        onboarding: await prepareSeenOnboarding(),
       ));
       await tester.pumpAndSettle();
 
@@ -78,6 +78,7 @@ void main() {
         focus: FocusProvider(),
         theme: theme,
         habit: hp,
+        onboarding: await prepareSeenOnboarding(),
       ));
       await tester.pumpAndSettle();
 

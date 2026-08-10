@@ -1,4 +1,6 @@
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/services/local_database.dart';
+import 'package:todolist/state/onboarding_provider.dart';
 
 /// 开启 [LocalDatabase] 的纯内存后端（仅测试用）。本项目仅声明 Android/iOS/macOS
 /// 平台（无 windows/linux 目录），宿主 `flutter test` 没有可用的 sqflite 平台实现，
@@ -13,3 +15,13 @@ import 'package:todolist/services/local_database.dart';
 void useMemoryDatabase() {
   LocalDatabase.testUseMemory = true;
 }
+
+/// 测试用：构造「已看过引导」的 [OnboardingProvider]，使 [MyApp] 直进主页而非引导页。
+/// 会注入内存版 SharedPreferences 并把 onboarding_seen 标为 true。
+Future<OnboardingProvider> prepareSeenOnboarding() async {
+  SharedPreferencesStorePlatform.instance = InMemorySharedPreferencesStore.empty();
+  final p = OnboardingProvider();
+  await p.complete();
+  return p;
+}
+

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>「有条」首次启动引导页 · 设计稿 v0.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --primary:#0061A4;
+    --bg:#FAF8FD;
+    --surface:#F3EDF7;
+    --text:#1A1C1E;
+    --meta:#49454F;
+    --chip:#D1E4FF;
+    --track:#E5DFF0;
+    --line:#E5DFF0;
+    --radius:16px;
+    --sans:'Inter','Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:var(--sans);background:#EFEAF4;color:var(--text);padding:32px 20px 64px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto}
+  header.doc{background:#fff;border-radius:20px;padding:24px 28px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:28px}
+  header.doc h1{font-size:22px;font-weight:700;letter-spacing:.2px}
+  header.doc p{color:var(--meta);font-size:13px;margin-top:6px;line-height:1.6}
+  header.doc .tag{display:inline-block;margin-top:12px;font-size:12px;color:var(--primary);background:var(--chip);padding:4px 10px;border-radius:999px;font-weight:600}
+  h2.sec{font-size:16px;font-weight:600;margin:34px 4px 16px;display:flex;align-items:center;gap:8px}
+  h2.sec::before{content:"";width:4px;height:16px;background:var(--primary);border-radius:2px;display:inline-block}
+
+  /* phone grid */
+  .phones{display:flex;gap:24px;flex-wrap:wrap;justify-content:center}
+  .phone{width:300px;background:var(--bg);border-radius:38px;padding:14px;border:1px solid var(--line);box-shadow:0 8px 28px rgba(26,28,30,.10);position:relative}
+  .screen{background:var(--bg);border-radius:26px;height:600px;overflow:hidden;display:flex;flex-direction:column;position:relative}
+  .statusbar{display:flex;justify-content:space-between;align-items:center;padding:10px 18px 4px;font-size:12px;color:var(--text);font-weight:600}
+  .statusbar .dots{display:flex;gap:4px}
+  .statusbar .dots i{width:5px;height:5px;border-radius:50%;background:var(--text);opacity:.55;display:inline-block}
+  .skip{position:absolute;top:14px;right:20px;font-size:13px;color:var(--primary);font-weight:600;z-index:2}
+  .body{flex:1;display:flex;flex-direction:column;padding:8px 22px 18px}
+  .center{align-items:center;justify-content:center;text-align:center;gap:14px}
+  .logo{width:76px;height:76px;border-radius:20px;background:var(--primary);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(0,97,164,.28)}
+  .logo svg{width:40px;height:40px}
+  .appname{font-size:26px;font-weight:700;margin-top:4px}
+  .tagline{font-size:14px;color:var(--meta)}
+  .sub{font-size:12.5px;color:var(--meta);line-height:1.7}
+  .features{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+  .frow{display:flex;align-items:center;gap:12px;background:var(--surface);border-radius:14px;padding:10px 12px}
+  .ficon{width:34px;height:34px;border-radius:10px;background:var(--chip);display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .ficon svg{width:18px;height:18px}
+  .frow .ft{font-size:13.5px;font-weight:600}
+  .frow .fd{font-size:11.5px;color:var(--meta)}
+  .bell{width:60px;height:60px;border-radius:18px;background:var(--chip);display:flex;align-items:center;justify-content:center;align-self:center;margin:6px 0 2px}
+  .bell svg{width:30px;height:30px}
+  .toggle{display:flex;align-items:center;justify-content:space-between;background:var(--surface);border-radius:12px;padding:11px 14px;font-size:13px;font-weight:600}
+  .switch{width:42px;height:24px;border-radius:999px;background:var(--primary);position:relative;flex:0 0 auto}
+  .switch::after{content:"";position:absolute;width:18px;height:18px;border-radius:50%;background:#fff;top:3px;right:3px}
+  .note{font-size:11px;color:var(--meta);text-align:center;margin-top:8px}
+  .choice{display:flex;gap:10px;margin-top:14px}
+  .choice .pill{flex:1;text-align:center;font-size:12.5px;font-weight:600;padding:10px 0;border-radius:12px;border:1.5px solid var(--primary);color:var(--primary)}
+  .choice .pill.ghost{border-color:var(--line);color:var(--meta)}
+  .footer{display:flex;flex-direction:column;gap:12px;padding:0 22px 18px}
+  .dots{display:flex;gap:7px;justify-content:center}
+  .dots i{width:7px;height:7px;border-radius:50%;background:var(--track)}
+  .dots i.on{background:var(--primary);width:18px;border-radius:4px}
+  .btn{background:var(--primary);color:#fff;text-align:center;font-size:14px;font-weight:600;padding:13px 0;border-radius:14px}
+  .pagetitle{font-size:17px;font-weight:700;text-align:center;margin-top:2px}
+
+  /* annotations */
+  .notes{display:flex;gap:24px;flex-wrap:wrap;justify-content:center;margin-top:18px}
+  .note-card{width:300px;background:#fff;border-radius:16px;padding:16px 18px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+  .note-card h3{font-size:13px;font-weight:700;color:var(--primary);margin-bottom:8px}
+  .note-card ul{list-style:none;font-size:12px;color:var(--meta);line-height:1.8}
+  .note-card ul b{color:var(--text);font-weight:600}
+
+  /* flow */
+  .flow{background:#fff;border-radius:20px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.05);overflow-x:auto}
+  .flow svg{display:block;min-width:760px}
+  .spec{background:#fff;border-radius:20px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-top:8px}
+  .spec table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .spec th,.spec td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);color:var(--meta)}
+  .spec th{color:var(--text);font-weight:600}
+  .spec td .sw{display:inline-block;width:14px;height:14px;border-radius:4px;vertical-align:-2px;margin-right:6px;border:1px solid rgba(0,0,0,.08)}
+  footer.doc{text-align:center;color:var(--meta);font-size:11.5px;margin-top:30px;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="doc">
+    <h1>「有条」首次启动引导页 · 设计稿 v0.1</h1>
+    <p>轻量、可跳过的 3 屏首启引导（欢迎/本地优先 → 核心能力 → 开启提醒+开始）。配色与字号严格沿用 App 真实主题（主色 #0061A4 / 背景 #FAF8FD / 表面 #F3EDF7 / 正文 #1A1C1E / 次要 #49454F，字体 Inter）。</p>
+    <span class="tag">本稿为 HTML 高保真原型（Ardot 画布 MCP 当前会话未连接，改用可审阅原型交付）</span>
+  </header>
+
+  <h2 class="sec">三屏设计稿</h2>
+  <div class="phones">
+
+    <!-- Screen 1 -->
+    <div class="phone">
+      <div class="screen">
+        <div class="statusbar"><span>9:41</span><span class="dots"><i></i><i></i><i></i></span></div>
+        <div class="skip">跳过 ›</div>
+        <div class="body center">
+          <div class="logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+          </div>
+          <div class="appname">有条</div>
+          <div class="tagline">本地优先的待办 · 习惯 · 专注</div>
+          <div class="sub">数据只存在你手机上<br/>无需账号 · 不上传云端</div>
+        </div>
+        <div class="footer">
+          <div class="dots"><i class="on"></i><i></i><i></i></div>
+          <div class="btn">下一步</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Screen 2 -->
+    <div class="phone">
+      <div class="screen">
+        <div class="statusbar"><span>9:41</span><span class="dots"><i></i><i></i><i></i></span></div>
+        <div class="skip">跳过 ›</div>
+        <div class="body">
+          <div class="pagetitle">这个 App 能帮你</div>
+          <div class="features">
+            <div class="frow"><div class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4-1 9.5-9.5a2 2 0 0 0-3-3L5 16l-1 4z"/></svg></div><div><div class="ft">速记建单</div><div class="fd">一句话写任务，自动识别时间</div></div></div>
+            <div class="frow"><div class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></svg></div><div><div class="ft">习惯热力图</div><div class="fd">连续打卡一目了然</div></div></div>
+            <div class="frow"><div class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="5" height="14" rx="1.5"/><rect x="10" y="5" width="5" height="14" rx="1.5"/><rect x="16" y="5" width="4" height="14" rx="1.5"/></svg></div><div><div class="ft">看板视图</div><div class="fd">拖拽管理任务状态</div></div></div>
+            <div class="frow"><div class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/></svg></div><div><div class="ft">全局搜索</div><div class="fd">任务/习惯一搜即达</div></div></div>
+            <div class="frow"><div class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 3h6"/></svg></div><div><div class="ft">专注计时</div><div class="fd">番茄钟 + 累计时长</div></div></div>
+            <div class="frow"><div class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 9h16M8 3v4M16 3v4"/></svg></div><div><div class="ft">日历</div><div class="fd">按日期纵览安排</div></div></div>
+          </div>
+        </div>
+        <div class="footer">
+          <div class="dots"><i></i><i class="on"></i><i></i></div>
+          <div class="btn">下一步</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Screen 3 -->
+    <div class="phone">
+      <div class="screen">
+        <div class="statusbar"><span>9:41</span><span class="dots"><i></i><i></i><i></i></span></div>
+        <div class="skip">跳过 ›</div>
+        <div class="body">
+          <div class="bell">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#0061A4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>
+          </div>
+          <div class="pagetitle">开启提醒</div>
+          <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
+            <div class="toggle"><span>通知</span><span class="switch"></span></div>
+            <div class="toggle"><span>精确闹钟</span><span class="switch"></span></div>
+          </div>
+          <div class="note">任务、习惯到点提醒<br/>ColorOS 需精确闹钟权限才准点</div>
+          <div class="note" style="margin-top:14px">已为你放入 7 条示例任务</div>
+          <div class="choice">
+            <div class="pill">保留示例</div>
+            <div class="pill ghost">从零开始</div>
+          </div>
+        </div>
+        <div class="footer">
+          <div class="dots"><i></i><i></i><i class="on"></i></div>
+          <div class="btn">开始使用</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Annotations -->
+  <div class="notes">
+    <div class="note-card">
+      <h3>屏 1 · 欢迎 / 本地优先</h3>
+      <ul>
+        <li><b>组件</b>：Logo、App 名、主标语、副文案</li>
+        <li><b>文案</b>：有条 / 本地优先的待办·习惯·专注 / 数据只存在你手机上 · 无需账号·不上传云端</li>
+        <li><b>状态</b>：页码 1/3；右下「下一步」进入屏 2</li>
+        <li><b>跳过</b>：右上「跳过 ›」直接落 home（置标志位）</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>屏 2 · 核心能力</h3>
+      <ul>
+        <li><b>组件</b>：标题 + 6 行能力卡（图标+标题+一句说明）</li>
+        <li><b>能力</b>：均取自 App 真实功能（已核实存在）</li>
+        <li><b>状态</b>：页码 2/3；「下一步」进入屏 3</li>
+        <li><b>跳过</b>：同样可一键跳过</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>屏 3 · 开启提醒 + 开始</h3>
+      <ul>
+        <li><b>组件</b>：铃铛图标、双开关（通知/精确闹钟）、说明、示例提示、二选一、主按钮</li>
+        <li><b>权限</b>：进入即请求通知权限；精确闹钟说明针对 ColorOS</li>
+        <li><b>选择</b>：保留示例 / 从零开始（决定首启是否清空 7 条 mock）</li>
+        <li><b>完成</b>：「开始使用」置标志位 → home</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 class="sec">路由流程（ardot-design-router）</h2>
+  <div class="flow">
+    <svg viewBox="0 0 760 220" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#49454F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+      </defs>
+      <!-- start -->
+      <rect x="20" y="90" width="120" height="44" rx="12" fill="#F3EDF7" stroke="#E5DFF0"/>
+      <text x="80" y="117" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1C1E">App 启动</text>
+      <!-- decision -->
+      <rect x="180" y="82" width="150" height="60" rx="12" fill="#D1E4FF" stroke="#0061A4"/>
+      <text x="255" y="107" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0061A4">hasSeenIntro?</text>
+      <text x="255" y="126" text-anchor="middle" font-size="11" fill="#49454F">(shared_prefs)</text>
+      <!-- home (yes) -->
+      <rect x="590" y="90" width="140" height="44" rx="12" fill="#0061A4"/>
+      <text x="660" y="117" text-anchor="middle" font-size="13" font-weight="600" fill="#fff">主页 home</text>
+      <!-- onboarding (no) -->
+      <rect x="370" y="30" width="170" height="44" rx="12" fill="#F3EDF7" stroke="#E5DFF0"/>
+      <text x="455" y="57" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1A1C1E">引导页（3 屏）</text>
+      <!-- home after onboarding -->
+      <rect x="370" y="150" width="170" height="44" rx="12" fill="#F3EDF7" stroke="#E5DFF0"/>
+      <text x="455" y="177" text-anchor="middle" font-size="12" fill="#49454F">置 hasSeenIntro=true</text>
+
+      <line x1="140" y1="112" x2="176" y2="112" stroke="#49454F" stroke-width="1.5" marker-end="url(#ar)"/>
+      <line x1="330" y1="112" x2="586" y2="112" stroke="#49454F" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="470" y="105" font-size="11" fill="#0061A4" text-anchor="middle">是</text>
+      <line x1="255" y1="82" x2="255" y2="74" stroke="#49454F" stroke-width="1.5"/>
+      <line x1="255" y1="74" x2="455" y2="74" stroke="#49454F" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="350" y="66" font-size="11" fill="#0061A4" text-anchor="middle">否</text>
+      <line x1="455" y1="74" x2="455" y2="30" stroke="#49454F" stroke-width="1.5"/>
+      <line x1="455" y1="194" x2="455" y2="210" stroke="#49454F" stroke-width="1.5"/>
+      <line x1="455" y1="210" x2="660" y2="210" stroke="#49454F" stroke-width="1.5" marker-end="url(#ar)"/>
+      <line x1="660" y1="210" x2="660" y2="134" stroke="#49454F" stroke-width="1.5"/>
+      <text x="600" y="205" font-size="11" fill="#49454F" text-anchor="middle">完成/跳过</text>
+    </svg>
+  </div>
+
+  <h2 class="sec">设计规范</h2>
+  <div class="spec">
+    <table>
+      <tr><th>角色</th><th>色值</th><th>用途</th></tr>
+      <tr><td>主色 Primary</td><td><span class="sw" style="background:#0061A4"></span>#0061A4</td><td>按钮、开关、页码、图标强调</td></tr>
+      <tr><td>背景 Background</td><td><span class="sw" style="background:#FAF8FD"></span>#FAF8FD</td><td>页面底色</td></tr>
+      <tr><td>表面 Surface</td><td><span class="sw" style="background:#F3EDF7"></span>#F3EDF7</td><td>卡片/能力行/开关行底</td></tr>
+      <tr><td>正文 Text</td><td><span class="sw" style="background:#1A1C1E"></span>#1A1C1E</td><td>标题与正文</td></tr>
+      <tr><td>次要 Meta</td><td><span class="sw" style="background:#49454F"></span>#49454F</td><td>说明、副文案</td></tr>
+      <tr><td>芯片 Chip</td><td><span class="sw" style="background:#D1E4FF"></span>#D1E4FF</td><td>图标底、选中态</td></tr>
+      <tr><td>轨道 Track</td><td><span class="sw" style="background:#E5DFF0"></span>#E5DFF0</td><td>页码未选、分隔线</td></tr>
+      <tr><td>字体</td><td colspan="2">Inter（中文回退 Noto Sans SC / PingFang SC / Microsoft YaHei）— 与 App 一致</td></tr>
+      <tr><td>圆角</td><td colspan="2">屏内卡片 12–14px；手机外框 38px；按钮 14px</td></tr>
+      <tr><td>字号</td><td colspan="2">App 名 26 / 页标题 17 / 正文 13 / 说明 11–12（对照 App textTheme）</td></tr>
+    </table>
+  </div>
+
+  <footer class="doc">
+    设计稿 v0.1 · 基于已核实代码现状（无 onboarding；首启预置 7 mock；local_database.tasksEmpty 判新装；Material 3 + Inter + lightTheme）。<br/>
+    下一步：据此实现 → 加 hasSeenIntro 标志 + 启动门控 + 3 屏 pager（含权限引导与示例任务选择）。详见同目录 onboarding_tdd.md。
+  </footer>
+
+</div>
+</body>
+</html>

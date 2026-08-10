@@ -1,10 +1,10 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:todolist/main.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
+import 'test_helpers.dart';
 
 /// 构建冒烟测试：确保 MyApp 能正常初始化并渲染 6 个底部 Tab，
 /// 任何在 build 期抛错（依赖缺失、布局崩溃）都会被这里捕获。
@@ -14,12 +14,14 @@ void main() {
   });
 
   testWidgets('MyApp 渲染 6 个底部导航 Tab', (tester) async {
+    final onboarding = await prepareSeenOnboarding();
     await tester.pumpWidget(
       MyApp(
         task: TaskProvider(),
         focus: FocusProvider(),
         theme: ThemeProvider(),
         habit: HabitProvider(),
+        onboarding: onboarding,
       ),
     );
     await tester.pump();

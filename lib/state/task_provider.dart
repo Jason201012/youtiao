@@ -176,6 +176,17 @@ class TaskProvider extends ChangeNotifier {
     _idSeq = max + 1;
   }
 
+  /// 清空首启示例任务（引导页「从零开始」选项调用）。
+  /// 把内存中的 7 条 mock 与回收站清空并落库为空，使全新用户可以从空白开始。
+  /// 必须在 [load] 预置 mock 之后、主页渲染之前调用（引导页完成环节里触发）。
+  void clearSampleTasks() {
+    _tasks.clear();
+    _trash.clear();
+    _recomputeIdSeq(); // 重置自增 id 起点（空库 → 8 起）
+    notifyListeners();
+    _persist();
+  }
+
   // ===== 首页筛选状态（已移除搜索 / 筛选功能）=====
 
   // ===== Mock 数据（7 条，分类进度：工作 75% / 生活 100% / 学习 50%）=====

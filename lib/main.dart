@@ -8,6 +8,8 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
+import 'package:todolist/state/onboarding_provider.dart';
+import 'package:todolist/screens/onboarding_screen.dart';
 import 'package:todolist/widgets/bottom_nav.dart';
 import 'package:todolist/widgets/new_task_fab.dart';
 import 'package:todolist/widgets/quick_entry_sheet.dart';
@@ -30,6 +32,8 @@ void main() async {
   await _safeLoad(theme, 'ThemeProvider');
   final habit = HabitProvider();
   await _safeLoad(habit, 'HabitProvider');
+  final onboarding = OnboardingProvider();
+  await _safeLoad(onboarding, 'OnboardingProvider');
   // 启动后调度全部已设提醒的习惯（失败单个静默，不影响其它功能）。
   try {
     await habit.scheduleAllReminders();
@@ -43,7 +47,7 @@ void main() async {
   if (task.backgroundGuardEnabled) {
     await BackgroundService.instance.start();
   }
-  runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit));
+  runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding));
 }
 
 /// 安全加载 Provider：捕获所有异常避免 [runApp()] 永远不被调用（卡在 splash）。
@@ -57,6 +61,8 @@ Future<void> _safeLoad(ChangeNotifier provider, String name) async {
       await provider.load();
     } else if (provider is HabitProvider) {
       await provider.load();
+    } else if (provider is OnboardingProvider) {
+      await provider.load();
     }
   } catch (e, stack) {
     debugPrint('[$name] 启动加载失败（已降级跳过）：$e\n$stack');
@@ -69,12 +75,14 @@ class MyApp extends StatelessWidget {
   final FocusProvider focus;
   final ThemeProvider theme;
   final HabitProvider habit;
+  final OnboardingProvider onboarding;
   const MyApp({
     super.key,
     required this.task,
     required this.focus,
     required this.theme,
     required this.habit,
+    required this.onboarding,
   });
 
   @override
@@ -85,6 +93,7 @@ class MyApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: focus),
         ChangeNotifierProvider.value(value: theme),
         ChangeNotifierProvider.value(value: habit),
+        ChangeNotifierProvider.value(value: onboarding),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, theme, _) {
@@ -107,7 +116,9 @@ class MyApp extends StatelessWidget {
                   GlobalCupertinoLocalizations.delegate,
                 ],
                 supportedLocales: const [Locale('zh', 'CN')],
-                home: const MainScaffold(),
+                home: onboarding.hasSeenIntro
+                    ? const MainScaffold()
+                    : const OnboardingScreen(),
               );
               } catch (e) {
                 // buildThemes 或 DynamicColorBuilder 异常时降级为默认主题。
@@ -126,7 +137,9 @@ class MyApp extends StatelessWidget {
                     GlobalCupertinoLocalizations.delegate,
                   ],
                   supportedLocales: const [Locale('zh', 'CN')],
-                  home: const MainScaffold(),
+                  home: onboarding.hasSeenIntro
+                    ? const MainScaffold()
+                    : const OnboardingScreen(),
                 );
               }
             },
