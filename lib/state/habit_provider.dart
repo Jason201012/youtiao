@@ -231,6 +231,121 @@ class HabitProvider extends ChangeNotifier {
     return streak;
   }
 
+  /// 全部打卡日期集合（date-only，去重），供热力图整体视图着色。
+  Set<DateTime> get allCheckedDays => _allDates;
+
+  /// 返回近 [days] 天内（含今天）按「日」聚合的打卡次数，供多习惯聚合热力图分级着色。
+  Map<DateTime, int> checkInCountsByDay(int days) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final start = today.subtract(Duration(days: days - 1));
+    final map = <DateTime, int>{};
+    for (final c in _checkIns) {
+      final d = DateTime(c.date.year, c.date.month, c.date.day);
+      if (d.isBefore(start)) continue;
+      map[d] = (map[d] ?? 0) + 1;
+    }
+    return map;
+  }
+
+  // ===== 备份 / 导出 / 恢复（并入「备份与恢复」「导出数据」）=====
+
+  /// 完整备份数据（习惯 + 打卡记录），用于「备份与恢复」导出。
+  /// 以独立键 ['habits'] / ['check_ins'] 写入，老备份缺这些键时恢复逻辑会跳过，
+  /// 不会误清现有习惯数据。
+  Map<String, dynamic> backupData() => {
+        'habits': _habits.map((h) => h.toJson()).toList(),
+        'check_ins': _checkIns.map((c) => c.toJson()).toList(),
+      };
+
+  /// 从备份 JSON 恢复：仅恢复备份中实际存在的部分（[habits] / [check_ins]）。
+  /// 老备份无这两个键时不触碰现有习惯，避免「恢复任务备份反而清空习惯」。
+  Future<void> restoreFromJson(Map<String, dynamic> data) async {
+    if (data['habits'] is List) {
+      final habitsList = data['habits'] as List;
+      _habits
+        ..clear()
+        ..addAll(
+            habitsList.map((e) => Habit.fromJson(e as Map<String, dynamic>)));
+      // 取消旧提醒并按恢复的 habits 重新调度（仅习惯提醒，不动任务通知）。
+      for (final h in _habits) {
+        await NotificationService.instance.cancelHabitReminder(h.id);
+        if (!h.archived && h.reminderMinute != null) {
+          await NotificationService.instance.scheduleHabitReminder(h);
+        }
+      }
+    }
+    if (data['check_ins'] is List) {
+      final checkList = data['check_ins'] as List;
+      _checkIns
+        ..clear()
+        ..addAll(
+            checkList.map((e) => CheckIn.fromJson(e as Map<String, dynamic>)));
+    }
+    await _persistHabits();
+    await _persistCheckIns();
+    notifyListeners();
+  }
+
+  /// 导出 CSV：先列习惯表（含当前/最长连续、累计打卡），再列打卡记录表。
+  String exportCsv() {
+    final buf = StringBuffer();
+    buf.writeln('习惯,表情,创建时间,当前连续(天),最长连续(天),累计打卡,提醒,是否归档');
+    for (final h in _habits) {
+      final reminder =
+          h.reminderMinute == null ? '' : _fmtMinute(h.reminderMinute!);
+      buf.writeln('"${_esc(h.title)}","${_esc(h.emoji)}","${_fmt(h.createdAt)}",'
+          '${currentStreak(h)},${longestStreak(h)},${checkInCount(h)},'
+          '"$reminder","${h.archived ? '是' : '否'}"');
+    }
+    buf.writeln();
+    buf.writeln('习惯,打卡日期');
+    final titleById = {for (final h in _habits) h.id: h.title};
+    for (final c in _checkIns) {
+      final name = titleById[c.habitId] ?? c.habitId;
+      buf.writeln('"${_esc(name)}","${CheckIn.dateKey(c.date)}"');
+    }
+    return buf.toString();
+  }
+
+  /// 导出 Markdown：习惯清单（含连续/累计）+ 打卡记录列表。
+  String exportMarkdown() {
+    final buf = StringBuffer();
+    buf.writeln('# 有条 习惯导出');
+    buf.writeln('');
+    buf.writeln('> 导出时间：${_fmt(DateTime.now())}');
+    buf.writeln('');
+    if (_habits.isEmpty) {
+      buf.writeln('_暂无习惯_');
+      return buf.toString();
+    }
+    buf.writeln('## 习惯（${_habits.length}）');
+    for (final h in _habits) {
+      final reminder =
+          h.reminderMinute == null ? '无' : _fmtMinute(h.reminderMinute!);
+      buf.writeln('- ${_esc(h.emoji)} ${_esc(h.title)} ｜ 当前连续 '
+          '${currentStreak(h)} 天 · 最长 ${longestStreak(h)} 天 · 累计 '
+          '${checkInCount(h)} 次 ｜ 提醒 $reminder${h.archived ? ' ｜ 已归档' : ''}');
+    }
+    if (_checkIns.isNotEmpty) {
+      buf.writeln('');
+      buf.writeln('## 打卡记录（${_checkIns.length}）');
+      final titleById = {for (final h in _habits) h.id: h.title};
+      for (final c in _checkIns) {
+        final name = titleById[c.habitId] ?? c.habitId;
+        buf.writeln('- ${CheckIn.dateKey(c.date)} ｜ ${_esc(name)}');
+      }
+    }
+    return buf.toString();
+  }
+
+  static String _fmt(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
+      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  static String _fmtMinute(int m) =>
+      '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
+  static String _esc(String s) => s.replaceAll('"', '""');
+
   Future<void> _persistHabits() async {
     try {
       await LocalDatabase.instance.replaceHabits(_habits);

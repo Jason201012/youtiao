@@ -9,6 +9,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/habit_heatmap.dart';
 
 /// 习惯打卡 / 成就页：今日打卡列表 + 新增习惯 + 成就墙。
 /// 主题色、开关、强调色等统一跟随全局 ThemeProvider（导航选中/FAB/勾选均绑定
@@ -48,6 +49,12 @@ class HabitScreen extends StatelessWidget {
                       currentStreak: habit.overallCurrentStreak,
                       totalCheckIns: habit.totalCheckIns,
                     ),
+                    if (habit.habitCount > 0) ...[
+                      const SizedBox(height: 24),
+                      const _HeatmapCard(),
+                      const SizedBox(height: 24),
+                      const _StreakSection(),
+                    ],
                     const SizedBox(height: 24),
                     _SectionTitle('今日习惯'),
                     const SizedBox(height: AppColors.contentGap),
@@ -147,6 +154,91 @@ class _OverviewCard extends StatelessWidget {
   }
 }
 
+class _HeatmapCard extends StatelessWidget {
+  const _HeatmapCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final habit = context.watch<HabitProvider>();
+    final ext = appColors(context);
+    const weeks = 18;
+    final counts = habit.checkInCountsByDay(weeks * 7);
+    final checkedDays = counts.keys.toSet();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('打卡热力图',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text('最近 $weeks 周打卡密度',
+              style: TextStyle(fontSize: 12, color: ext.meta)),
+          const SizedBox(height: 14),
+          HabitHeatmap(
+            checkedDays: checkedDays,
+            levelOf: (d) => counts[d] ?? 0,
+            weeks: weeks,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StreakSection extends StatelessWidget {
+  const _StreakSection();
+
+  @override
+  Widget build(BuildContext context) {
+    final habit = context.watch<HabitProvider>();
+    final ext = appColors(context);
+    final primary = Theme.of(context).colorScheme.primary;
+    final list = habit.activeHabits.toList()
+      ..sort((a, b) => habit.currentStreak(b).compareTo(habit.currentStreak(a)));
+    if (list.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _SectionTitle('连续天数'),
+        const SizedBox(height: AppColors.contentGap),
+        ...list.map((h) => Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                ),
+                child: Row(
+                  children: [
+                    Text(h.emoji, style: const TextStyle(fontSize: 20)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(h.title,
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                    ),
+                    StreakBadge(
+                      current: habit.currentStreak(h),
+                      longest: habit.longestStreak(h),
+                      accent: primary,
+                      showLongest: true,
+                    ),
+                  ],
+                ),
+              ),
+            )),
+      ],
+    );
+  }
+}
+
 class _EmptyHint extends StatelessWidget {
   const _EmptyHint();
   @override
@@ -201,8 +293,9 @@ class _HabitTile extends StatelessWidget {
             style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Row(
           children: [
-            Text('连续 $streak 天 · $freq',
-                style: TextStyle(color: ext.meta, fontSize: 12)),
+            StreakBadge(current: streak, accent: primary),
+            const SizedBox(width: 8),
+            Text(freq, style: TextStyle(color: ext.meta, fontSize: 12)),
             if (habit.reminderMinute != null) ...[
               const SizedBox(width: 8),
               GestureDetector(
