@@ -15,6 +15,9 @@ class TaskProvider extends ChangeNotifier {
   static const String _kNotify = 'notifications_enabled';
   static const String _kSound = 'sound_enabled';
   static const String _kGuard = 'background_guard';
+  /// 是否已执行过「首启示例预置」决策。一旦置位（预置过 mock 或用户选过「从零开始」），
+  /// 即便日后任务库被清空，[load] 也不再重新塞回 7 条 mock，避免「从零开始」后重启复活示例。
+  static const String _kSeeded = 'samples_seeded_v1';
 
   // ===== 通知总开关 =====
   bool _notificationsEnabled = true;
@@ -74,18 +77,22 @@ class TaskProvider extends ChangeNotifier {
   /// 启动时调用：从本地读取任务列表与开关设置；首次启动则保留 7 条 mock 并落盘。
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    // 确保数据库已打开（首次启动会建表）。
+    // 确保数据库已打开（首次启动会建表）。内存测试后端无需真实 SQLite，跳过打开。
     final db = LocalDatabase.instance;
-    await db.db;
+    if (!LocalDatabase.testUseMemory) {
+      await db.db;
+    }
     // —— 从旧版 SharedPreferences JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
     if (await db.tasksEmpty && prefs.getString(_kTasks) != null) {
       await db.migrateTasksFromPrefs(prefs);
     }
     final loadedTasks = await db.loadTasks();
     final loadedTrash = await db.loadTrash();
-    if (loadedTasks.isEmpty && loadedTrash.isEmpty) {
-      // 全新安装：保留内置 7 条 mock 并落库。
+    final seeded = prefs.getBool(_kSeeded) ?? false;
+    if (loadedTasks.isEmpty && loadedTrash.isEmpty && !seeded) {
+      // 全新安装：保留内置 7 条 mock 并落库；置位标志，避免「从零开始」后重启又被塞回。
       await _persist();
+      await prefs.setBool(_kSeeded, true);
     } else {
       _tasks
         ..clear()
@@ -93,6 +100,9 @@ class TaskProvider extends ChangeNotifier {
       _trash
         ..clear()
         ..addAll(loadedTrash);
+      // 已有数据，或用户已做过首启示例决策（含「从零开始」）：标记已预置，
+      // 日后即便任务库被清空也不再复活示例。
+      await prefs.setBool(_kSeeded, true);
     }
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
     _soundEnabled = prefs.getBool(_kSound) ?? true;
@@ -179,12 +189,15 @@ class TaskProvider extends ChangeNotifier {
   /// 清空首启示例任务（引导页「从零开始」选项调用）。
   /// 把内存中的 7 条 mock 与回收站清空并落库为空，使全新用户可以从空白开始。
   /// 必须在 [load] 预置 mock 之后、主页渲染之前调用（引导页完成环节里触发）。
-  void clearSampleTasks() {
+  Future<void> clearSampleTasks() async {
     _tasks.clear();
     _trash.clear();
     _recomputeIdSeq(); // 重置自增 id 起点（空库 → 8 起）
     notifyListeners();
-    _persist();
+    await _persist();
+    // 标记已做过首启示例决策，避免下次启动因 DB 为空又把 7 条 mock 塞回来。
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kSeeded, true);
   }
 
   // ===== 首页筛选状态（已移除搜索 / 筛选功能）=====

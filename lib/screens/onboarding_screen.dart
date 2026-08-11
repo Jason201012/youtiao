@@ -85,7 +85,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     // 选「从零开始」则清空首启示例任务。
     if (!_keepSample) {
       try {
-        task.clearSampleTasks();
+        await task.clearSampleTasks();
       } catch (_) {
         // 清空失败不应阻塞进入主页。
       }

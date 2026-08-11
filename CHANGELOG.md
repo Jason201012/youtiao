@@ -1,5 +1,10 @@
 # 更新日志（Changelog）
 
+## v2.5.1（2026-08-11）
+
+- **🐛 修复「从零开始」示例任务重启复活**：引导页选「从零开始」后，退出重进示例任务又出现。根因是 `TaskProvider.load()` 把「空库」误判为「全新安装」重新落盘 7 条示例，且 7 条 mock 写在字段初始化器里、每次启动都会被装回内存。新增持久标志 `samples_seeded_v1`，仅首次且未清空过时预置示例；`clearSampleTasks()` 改为 async 并在清空后写入该标志，杜绝重启复活。新增 2 个回归测试（从零开始→重启不复活 / 全新安装仍预置示例）。`flutter analyze` 0 error，`task_provider_test` 41/41、`onboarding_test` 5/5 全绿。
+- 版本升至 v2.5.1（versionCode 72）。
+
 ## v2.5.0（2026-08-11）
 
 - **✨ 提醒提前量（提前 N 分钟响铃）**：任务新增 `reminderOffsetMin` 字段（默认 0，向后兼容旧数据）。「新建/编辑任务」中，当任务为「不重复 + 有截止时间」时，在「截止时间」下方新增「提醒提前量」下拉（准时 / 提前 5 / 10 / 15 / 30 / 60 分钟）；调度逻辑在 `NotificationService.scheduleForTask` 内将触发时刻改为 `截止时间 - 提前量`。仅对一次性截止提醒生效，重复任务走各自的 `repeatMinute` 不受影响。新增 `reminder_offset_test` 5 个用例（默认值 / json 往返 / 旧数据回退 / copyWith）。`flutter analyze` 0 error，新单测全绿。

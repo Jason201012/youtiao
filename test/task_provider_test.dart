@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -63,6 +64,43 @@ void main() {
   final now = () => DateTime.now();
   final todayNoon = () =>
       DateTime(now().year, now().month, now().day, 10);
+
+  group('clearSampleTasks 后重启不复活示例（回归）', () {
+    test('从零开始后再次 load 不应重新塞入 7 条 mock', () async {
+      // 关闭通知，避免 load() 内 _rescheduleAllActive 走 tz 调度路径（测试环境无原生时区库）。
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('notifications_enabled', false);
+
+      // 首次启动：预置 7 条示例
+      final p = TaskProvider();
+      await p.load();
+      expect(p.tasks.length, 7, reason: '全新安装应有 7 条示例');
+
+      // 用户在引导页选择「从零开始」
+      await p.clearSampleTasks();
+      expect(p.tasks.length, 0, reason: '从零开始后应为空');
+      // 清空须置位 samples_seeded 标志，使后续空库不再复活
+      expect(prefs.getBool('samples_seeded_v1'), isTrue);
+
+      // 模拟重启：重建 Provider 并再次 load
+      final p2 = TaskProvider();
+      await p2.load();
+      expect(p2.tasks.length, 0, reason: '从零开始后重启不应复活示例');
+    });
+
+    test('全新安装首启仍预置 7 条示例且置位标志', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('notifications_enabled', false);
+      // 确保是全新状态
+      await prefs.remove('samples_seeded_v1');
+
+      final p = TaskProvider();
+      await p.load();
+      expect(p.tasks.length, 7, reason: '全新安装应预置 7 条示例');
+      expect(prefs.getBool('samples_seeded_v1'), isTrue,
+          reason: '预置后应置位标志，避免误判空库为全新安装');
+    });
+  });
 
   group('sectionCounts 首页分区计数', () {
     test('按截止日 vs 重复 vs 已完成 正确分组', () async {

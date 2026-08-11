@@ -1,7 +1,7 @@
 {
-  "version": "2.5.0",
-  "tag": "v2.5.0",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.0/app-release-v2.5.0-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.0",
-  "notes": "v2.5.0：提醒提前量——任务新增「提醒提前量」选项（准时 / 提前 5 / 10 / 15 / 30 / 60 分钟），不重复且有截止时间的任务可在截止时刻前 N 分钟响铃；触发时刻在通知调度内改为「截止时间 - 提前量」，向后兼容旧数据（缺字段回退 0）。仅对一次性截止提醒生效，重复任务不受影响。flutter analyze 0 error，reminder_offset_test 5 项全绿。"
+  "version": "2.5.1",
+  "tag": "v2.5.1",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.1/app-release-v2.5.1-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.1",
+  "notes": "v2.5.1：修复示例任务重启复活的 bug——引导页选「从零开始」后，退出重进示例任务又出现。根因是 load() 把空库误判为全新安装重新落盘 7 条示例，且 mock 写在字段初始化器里每次启动装回内存。新增持久标志 samples_seeded_v1，仅首次且未清空过时预置；clearSampleTasks 清空后写入该标志，杜绝重启复活。新增 2 个回归测试全绿。flutter analyze 0 error。"
 }
