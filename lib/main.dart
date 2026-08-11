@@ -9,6 +9,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/onboarding_provider.dart';
+import 'package:todolist/services/focus_audio_service.dart';
 import 'package:todolist/screens/onboarding_screen.dart';
 import 'package:todolist/widgets/bottom_nav.dart';
 import 'package:todolist/widgets/new_task_fab.dart';
@@ -268,11 +269,20 @@ class _MainScaffoldState extends State<MainScaffold>
     // 在激进 ROM 上杀进程时丢写（纯黑背景等唯一非默认项最易暴露）。
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      // 进程即将转入后台/被杀：把所有 Provider / 服务的首选项重新落盘，
+      // 规避 shared_preferences.apply() 在激进 ROM（ColorOS 等）上杀进程时丢写。
       try {
         Provider.of<ThemeProvider>(context, listen: false).persist();
-      } catch (_) {
-        // 持久化失败不影响退出。
-      }
+      } catch (_) {}
+      try {
+        Provider.of<FocusProvider>(context, listen: false).persist();
+      } catch (_) {}
+      try {
+        Provider.of<OnboardingProvider>(context, listen: false).persist();
+      } catch (_) {}
+      try {
+        FocusAudioService.instance.persist();
+      } catch (_) {}
     }
   }
 

@@ -40,4 +40,15 @@ class OnboardingProvider extends ChangeNotifier {
       // 持久化失败：保持内存态为 true，本次仍能进主页。
     }
   }
+
+  /// 进程即将被杀（AppLifecycleState.paused/detached）时调用，把「是否看过引导」
+  /// 重新落盘，防御 shared_preferences.apply() 在激进 ROM 杀进程时丢写。
+  Future<void> persist() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kSeen, _seen);
+    } catch (_) {
+      // 持久化失败不影响退出。
+    }
+  }
 }

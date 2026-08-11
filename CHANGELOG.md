@@ -1,5 +1,12 @@
 # 更新日志（Changelog）
 
+## v2.5.3（2026-08-11）
+
+- **🔧 KGP 插件迁移（构建可靠性）**：将 4 个仍在构建期触发「plugins that apply Kotlin Gradle Plugin」警告的插件升级到内置 Kotlin 兼容版本，消除 Flutter 未来版本中潜在的构建失败风险——`dynamic_color ^1.7.0→^1.9.0`、`share_plus ^10→^13.0.0`、`package_info_plus ^9→^10.0.0`、`add_2_calendar ^2→^3.1.1`；为解开 `win32 ^5 vs ^6` 依赖冲突、实现四个插件全量脱 KGP，将 `file_picker` 升级到 `^12.0.0-beta.1`（当前唯一脱 KGP 版本，为 beta）。调用点仅适配 `share_plus`（`SharePlus.instance.share(ShareParams(...))`）与 `file_picker`（`FilePicker.pickFiles(...)`，删除已移除的 `.platform` 访问器）；另两插件 API 兼容无需改动。
+- **🔧 首选项持久化加固（SP 可靠性）**：为防御 ColorOS / Realme 等激进 ROM 在进程被杀时 `shared_preferences.apply()` 丢写，于 `main.dart` 应用生命周期 `paused/detached` 时统一调用各 Provider / 服务的 `persist()` 兜底落盘（新增 `FocusProvider` / `OnboardingProvider` / `FocusAudioService` 的 `persist()`；`FocusAudioService` 加 `_initialized` 标志，避免未初始化时用默认值覆盖真实偏好）。
+- `flutter analyze` 0 error，`flutter test` **274/274 全绿**；release 构建已验证 KGP 警告彻底消失。
+- 版本升至 v2.5.3（versionCode 74）。
+
 ## v2.5.2（2026-08-11）
 
 - **✨ 稍后提醒（snooze）**：任务 / 习惯通知新增「稍后提醒」按钮，点击后于 10 分钟后以**覆盖式**重新提醒（复用原通知 id，不叠加新通知、不刷屏）；冷启动点按同样支持暂存并在导航就绪后跳转。

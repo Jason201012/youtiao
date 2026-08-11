@@ -35,7 +35,9 @@ class DataIo {
 
   /// 通过系统分享面板分享一个本地文件。
   static Future<void> shareFile(File file, {String mimeType = 'application/json'}) async {
-    await Share.shareXFiles([XFile(file.path, mimeType: mimeType)]);
+    await SharePlus.instance.share(
+      ShareParams(files: [XFile(file.path, mimeType: mimeType)]),
+    );
   }
 
   /// 把图片字节写入临时目录并唤起系统分享面板（微信/QQ/相册等）。
@@ -48,9 +50,11 @@ class DataIo {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/$fileName');
     await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles(
-      [XFile(file.path, mimeType: 'image/png')],
-      text: text,
+    await SharePlus.instance.share(
+      ShareParams(
+        files: [XFile(file.path, mimeType: 'image/png')],
+        text: text,
+      ),
     );
   }
 
@@ -83,7 +87,7 @@ class DataIo {
 
   /// 选择 .json 备份文件并返回其文本内容；用户取消选择返回 null。
   static Future<String?> pickJsonFile() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['json'],
     );

@@ -90,6 +90,9 @@ class FocusAudioService {
   double _volume = 0.5;
   /// 是否处于「应当播放」的状态（专注进行中）。
   bool _active = false;
+  /// 是否已从 [SharedPreferences] 读取过偏好。未初始化前内存态为默认值，
+  /// [persist] 不可覆盖真实持久化值，否则会把用户已存的环境音设置清空。
+  bool _initialized = false;
 
   Set<FocusSoundType> get types => Set<FocusSoundType>.from(_selected);
   double get volume => _volume;
@@ -130,6 +133,17 @@ class FocusAudioService {
       _selected.remove(FocusSoundType.off);
     }
     _volume = (prefs.getDouble(_kVol) ?? 0.5).clamp(0.0, 1.0);
+    _initialized = true;
+  }
+
+  /// 进程即将被杀（AppLifecycleState.paused/detached）时调用：把选中的音效集合与音量
+  /// 重新落盘，防御 shared_preferences.apply() 在激进 ROM 杀进程时丢写。
+  /// 未初始化（用户从未进入专注页）时不写，避免用默认值覆盖真实持久化值。
+  Future<void> persist() async {
+    if (!_initialized) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_kTypes, _selected.map((e) => e.name).toList());
+    await prefs.setDouble(_kVol, _volume);
   }
 
   Future<void> _persist() async {

@@ -257,6 +257,14 @@ class FocusProvider extends ChangeNotifier {
     );
   }
 
+  /// 进程即将被杀（AppLifecycleState.paused/detached）时调用，把所有内存态重新落盘，
+  /// 最大化解 shared_preferences.apply() / SQLite 在进程死亡前的刷盘机会
+  /// （ColorOS 等激进杀进程 ROM 上 apply() 异步写盘易在杀进程时丢失）。
+  Future<void> persist() async {
+    await _persist(); // 会话列表（SQLite）
+    await _persistActive(); // 进行中计时态（SP）
+  }
+
   // —— 进行中状态派生 ——
 
   /// 是否存在进行中的番茄钟。
