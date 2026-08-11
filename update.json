@@ -1,7 +1,7 @@
 {
-  "version": "2.5.1",
-  "tag": "v2.5.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.1/app-release-v2.5.1-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.1",
-  "notes": "v2.5.1：修复示例任务重启复活的 bug——引导页选「从零开始」后，退出重进示例任务又出现。根因是 load() 把空库误判为全新安装重新落盘 7 条示例，且 mock 写在字段初始化器里每次启动装回内存。新增持久标志 samples_seeded_v1，仅首次且未清空过时预置；clearSampleTasks 清空后写入该标志，杜绝重启复活。新增 2 个回归测试全绿。flutter analyze 0 error。"
+  "version": "2.5.2",
+  "tag": "v2.5.2",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.2/app-release-v2.5.2-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.2",
+  "notes": "v2.5.2：新增「稍后提醒」——任务/习惯通知点一下，10 分钟后再提醒一次（覆盖式重排，不堆通知）；顺带修复内部命名冲突、CHANGELOG 虚标与一条卡死的测试。flutter analyze 0 error，274 项测试全绿。"
 }
