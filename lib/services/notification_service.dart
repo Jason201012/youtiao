@@ -65,9 +65,17 @@ class NotificationService {
   /// 通知 payload 前缀：携带习惯 id，点击习惯提醒跳转到习惯页。
   static const String payloadHabitPrefix = 'habit:';
 
+  /// 通知「稍后提醒」action 按钮的 actionId。
+  static const String snoozeActionId = 'snooze';
+
   /// 点击通知的回调（由 main.dart 注入，负责根据 payload 导航）。
   /// 用实例字段而非直接 import 页面，避免 service 反向依赖 UI。
   static void Function(String? payload)? onNotificationTap;
+
+  /// 点击通知 action 按钮的回调（由 main.dart 注入）。
+  /// 普通点击（点通知体）走 [onNotificationTap]；点 action 按钮（如「稍后提醒」）
+  /// 走这里，并带 actionId 与 payload 供调用方区分。
+  static void Function(String? actionId, String? payload)? onNotificationAction;
 
   /// 把任务 id（字符串）映射成一个稳定的通知 id：优先用数字本身（本 App 的
   /// id 都是纯数字字符串），兜底用 hashCode。schedule / cancel 必须走同一函数，
@@ -149,8 +157,15 @@ class NotificationService {
   }
 
   /// 点击通知时的回调（App 在前台/后台回到前台时触发，冷启动点开也走这里）。
-  /// 仅把 payload 透传给 [onNotificationTap]，真正的导航逻辑在 main.dart 中。
-  static void _onTap(NotificationResponse r) => onNotificationTap?.call(r.payload);
+  /// - 普通点击（actionId 为空）：payload 透传给 [onNotificationTap] 做导航。
+  /// - 点 action 按钮（如「稍后提醒」，actionId 非空）：转 [onNotificationAction]。
+  static void _onTap(NotificationResponse r) {
+    if (r.actionId != null) {
+      onNotificationAction?.call(r.actionId, r.payload);
+    } else {
+      onNotificationTap?.call(r.payload);
+    }
+  }
 
   /// 从 payload 解析任务 id；非任务类通知（无前缀 / 空）返回 null。
   static String? parseTaskId(String? payload) {
@@ -310,6 +325,7 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
+        actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -394,6 +410,7 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
+        actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -564,6 +581,7 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: true,
+        actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -632,6 +650,91 @@ class NotificationService {
       }
     } catch (e) {
       debugPrint('[通知] 取消习惯提醒失败 id=$id: $e');
+    }
+  }
+
+  /// 稍后提醒（snooze）：用同一通知 id 在 [delay] 后重新弹出该任务提醒。
+  /// 覆盖式调度（不新建通知），点「稍后提醒」后原通知消失、[delay] 后再弹一次；
+  /// [delay] 默认 10 分钟。仅对「截止提醒」一次性任务有效（重复 / 习惯走各自方法）。
+  Future<bool> snoozeTaskReminder(Task task,
+      {Duration delay = const Duration(minutes: 10), bool playSound = true}) async {
+    if (!enabled) {
+      debugPrint('[通知] 未 snooze id=${task.id}：通知总开关关闭');
+      return false;
+    }
+    final loc = _loc ?? tz.UTC;
+    final when = tz.TZDateTime.now(loc).add(delay);
+    // 清除「已取消」标记，保证 snooze 后的提醒能正常弹出。
+    _deadlineCancelled.remove(task.id);
+    final chId = playSound ? _chSound : _chSilent;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        chId,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: playSound,
+      ),
+    );
+    try {
+      await _plugin.zonedSchedule(
+        _notifyIdOf(task.id),
+        '任务提醒',
+        task.title.isNotEmpty ? task.title : '无标题任务',
+        when,
+        detail,
+        payload: '$payloadTaskPrefix${task.id}',
+        androidScheduleMode: await _scheduleMode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      debugPrint('[通知] snooze id=${task.id} -> $when (${delay.inMinutes}min)');
+      return true;
+    } catch (e, s) {
+      debugPrint('[通知] snooze 失败 id=${task.id}: $e');
+      debugPrint('$s');
+      return false;
+    }
+  }
+
+  /// 习惯提醒的稍后提醒：用同一习惯通知 id 在 [delay] 后重新弹出打卡提醒。
+  Future<bool> snoozeHabitReminder(Habit habit,
+      {Duration delay = const Duration(minutes: 10)}) async {
+    if (!enabled) {
+      debugPrint('[通知] 未 snooze 习惯 id=${habit.id}：通知总开关关闭');
+      return false;
+    }
+    final loc = _loc ?? tz.UTC;
+    final when = tz.TZDateTime.now(loc).add(delay);
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+      ),
+    );
+    try {
+      await _plugin.zonedSchedule(
+        _habitNotifyIdOf(habit.id, 0),
+        '习惯打卡',
+        '${habit.emoji} ${habit.title} · 该打卡啦',
+        when,
+        detail,
+        payload: '$payloadHabitPrefix${habit.id}',
+        androidScheduleMode: await _scheduleMode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      debugPrint('[通知] snooze 习惯 id=${habit.id} -> $when (${delay.inMinutes}min)');
+      return true;
+    } catch (e, s) {
+      debugPrint('[通知] snooze 习惯失败 id=${habit.id}: $e');
+      debugPrint('$s');
+      return false;
     }
   }
 

@@ -1,5 +1,14 @@
 # 更新日志（Changelog）
 
+## v2.5.2（2026-08-11）
+
+- **✨ 稍后提醒（snooze）**：任务 / 习惯通知新增「稍后提醒」按钮，点击后于 10 分钟后以**覆盖式**重新提醒（复用原通知 id，不叠加新通知、不刷屏）；冷启动点按同样支持暂存并在导航就绪后跳转。
+- **🔧 消除 `HabitHeatmap` 重名**：`focus_chart.dart` 中的热力图组件与习惯页同名类冲突，改名 `FocusHabitHeatmap`，避免潜在命名污染。
+- **🔧 校正 CHANGELOG「归档」虚标**：`task_detail` 仅做编辑 + 删除，并无归档动作，移除此前不实记录。
+- **🔧 修复 `search_render_test` 卡死**：测试补齐通知通道 mock（headless 下未挂载 `dexterous.com/flutter/local_notifications` 通道导致 `addHabit`→`scheduleHabitReminder` 永久挂起），并将 `_settle` 改为有限手动 `pump`（`pumpAndSettle` 本版无 `timeout` 形参）。
+- `flutter analyze` 0 error，`flutter test` **274/274 全绿**。
+- 版本升至 v2.5.2（versionCode 73）。
+
 ## v2.5.1（2026-08-11）
 
 - **🐛 修复「从零开始」示例任务重启复活**：引导页选「从零开始」后，退出重进示例任务又出现。根因是 `TaskProvider.load()` 把「空库」误判为「全新安装」重新落盘 7 条示例，且 7 条 mock 写在字段初始化器里、每次启动都会被装回内存。新增持久标志 `samples_seeded_v1`，仅首次且未清空过时预置示例；`clearSampleTasks()` 改为 async 并在清空后写入该标志，杜绝重启复活。新增 2 个回归测试（从零开始→重启不复活 / 全新安装仍预置示例）。`flutter analyze` 0 error，`task_provider_test` 41/41、`onboarding_test` 5/5 全绿。
@@ -90,7 +99,7 @@
 
 ## v2.3.8（2026-08-07）
 
-- **任务详情页**：单击任务进入详情页，分区查看优先级色条 / 标题 / 完成状态、备注全文、标签、截止与重复规则、累计专注时长；子任务清单可逐项勾选（实时刷新 done/total 进度）；底部操作栏支持编辑、开始专注、归档与删除。
+- **任务详情页**：单击任务进入详情页，分区查看优先级色条 / 标题 / 完成状态、备注全文、标签、截止与重复规则、累计专注时长；子任务清单可逐项勾选（实时刷新 done/total 进度）；底部操作栏支持编辑、开始专注与删除。
 - **专注可视化（零依赖自绘）**：专注页底部新增「近 7 日」专注时长柱状图（CustomPaint 绘制，复用主题色 token）与习惯打卡热力（GridView 小方块），直观呈现专注节奏与打卡连续性。
 - 版本升至 v2.3.8（versionCode 59）。`flutter test` 全绿（123 项）。
 

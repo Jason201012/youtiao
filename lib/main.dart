@@ -27,6 +27,10 @@ final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
 /// 冷启动时通知点击先于 MaterialApp 就绪到达，暂存 payload，待 MainScaffold 首帧后消费。
 String? _pendingNotificationPayload;
 
+/// 冷启动时点击通知「稍后提醒」action 先于导航器就绪到达，暂存任务/习惯 id。
+String? _pendingSnoozeTaskId;
+String? _pendingSnoozeHabitId;
+
 /// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
 void _handleNotificationTap(String? payload) {
   if (payload == null || payload.isEmpty) return;
@@ -48,10 +52,38 @@ void _navigateFromPayload(String payload, NavigatorState nav) {
   }
 }
 
+/// 通知 action 按钮点击回调：目前仅处理「稍后提醒」。导航器未就绪时暂存 id。
+void _handleNotificationAction(String? actionId, String? payload) {
+  if (actionId != NotificationService.snoozeActionId) return;
+  final taskId = NotificationService.parseTaskId(payload);
+  final habitId = NotificationService.parseHabitId(payload);
+  final state = _navigatorKey.currentState;
+  if (state != null) {
+    _doSnooze(state, taskId, habitId);
+  } else if (taskId != null) {
+    _pendingSnoozeTaskId = taskId;
+  } else if (habitId != null) {
+    _pendingSnoozeHabitId = habitId;
+  }
+}
+
+/// 用 task/habit id 从 Provider 取实体并触发稍后提醒调度。
+void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
+  final ctx = nav.context;
+  if (taskId != null) {
+    final task = Provider.of<TaskProvider>(ctx, listen: false).byId(taskId);
+    if (task != null) NotificationService.instance.snoozeTaskReminder(task);
+  } else if (habitId != null) {
+    final habit = Provider.of<HabitProvider>(ctx, listen: false).byId(habitId);
+    if (habit != null) NotificationService.instance.snoozeHabitReminder(habit);
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // 在 init() 前挂上点击回调（init 内部 initialize() 会在冷启动时直接触发）。
   NotificationService.onNotificationTap = _handleNotificationTap;
+  NotificationService.onNotificationAction = _handleNotificationAction;
   await NotificationService.instance.init();
 
   final task = TaskProvider();
@@ -209,6 +241,17 @@ class _MainScaffoldState extends State<MainScaffold>
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final state = _navigatorKey.currentState;
         if (mounted && state != null) _navigateFromPayload(p, state);
+      });
+    }
+    // 消费冷启动期间因点通知「稍后提醒」而暂存的 id（导航器此时已就绪）。
+    if (_pendingSnoozeTaskId != null || _pendingSnoozeHabitId != null) {
+      final tId = _pendingSnoozeTaskId;
+      final hId = _pendingSnoozeHabitId;
+      _pendingSnoozeTaskId = null;
+      _pendingSnoozeHabitId = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _navigatorKey.currentState;
+        if (mounted && state != null) _doSnooze(state, tId, hId);
       });
     }
   }

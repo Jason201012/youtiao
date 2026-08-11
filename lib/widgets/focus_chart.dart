@@ -64,12 +64,12 @@ class FocusWeekBars extends StatelessWidget {
 }
 
 /// 单个习惯的打卡热力：近 [days] 天的小方块网格（已打卡=accent，未打卡=track）。
-class HabitHeatmap extends StatelessWidget {
+class FocusHabitHeatmap extends StatelessWidget {
   final Habit habit;
   final Set<DateTime> checkedDays;
   final int days;
   final AppColorsExt ext;
-  const HabitHeatmap({
+  const FocusHabitHeatmap({
     super.key,
     required this.habit,
     required this.checkedDays,
@@ -151,7 +151,7 @@ class FocusWeekOverview extends StatelessWidget {
                 Text('习惯打卡', style: TextStyle(fontSize: 13, color: ext.meta)),
                 const SizedBox(height: 12),
                 for (final h in habits) ...[
-                  HabitHeatmap(
+                  FocusHabitHeatmap(
                     habit: h,
                     checkedDays: habit.checkedDays(h, 21),
                     days: 21,

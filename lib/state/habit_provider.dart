@@ -26,6 +26,14 @@ class HabitProvider extends ChangeNotifier {
   List<Habit> get activeHabits =>
       _habits.where((h) => !h.archived).toList();
 
+  /// 按 id 查找习惯，找不到返回 null（通知稍后提醒等场景用）。
+  Habit? byId(String id) {
+    for (final h in _habits) {
+      if (h.id == id) return h;
+    }
+    return null;
+  }
+
   Future<void> load() async {
     try {
       final db = LocalDatabase.instance;
