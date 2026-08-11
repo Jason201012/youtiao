@@ -60,6 +60,15 @@ class NotificationService {
   /// 定时测试用固定 id（不与任务 id 冲突）。
   static const int _kTestTimerId = 999999;
 
+  /// 通知 payload 前缀：携带任务 id，点击通知时据此跳转到对应任务详情页。
+  static const String payloadTaskPrefix = 'task:';
+  /// 通知 payload 前缀：携带习惯 id，点击习惯提醒跳转到习惯页。
+  static const String payloadHabitPrefix = 'habit:';
+
+  /// 点击通知的回调（由 main.dart 注入，负责根据 payload 导航）。
+  /// 用实例字段而非直接 import 页面，避免 service 反向依赖 UI。
+  static void Function(String? payload)? onNotificationTap;
+
   /// 把任务 id（字符串）映射成一个稳定的通知 id：优先用数字本身（本 App 的
   /// id 都是纯数字字符串），兜底用 hashCode。schedule / cancel 必须走同一函数，
   /// 否则编辑/删除时取消会错位。
@@ -139,9 +148,20 @@ class NotificationService {
     ));
   }
 
-  /// 点击通知时的回调（App 在前台/后台回到前台时触发）
-  static void _onTap(NotificationResponse r) {
-    // 当前无特定跳转目标，留作扩展
+  /// 点击通知时的回调（App 在前台/后台回到前台时触发，冷启动点开也走这里）。
+  /// 仅把 payload 透传给 [onNotificationTap]，真正的导航逻辑在 main.dart 中。
+  static void _onTap(NotificationResponse r) => onNotificationTap?.call(r.payload);
+
+  /// 从 payload 解析任务 id；非任务类通知（无前缀 / 空）返回 null。
+  static String? parseTaskId(String? payload) {
+    if (payload == null || !payload.startsWith(payloadTaskPrefix)) return null;
+    return payload.substring(payloadTaskPrefix.length);
+  }
+
+  /// 从 payload 解析习惯 id；非习惯类通知返回 null。
+  static String? parseHabitId(String? payload) {
+    if (payload == null || !payload.startsWith(payloadHabitPrefix)) return null;
+    return payload.substring(payloadHabitPrefix.length);
   }
 
   /// 读取当前通知权限状态（Android 13+ 才有效；旧版本恒为 true）。
@@ -291,12 +311,14 @@ class NotificationService {
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
+      final payload = '$payloadTaskPrefix${task.id}';
       await _plugin.zonedSchedule(
         _notifyIdOf(task.id),
         '任务提醒',
         task.title.isNotEmpty ? task.title : '无标题任务',
         when,
         detail,
+        payload: payload,
         androidScheduleMode: mode,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
@@ -312,7 +334,7 @@ class NotificationService {
           // 任务在到期前已完成/被取消则不再弹：应用内兜底定时器不受系统 AlarmManager
           // cancel 影响，必须用 _deadlineCancelled 二次校验拦截。
           if (_deadlineCancelled.contains(id)) return;
-          _plugin.show(_notifyIdOf(id), '任务提醒', task.title.isNotEmpty ? task.title : '无标题任务', detail);
+          _plugin.show(_notifyIdOf(id), '任务提醒', task.title.isNotEmpty ? task.title : '无标题任务', detail, payload: payload);
         });
       }
       return true;
@@ -396,6 +418,7 @@ class NotificationService {
             task.title.isNotEmpty ? task.title : '无标题任务',
             when,
             detail,
+            payload: '$payloadTaskPrefix${task.id}',
             androidScheduleMode: mode,
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
@@ -420,6 +443,7 @@ class NotificationService {
               task.title,
               when,
               detail,
+              payload: '$payloadTaskPrefix${task.id}',
               androidScheduleMode: mode,
               uiLocalNotificationDateInterpretation:
                   UILocalNotificationDateInterpretation.absoluteTime,
@@ -444,6 +468,7 @@ class NotificationService {
             task.title.isNotEmpty ? task.title : '无标题任务',
             when,
             detail,
+            payload: '$payloadTaskPrefix${task.id}',
             androidScheduleMode: mode,
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
@@ -554,6 +579,7 @@ class NotificationService {
           body,
           when,
           detail,
+          payload: '$payloadHabitPrefix${habit.id}',
           androidScheduleMode: mode,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
@@ -577,6 +603,7 @@ class NotificationService {
           body,
           candidate,
           detail,
+          payload: '$payloadHabitPrefix${habit.id}',
           androidScheduleMode: mode,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,

@@ -1,5 +1,10 @@
 # 更新日志（Changelog）
 
+## v2.4.9（2026-08-11）
+
+- **✨ 通知点击跳转任务详情**：任务 / 重复 / 习惯提醒现在携带 `payload`（`task:` / `habit:` 前缀 + 实体 id），点击通知直接从应用内导航到对应任务详情页或习惯页；冷启动（被杀后点开通知）也能正确跳转——`main.dart` 注入根 `navigatorKey`，`NotificationService.onNotificationTap` 按前缀解析并 `push`，导航器未就绪时暂存 `pending` 待首帧消费。新增 `parseTaskId` / `parseHabitId` 解析助手与 6 个单测。`flutter analyze` 0 issue。`flutter test` 通过（新增 payload 解析用例 6 项；`search_render_test` 2 项超时属历史遗留、与本次无关）。
+- 版本升至 v2.4.9（versionCode 70）。
+
 ## v2.4.8（2026-08-10）
 
 - **🔧 首次启动引导页改为「不可跳过」**：删除原右上角「跳过」按钮，必须走到末页「开始使用」才进入主页，强制新用户看完引导、建立本地优先认知。引导三屏内容不变（屏1 本地优先理念 / 屏2 核心能力地图 / 屏3 开启提醒 + 精确闹钟引导 +「保留示例 / 从零开始」二选一）。

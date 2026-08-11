@@ -19,9 +19,39 @@ import 'package:todolist/screens/calendar_screen.dart';
 import 'package:todolist/screens/focus_screen.dart';
 import 'package:todolist/screens/habit_screen.dart';
 import 'package:todolist/screens/settings_screen.dart';
+import 'package:todolist/screens/task_detail_screen.dart';
+
+/// 全局根导航键：供通知点击回调在脱离 widget context 时仍能 push 路由。
+final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+/// 冷启动时通知点击先于 MaterialApp 就绪到达，暂存 payload，待 MainScaffold 首帧后消费。
+String? _pendingNotificationPayload;
+
+/// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
+void _handleNotificationTap(String? payload) {
+  if (payload == null || payload.isEmpty) return;
+  final state = _navigatorKey.currentState;
+  if (state != null) {
+    _navigateFromPayload(payload, state);
+  } else {
+    _pendingNotificationPayload = payload;
+  }
+}
+
+/// 按前缀跳转：task: → 任务详情；habit: → 习惯页。其它（专注完成/测试）忽略。
+void _navigateFromPayload(String payload, NavigatorState nav) {
+  if (payload.startsWith(NotificationService.payloadTaskPrefix)) {
+    final id = payload.substring(NotificationService.payloadTaskPrefix.length);
+    nav.push(MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: id)));
+  } else if (payload.startsWith(NotificationService.payloadHabitPrefix)) {
+    nav.push(MaterialPageRoute(builder: (_) => const HabitScreen()));
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 在 init() 前挂上点击回调（init 内部 initialize() 会在冷启动时直接触发）。
+  NotificationService.onNotificationTap = _handleNotificationTap;
   await NotificationService.instance.init();
 
   final task = TaskProvider();
@@ -105,6 +135,7 @@ class MyApp extends StatelessWidget {
                 final themes = theme.buildThemes(lightDynamic, darkDynamic);
                 return MaterialApp(
                 title: '有条',
+                navigatorKey: _navigatorKey,
                 themeMode: theme.effectiveThemeMode,
                 theme: themes.$1,
                 darkTheme: themes.$2,
@@ -126,6 +157,7 @@ class MyApp extends StatelessWidget {
                 final fallback = theme.buildThemes(null, null);
                 return MaterialApp(
                   title: '有条',
+                  navigatorKey: _navigatorKey,
                   themeMode: theme.effectiveThemeMode,
                   theme: fallback.$1,
                   darkTheme: fallback.$2,
@@ -170,6 +202,15 @@ class _MainScaffoldState extends State<MainScaffold>
         () => setState(() => _index = 0);
     // 任务行「专注」按钮请求跳到专注 Tab（index=3）；FocusProvider 静态回调。
     FocusProvider.jumpToFocusTab = () => setState(() => _index = 3);
+    // 消费冷启动期间因点通知而暂存的 payload（导航器此时已就绪）。
+    if (_pendingNotificationPayload != null) {
+      final p = _pendingNotificationPayload!;
+      _pendingNotificationPayload = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _navigatorKey.currentState;
+        if (mounted && state != null) _navigateFromPayload(p, state);
+      });
+    }
   }
 
   @override
