@@ -54,6 +54,14 @@ class _TaskSheetState extends State<TaskSheet> {
   int _repeatInterval = 2;
   DateTime? _repeatAnchor; // interval 锚点，创建时填当天
 
+  /// 提醒提前量（分钟）：一次性截止提醒在截止前该分钟数触发（0 = 准时）。
+  /// 仅对「不重复」且有截止时间的任务有意义。
+  int _reminderOffsetMin = 0;
+
+  /// 提前量候选：0（准时）/ 5 / 10 / 15 / 30 / 60 分钟。
+  static const List<int> _offsetOptions = [0, 5, 10, 15, 30, 60];
+  static String _offsetLabel(int m) => m == 0 ? '准时（不提前）' : '提前 $m 分钟';
+
   bool get _isEdit => widget.task != null;
 
   @override
@@ -70,6 +78,7 @@ class _TaskSheetState extends State<TaskSheet> {
       _repeatWeekdays = List.from(t.repeatWeekdays);
       _repeatInterval = t.repeatInterval;
       _repeatAnchor = t.repeatAnchor;
+      _reminderOffsetMin = t.reminderOffsetMin;
       _repeatTime = t.repeatMinute != null
           ? TimeOfDay(hour: t.repeatMinute! ~/ 60, minute: t.repeatMinute! % 60)
           : const TimeOfDay(hour: 7, minute: 0);
@@ -258,6 +267,7 @@ class _TaskSheetState extends State<TaskSheet> {
         note: _noteController.text.trim(),
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
+        reminderOffsetMin: _reminderOffsetMin,
       ));
     } else {
       provider.addTask(Task(
@@ -274,6 +284,7 @@ class _TaskSheetState extends State<TaskSheet> {
         note: _noteController.text.trim(),
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
+        reminderOffsetMin: _reminderOffsetMin,
       ));
     }
     Navigator.pop(context);
@@ -663,6 +674,36 @@ class _TaskSheetState extends State<TaskSheet> {
                 ),
               ),
             ),
+            // 提醒提前量：仅对「不重复 + 有截止时间」的任务生效。
+            if (_dueDate != null) ...[
+              const SizedBox(height: 12),
+              _SectionLabel('提醒提前量'),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                ),
+                child: DropdownButton<int>(
+                  value: _reminderOffsetMin,
+                  isExpanded: true,
+                  underline: const SizedBox(),
+                  icon: Icon(Symbols.arrow_drop_down, color: ext.meta),
+                  items: [
+                    for (final m in _offsetOptions)
+                      DropdownMenuItem(
+                        value: m,
+                        child: Text(_offsetLabel(m),
+                            style: TextStyle(
+                                color: scheme.onSurface, fontSize: 15)),
+                      ),
+                  ],
+                  onChanged: (v) =>
+                      setState(() => _reminderOffsetMin = v ?? 0),
+                ),
+              ),
+            ],
           ],
           const SizedBox(height: 18),
           // 重复规则

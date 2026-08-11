@@ -171,6 +171,11 @@ class Task {
   /// 序列化为 `order`（double），缺省为 0.0。
   final double order;
 
+  /// 提醒提前量（分钟）：一次性「截止提醒」在截止时间之前该分钟数触发（0 = 准时）。
+  /// 仅对 [repeat]==none 的任务生效（重复任务有自己的 [repeatMinute] 触发时刻）。
+  /// 序列化为 `reminderOffsetMin`，旧数据缺省为 0（向后兼容）。
+  final int reminderOffsetMin;
+
   const Task({
     required this.id,
     required this.title,
@@ -190,6 +195,7 @@ class Task {
     this.tags = const [],
     this.focusSecTotal = 0,
     this.order = 0.0,
+    this.reminderOffsetMin = 0,
   });
 
   // 哨兵：区分"未传该参数（保留旧值）"与"显式传 null（清空该字段）"。
@@ -216,6 +222,7 @@ class Task {
     List<String>? tags,
     int? focusSecTotal,
     double? order,
+    int? reminderOffsetMin,
   }) =>
       Task(
         id: id ?? this.id,
@@ -240,6 +247,7 @@ class Task {
         tags: tags ?? this.tags,
         focusSecTotal: focusSecTotal ?? this.focusSecTotal,
         order: order ?? this.order,
+        reminderOffsetMin: reminderOffsetMin ?? this.reminderOffsetMin,
       );
 
   /// 序列化为 JSON（用于 shared_preferences 持久化）
@@ -263,6 +271,7 @@ class Task {
         'tags': tags,
         'focusSecTotal': focusSecTotal,
         'order': order,
+        'reminderOffsetMin': reminderOffsetMin,
       };
 
   /// 从 JSON 反序列化（兼容旧版仅含 [done] 布尔的备份，以及 v1.9.4 之前
@@ -315,6 +324,7 @@ class Task {
       tags: tags,
       focusSecTotal: j['focusSecTotal'] as int? ?? 0,
       order: (j['order'] as num?)?.toDouble() ?? 0.0,
+      reminderOffsetMin: j['reminderOffsetMin'] as int? ?? 0,
     );
   }
 

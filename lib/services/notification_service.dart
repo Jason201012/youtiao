@@ -293,13 +293,15 @@ class NotificationService {
     try {
       final loc = _loc ?? tz.UTC;
       final due = task.dueDate!;
-      final tz.TZDateTime when = due.isBefore(DateTime.now())
+      // 提醒提前量：在截止时间之前 reminderOffsetMin 分钟触发（0 = 准时）。
+      final base = due.subtract(Duration(minutes: task.reminderOffsetMin));
+      final tz.TZDateTime when = base.isBefore(DateTime.now())
           ? tz.TZDateTime.now(loc).add(const Duration(seconds: 1))
           : tz.TZDateTime(
-              loc, due.year, due.month, due.day, due.hour, due.minute);
+              loc, base.year, base.month, base.day, base.hour, base.minute);
       // 打印实际调度时刻（含时区），便于在 debug 控制台核对是否准时。
       debugPrint(
-          '[通知] 调度 id=${task.id} "${task.title}" -> $when (playSound=$playSound)');
+          '[通知] 调度 id=${task.id} "${task.title}" -> $when (playSound=$playSound, offset=${task.reminderOffsetMin}min)');
       final chId = playSound ? _chSound : _chSilent;
       final androidDetail = AndroidNotificationDetails(
         chId,

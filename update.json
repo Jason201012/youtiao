@@ -1,7 +1,7 @@
 {
-  "version": "2.4.9",
-  "tag": "v2.4.9",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.4.9/app-release-v2.4.9-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.4.9",
-  "notes": "v2.4.9：通知点击跳转任务详情——任务/重复/习惯提醒现携带 payload（task:/habit: 前缀 + 实体 id），点击通知直接从应用内导航到对应任务详情页或习惯页；冷启动（被杀后点开通知）也能正确跳转。新增 parseTaskId/parseHabitId 解析助手与 6 个单测。flutter analyze 0 issue，flutter test 通过（search_render_test 2 项超时属历史遗留、与本次无关）。"
+  "version": "2.5.0",
+  "tag": "v2.5.0",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.0/app-release-v2.5.0-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.0",
+  "notes": "v2.5.0：提醒提前量——任务新增「提醒提前量」选项（准时 / 提前 5 / 10 / 15 / 30 / 60 分钟），不重复且有截止时间的任务可在截止时刻前 N 分钟响铃；触发时刻在通知调度内改为「截止时间 - 提前量」，向后兼容旧数据（缺字段回退 0）。仅对一次性截止提醒生效，重复任务不受影响。flutter analyze 0 error，reminder_offset_test 5 项全绿。"
 }
