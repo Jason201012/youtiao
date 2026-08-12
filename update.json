@@ -1,7 +1,7 @@
 {
-  "version": "2.5.2",
-  "tag": "v2.5.2",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.2/app-release-v2.5.2-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.2",
-  "notes": "v2.5.2：新增「稍后提醒」——任务/习惯通知点一下，10 分钟后再提醒一次（覆盖式重排，不堆通知）；顺带修复内部命名冲突、CHANGELOG 虚标与一条卡死的测试。flutter analyze 0 error，274 项测试全绿。"
+  "version": "2.5.3",
+  "tag": "v2.5.3",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.3/app-release-v2.5.3-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.3",
+  "notes": "v2.5.3：插件 KGP 迁移（dynamic_color/share_plus/package_info_plus/add_2_calendar/file_picker 对齐 Flutter 3.44 + Gradle 9.1 + JDK 25）；首选项持久化加固——修复 ColorOS/Realme 进程被杀前 apply() 未刷盘导致的开关丢失（纯黑背景等），开关回调 await + 生命周期 paused/detached 兜底 persist。flutter analyze 0 error，274 项测试全绿。"
 }
