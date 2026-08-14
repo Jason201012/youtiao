@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/achievement.dart';
@@ -10,6 +11,8 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/habit_heatmap.dart';
+import 'package:todolist/widgets/habit_share_card.dart';
+import 'package:todolist/widgets/streak_celebration.dart';
 
 /// 习惯打卡 / 成就页：今日打卡列表 + 新增习惯 + 成就墙。
 /// 主题色、开关、强调色等统一跟随全局 ThemeProvider（导航选中/FAB/勾选均绑定
@@ -94,6 +97,28 @@ String _fmtMinute(int minute) {
   final m = minute % 60;
   return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
 }
+
+/// 打卡并在打破历史最长连续时播放庆祝动效。
+///
+/// 先记录「打卡前最长连续」与「是否已打卡」，toggle 后若本次是新增打卡且当前连续
+/// 已超过此前最长，即触发全屏庆祝。供习惯列表圆圈与详情弹层共用。
+Future<void> checkInWithCelebration(
+  BuildContext context,
+  HabitProvider hp,
+  Habit habit,
+) async {
+  final wasChecked = hp.isCheckedToday(habit);
+  final longestBefore = hp.longestStreak(habit);
+  await hp.toggleCheckInToday(habit);
+  if (context.mounted && !wasChecked) {
+    final now = hp.currentStreak(habit);
+    if (now > longestBefore) showStreakCelebration(context, now);
+  }
+}
+
+/// 打开单习惯详情弹层（含该习惯自己的热力图、连续天数与分享入口）。
+void showHabitDetailSheet(BuildContext context, Habit habit) =>
+    _HabitDetailSheet.show(context, habit);
 
 class _SectionTitle extends StatelessWidget {
   final String text;
@@ -277,80 +302,123 @@ class _HabitTile extends StatelessWidget {
     final freq = habit.weekdays.isEmpty
         ? '每天'
         : '每周 ${habit.weekdays.map(_wdLabel).join(' ')}';
+
+    // 左侧整块（头像 + 标题 + 连续/频率）点击进入单习惯详情；
+    // 提醒 chip 是独立兄弟节点，点它只改提醒、不会误开详情。
+    final left = Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => showHabitDetailSheet(context, habit),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: Color(habit.colorValue),
+                child: Text(habit.emoji, style: const TextStyle(fontSize: 20)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(habit.title,
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        StreakBadge(current: streak, accent: primary),
+                        const SizedBox(width: 8),
+                        Text(freq,
+                            style: TextStyle(color: ext.meta, fontSize: 12)),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    final chip = habit.reminderMinute != null
+        ? Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: _ReminderChip(habit: habit),
+          )
+        : const SizedBox.shrink();
+
+    // 右侧打卡圆圈：快速打卡 + 打破纪录庆祝。
+    final check = Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: GestureDetector(
+        onTap: () => checkInWithCelebration(context, hp, habit),
+        child: Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: checked ? primary : Colors.transparent,
+            border: Border.all(
+                color: checked ? primary : ext.meta, width: 2),
+          ),
+          child: checked
+              ? const Icon(Icons.check, color: Colors.white, size: 18)
+              : null,
+        ),
+      ),
+    );
+
     return Container(
       decoration: BoxDecoration(
         color: ext.chip,
         borderRadius: BorderRadius.circular(AppColors.cardRadius),
       ),
-      child: ListTile(
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        leading: CircleAvatar(
-          backgroundColor: Color(habit.colorValue),
-          child: Text(habit.emoji, style: const TextStyle(fontSize: 20)),
+      child: Row(
+        children: [left, chip, check],
+      ),
+    );
+  }
+}
+
+/// 提醒时间 chip：点击改时间，长按取消提醒（沿用原习惯页交互）。
+class _ReminderChip extends StatelessWidget {
+  final Habit habit;
+  const _ReminderChip({required this.habit});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    return GestureDetector(
+      onTap: () async {
+        final cur = habit.reminderMinute!;
+        final picked = await showTimePicker(
+          context: context,
+          initialTime: TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
+        );
+        if (picked != null) {
+          context
+              .read<HabitProvider>()
+              .setReminder(habit, picked.hour * 60 + picked.minute);
+        }
+      },
+      onLongPress: () =>
+          context.read<HabitProvider>().setReminder(habit, null),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: ext.chip,
+          borderRadius: BorderRadius.circular(AppColors.chipRadius),
         ),
-        title: Text(habit.title,
-            style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Row(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            StreakBadge(current: streak, accent: primary),
-            const SizedBox(width: 8),
-            Text(freq, style: TextStyle(color: ext.meta, fontSize: 12)),
-            if (habit.reminderMinute != null) ...[
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () async {
-                  final cur = habit.reminderMinute!;
-                  final picked = await showTimePicker(
-                    context: context,
-                    initialTime:
-                        TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
-                  );
-                  if (picked != null) {
-                    context.read<HabitProvider>().setReminder(
-                        habit, picked.hour * 60 + picked.minute);
-                  }
-                },
-                onLongPress: () =>
-                    context.read<HabitProvider>().setReminder(habit, null),
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: ext.chip,
-                    borderRadius:
-                        BorderRadius.circular(AppColors.chipRadius),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Symbols.alarm, size: 12, color: ext.meta),
-                      const SizedBox(width: 3),
-                      Text(_fmtMinute(habit.reminderMinute!),
-                          style: TextStyle(fontSize: 11, color: ext.meta)),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            Icon(Symbols.alarm, size: 12, color: ext.meta),
+            const SizedBox(width: 3),
+            Text(_fmtMinute(habit.reminderMinute!),
+                style: TextStyle(fontSize: 11, color: ext.meta)),
           ],
-        ),
-        trailing: GestureDetector(
-          onTap: () =>
-              context.read<HabitProvider>().toggleCheckInToday(habit),
-          child: Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: checked ? primary : Colors.transparent,
-              border: Border.all(
-                  color: checked ? primary : ext.meta, width: 2),
-            ),
-            child: checked
-                ? const Icon(Icons.check, color: Colors.white, size: 18)
-                : null,
-          ),
         ),
       ),
     );
@@ -748,6 +816,208 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 单习惯详情弹层：该习惯自己的热力图 + 连续/累计统计 + 打卡（带破纪录庆祝）+ 分享。
+///
+/// 与首页聚合热力图区分，这里只展示当前这一个习惯的打卡密度与连续天数。
+class _HabitDetailSheet extends StatelessWidget {
+  final Habit habit;
+  const _HabitDetailSheet({required this.habit});
+
+  static void show(BuildContext context, Habit habit) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _HabitDetailSheet(habit: habit),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hp = context.watch<HabitProvider>();
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final primary = Theme.of(context).colorScheme.primary;
+    const weeks = 18;
+
+    final current = hp.currentStreak(habit);
+    final longest = hp.longestStreak(habit);
+    final total = hp.checkInCount(habit);
+    final checked = hp.checkedDays(habit, weeks * 7);
+    final freq = habit.weekdays.isEmpty
+        ? '每天'
+        : '每周 ${habit.weekdays.map(_wdLabel).join(' ')}';
+    final created = DateFormat('yyyy年M月d日').format(habit.createdAt);
+    final isCheckedToday = hp.isCheckedToday(habit);
+
+    return SafeArea(
+      top: false,
+      child: ConstrainedBox(
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.92),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Spacer(),
+                  IconButton(
+                    icon: const Icon(Symbols.close),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Container(
+                    width: 56,
+                    height: 56,
+                    decoration: BoxDecoration(
+                      color: Color(habit.colorValue),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Center(
+                      child: Text(habit.emoji,
+                          style: const TextStyle(fontSize: 30)),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(habit.title,
+                            style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: onBg)),
+                        const SizedBox(height: 4),
+                        Text('$freq · 创建于 $created',
+                            style: TextStyle(fontSize: 12, color: ext.meta)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              // hero：当前连续 + 最长 + 累计
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.local_fire_department, size: 40, color: primary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('$current',
+                              style: TextStyle(
+                                  fontSize: 34,
+                                  fontWeight: FontWeight.bold,
+                                  color: primary)),
+                          Text('当前连续（天）',
+                              style:
+                                  TextStyle(fontSize: 12, color: ext.meta)),
+                        ],
+                      ),
+                    ),
+                    _MiniStat(value: '$longest', label: '最长'),
+                    const SizedBox(width: 16),
+                    _MiniStat(value: '$total', label: '累计'),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              // 单习惯热力图
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: ext.chip,
+                  borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('打卡热力图',
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 4),
+                    Text('最近 $weeks 周',
+                        style: TextStyle(fontSize: 12, color: ext.meta)),
+                    const SizedBox(height: 14),
+                    HabitHeatmap(
+                      checkedDays: checked,
+                      weeks: weeks,
+                      accent: primary,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () =>
+                          checkInWithCelebration(context, hp, habit),
+                      icon: Icon(
+                        isCheckedToday ? Icons.check : Icons.add,
+                      ),
+                      label:
+                          Text(isCheckedToday ? '今日已打卡' : '打卡'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => showHabitShareSheet(context, habit),
+                      icon: const Icon(Symbols.ios_share),
+                      label: const Text('分享'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniStat extends StatelessWidget {
+  final String value;
+  final String label;
+  const _MiniStat({required this.value, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Text(value,
+            style: TextStyle(
+                fontSize: 22, fontWeight: FontWeight.bold, color: onBg)),
+        Text(label, style: TextStyle(fontSize: 11, color: ext.meta)),
+      ],
     );
   }
 }

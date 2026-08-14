@@ -1,5 +1,13 @@
 # 更新日志（Changelog）
 
+## v2.5.4（2026-08-13）
+
+- **✨ 单习惯详情弹层**：点击习惯进入详情，含专属「单习惯打卡热力图」、当前/最长/累计连续天数统计与「分享」入口。
+- **✨ streak 破纪录全屏庆祝动效**：打卡后当前连续天数超过历史最长时，触发全屏火焰庆祝 overlay（「新纪录！连续 N 天」）。
+- **✨ 单习惯 streak 分享长图**：单个习惯战绩生成竖版分享图，支持浅/深主题切换，可保存相册或分享。
+- **🐛 修复分享长图页脚溢出**：窄屏（360px）下页脚两行总宽超卡片内宽 77px，导出 PNG 会裁切 gitee 地址；改为 `Flexible` + 省略号彻底解决。
+- `flutter analyze` 0 error，`flutter test` **280/280 全绿**（新增 6 个用例，无回归）。版本升至 v2.5.4（versionCode 75）。
+
 ## v2.5.3（2026-08-11）
 
 - **🔧 KGP 插件迁移（构建可靠性）**：将 4 个仍在构建期触发「plugins that apply Kotlin Gradle Plugin」警告的插件升级到内置 Kotlin 兼容版本，消除 Flutter 未来版本中潜在的构建失败风险——`dynamic_color ^1.7.0→^1.9.0`、`share_plus ^10→^13.0.0`、`package_info_plus ^9→^10.0.0`、`add_2_calendar ^2→^3.1.1`；为解开 `win32 ^5 vs ^6` 依赖冲突、实现四个插件全量脱 KGP，将 `file_picker` 升级到 `^12.0.0-beta.1`（当前唯一脱 KGP 版本，为 beta）。调用点仅适配 `share_plus`（`SharePlus.instance.share(ShareParams(...))`）与 `file_picker`（`FilePicker.pickFiles(...)`，删除已移除的 `.platform` 访问器）；另两插件 API 兼容无需改动。

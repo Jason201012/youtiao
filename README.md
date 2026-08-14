@@ -4,9 +4,9 @@
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v2.5.3**（versionCode 74）　·　开源协议 **[MIT](LICENSE)**
+当前版本 **v2.5.4**（versionCode 75）　·　开源协议 **[MIT](LICENSE)**
 
-> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**；最新版 v2.4.1 起统一发布在承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。点此直达最新版 👉 [v2.5.3 下载](https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.3)
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**；最新版 v2.4.1 起统一发布在承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。点此直达最新版 👉 [v2.5.4 下载](https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.4)
 
 ## ✨ 功能特性
 
@@ -29,6 +29,7 @@
 - 🎨 **设计**：Material 3 设计语言
 - ⏱️ **专注计时（番茄钟）**：新增「专注」Tab，内置番茄钟倒计时（25 / 5 / 15 分钟预设，可开始 / 暂停 / 停止），可关联某一任务，自动记录每次专注时长与今日专注统计，数据本地持久化
 - 🌊 **专注环境音（淡入淡出 + 多音叠加）**：内置白 / 粉 / 棕噪音与雨声 / 海浪 / 篝火 / 风声七种零版权环境音（程序化合成），支持多选同时叠加播放、切换时 500ms 音量渐变避免爆音，选择自动记忆
+- 🔥 **习惯打卡增强**：单习惯详情含专属热力图与当前/最长/累计连续天数统计；破纪录全屏庆祝动效；支持单习惯战绩分享长图（浅/深主题）
 
 ## 🛠 技术栈
 
