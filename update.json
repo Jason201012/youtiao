@@ -1,0 +1,7 @@
+{
+  "version": "2.5.4",
+  "tag": "v2.5.4",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.4/app-release-v2.5.4-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.4",
+  "notes": "v2.5.4：习惯模块三项增强——单习惯详情弹层（含专属打卡热力图、当前/最长/累计统计与分享入口）；streak 破纪录全屏庆祝动效；单习惯 streak 分享长图（浅/深主题，页脚防溢出）。顺带修复分享长图页脚在窄屏溢出导致导出 PNG 裁切 gitee 地址的布局问题。flutter analyze 0 error，280 项测试全绿。"
+}
