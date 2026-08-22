@@ -49,6 +49,9 @@ class TaskProvider extends ChangeNotifier {
   // ===== 后台提醒守护（前台服务保活）=====
   bool _backgroundGuard = true;
   bool get backgroundGuardEnabled => _backgroundGuard;
+
+  /// 午夜守护是否已启动（防止 [load] 被重复调用时叠加多个周期定时器 / 生命周期观察者）。
+  bool _midnightWatchStarted = false;
   Future<void> setSoundEnabled(bool v) async {
     _soundEnabled = v;
     // 重新调度所有提醒（截止 + 每日），应用新的声音设置
@@ -152,6 +155,8 @@ class TaskProvider extends ChangeNotifier {
   /// App 在前台/后台存活期间的轻量守护：周期性（15 分钟）+ 回到前台时检查「日期是否已跨天」，
   /// 若跨天则重置每日任务。原生午夜闹钟负责「App 已关闭」的情况，本守护负责「App 正开着」的边界。
   void _startMidnightWatch() {
+    if (_midnightWatchStarted) return; // 防止 load() 重复调用叠加观察者/定时器
+    _midnightWatchStarted = true;
     // 周期性检查（App 进程存活时有效）
     Future.doWhile(() async {
       await Future.delayed(const Duration(minutes: 15));
@@ -171,9 +176,14 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
+  /// 捕获写盘异常并输出，避免「变更仅存于内存、重启即回退」被静默吞掉。
   Future<void> _persist() async {
-    await _persistSettings();
-    await LocalDatabase.instance.replaceTasks(_tasks, _trash);
+    try {
+      await _persistSettings();
+      await LocalDatabase.instance.replaceTasks(_tasks, _trash);
+    } catch (e, s) {
+      debugPrint('TaskProvider 持久化失败（变更仅存于内存，重启将回退）：$e\n$s');
+    }
   }
 
   /// 载入后重算自增 id 起点，避免新任务 id 与已有（含回收站）冲突。
@@ -276,7 +286,7 @@ class TaskProvider extends ChangeNotifier {
   int get total => _tasks.length;
   int get completed => _tasks.where((t) => t.done).length;
   int get overdue =>
-      _tasks.where((t) => !t.done && !t.isRepeating && t.dueDate != null && t.dueDate!.isBefore(DateTime.now())).length;
+      _tasks.where((t) => Task.isOverdue(t, DateTime.now())).length;
   double get completionRate => total == 0 ? 0 : completed / total;
 
   /// 判断任务是否为「今天的事务」：未删除，且（无截止日期 / 截止日期为今天 / 今天为循环日）。
@@ -732,23 +742,20 @@ class TaskProvider extends ChangeNotifier {
     _persist();
   }
 
-  /// 更新已有任务：保留 id / done / completedAt / subtask 计数，
-  /// 仅修改标题·优先级·分类·截止时间·每日提醒；相关字段变化时同步重排本地提醒。
+  /// 更新已有任务：以调用方传入的 [updated]（已携带全部可编辑字段）为基础落库，
+  /// 仅强制保留内部派生/不可编辑字段（id / status / completedAt / focusSecTotal / order）
+  /// 自 [old] 取，避免丢失 tags / subtasks / reminderOffsetMin 等新字段
+  /// （曾于 v1.9.4 / v2.3.3 / v2.3.4 / v2.5.0 多次踩坑）。
   void updateTask(Task updated) {
     final i = _tasks.indexWhere((t) => t.id == updated.id);
     if (i == -1) return;
     final old = _tasks[i];
-    _tasks[i] = old.copyWith(
-      title: updated.title,
-      priority: updated.priority,
-      category: updated.category,
-      dueDate: updated.dueDate,
-      repeat: updated.repeat,
-      repeatWeekdays: updated.repeatWeekdays,
-      repeatInterval: updated.repeatInterval,
-      repeatMinute: updated.repeatMinute,
-      repeatAnchor: updated.repeatAnchor,
-      note: updated.note,
+    _tasks[i] = updated.copyWith(
+      id: old.id,
+      status: old.status,
+      completedAt: old.completedAt,
+      focusSecTotal: old.focusSecTotal,
+      order: old.order,
     );
     // 截止时间或重复设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
     final remindersChanged = old.dueDate != updated.dueDate ||
@@ -872,15 +879,30 @@ class TaskProvider extends ChangeNotifier {
   /// [includeTrash] 为 true 且备份含回收站时，用备份的回收站覆盖当前回收站。
   Future<void> restoreFromJson(String raw, {bool includeTrash = true}) async {
     final data = jsonDecode(raw) as Map<String, dynamic>;
+    // 结构预校验：选到其它应用的 JSON 时直接拒绝，避免清空全部任务。
+    if (data['app'] != '有条' && data['tasks'] is! List) {
+      throw Exception('不是「有条」的备份文件');
+    }
+    // 干跑解析：任一任务字段非法（如未知 priority / category）先在此抛错，
+    // 此时尚未清空内存态，用户数据不被破坏（修复前会留下空列表吓人）。
     final list = (data['tasks'] as List?) ?? [];
-    _tasks
-      ..clear()
-      ..addAll(list.map((e) => Task.fromJson(e as Map<String, dynamic>)));
+    final parsed = list
+        .map((e) => Task.fromJson(e as Map<String, dynamic>))
+        .toList();
+    final trashParsed = <Task>[];
     if (includeTrash) {
       final trashList = (data['trash'] as List?) ?? [];
+      trashParsed.addAll(
+          trashList.map((e) => Task.fromJson(e as Map<String, dynamic>)));
+    }
+    // 全部解析通过后，才真正覆盖内存态并落库。
+    _tasks
+      ..clear()
+      ..addAll(parsed);
+    if (includeTrash) {
       _trash
         ..clear()
-        ..addAll(trashList.map((e) => Task.fromJson(e as Map<String, dynamic>)));
+        ..addAll(trashParsed);
     }
     if (data['notifications_enabled'] is bool) {
       _notificationsEnabled = data['notifications_enabled'];

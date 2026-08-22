@@ -7,7 +7,7 @@ import Foundation
 
 import audio_session
 import dynamic_color
-import file_picker
+import file_picker_darwin
 import flutter_local_notifications
 import just_audio
 import package_info_plus

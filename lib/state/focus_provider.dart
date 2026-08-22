@@ -100,6 +100,21 @@ class FocusProvider extends ChangeNotifier {
 
   Timer? _tickTimer;
 
+  /// 补录/推进阶段时的重入守卫：阶段跑满由每秒 tick 触发，但在 [ _recordAndAdvance ]
+  /// 内部的多个 await 完成前，下一秒 tick 可能再次进入并重复补录同一阶段会话。
+  /// 用此标志保证同一阶段只收尾一次。
+  bool _completing = false;
+
+  /// 会话 id 自增序号：与时间戳组合，避免同一毫秒内两次完成撞 id（撞 id 会导致
+  /// 整表 JSON 按 id 覆盖时丢一条会话）。habit 侧 v2.4.6 已修过同类问题。
+  static int _sessionSeq = 0;
+
+  /// 生成全局唯一的专注会话 id（时间戳 + 3 位自增序号）。
+  String _nextSessionId() {
+    final seq = (_sessionSeq++ % 1000).toString().padLeft(3, '0');
+    return '${DateTime.now().millisecondsSinceEpoch}$seq';
+  }
+
   /// 所有会话（按结束时间倒序，最新在前）。
   List<FocusSession> get sessions =>
       _sessions.toList()..sort((a, b) => b.endedAt.compareTo(a.endedAt));
@@ -415,7 +430,7 @@ class FocusProvider extends ChangeNotifier {
     if (elapsed > 0) {
       final now = DateTime.now();
       final s = FocusSession(
-        id: now.millisecondsSinceEpoch.toString(),
+        id: _nextSessionId(),
         taskId: activeTaskId,
         taskTitle: activeTaskTitle,
         plannedSec: activeTotalSec,
@@ -488,6 +503,10 @@ class FocusProvider extends ChangeNotifier {
   ///   不弹「完成」通知（系统闹钟已在完成时刻弹出）。
   /// - 番茄循环关闭：维持原行为，清空进行中状态（不自动开始下一段）。
   Future<void> _recordAndAdvance({required bool silent}) async {
+    // 重入保护：避免在 await 链未结束前被下一秒 tick 再次进入，导致重复补录会话。
+    if (_completing) return;
+    _completing = true;
+    try {
     final phase = activePhase;
     final total = activeTotalSec;
     final start = activeSegmentStartEpochMs != null
@@ -495,7 +514,7 @@ class FocusProvider extends ChangeNotifier {
         : DateTime.now().subtract(Duration(seconds: total));
     final ended = start.add(Duration(seconds: total));
     final s = FocusSession(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      id: _nextSessionId(),
       taskId: activeTaskId,
       taskTitle: activeTaskTitle,
       plannedSec: total,
@@ -541,6 +560,9 @@ class FocusProvider extends ChangeNotifier {
       await NotificationService.instance.showFocusDoneNow();
     }
     notifyListeners();
+    } finally {
+      _completing = false;
+    }
   }
 
   /// 挂「专注完成」系统闹钟（setAlarmClock）：完成时刻弹出，杀后台也准点。

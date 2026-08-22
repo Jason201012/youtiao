@@ -1,7 +1,8 @@
 {
-  "version": "2.5.4",
-  "tag": "v2.5.4",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.4/app-release-v2.5.4-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.4",
-  "notes": "v2.5.4：习惯模块三项增强——单习惯详情弹层（含专属打卡热力图、当前/最长/累计统计与分享入口）；streak 破纪录全屏庆祝动效；单习惯 streak 分享长图（浅/深主题，页脚防溢出）。顺带修复分享长图页脚在窄屏溢出导致导出 PNG 裁切 gitee 地址的布局问题。flutter analyze 0 error，280 项测试全绿。"
+  "version": "2.5.6",
+  "tag": "v2.5.6",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.6/app-release-v2.5.6-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.6",
+  "apkSha256": "da60b1a84a87de66d97f934d6064c6e60c93bd40fe5b080fcc3d2b971054e6b4",
+  "notes": "v2.5.6：代码审查报告 21 项问题逐条验证，修复 19 项真实问题——午夜重置改读 SQLite、编辑任务丢字段、逾期口径统一、习惯周提醒 skipToday、番茄钟重入保护、备份恢复事务化+dry-run、SQLite 快照防并发、APK 完整性 sha256 校验、会话 id 自增防撞等；并修复 data_io.dart 在 file_picker v12 下的编译阻塞。flutter analyze 0 error，280 项测试全绿；APK 已附 sha256 校验值，更新时可自动校验完整性。"
 }

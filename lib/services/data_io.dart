@@ -91,8 +91,10 @@ class DataIo {
       type: FileType.custom,
       allowedExtensions: ['json'],
     );
-    if (result == null || result.files.isEmpty) return null;
-    final path = result.files.single.path;
+    // file_picker v12 起 pickFiles() 直接返回 List<PlatformFile>，
+    // 取消选择时返回空列表（不再返回 null），故按空列表判定取消。
+    if (result.isEmpty) return null;
+    final path = result.single.path;
     if (path == null) return null;
     return File(path).readAsString();
   }

@@ -86,6 +86,10 @@ class FocusAudioService {
   /// 避免「先淡出又立刻淡入」时延迟的 pause 误停正在播放的实例。
   final Map<FocusSoundType, int> _epoch = {};
 
+  /// 每个播放器正在进行的音量渐变定时器：新 ramp 会取消该播放器上一次的 ramp，
+  /// 避免快速 stop→start 时多个 ramp 互相打架（音量抖动）；dispose 时统一取消。
+  final Map<AudioPlayer, Timer> _rampTimers = {};
+
   Set<FocusSoundType> _selected = {};
   double _volume = 0.5;
   /// 是否处于「应当播放」的状态（专注进行中）。
@@ -155,8 +159,9 @@ class FocusAudioService {
   /// 与 [_active] 解耦：仅更新选中集合并做增删补差——
   /// 移除的音效淡出，新增且在专注进行中的音效淡入。
   Future<void> setTypes(Set<FocusSoundType> types) async {
-    types.remove(FocusSoundType.off);
-    _selected = Set<FocusSoundType>.from(types);
+    // 先拷贝再移除 off，避免修改调用方传入的 Set（常见误用会污染上游状态）。
+    final next = Set<FocusSoundType>.from(types)..remove(FocusSoundType.off);
+    _selected = next;
     await _persist();
     final current = _players.keys.toSet();
     final toStop = current.difference(_selected);
@@ -242,17 +247,23 @@ class FocusAudioService {
   }
 
   /// 在 [dur] 内把音量从 [from] 线性过渡到 [to]。
-  void _ramp(AudioPlayer p, double from, double to, Duration dur) {
+  /// 同一播放器上的上一次 ramp 会被取消，避免快速 stop→start 时多个 ramp 互相打架（音量抖动）。
+  Timer _ramp(AudioPlayer p, double from, double to, Duration dur) {
+    _rampTimers[p]?.cancel();
     final sw = Stopwatch()..start();
     final step = const Duration(milliseconds: 30);
-    Timer.periodic(step, (timer) {
+    final timer = Timer.periodic(step, (timer) {
       final k = (sw.elapsedMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0);
       p.setVolume(from + (to - from) * k);
       if (k >= 1) timer.cancel();
     });
+    _rampTimers[p] = timer;
+    return timer;
   }
 
   void dispose() {
+    for (final t in _rampTimers.values) t.cancel();
+    _rampTimers.clear();
     for (final p in _players.values) {
       p.stop();
       p.dispose();

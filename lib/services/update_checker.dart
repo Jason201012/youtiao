@@ -20,6 +20,7 @@ class UpdateInfo {
   final String? releaseNotes; // 更新说明 body
   final String? apkUrl; // apk 直链
   final String? releaseUrl; // 发行版页面（html_url）
+  final String? apkSha256; // APK 文件 sha256（可选，用于下载后完整性校验）
 
   const UpdateInfo({
     required this.tagName,
@@ -28,6 +29,7 @@ class UpdateInfo {
     this.releaseNotes,
     this.apkUrl,
     this.releaseUrl,
+    this.apkSha256,
   });
 }
 
@@ -44,8 +46,8 @@ class UpdateResult {
 /// 返回 >0 表示 [b] 比 [a] 新（即 [a] 旧），<0 表示 [a] 更新，0 相等。
 /// 支持 "2.1.2" 与 "v2.2.0" 混用（自动去 v 前缀），段数不足补 0。
 int compareVersion(String a, String b) {
-  final pa = a.replaceAll(RegExp(r'^v'), '').split('.').map(int.parse).toList();
-  final pb = b.replaceAll(RegExp(r'^v'), '').split('.').map(int.parse).toList();
+  final pa = a.replaceAll(RegExp(r'^v'), '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
+  final pb = b.replaceAll(RegExp(r'^v'), '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
   final n = pa.length > pb.length ? pa.length : pb.length;
   for (var i = 0; i < n; i++) {
     final la = i < pa.length ? pa[i] : 0;
@@ -92,6 +94,7 @@ class UpdateChecker {
         apkUrl: data['apkUrl'] as String?,
         releaseUrl: data['releaseUrl'] as String? ??
             'https://gitee.com/jason1012/youtiao-releases/releases/tag/$tag',
+        apkSha256: data['apkSha256'] as String?,
       );
       final has = compareVersion(local, version) > 0;
       return UpdateResult(hasUpdate: has, info: has ? info : null);

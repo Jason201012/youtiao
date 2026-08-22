@@ -184,13 +184,18 @@ class LocalDatabase {
   /// 整表替换：清空 tasks / trash 后重新写入。数据量小（数百条内），整表重写
   /// 与旧版「整存整取」语义一致，但改为按行持久化，天然支持增量且不锁整个 JSON。
   Future<void> replaceTasks(List<Task> tasks, List<Task> trash) async {
+    // 快照：调用方传入的是 Provider 持有的可变列表引用，事务内多个 await 之间
+    // 用户操作（addTask 的 insert / _removeMany 的 removeAt）可能修改原列表，
+    // 导致迭代抛出 ConcurrentModificationError 而整次持久化静默失败。
+    final tasksCopy = List<Task>.from(tasks);
+    final trashCopy = List<Task>.from(trash);
     if (testUseMemory) {
       _memTasks.clear();
       _memTrash.clear();
-      for (final t in tasks) {
+      for (final t in tasksCopy) {
         _memTasks[t.id] = jsonEncode(t.toJson());
       }
-      for (final t in trash) {
+      for (final t in trashCopy) {
         _memTrash[t.id] = jsonEncode(t.toJson());
       }
       return;
@@ -199,13 +204,13 @@ class LocalDatabase {
     await d.transaction((txn) async {
       await txn.delete(kTasks);
       await txn.delete(kTrash);
-      for (final t in tasks) {
+      for (final t in tasksCopy) {
         await txn.insert(kTasks, {
           'id': t.id,
           'data': jsonEncode(t.toJson()),
         });
       }
-      for (final t in trash) {
+      for (final t in trashCopy) {
         await txn.insert(kTrash, {
           'id': t.id,
           'data': jsonEncode(t.toJson()),
@@ -239,9 +244,10 @@ class LocalDatabase {
   }
 
   Future<void> replaceFocus(List<FocusSession> sessions) async {
+    final copy = List<FocusSession>.from(sessions); // 快照，避免迭代期被并发修改
     if (testUseMemory) {
       _memFocus.clear();
-      for (final s in sessions) {
+      for (final s in copy) {
         _memFocus[s.id] = jsonEncode(s.toJson());
       }
       return;
@@ -249,7 +255,7 @@ class LocalDatabase {
     final d = await db;
     await d.transaction((txn) async {
       await txn.delete(kFocus);
-      for (final s in sessions) {
+      for (final s in copy) {
         await txn.insert(kFocus, {
           'id': s.id,
           'data': jsonEncode(s.toJson()),
@@ -283,9 +289,10 @@ class LocalDatabase {
   }
 
   Future<void> replaceHabits(List<Habit> habits) async {
+    final copy = List<Habit>.from(habits); // 快照，避免迭代期被并发修改
     if (testUseMemory) {
       _memHabits.clear();
-      for (final h in habits) {
+      for (final h in copy) {
         _memHabits[h.id] = jsonEncode(h.toJson());
       }
       return;
@@ -293,7 +300,7 @@ class LocalDatabase {
     final d = await db;
     await d.transaction((txn) async {
       await txn.delete(kHabits);
-      for (final h in habits) {
+      for (final h in copy) {
         await txn.insert(kHabits, {
           'id': h.id,
           'data': jsonEncode(h.toJson()),
@@ -318,9 +325,10 @@ class LocalDatabase {
   }
 
   Future<void> replaceCheckIns(List<CheckIn> checkIns) async {
+    final copy = List<CheckIn>.from(checkIns); // 快照，避免迭代期被并发修改
     if (testUseMemory) {
       _memCheckIns.clear();
-      for (final c in checkIns) {
+      for (final c in copy) {
         _memCheckIns[c.id] = jsonEncode(c.toJson());
       }
       return;
@@ -328,7 +336,7 @@ class LocalDatabase {
     final d = await db;
     await d.transaction((txn) async {
       await txn.delete(kCheckIns);
-      for (final c in checkIns) {
+      for (final c in copy) {
         await txn.insert(kCheckIns, {
           'id': c.id,
           'data': jsonEncode(c.toJson()),

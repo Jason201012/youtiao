@@ -233,7 +233,8 @@ class NotificationService {
     final exactOk = await canScheduleExactAlarms();
 
     // 1) 即时通知（绕过 enabled，验证通道/权限本身可用）
-    final nowId = DateTime.now().millisecondsSinceEpoch % 100000;
+    // 置于 80 万段：避开任务 id（0..N）、重复提醒（50 万+）、专注完成（777777）、定时测试（999999）。
+    final nowId = 800000 + (DateTime.now().millisecondsSinceEpoch % 100000);
     await _plugin.show(
       nowId,
       '测试通知（即时）',
@@ -310,10 +311,13 @@ class NotificationService {
       final due = task.dueDate!;
       // 提醒提前量：在截止时间之前 reminderOffsetMin 分钟触发（0 = 准时）。
       final base = due.subtract(Duration(minutes: task.reminderOffsetMin));
-      final tz.TZDateTime when = base.isBefore(DateTime.now())
-          ? tz.TZDateTime.now(loc).add(const Duration(seconds: 1))
-          : tz.TZDateTime(
-              loc, base.year, base.month, base.day, base.hour, base.minute);
+      // 提醒时刻已过去（任务逾期）：不再补弹「迟到提醒」，避免从回收站恢复/重排逾期任务时立即骚扰。
+      if (base.isBefore(DateTime.now())) {
+        debugPrint('[通知] 未调度 id=${task.id}：提醒时刻已过期（逾期任务不补弹）');
+        return false;
+      }
+      final tz.TZDateTime when = tz.TZDateTime(
+          loc, base.year, base.month, base.day, base.hour, base.minute);
       // 打印实际调度时刻（含时区），便于在 debug 控制台核对是否准时。
       debugPrint(
           '[通知] 调度 id=${task.id} "${task.title}" -> $when (playSound=$playSound, offset=${task.reminderOffsetMin}min)');
@@ -612,8 +616,11 @@ class NotificationService {
       }
 
       for (final wd in habit.weekdays) {
-        // 计算「下一个该星期 @ hh:mm」的真实时刻。skipToday 且恰为今天则再往后跳一周。
+        // 计算「下一个该星期 @ hh:mm」的真实时刻。
+        // skipToday（今天已打卡）时从「明天」起找，避免今天恰为提醒星期且时刻未过时
+        // 仍弹今日提醒（与 daily 分支、任务 weekly 分支的 limit 模式保持一致）。
         var candidate = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+        if (skipToday) candidate = candidate.add(const Duration(days: 1));
         while (candidate.weekday != wd || !candidate.isAfter(now)) {
           candidate = candidate.add(const Duration(days: 1));
         }

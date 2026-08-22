@@ -131,6 +131,16 @@ class Task {
   /// 是否完成：由 [status] 派生，保持对外只读语义一致。
   bool get done => status == TaskStatus.done;
 
+  /// 是否「逾期」：统一口径（看板统计卡、首页「逾期」筛选、分享长图共用）。
+  /// 规则：未完成、非重复任务，且截止日期按「天」严格早于今天
+  /// （今天到点未做不算逾期）。重复任务不计逾期（v2.2.8 对齐过）。
+  static bool isOverdue(Task t, DateTime now) {
+    if (t.done || t.isRepeating || t.dueDate == null) return false;
+    final today = DateTime(now.year, now.month, now.day);
+    return DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day)
+        .isBefore(today);
+  }
+
   /// 子任务总数（由 [subtasks] 派生）。
   int get subtaskTotal => subtasks.length;
 

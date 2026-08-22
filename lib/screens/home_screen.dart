@@ -400,7 +400,7 @@ class _HomeScreenState extends State<HomeScreen> {
           TaskFilter.done => tasks.where((t) => t.status == TaskStatus.done).toList(),
           // 与「逾期」板块口径保持一致：按「天」判断，今天到点未做不算逾期。
           TaskFilter.overdue =>
-            tasks.where((t) => !t.done && (_dueDayDiff(t.dueDate) ?? 0) < 0).toList(),
+            tasks.where((t) => Task.isOverdue(t, DateTime.now())).toList(),
           TaskFilter.all => const <Task>[],
         };
         final visible = filter == TaskFilter.all

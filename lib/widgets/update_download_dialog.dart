@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:material_symbols_icons/material_symbols_icons.dart';
@@ -48,6 +49,11 @@ class _DownloadBodyState extends State<_DownloadBody> {
       setState(() => _error = '未找到可用的下载地址');
       return;
     }
+    // 仅允许 https 直链，避免明文 http 被中间人劫持后下载恶意 APK。
+    if (!url.startsWith('https://')) {
+      setState(() => _error = '更新地址不安全（需 https）');
+      return;
+    }
     try {
       final cacheDirs = await getExternalCacheDirectories();
       final cacheDir = cacheDirs?.first;
@@ -79,6 +85,19 @@ class _DownloadBodyState extends State<_DownloadBody> {
       }
       await sink.close();
       client.close();
+
+      // APK 完整性校验：若 update.json 提供了 apkSha256，则比对下载文件，
+      // 不一致（篡改 / 下载不完整）直接拒绝安装，避免诱导安装恶意 APK。
+      final expected = widget.info.apkSha256?.trim();
+      if (expected != null && expected.isNotEmpty) {
+        final bytes = await apkFile.readAsBytes();
+        final actual = sha256.convert(bytes).toString();
+        if (actual.toLowerCase() != expected.toLowerCase()) {
+          if (!mounted) return;
+          setState(() => _error = 'APK 校验失败：文件可能被篡改或下载不完整');
+          return;
+        }
+      }
 
       if (!mounted) return;
       setState(() {

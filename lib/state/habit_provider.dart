@@ -285,7 +285,10 @@ class HabitProvider extends ChangeNotifier {
       for (final h in _habits) {
         await NotificationService.instance.cancelHabitReminder(h.id);
         if (!h.archived && h.reminderMinute != null) {
-          await NotificationService.instance.scheduleHabitReminder(h);
+          await NotificationService.instance.scheduleHabitReminder(
+            h,
+            checkedToday: isCheckedToday(h),
+          );
         }
       }
     }

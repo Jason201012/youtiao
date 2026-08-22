@@ -65,9 +65,16 @@ class GlobalSearch {
       final hh = (h.reminderMinute! ~/ 60).toString().padLeft(2, '0');
       final mm = (h.reminderMinute! % 60).toString().padLeft(2, '0');
       final time = '$hh:$mm';
-      if (time.contains(q)) return true;
-      // 允许按「小时」数字匹配（如搜 "8" 命中 08:30）。
-      if (hh.contains(q)) return true;
+      // 匹配规则（兼顾 V-21 修复与既有搜索习惯）：
+      //  1) 整串相等：搜 "08:30" 命中；
+      //  2) HH:mm 前缀：搜 "08" 命中 08:30；
+      //  3) 纯整数按「小时」匹配：搜 "8" 命中 08:xx，且不会误命中 18/10-19 等其它小时
+      //     （修复旧实现搜 "1" 误命中 01/10-19/21 点的过匹配问题）。
+      final intQ = int.tryParse(q);
+      final hour = h.reminderMinute! ~/ 60;
+      if (time == q || time.startsWith(q) || (intQ != null && intQ == hour)) {
+        return true;
+      }
     }
     return false;
   }

@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:todolist/models/checkin.dart';
+import 'package:todolist/models/focus_session.dart';
+import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -143,6 +146,23 @@ class BackupSheet {
     if (ok != true) return;
     try {
       final data = jsonDecode(raw) as Map<String, dynamic>;
+      // 先干跑解析专注/习惯/打卡：任一失败则在任务被覆盖前抛错，
+      // 避免「任务已恢复、专注失败」的部分恢复假象（修复前 tasks 已被清空）。
+      if (data['focus_sessions'] is List) {
+        (data['focus_sessions'] as List)
+            .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      if (data['habits'] is List) {
+        (data['habits'] as List)
+            .map((e) => Habit.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      if (data['check_ins'] is List) {
+        (data['check_ins'] as List)
+            .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
       await provider.restoreFromJson(raw, includeTrash: includeTrash);
       // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
       final focusList = data['focus_sessions'];

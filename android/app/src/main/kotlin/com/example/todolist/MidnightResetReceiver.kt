@@ -3,8 +3,10 @@ package com.example.todolist
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,9 +20,10 @@ import java.util.Calendar
  *     与现有 07:00 每日提醒同机制，无需用户打开 App）；
  *  2) 设备开机（BOOT_COMPLETED）后重新挂上闹钟。
  *
- * 处理逻辑：直接读写 shared_preferences 插件落盘的 `tasks` JSON（文件名 FlutterSharedPreferences），
- * 把「已完成且 completedAt 日期早于今天、且未过截止日」的每日任务重置为未完成，实现「每天循环打卡」。
- * 与 Dart 侧 TaskProvider.load() 的每日重置逻辑保持一致。
+ * 处理逻辑：v2.2.4 起任务数据唯一真相来源为 SQLite（youtiao.db，tasks 表，data 列存完整 Task JSON）。
+ * 本接收器直接打开该 DB，把「已完成且 completedAt 日期早于今天、且未过截止日、今天为其循环日」的
+ * 重复任务重置为未完成，实现「每天循环打卡」。与 Dart 侧 TaskProvider._resetDailyIfNeeded 完全一致。
+ * 仅当数据库文件尚不存在（极老、从未迁移的设备）时回退到旧版 SharedPreferences 的 tasks JSON。
  */
 class MidnightResetReceiver : BroadcastReceiver() {
 
@@ -28,6 +31,7 @@ class MidnightResetReceiver : BroadcastReceiver() {
         const val ACTION_MIDNIGHT = "com.example.todolist.MIDNIGHT_RESET"
         const val PREFS_NAME = "FlutterSharedPreferences"
         const val KEY_TASKS = "tasks"
+        const val kDbName = "youtiao.db"
         const val ALARM_REQUEST = 7723
 
         /** 安排下一次「当天 00:00」的 setAlarmClock 闹钟（ColorOS 可靠）。幂等：重复调用只会覆盖。 */
@@ -124,34 +128,62 @@ class MidnightResetReceiver : BroadcastReceiver() {
         schedule(context)
     }
 
-    /** 读取 tasks JSON，重置符合条件的重复任务，写回。 */
+    /** 重置每日任务：优先直接读写 SQLite（v2.2.4 起任务数据的唯一真相来源）；
+     *  仅当数据库尚未建立（极少数从未迁移的极老设备）时回退到旧版 SharedPreferences。 */
     private fun resetDailyTasks(context: Context) {
+        val dbFile = runCatching { context.getDatabasePath(kDbName) }.getOrNull()
+        if (dbFile != null && dbFile.exists()) {
+            resetDailyTasksSqlite(dbFile.absolutePath)
+            return
+        }
+        // 回退路径：旧版 SP（tasks JSON 整体）
+        resetDailyTasksPrefs(context)
+    }
+
+    /** 直接打开 SQLite（youtiao.db，与 sqflite 同路径），重置 tasks 表中符合条件的重复任务。
+     * 复用与 Dart Task 完全一致的 JSON 字段（status/done/completedAt/dueDate/repeat 等）。 */
+    private fun resetDailyTasksSqlite(dbPath: String) {
+        try {
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+            try {
+                val cursor = db.query("tasks", arrayOf("id", "data"), null, null, null, null, null)
+                val updates = mutableListOf<Pair<String, String>>()
+                cursor.use {
+                    while (it.moveToNext()) {
+                        val id = it.getString(0)
+                        val dataStr = it.getString(1)
+                        val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
+                        if (shouldResetTask(obj)) {
+                            obj.put("status", "todo")
+                            obj.put("done", false)
+                            obj.remove("completedAt")
+                            updates.add(Pair(id, obj.toString()))
+                        }
+                    }
+                }
+                for ((id, newData) in updates) {
+                    val cv = ContentValues()
+                    cv.put("data", newData)
+                    db.update("tasks", cv, "id = ?", arrayOf(id))
+                }
+            } finally {
+                db.close()
+            }
+        } catch (_: Exception) {
+            // 打开/读写失败不崩溃
+        }
+    }
+
+    /** 回退路径：读取旧版 SharedPreferences 的 tasks JSON 并重置（仅未迁移设备）。 */
+    private fun resetDailyTasksPrefs(context: Context) {
         try {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val raw = prefs.getString(KEY_TASKS, null) ?: return
             val arr = JSONArray(raw)
-            val today = todayStr()
             var changed = false
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
-                // 解析重复规则（与 Dart Task.repeat 一致）
-                val repeat = parseRepeat(obj)
-                if (repeat == RepeatMode.NONE) continue
-                val status = obj.optString("status", "todo")
-                val done = obj.optBoolean("done", false)
-                if (status != "done" && !done) continue
-
-                // 截止日期已过的重复任务不再重置（与 load() 的 !_dateHasPassed 一致）
-                val dueDate = datePart(obj.opt("dueDate"))
-                if (dueDate != null && dueDate < today) continue
-
-                // 仅在「今天是其循环日」才重置（与 Dart Task.repeatsOn 一致）
-                if (!isRecurrenceToday(obj, repeat, today)) continue
-
-                // completedAt 日期早于今天才重置（今天刚完成的保持已完成）
-                val compDate = datePart(obj.opt("completedAt"))
-                val completedBeforeToday = compDate == null || compDate < today
-                if (completedBeforeToday) {
+                if (shouldResetTask(obj)) {
                     obj.put("status", "todo")
                     obj.put("done", false)
                     obj.remove("completedAt")
@@ -164,6 +196,22 @@ class MidnightResetReceiver : BroadcastReceiver() {
         } catch (_: Exception) {
             // 解析/写入失败不崩溃
         }
+    }
+
+    /** 判断该任务 JSON 是否应在今天被重置：已完成的重复任务，今天是其循环日，
+     *  且上次完成早于今天、未过截止日（与 Dart TaskProvider._resetDailyIfNeeded 一致）。 */
+    private fun shouldResetTask(obj: JSONObject): Boolean {
+        val repeat = parseRepeat(obj)
+        if (repeat == RepeatMode.NONE) return false
+        val status = obj.optString("status", "todo")
+        val done = obj.optBoolean("done", false)
+        if (status != "done" && !done) return false
+        val today = todayStr()
+        val dueDate = datePart(obj.opt("dueDate"))
+        if (dueDate != null && dueDate < today) return false
+        if (!isRecurrenceToday(obj, repeat, today)) return false
+        val compDate = datePart(obj.opt("completedAt"))
+        return compDate == null || compDate < today
     }
 
     /** 重复规则枚举，与 Dart RepeatType 对应。 */
