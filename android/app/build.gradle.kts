@@ -31,11 +31,39 @@ android {
         }
     }
 
+    // 固定 release 签名：凭据从环境变量读取，绝不硬编码进仓库文件。
+    // 使用方式（构建前 export）：
+    //   YOUTIAO_KEYSTORE=E:/WorkBuddy/6/youtiao-release-keys/youtiao-release.jks
+    //   YOUTIAO_KEY_ALIAS=youtiao
+    //   YOUTIAO_KEYSTORE_PASSWORD=youtiao-release-2026
+    //   YOUTIAO_KEY_PASSWORD=youtiao-release-2026
+    // keystore 存放于项目外（E:/WorkBuddy/6/youtiao-release-keys/），不会被 git 跟踪，
+    // 且不再依赖 AGP 自动生成的 debug keystore，避免跨机/重建导致的签名漂移（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
+    val keystorePath = System.getenv("YOUTIAO_KEYSTORE")
+    val keyAliasName = System.getenv("YOUTIAO_KEY_ALIAS") ?: "youtiao"
+    val keystorePassword = System.getenv("YOUTIAO_KEYSTORE_PASSWORD")
+    val releaseKeyPassword = System.getenv("YOUTIAO_KEY_PASSWORD")
+    val useFixedReleaseSigning = keystorePath != null && keystorePassword != null && releaseKeyPassword != null
+
+    if (useFixedReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(keystorePath!!)
+                storePassword = keystorePassword
+                keyAlias = keyAliasName
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 优先用固定 release keystore；若环境变量未设置则回退 debug（保持本地 flutter run --release 可用）。
+            signingConfig = if (useFixedReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             // 注：本机 Gradle 9.1 + JDK 25 在 release 构建中对 minifyReleaseWithR8 的
             // output-metadata.json / resourceShrinkingParams 快照报 "not a regular file"
             // （Gradle 9.1 严格快照 + JDK 25 文件属性读取的兼容问题，doNotTrackState 对该输入属性无效）。

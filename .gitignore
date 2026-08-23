@@ -103,3 +103,10 @@ dist/
 _build_junk_*/
 _build_bak_*/
 _agradle_bak_*/
+
+# sandbox 会话遗留的临时脚手架脚本与探测文件（不进 git；用户侧终端 git clean -fd 可清除）
+.trash/
+_build_fixed_release.py
+_probe_*
+_run_dart.py
+_run_test_lock.py
