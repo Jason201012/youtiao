@@ -512,7 +512,15 @@ class FocusProvider extends ChangeNotifier {
     final start = activeSegmentStartEpochMs != null
         ? DateTime.fromMillisecondsSinceEpoch(activeSegmentStartEpochMs!)
         : DateTime.now().subtract(Duration(seconds: total));
-    final ended = start.add(Duration(seconds: total));
+    // 🟡 修复 Bug4：补录场景下，endedAt 不允许早于/晚于真实完成时刻。
+    // 原写法 `ended = start + total` 在「本阶段曾暂停过」时会把 paused 之前的累计秒
+    // 也加进去（start 已是最后一段起点，total 却含已累计的暂停前时间），导致 endedAt
+    // 晚于当前时刻（落在未来）。按 endedAt 归日的统计（今日专注、日历视图）会算错天。
+    // 补录（_completeSilently / _completeNaturally）发生在阶段真正跑满之时，
+    // 用「现在」作为结束时刻最贴合真实完成点；对于无 segment 起点（理论上不会发生）
+    // 的兜底仍退回 start+total。
+    final now = DateTime.now();
+    final ended = start.isAfter(now) ? start.add(Duration(seconds: total)) : now;
     final s = FocusSession(
       id: _nextSessionId(),
       taskId: activeTaskId,

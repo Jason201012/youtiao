@@ -163,24 +163,49 @@ class BackupSheet {
             .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
             .toList();
       }
+
+      // 🟡 修复 Bug3（部分恢复可观测性）：恢复分三步（任务 → 专注 → 习惯/打卡），
+      // 三步各自独立落盘，本身不存在「任务已换、习惯没换」的中间态残留数据问题，
+      // 但任一步 IO 失败都应明确告诉用户哪一步失败，而不是笼统的「格式不正确」。
+      // 任一步失败不中断已成功的前序步骤（各自已落盘），仅累计错误并提示。
+      final failures = <String>[];
       await provider.restoreFromJson(raw, includeTrash: includeTrash);
       // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
       final focusList = data['focus_sessions'];
       if (focusList is List) {
-        await focusProvider.restoreSessions(focusList);
+        try {
+          await focusProvider.restoreSessions(focusList);
+        } catch (e) {
+          failures.add('专注记录（$e）');
+        }
       }
       // 仅当备份含习惯/打卡字段时才恢复，避免老备份把现有习惯清空。
       if (data['habits'] is List || data['check_ins'] is List) {
-        await habitProvider.restoreFromJson(data);
+        try {
+          await habitProvider.restoreFromJson(data);
+        } catch (e) {
+          failures.add('习惯/打卡（$e）');
+        }
       }
+
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('已从备份恢复')));
+        if (failures.isEmpty) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('已从备份恢复')));
+        } else {
+          // 任务已成功恢复，但部分子系统失败：提示具体步骤，便于用户重试用子集。
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('任务已恢复，但以下步骤失败：${failures.join('、')}'),
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
       }
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('恢复失败：文件格式不正确（$e）')),
+          SnackBar(content: Text('恢复失败：文件格式不正确或任务恢复出错（$e）')),
         );
       }
     }

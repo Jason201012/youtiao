@@ -1,7 +1,7 @@
 name: todolist
 description: Material 3 TodoList 应用（设计稿 1:1 还原）
 publish_to: 'none'
-version: 2.5.7+78
+version: 2.5.8+79
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

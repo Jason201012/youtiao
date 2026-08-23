@@ -45,9 +45,22 @@ class UpdateResult {
 /// 比较两个语义化版本号。
 /// 返回 >0 表示 [b] 比 [a] 新（即 [a] 旧），<0 表示 [a] 更新，0 相等。
 /// 支持 "2.1.2" 与 "v2.2.0" 混用（自动去 v 前缀），段数不足补 0。
+///
+/// 🟡 修复 Bug6：此前 `int.tryParse("7-beta")` 返回 null → 按 0 计，
+/// 导致 "2.5.7-beta" 与 "2.5.7" 被判为相等。现对每一段先截断非数字预发布
+/// 后缀（如 `-beta`、`-rc1`）再做数值比较，正规式三段式不受影响。
 int compareVersion(String a, String b) {
-  final pa = a.replaceAll(RegExp(r'^v'), '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
-  final pb = b.replaceAll(RegExp(r'^v'), '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
+  List<int> parseVer(String v) => v
+      .replaceAll(RegExp(r'^v'), '')
+      .split('.')
+      .map((s) {
+        // 截断首个非数字字符之后的预发布后缀（"7-beta" → "7"、"0" → "0"）。
+        final digits = s.split(RegExp(r'[^0-9]')).first;
+        return int.tryParse(digits.isEmpty ? '0' : digits) ?? 0;
+      })
+      .toList();
+  final pa = parseVer(a);
+  final pb = parseVer(b);
   final n = pa.length > pb.length ? pa.length : pb.length;
   for (var i = 0; i < n; i++) {
     final la = i < pa.length ? pa[i] : 0;

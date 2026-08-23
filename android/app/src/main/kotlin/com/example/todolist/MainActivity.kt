@@ -257,9 +257,19 @@ class MainActivity : FlutterActivity() {
     private fun installApk(apk: File) {
         // 路径归属校验：仅允许安装应用自身外部缓存目录（file_paths.xml 限定的
         // external-cache/updates/）下的 APK，杜绝传入任意路径导致安装外部文件。
+        //
+        // 🔒 安全加固：此前用 `apk.absolutePath.startsWith(cacheDir.absolutePath)`
+        // 前缀匹配，理论上 `"…/cache/../files/x.apk"` 可绕过前缀检查。改为比较
+        // canonicalPath（解析 `..` 与符号链接后的真实路径），确保 APK 确实落在
+        // 应用外部缓存目录内。FileProvider 的 paths 白名单仍作为二次兜底。
         val cacheDir = externalCacheDir
-        if (cacheDir == null || !apk.absolutePath.startsWith(cacheDir.absolutePath)) {
-            throw SecurityException("APK 路径不在应用缓存目录内：${apk.absolutePath}")
+        if (cacheDir == null) {
+            throw SecurityException("无法获取应用缓存目录")
+        }
+        val canonicalApk = apk.canonicalPath
+        val canonicalCache = cacheDir.canonicalPath
+        if (!canonicalApk.startsWith(canonicalCache)) {
+            throw SecurityException("APK 路径不在应用缓存目录内：$canonicalApk")
         }
         val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)

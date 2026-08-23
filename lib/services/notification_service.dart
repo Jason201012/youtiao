@@ -58,7 +58,23 @@ class NotificationService {
       );
 
   /// 定时测试用固定 id（不与任务 id 冲突）。
+  ///
+  /// 【通知 id 段分配表（固化，新增 id 必须避开以下区间）】
+  /// - 任务一次性截止提醒：_notifyIdOf(id)         ≈ [0, ~2.1e9]（纯数字任务 id）
+  /// - 任务重复提醒：      +500000 + dayIndex*13   ≈ [500000, ~2.1e9]
+  /// - 专注完成通知：      777777（固定）
+  /// - 专注进行中常驻：    777778（固定）
+  /// - 习惯提醒：          800000 + slot*10 + day  = [800000, ~1800007]
+  /// - 定时测试系统闹钟：  _kTestTimerId = 999999（固定）
+  /// - 定时测试应用内延迟：_kTestTimerId + 1 = 1000000（固定）
+  /// - 即时测试通知：      1200000 + ms%100000     = [1200000, 1299999]（见 [showTest]）
+  ///
+  /// 即时测试通知此前落在 800000 段，与习惯提醒段重叠，会以相同 id 顶掉用户当天
+  /// 尚未触发的习惯打卡闹钟（约 10% 习惯被波及）。现整体移出习惯段到 1200000+。
   static const int _kTestTimerId = 999999;
+
+  /// 即时测试通知 id 段起点（避开习惯提醒段 [800000,1800007] 与定时测试段 [999999,1000000]）。
+  static const int _kTestInstantBase = 1200000;
 
   /// 通知 payload 前缀：携带任务 id，点击通知时据此跳转到对应任务详情页。
   static const String payloadTaskPrefix = 'task:';
@@ -233,8 +249,10 @@ class NotificationService {
     final exactOk = await canScheduleExactAlarms();
 
     // 1) 即时通知（绕过 enabled，验证通道/权限本身可用）
-    // 置于 80 万段：避开任务 id（0..N）、重复提醒（50 万+）、专注完成（777777）、定时测试（999999）。
-    final nowId = 800000 + (DateTime.now().millisecondsSinceEpoch % 100000);
+    // 置于 120 万段（_kTestInstantBase）：避开任务 id（0..N）、重复提醒（50 万+）、
+    // 习惯提醒（80 万~180 万）、专注完成（777777）、定时测试（999999/1000000），
+    // 避免以相同 id 顶掉用户当天尚未触发的习惯打卡闹钟（Bug2 修复）。
+    final nowId = _kTestInstantBase + (DateTime.now().millisecondsSinceEpoch % 100000);
     await _plugin.show(
       nowId,
       '测试通知（即时）',

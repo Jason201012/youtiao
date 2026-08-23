@@ -277,11 +277,25 @@ class HabitProvider extends ChangeNotifier {
   Future<void> restoreFromJson(Map<String, dynamic> data) async {
     if (data['habits'] is List) {
       final habitsList = data['habits'] as List;
+
+      // 🔴 修复 Bug1（僵尸习惯提醒）：覆盖 _habits 之前，先取消**本机现有全部习惯**
+      // 的每日打卡提醒。否则若本机有 H1、备份里只有 H2，恢复后 H1 从列表消失，
+      // 但它在系统 AlarmManager 里的 matchDateTimeComponents.time 永久循环打卡
+      // 提醒不会被取消，之后每天到点仍会弹一个「点进去找不到的习惯」提醒。
+      // 对比 TaskProvider.restoreFromJson 的做法（先整体 cancelAll 再重排），
+      // 习惯侧此前漏掉了这一步，现补上。
+      final oldIds = _habits.map((h) => h.id).toList();
+      for (final id in oldIds) {
+        await NotificationService.instance.cancelHabitReminder(id);
+      }
+
       _habits
         ..clear()
         ..addAll(
             habitsList.map((e) => Habit.fromJson(e as Map<String, dynamic>)));
       // 取消旧提醒并按恢复的 habits 重新调度（仅习惯提醒，不动任务通知）。
+      // 注：上面的 oldIds 取消已覆盖「本机多余习惯」，这里再对恢复的列表逐个
+      // 重挂（含 archived/无提醒的跳过），保证最终状态与备份一致。
       for (final h in _habits) {
         await NotificationService.instance.cancelHabitReminder(h.id);
         if (!h.archived && h.reminderMinute != null) {

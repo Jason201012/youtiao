@@ -1,8 +1,8 @@
 ﻿{
-  "version": "2.5.7",
-  "tag": "v2.5.7",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.7/app-release-v2.5.7-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.7",
-  "apkSha256": "35833B7AA9CFC027F49DAE9485EBF48F88DFF214397D774516D0E1B4FD8E4EDE",
-  "notes": "v2.5.7：以固定 release keystore 重签发布，彻底解决旧包因 debug 签名导致的 INSTALL_FAILED_UPDATE_INCOMPATIBLE（错误 -7）升级失败问题；沿用 v2.5.6 的全部功能修复（代码审查 19 项问题、APK 完整性 sha256 校验、280 项测试全绿）。APK 已附 sha256 校验值，更新时可自动校验完整性。"
+  "version": "2.5.8",
+  "tag": "v2.5.8",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.8/app-release-v2.5.8-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.8",
+  "apkSha256": "A064E668B148AE107611457392A04E666F1F2D0294C9A96682C83E550B2D0522",
+  "notes": "v2.5.8：代码审查问题修复版。修复 6 项缺陷——习惯提醒僵尸通知（restore 前先取消旧提醒）、测试通知 id 与习惯段重叠、备份恢复非原子（分步 try/catch）、专注结束时间落在未来、撤销删除索引、版本号含 -beta 后缀时比较异常；2 项安全加固——FileProvider 路径用 canonicalPath 校验、AndroidManifest 关闭 allowBackup。沿用固定 release keystore 签名与 arm64-v8a 单架构。"
 }
