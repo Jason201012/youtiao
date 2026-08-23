@@ -1,8 +1,8 @@
-{
-  "version": "2.5.6",
-  "tag": "v2.5.6",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.6/app-release-v2.5.6-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.6",
-  "apkSha256": "31734a3a24ccd3423f522175e65acd7337f11440a3048c2731f9fba16656416f",
-  "notes": "v2.5.6：代码审查报告 21 项问题逐条验证，修复 19 项真实问题——午夜重置改读 SQLite、编辑任务丢字段、逾期口径统一、习惯周提醒 skipToday、番茄钟重入保护、备份恢复事务化+dry-run、SQLite 快照防并发、APK 完整性 sha256 校验、会话 id 自增防撞等；并修复 data_io.dart 在 file_picker v12 下的编译阻塞。flutter analyze 0 error，280 项测试全绿；APK 已附 sha256 校验值，更新时可自动校验完整性。"
+﻿{
+  "version": "2.5.7",
+  "tag": "v2.5.7",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.7/app-release-v2.5.7-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.7",
+  "apkSha256": "35833B7AA9CFC027F49DAE9485EBF48F88DFF214397D774516D0E1B4FD8E4EDE",
+  "notes": "v2.5.7：以固定 release keystore 重签发布，彻底解决旧包因 debug 签名导致的 INSTALL_FAILED_UPDATE_INCOMPATIBLE（错误 -7）升级失败问题；沿用 v2.5.6 的全部功能修复（代码审查 19 项问题、APK 完整性 sha256 校验、280 项测试全绿）。APK 已附 sha256 校验值，更新时可自动校验完整性。"
 }
