@@ -15,9 +15,93 @@ class TaskProvider extends ChangeNotifier {
   static const String _kNotify = 'notifications_enabled';
   static const String _kSound = 'sound_enabled';
   static const String _kGuard = 'background_guard';
+  static const String _kTrashRetention = 'trash_retention_days';
   /// 是否已执行过「首启示例预置」决策。一旦置位（预置过 mock 或用户选过「从零开始」），
   /// 即便日后任务库被清空，[load] 也不再重新塞回 7 条 mock，避免「从零开始」后重启复活示例。
   static const String _kSeeded = 'samples_seeded_v1';
+
+  // ===== 稍后提醒时长（分钟）=====
+  /// 点击通知「稍后提醒」后的顺延时长，默认 10 分钟。可选 10/30/60/120。
+  static const List<int> snoozeOptions = [10, 30, 60, 120];
+  static const String _kSnooze = 'snooze_minutes';
+  int _snoozeMinutes = 10;
+  int get snoozeMinutes => _snoozeMinutes;
+  Future<void> setSnoozeMinutes(int v) async {
+    if (v == _snoozeMinutes) return;
+    _snoozeMinutes = v;
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  // ===== 勿扰时段（本地时间，小时 0-23）=====
+  /// 勿扰开始/结束小时；[dndEnabled]=false 时表示不启用勿扰。
+  /// 一次性提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹（重复/习惯提醒不动）。
+  static const String _kDndEnabled = 'dnd_enabled';
+  static const String _kDndStart = 'dnd_start';
+  static const String _kDndEnd = 'dnd_end';
+  bool _dndEnabled = false;
+  bool get dndEnabled => _dndEnabled;
+  int _dndStartHour = 22;
+  int get dndStartHour => _dndStartHour;
+  int _dndEndHour = 7;
+  int get dndEndHour => _dndEndHour;
+  Future<void> setDnd({
+    required bool enabled,
+    int? startHour,
+    int? endHour,
+  }) async {
+    _dndEnabled = enabled;
+    if (startHour != null) _dndStartHour = startHour.clamp(0, 23);
+    if (endHour != null) _dndEndHour = endHour.clamp(0, 23);
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  /// 判断给定小时（0-23）是否处于勿扰区间内。区间可跨午夜（start>end 表示
+  /// 如 22→07 覆盖当晚到次晨）。勿扰未启用时恒为 false。
+  bool isDndHour(int hour) {
+    if (!_dndEnabled) return false;
+    if (_dndStartHour == _dndEndHour) return false; // 起止相同视为全天不限制
+    if (_dndStartHour < _dndEndHour) {
+      return hour >= _dndStartHour && hour < _dndEndHour;
+    }
+    // 跨午夜：[22,24) ∪ [0,7)
+    return hour >= _dndStartHour || hour < _dndEndHour;
+  }
+
+  // ===== 回收站自动清理（保留天数）=====
+  /// 回收站条目超过该天数后，在每日 00:00 的原生重置接收器 + App 启动时兜底清理。
+  /// -1 表示「永不自动清理」（回收站仅手动管理）。可选 7 / 30 / 90 / -1。
+  static const List<int> trashRetentionOptions = [7, 30, 90, -1];
+  int _trashRetentionDays = 30;
+  int get trashRetentionDays => _trashRetentionDays;
+  /// 人类可读的保留期文案（含「永不」）。
+  String get trashRetentionLabel {
+    return _trashRetentionDays < 0 ? '永不' : '$_trashRetentionDays 天';
+  }
+  Future<void> setTrashRetentionDays(int v) async {
+    if (v == _trashRetentionDays) return;
+    _trashRetentionDays = v;
+    notifyListeners();
+    await _persistSettings();
+    // 立即按新规则清理一次（仅影响内存中的回收站，落盘在 _persist）。
+    _cleanupTrashIfNeeded(persist: true);
+  }
+
+  /// 按当前保留期移除过期的回收站条目；[persist]=true 时变更会落 SQLite。
+  /// 返回是否发生了实际清理。被 load() 兜底与 setTrashRetentionDays 调用。
+  bool _cleanupTrashIfNeeded({bool persist = false}) {
+    if (_trashRetentionDays < 0) return false; // 永不自动清理
+    final cutoff = DateTime.now().subtract(Duration(days: _trashRetentionDays));
+    final before = _trash.length;
+    _trash.removeWhere((t) {
+      if (t.deletedAt == null) return false; // 无删除时间视为新近，保留
+      return t.deletedAt!.isBefore(cutoff);
+    });
+    final removed = _trash.length != before;
+    if (removed && persist) _persist();
+    return removed;
+  }
 
   // ===== 通知总开关 =====
   bool _notificationsEnabled = true;
@@ -103,6 +187,9 @@ class TaskProvider extends ChangeNotifier {
       _trash
         ..clear()
         ..addAll(loadedTrash);
+      // 兜底清理：App 启动时按保留期移除过期回收站条目（原生 MidnightResetReceiver
+      // 负责「App 已关闭」的每日 00:00 清理，这里覆盖 App 已开、长期未跨午夜边界的情况）。
+      _cleanupTrashIfNeeded(persist: true);
       // 已有数据，或用户已做过首启示例决策（含「从零开始」）：标记已预置，
       // 日后即便任务库被清空也不再复活示例。
       await prefs.setBool(_kSeeded, true);
@@ -110,6 +197,11 @@ class TaskProvider extends ChangeNotifier {
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
     _soundEnabled = prefs.getBool(_kSound) ?? true;
     _backgroundGuard = prefs.getBool(_kGuard) ?? true;
+    _snoozeMinutes = prefs.getInt(_kSnooze) ?? 10;
+    _dndEnabled = prefs.getBool(_kDndEnabled) ?? false;
+    _dndStartHour = prefs.getInt(_kDndStart) ?? 22;
+    _dndEndHour = prefs.getInt(_kDndEnd) ?? 7;
+    _trashRetentionDays = prefs.getInt(_kTrashRetention) ?? 30;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
@@ -173,6 +265,11 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setBool(_kNotify, _notificationsEnabled);
     await prefs.setBool(_kSound, _soundEnabled);
     await prefs.setBool(_kGuard, _backgroundGuard);
+    await prefs.setInt(_kSnooze, _snoozeMinutes);
+    await prefs.setBool(_kDndEnabled, _dndEnabled);
+    await prefs.setInt(_kDndStart, _dndStartHour);
+    await prefs.setInt(_kDndEnd, _dndEndHour);
+    await prefs.setInt(_kTrashRetention, _trashRetentionDays);
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
@@ -536,7 +633,7 @@ class TaskProvider extends ChangeNotifier {
 
   /// 首页分区任务列表：逾期 / 今天 / 未来 / 每天 / 已完成（各自已排序）。
   /// 与首页 [_section] 完全一致的分组与排序口径，供分享卡片列出「详细事件 / 任务」，
-  /// 而非只有计数。
+  /// 而非只有计数。置顶(pinned)任务在各分区内优先于 order / 截止时间排最前。
   Map<String, List<Task>> get homeTasks {
     int? dayDiff(DateTime? due) {
       if (due == null) return null;
@@ -551,7 +648,9 @@ class TaskProvider extends ChangeNotifier {
         .where((t) => (dayDiff(t.dueDate) ?? 0) < 0)
         .toList()
       ..sort((a, b) {
-        // 手动排序 order 优先；其次截止时间早的排前（拖最久的排前）。
+        // 置顶优先；其次手动排序 order；最后截止时间早的排前（拖最久的排前）。
+        final p = _comparePinned(a, b);
+        if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
         return a.dueDate!.compareTo(b.dueDate!);
@@ -560,6 +659,8 @@ class TaskProvider extends ChangeNotifier {
         .where((t) => dayDiff(t.dueDate) == 0 || t.dueDate == null)
         .toList()
       ..sort((a, b) {
+        final p = _comparePinned(a, b);
+        if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
         // 无截止日期的排到今天列表末尾，不影响有日期任务的按时排序
@@ -573,21 +674,29 @@ class TaskProvider extends ChangeNotifier {
       return d != null && d > 0;
     }).toList()
       ..sort((a, b) {
+        final p = _comparePinned(a, b);
+        if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
         return a.dueDate!.compareTo(b.dueDate!);
       });
-    // 重复任务单独成段，按提醒时刻升序（order 优先）。
+    // 重复任务单独成段，按提醒时刻升序（置顶优先，其次 order 优先）。
     final repeat = _tasks.where((t) => t.isRepeating && !t.done).toList()
       ..sort((a, b) {
+        final p = _comparePinned(a, b);
+        if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
         return (a.repeatMinute ?? 24 * 60)
             .compareTo(b.repeatMinute ?? 24 * 60);
       });
-    // 已完成统一进「已完成」（order 优先）。
+    // 已完成统一进「已完成」（置顶优先，其次 order 优先）。
     final done = _tasks.where((t) => t.done).toList()
-      ..sort((a, b) => a.order.compareTo(b.order));
+      ..sort((a, b) {
+        final p = _comparePinned(a, b);
+        if (p != 0) return p;
+        return a.order.compareTo(b.order);
+      });
     return {
       'overdue': overdue,
       'today': today,
@@ -604,6 +713,12 @@ class TaskProvider extends ChangeNotifier {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     return DateTime(due.year, due.month, due.day).difference(today).inDays;
+  }
+
+  /// 置顶排序比较器：置顶(pinned=true)任务始终排在前（降序），与首页 home_screen 一致。
+  static int _comparePinned(Task a, Task b) {
+    if (a.pinned == b.pinned) return 0;
+    return a.pinned ? -1 : 1;
   }
 
   /// 判断某任务在首页属于哪个分区（逾期/今天/未来/每天/已完成）。
@@ -721,6 +836,15 @@ class TaskProvider extends ChangeNotifier {
     } else {
       _reconcileDeadlineOnCompletion(_tasks[i]);
     }
+    notifyListeners();
+    _persist();
+  }
+
+  /// 切换任务置顶/星标状态：置顶任务在所属分区内固定排最前（优先于手动 order）。
+  void togglePinned(String id) {
+    final i = _tasks.indexWhere((t) => t.id == id);
+    if (i == -1) return;
+    _tasks[i] = _tasks[i].copyWith(pinned: !_tasks[i].pinned);
     notifyListeners();
     _persist();
   }

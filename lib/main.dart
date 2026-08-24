@@ -5,6 +5,7 @@ import 'package:dynamic_color/dynamic_color.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -32,6 +33,9 @@ String? _pendingNotificationPayload;
 String? _pendingSnoozeTaskId;
 String? _pendingSnoozeHabitId;
 
+/// 冷启动时点击通知「完成」action 先于导航器就绪到达，暂存任务 id。
+String? _pendingCompleteTaskId;
+
 /// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
 void _handleNotificationTap(String? payload) {
   if (payload == null || payload.isEmpty) return;
@@ -53,31 +57,64 @@ void _navigateFromPayload(String payload, NavigatorState nav) {
   }
 }
 
-/// 通知 action 按钮点击回调：目前仅处理「稍后提醒」。导航器未就绪时暂存 id。
+/// 通知 action 按钮点击回调：处理「稍后提醒」与「完成」两类 action。
+/// 导航器未就绪（冷启动）时暂存 id，待 MainScaffold 首帧后消费。
 void _handleNotificationAction(String? actionId, String? payload) {
-  if (actionId != NotificationService.snoozeActionId) return;
-  final taskId = NotificationService.parseTaskId(payload);
-  final habitId = NotificationService.parseHabitId(payload);
-  final state = _navigatorKey.currentState;
-  if (state != null) {
-    _doSnooze(state, taskId, habitId);
-  } else if (taskId != null) {
-    _pendingSnoozeTaskId = taskId;
-  } else if (habitId != null) {
-    _pendingSnoozeHabitId = habitId;
+  if (actionId == NotificationService.snoozeActionId) {
+    final taskId = NotificationService.parseTaskId(payload);
+    final habitId = NotificationService.parseHabitId(payload);
+    final state = _navigatorKey.currentState;
+    if (state != null) {
+      _doSnooze(state, taskId, habitId);
+    } else if (taskId != null) {
+      _pendingSnoozeTaskId = taskId;
+    } else if (habitId != null) {
+      _pendingSnoozeHabitId = habitId;
+    }
+    return;
+  }
+  if (actionId == NotificationService.completeActionId) {
+    final taskId = NotificationService.parseTaskId(payload);
+    if (taskId == null) return;
+    final state = _navigatorKey.currentState;
+    if (state != null) {
+      _doComplete(state, taskId);
+    } else {
+      _pendingCompleteTaskId = taskId;
+    }
   }
 }
 
 /// 用 task/habit id 从 Provider 取实体并触发稍后提醒调度。
+/// 顺延时长取用户设置的 [TaskProvider.snoozeMinutes]（默认 10 分钟）。
 void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
   final ctx = nav.context;
+  final provider = Provider.of<TaskProvider>(ctx, listen: false);
+  final delay = Duration(minutes: provider.snoozeMinutes);
   if (taskId != null) {
-    final task = Provider.of<TaskProvider>(ctx, listen: false).byId(taskId);
-    if (task != null) NotificationService.instance.snoozeTaskReminder(task);
+    final task = provider.byId(taskId);
+    if (task != null) {
+      NotificationService.instance.snoozeTaskReminder(task, delay: delay);
+    }
   } else if (habitId != null) {
     final habit = Provider.of<HabitProvider>(ctx, listen: false).byId(habitId);
-    if (habit != null) NotificationService.instance.snoozeHabitReminder(habit);
+    if (habit != null) {
+      NotificationService.instance.snoozeHabitReminder(habit, delay: delay);
+    }
   }
+}
+
+/// 从通知「完成」action 直接把任务标记为已完成：调用 TaskProvider.setStatus，
+/// 并弹一条「已完成 ✓」确认通知（覆盖式，同 id 不刷屏）。任务已处于完成态则跳过。
+void _doComplete(NavigatorState nav, String? taskId) {
+  if (taskId == null) return;
+  final provider = Provider.of<TaskProvider>(nav.context, listen: false);
+  final task = provider.byId(taskId);
+  if (task == null || task.done) return;
+  // 标记完成（内部会取消其一次性截止提醒，避免完成后仍弹；重复任务则跳过今日）。
+  provider.setStatus(taskId, TaskStatus.done);
+  // 覆盖式确认通知：用任务通知 id，用户一眼可见「已完成」，且不会叠加新通知。
+  NotificationService.instance.showCompletedConfirm(taskId, task.title);
 }
 
 void main() async {
@@ -110,6 +147,18 @@ void main() async {
   if (task.backgroundGuardEnabled) {
     await BackgroundService.instance.start();
   }
+  // 注入勿扰顺延逻辑：一次性提醒落在勿扰区间时，顺延到时段结束 + 5 分钟再弹。
+  NotificationService.dndDefer = (DateTime scheduled) {
+    if (!task.dndEnabled) return null;
+    if (!task.isDndHour(scheduled.hour)) return null;
+    // 顺延到「勿扰结束小时」当天（或次日，若结束小时已过）的 :05 分。
+    var end = DateTime(
+        scheduled.year, scheduled.month, scheduled.day, task.dndEndHour, 5);
+    if (!end.isAfter(scheduled)) {
+      end = end.add(const Duration(days: 1));
+    }
+    return end;
+  };
   runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding));
 }
 
@@ -253,6 +302,15 @@ class _MainScaffoldState extends State<MainScaffold>
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final state = _navigatorKey.currentState;
         if (mounted && state != null) _doSnooze(state, tId, hId);
+      });
+    }
+    // 消费冷启动期间因点通知「完成」而暂存的 id（导航器此时已就绪）。
+    if (_pendingCompleteTaskId != null) {
+      final cId = _pendingCompleteTaskId;
+      _pendingCompleteTaskId = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _navigatorKey.currentState;
+        if (mounted && state != null) _doComplete(state, cId);
       });
     }
   }

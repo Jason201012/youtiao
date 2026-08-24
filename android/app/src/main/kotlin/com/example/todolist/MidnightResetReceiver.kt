@@ -33,6 +33,8 @@ class MidnightResetReceiver : BroadcastReceiver() {
         const val KEY_TASKS = "tasks"
         const val kDbName = "youtiao.db"
         const val ALARM_REQUEST = 7723
+        /** 回收站保留天数 pref key，与 Dart TaskProvider._kTrashRetention 完全一致。 */
+        const val kTrashRetention = "trash_retention_days"
 
         /** 安排下一次「当天 00:00」的 setAlarmClock 闹钟（ColorOS 可靠）。幂等：重复调用只会覆盖。 */
         fun schedule(context: Context) {
@@ -94,8 +96,13 @@ class MidnightResetReceiver : BroadcastReceiver() {
             }
         }
 
-        /** 今天的 yyyy-MM-dd（与 ISO 日期串同序比较，无需解析时间/时区）。 */
-        private fun todayStr(): String {
+    /** 轻量日志：用于排查每日重置 / 回收站清理问题（日志量极小，保留）。 */
+    private fun debugLog(msg: String) {
+        android.util.Log.d("MidnightReset", msg)
+    }
+
+    /** 今天的 yyyy-MM-dd（与 ISO 日期串同序比较，无需解析时间/时区）。 */
+    private fun todayStr(): String {
             val now = Calendar.getInstance()
             return String.format(
                 "%04d-%02d-%02d",
@@ -128,12 +135,24 @@ class MidnightResetReceiver : BroadcastReceiver() {
         schedule(context)
     }
 
+    /** 读取回收站保留天数（天）。与 Dart prefs key [kTrashRetention] 一致；
+     *  默认 30 天；负数表示「永不自动清理」。 */
+    private fun readTrashRetention(context: Context): Int {
+        return runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.getInt(kTrashRetention, 30)
+        }.getOrDefault(30)
+    }
+
     /** 重置每日任务：优先直接读写 SQLite（v2.2.4 起任务数据的唯一真相来源）；
      *  仅当数据库尚未建立（极少数从未迁移的极老设备）时回退到旧版 SharedPreferences。 */
     private fun resetDailyTasks(context: Context) {
         val dbFile = runCatching { context.getDatabasePath(kDbName) }.getOrNull()
         if (dbFile != null && dbFile.exists()) {
-            resetDailyTasksSqlite(dbFile.absolutePath)
+            val path = dbFile.absolutePath
+            resetDailyTasksSqlite(path)
+            // 回收站自动清理：删除早于保留期的过期条目
+            cleanupTrashSqlite(path, readTrashRetention(context))
             return
         }
         // 回退路径：旧版 SP（tasks JSON 整体）
@@ -165,6 +184,49 @@ class MidnightResetReceiver : BroadcastReceiver() {
                     val cv = ContentValues()
                     cv.put("data", newData)
                     db.update("tasks", cv, "id = ?", arrayOf(id))
+                }
+            } finally {
+                db.close()
+            }
+        } catch (_: Exception) {
+            // 打开/读写失败不崩溃
+        }
+    }
+
+    /** 直接打开 SQLite 清理 [trash] 表：删除 deletedAt（JSON data 内）早于保留期的条目。
+     * 与 Dart TaskProvider._cleanupTrashIfNeeded 一致；保留期天数由 [retentionDays] 传入，
+     * 负数表示「永不自动清理」。data 列存完整 Task JSON，deletedAt 为 ISO 时间戳。 */
+    private fun cleanupTrashSqlite(dbPath: String, retentionDays: Int) {
+        if (retentionDays < 0) return // 永不自动清理
+        try {
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+            try {
+                val cutoff = Calendar.getInstance().apply {
+                    add(Calendar.DAY_OF_MONTH, -retentionDays)
+                }
+                val cutoffStr = String.format(
+                    "%04d-%02d-%02d",
+                    cutoff.get(Calendar.YEAR),
+                    cutoff.get(Calendar.MONTH) + 1,
+                    cutoff.get(Calendar.DAY_OF_MONTH),
+                )
+                val cursor = db.query("trash", arrayOf("id", "data"), null, null, null, null, null)
+                val expired = mutableListOf<String>()
+                cursor.use {
+                    while (it.moveToNext()) {
+                        val id = it.getString(0)
+                        val dataStr = it.getString(1)
+                        val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
+                        val del = datePart(obj.opt("deletedAt")) ?: continue
+                        // 按 yyyy-MM-dd 字典序比较，早于 cutoffStr 视为过期
+                        if (del < cutoffStr) expired.add(id)
+                    }
+                }
+                for (id in expired) {
+                    db.delete("trash", "id = ?", arrayOf(id))
+                }
+                if (expired.isNotEmpty()) {
+                    debugLog("回收站自动清理：删除 ${expired.size} 条过期条目（保留 ${retentionDays} 天）")
                 }
             } finally {
                 db.close()

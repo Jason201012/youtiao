@@ -43,6 +43,13 @@ int? _dueDayDiff(DateTime? due) {
 String _wdLabel(int w) =>
     ['一', '二', '三', '四', '五', '六', '日'][(w - 1).clamp(0, 6)];
 
+/// 置顶排序比较器：置顶(pinned=true)任务始终排在前（降序），其余保持传入顺序相对不变。
+/// 用作各分区 sort 的第一关键字，使置顶语义优先于手动 order / 截止时间。
+int _comparePinned(Task a, Task b) {
+  if (a.pinned == b.pinned) return 0;
+  return a.pinned ? -1 : 1;
+}
+
 class HomeScreen extends StatefulWidget {
   /// 搜索态变化回调：用于让宿主 Scaffold 在搜索时隐藏「新增任务」FAB。
   final void Function(bool)? onSearchingChanged;
@@ -366,13 +373,19 @@ class _HomeScreenState extends State<HomeScreen> {
         final overdue = active
             .where((t) => (_dueDayDiff(t.dueDate) ?? 0) < 0)
             .toList()
-          ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+          ..sort((a, b) {
+            final p = _comparePinned(a, b);
+            if (p != 0) return p;
+            return a.dueDate!.compareTo(b.dueDate!);
+          });
 
         // 今天：截止日期就是今天，或没有截止日期（无截止视为当天，始终跟随当前日期，跨天自动顺延）。
         final today = active
             .where((t) => _dueDayDiff(t.dueDate) == 0 || t.dueDate == null)
             .toList()
           ..sort((a, b) {
+            final p = _comparePinned(a, b);
+            if (p != 0) return p;
             // 无截止日期的排到今天列表末尾，不破坏有日期任务的按时排序
             if (a.dueDate == null && b.dueDate == null) return 0;
             if (a.dueDate == null) return 1;
@@ -385,14 +398,27 @@ class _HomeScreenState extends State<HomeScreen> {
           final d = _dueDayDiff(t.dueDate);
           return d != null && d > 0;
         }).toList()
-          ..sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+          ..sort((a, b) {
+            final p = _comparePinned(a, b);
+            if (p != 0) return p;
+            return a.dueDate!.compareTo(b.dueDate!);
+          });
 
         // 重复：重复任务（所有规则），按提醒时刻升序（未设时刻的排最后）
         final repeat = tasks.where((t) => t.isRepeating && !t.done).toList()
-          ..sort((a, b) => (a.repeatMinute ?? 24 * 60)
-              .compareTo(b.repeatMinute ?? 24 * 60));
+          ..sort((a, b) {
+            final p = _comparePinned(a, b);
+            if (p != 0) return p;
+            return (a.repeatMinute ?? 24 * 60)
+                .compareTo(b.repeatMinute ?? 24 * 60);
+          });
 
-        final done = tasks.where((t) => t.done).toList();
+        final done = tasks.where((t) => t.done).toList()
+          ..sort((a, b) {
+            final p = _comparePinned(a, b);
+            if (p != 0) return p;
+            return a.order.compareTo(b.order);
+          });
 
         final filter = provider.taskFilter;
         final filtered = switch (filter) {

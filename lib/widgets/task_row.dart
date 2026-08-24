@@ -89,6 +89,17 @@ class TaskRow extends StatelessWidget {
                   : null,
             ),
           ),
+          // 置顶星标：pinned 任务在勾选框后显示一个星标角标，提示其常驻顶部。
+          if (task.pinned)
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Icon(
+                Symbols.star,
+                size: 16,
+                color: primary,
+                weight: 700,
+              ),
+            ),
         ],
       );
     }

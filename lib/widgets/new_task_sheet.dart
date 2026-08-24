@@ -58,6 +58,9 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 仅对「不重复」且有截止时间的任务有意义。
   int _reminderOffsetMin = 0;
 
+  /// 是否置顶/星标：置顶任务在所属分区内固定排最前。仅编辑模式可切换。
+  bool _pinned = false;
+
   /// 提前量候选：0（准时）/ 5 / 10 / 15 / 30 / 60 分钟。
   static const List<int> _offsetOptions = [0, 5, 10, 15, 30, 60];
   static String _offsetLabel(int m) => m == 0 ? '准时（不提前）' : '提前 $m 分钟';
@@ -85,6 +88,7 @@ class _TaskSheetState extends State<TaskSheet> {
       _noteController.text = t.note;
       _subtasks = t.subtasks.map((s) => s.copyWith()).toList();
       _tags = List.from(t.tags);
+      _pinned = t.pinned;
     }
   }
 
@@ -268,6 +272,7 @@ class _TaskSheetState extends State<TaskSheet> {
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
         reminderOffsetMin: _reminderOffsetMin,
+        pinned: _pinned,
       ));
     } else {
       provider.addTask(Task(
@@ -285,6 +290,7 @@ class _TaskSheetState extends State<TaskSheet> {
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
         reminderOffsetMin: _reminderOffsetMin,
+        pinned: _pinned,
       ));
     }
     Navigator.pop(context);
@@ -353,6 +359,40 @@ class _TaskSheetState extends State<TaskSheet> {
             style: TextStyle(color: scheme.onSurface, fontSize: 16),
           ),
           const SizedBox(height: 18),
+          // 置顶开关（仅编辑模式）：把任务钉在所属分区顶部，常驻高频可见。
+          if (_isEdit)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: InkWell(
+                onTap: () => setState(() => _pinned = !_pinned),
+                borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Icon(Symbols.star,
+                          size: 22,
+                          color: _pinned ? scheme.primary : ext.meta),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(
+                          '置顶 / 星标',
+                          style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w500,
+                              color: scheme.onSurface),
+                        ),
+                      ),
+                      Switch(
+                        value: _pinned,
+                        onChanged: (v) => setState(() => _pinned = v),
+                        activeColor: scheme.primary,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           // 备注
           _SectionLabel('备注'),
           const SizedBox(height: 8),

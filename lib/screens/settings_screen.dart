@@ -151,6 +151,88 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // 稍后提醒时长：点按在 10/30/60/120 分钟间切换。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.schedule,
+                        label: '稍后提醒时长',
+                        value: '${provider.snoozeMinutes} 分钟',
+                        onTap: () async {
+                          final picked = await showDialog<int>(
+                            context: context,
+                            builder: (d) => AlertDialog(
+                              title: const Text('稍后提醒时长'),
+                              content: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: TaskProvider.snoozeOptions
+                                    .map((m) => RadioListTile<int>(
+                                          title: Text('$m 分钟'),
+                                          value: m,
+                                          groupValue: provider.snoozeMinutes,
+                                          onChanged: (v) =>
+                                              Navigator.pop(d, v),
+                                        ))
+                                    .toList(),
+                              ),
+                            ),
+                          );
+                          if (picked != null) provider.setSnoozeMinutes(picked);
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // 勿扰时段：开关 + 起止小时（整点）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => Column(
+                        children: [
+                          SettingsRow(
+                            icon: Symbols.do_not_disturb_on,
+                            label: '勿扰时段',
+                            value: provider.dndEnabled
+                                ? '${provider.dndStartHour}:00 - ${provider.dndEndHour}:00'
+                                : null,
+                            switchValue: provider.dndEnabled,
+                            onSwitchChanged: (v) => provider.setDnd(
+                                enabled: v,
+                                startHour: provider.dndStartHour,
+                                endHour: provider.dndEndHour),
+                          ),
+                          if (provider.dndEnabled) ...[
+                            const SizedBox(height: AppColors.contentGap),
+                            Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 4),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: _HourPicker(
+                                      label: '开始',
+                                      value: provider.dndStartHour,
+                                      onChanged: (h) => provider.setDnd(
+                                          enabled: true,
+                                          startHour: h,
+                                          endHour: provider.dndEndHour),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: _HourPicker(
+                                      label: '结束',
+                                      value: provider.dndEndHour,
+                                      onChanged: (h) => provider.setDnd(
+                                          enabled: true,
+                                          startHour: provider.dndStartHour,
+                                          endHour: h),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     SettingsRow(
                       icon: Symbols.notifications_active,
                       label: '发送测试通知',
@@ -213,6 +295,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       icon: Symbols.backup,
                       label: '备份与恢复',
                       onTap: () => BackupSheet.show(context),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // 回收站自动清理：选择保留天数（7/30/90/永不）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.delete_sweep,
+                        label: '回收站自动清理',
+                        value: provider.trashRetentionLabel,
+                        onTap: () async {
+                          final picked = await showDialog<int>(
+                            context: context,
+                            builder: (d) => AlertDialog(
+                              title: const Text('回收站保留时长'),
+                              content: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: TaskProvider.trashRetentionOptions
+                                    .map((days) => RadioListTile<int>(
+                                          title: Text(days < 0 ? '永不自动清理' : '$days 天'),
+                                          value: days,
+                                          groupValue: provider.trashRetentionDays,
+                                          onChanged: (v) => Navigator.of(d).pop(v),
+                                        ))
+                                    .toList(),
+                              ),
+                            ),
+                          );
+                          if (picked != null) {
+                            provider.setTrashRetentionDays(picked);
+                          }
+                        },
+                      ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(
@@ -314,6 +427,90 @@ class _ThemeColorRow extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// 勿扰时段「起/止小时」选择器：整点 0-23，左右各一个。极简紧凑，避免占用过多纵向空间。
+class _HourPicker extends StatelessWidget {
+  final String label;
+  final int value;
+  final ValueChanged<int> onChanged;
+  const _HourPicker({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 6),
+          child: Text(label,
+              style: TextStyle(fontSize: 12, color: ext.meta)),
+        ),
+        Container(
+          height: 44,
+          decoration: BoxDecoration(
+            color: ext.chip,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.remove, size: 18),
+                onPressed: () => onChanged((value - 1).clamp(0, 23)),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+              GestureDetector(
+                onTap: () => _pickHour(context),
+                child: Text(
+                  '$value:00',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.add, size: 18),
+                onPressed: () => onChanged((value + 1).clamp(0, 23)),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _pickHour(BuildContext context) async {
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text('$label时间'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 240,
+          child: ListView.builder(
+            itemCount: 24,
+            itemBuilder: (_, i) => RadioListTile<int>(
+              title: Text('$i:00'),
+              value: i,
+              groupValue: value,
+              onChanged: (v) => Navigator.pop(d, v),
+            ),
+          ),
+        ),
+      ),
+    );
+    if (picked != null) onChanged(picked);
   }
 }
 

@@ -84,6 +84,18 @@ class NotificationService {
   /// 通知「稍后提醒」action 按钮的 actionId。
   static const String snoozeActionId = 'snooze';
 
+  /// 通知「完成」action 按钮的 actionId：点击后直接在通知栏把任务标记为已完成，
+  /// 无需进入 App（解决「看到提醒想完成却要进 App 找任务」的最后一公里断点）。
+  /// 仅对携带 task: 前缀 payload 的任务提醒生效（习惯提醒不显示完成按钮）。
+  static const String completeActionId = 'complete';
+
+  /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
+  /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
+  static List<AndroidNotificationAction> get _taskActions => [
+        AndroidNotificationAction(snoozeActionId, '稍后提醒'),
+        AndroidNotificationAction(completeActionId, '完成'),
+      ];
+
   /// 点击通知的回调（由 main.dart 注入，负责根据 payload 导航）。
   /// 用实例字段而非直接 import 页面，避免 service 反向依赖 UI。
   static void Function(String? payload)? onNotificationTap;
@@ -92,6 +104,12 @@ class NotificationService {
   /// 普通点击（点通知体）走 [onNotificationTap]；点 action 按钮（如「稍后提醒」）
   /// 走这里，并带 actionId 与 payload 供调用方区分。
   static void Function(String? actionId, String? payload)? onNotificationAction;
+
+  /// 勿扰时段顺延（由 main.dart 从 TaskProvider 注入）：传入「原定提醒时刻」，
+  /// 返回「实际应弹时刻」；若无需顺延（不在勿扰区间或未启用）返回 null。
+  /// 一次性截止提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹，避免深夜打扰。
+  /// 用函数字段注入，避免 service 反向依赖 TaskProvider（与 onNotificationTap 同模式）。
+  static DateTime? Function(DateTime scheduled)? dndDefer;
 
   /// 把任务 id（字符串）映射成一个稳定的通知 id：优先用数字本身（本 App 的
   /// id 都是纯数字字符串），兜底用 hashCode。schedule / cancel 必须走同一函数，
@@ -328,11 +346,19 @@ class NotificationService {
       final loc = _loc ?? tz.UTC;
       final due = task.dueDate!;
       // 提醒提前量：在截止时间之前 reminderOffsetMin 分钟触发（0 = 准时）。
-      final base = due.subtract(Duration(minutes: task.reminderOffsetMin));
+      var base = due.subtract(Duration(minutes: task.reminderOffsetMin));
       // 提醒时刻已过去（任务逾期）：不再补弹「迟到提醒」，避免从回收站恢复/重排逾期任务时立即骚扰。
       if (base.isBefore(DateTime.now())) {
         debugPrint('[通知] 未调度 id=${task.id}：提醒时刻已过期（逾期任务不补弹）');
         return false;
+      }
+      // 勿扰时段顺延：一次性提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹。
+      if (dndDefer != null) {
+        final deferred = dndDefer!(base);
+        if (deferred != null) {
+          debugPrint('[通知] id=${task.id} 提醒落在勿扰时段，顺延到 $deferred');
+          base = deferred;
+        }
       }
       final tz.TZDateTime when = tz.TZDateTime(
           loc, base.year, base.month, base.day, base.hour, base.minute);
@@ -347,7 +373,9 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
-        actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
+        // 任务提醒：稍后提醒 + 完成（直接标记完成，无需进 App）。
+        // 两个 action 各带 actionId，点击后由 main.dart 的 onNotificationAction 路由区分。
+        actions: _taskActions,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -432,7 +460,7 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
-        actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
+        actions: _taskActions,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -767,6 +795,33 @@ class NotificationService {
   Future<void> cancelAll() {
     _deadlineCancelled.clear();
     return _plugin.cancelAll();
+  }
+
+  /// 通知「完成」action 后的覆盖式确认通知：用任务通知 id 在原通知位弹出
+  /// 「已完成 ✓」，既不刷屏、也不叠加新通知。用户点开无跳转（payload 置空）。
+  Future<void> showCompletedConfirm(String taskId, String title) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+      ),
+    );
+    try {
+      await _plugin.show(
+        _notifyIdOf(taskId),
+        '已完成 ✓',
+        title.isNotEmpty ? title : '无标题任务',
+        detail,
+      );
+    } catch (e) {
+      debugPrint('[通知] 完成确认通知失败 id=$taskId: $e');
+    }
   }
 
   /// 在 [completeAt]（墙钟时刻）调度「专注完成」系统闹钟通知。
