@@ -4,7 +4,7 @@
 
 应用名「有条」，包名 `com.example.todolist`（发布标识，发布后不可更改）。
 
-当前版本 **v2.5.4**（versionCode 75）　·　开源协议 **[MIT](LICENSE)**
+开源协议 **[MIT](LICENSE)**
 
 > ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**；最新版 v2.4.1 起统一发布在承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。点此直达最新版 👉 [v2.5.4 下载](https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.4)
 
