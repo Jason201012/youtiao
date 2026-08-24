@@ -151,6 +151,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // 每日专注目标：点按在 关闭/30/60/90/120/180 分钟间切换；0=关闭（今日卡不展示进度环）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.flag,
+                        label: '每日专注目标',
+                        value: provider.focusGoalLabel,
+                        onTap: () async {
+                          final options = [0, 30, 60, 90, 120, 180];
+                          final picked = await showDialog<int>(
+                            context: context,
+                            builder: (d) => AlertDialog(
+                              title: const Text('每日专注目标'),
+                              content: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: options
+                                    .map((m) => RadioListTile<int>(
+                                          title: Text(m <= 0 ? '关闭' : '$m 分钟'),
+                                          value: m,
+                                          groupValue: provider.focusGoalMinutes,
+                                          onChanged: (v) => Navigator.pop(d, v),
+                                        ))
+                                    .toList(),
+                              ),
+                            ),
+                          );
+                          if (picked != null) provider.setFocusGoalMinutes(picked);
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     // 稍后提醒时长：点按在 10/30/60/120 分钟间切换。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(

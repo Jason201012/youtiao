@@ -1,12 +1,63 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+
+/// 识别备注中的 http(s) 链接并渲染为可点击文本（其余部分保持普通文本）。
+/// 正则匹配 http:// 或 https:// 起头的连续非空白字符。点击用 url_launcher 打开。
+class _NoteText extends StatelessWidget {
+  final String text;
+  final Color color;
+  const _NoteText({required this.text, required this.color});
+
+  static final RegExp _urlRe = RegExp(r'https?://[^\s]+');
+
+  @override
+  Widget build(BuildContext context) {
+    final matches = _urlRe.allMatches(text).toList();
+    if (matches.isEmpty) {
+      return Text(text, style: TextStyle(fontSize: 14, color: color));
+    }
+    final spans = <InlineSpan>[];
+    int cursor = 0;
+    final linkColor = Theme.of(context).colorScheme.primary;
+    for (final m in matches) {
+      if (m.start > cursor) {
+        spans.add(TextSpan(
+          text: text.substring(cursor, m.start),
+          style: TextStyle(fontSize: 14, color: color),
+        ));
+      }
+      final url = text.substring(m.start, m.end);
+      spans.add(TextSpan(
+        text: url,
+        style: TextStyle(fontSize: 14, color: linkColor, decoration: TextDecoration.underline),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () async {
+            final uri = Uri.tryParse(url);
+            if (uri != null && await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          },
+      ));
+      cursor = m.end;
+    }
+    if (cursor < text.length) {
+      spans.add(TextSpan(
+        text: text.substring(cursor),
+        style: TextStyle(fontSize: 14, color: color),
+      ));
+    }
+    return RichText(text: TextSpan(children: spans));
+  }
+}
 
 /// 任务详情页：展示标题 / 备注 / 标签 / 截止重复 / 累计专注 / 子任务勾选，
 /// 并提供编辑、开始专注、删除操作。数据通过 [TaskProvider.byId] 实时读取，
@@ -105,8 +156,7 @@ class TaskDetailScreen extends StatelessWidget {
                 children: [
                   const _Label('备注'),
                   const SizedBox(height: 6),
-                  Text(task.note,
-                      style: TextStyle(fontSize: 14, color: onBg)),
+                  _NoteText(text: task.note, color: onBg),
                 ],
               ),
             ),
@@ -152,6 +202,11 @@ class TaskDetailScreen extends StatelessWidget {
               children: [
                 _RowItem(
                     icon: Symbols.event, label: '截止', value: _dueLabel(task.dueDate)),
+                if (task.startDate != null)
+                  _RowItem(
+                      icon: Symbols.event_available,
+                      label: '开始',
+                      value: _dueLabel(task.startDate)),
                 if (task.isRepeating)
                   _RowItem(
                       icon: Symbols.repeat,

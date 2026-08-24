@@ -119,6 +119,10 @@ class Task {
   final Priority priority;
   final Category category;
   final DateTime? dueDate;
+  /// 任务开始时间（可空）。用于表达「时间段」任务的起点（如「14:00-15:00 开会」），
+  /// 与 [dueDate]（截止时间）并列。序列化为 `startDate`，旧数据缺省为 null（向后兼容）。
+  /// 仅作展示与排序语义使用，不参与提醒调度（提醒仍以 [dueDate]/重复规则为准）。
+  final DateTime? startDate;
   final TaskStatus status;
   final DateTime? completedAt;
 
@@ -193,9 +197,10 @@ class Task {
   const Task({
     required this.id,
     required this.title,
-    required this.priority,
+    required     this.priority,
     required this.category,
     this.dueDate,
+    this.startDate,
     this.status = TaskStatus.todo,
     this.completedAt,
     this.subtasks = const [],
@@ -224,6 +229,7 @@ class Task {
     Priority? priority,
     Category? category,
     Object? dueDate = _kKeep,
+    Object? startDate = _kKeep,
     TaskStatus? status,
     Object? completedAt = _kKeep,
     List<SubTask>? subtasks,
@@ -246,6 +252,7 @@ class Task {
         priority: priority ?? this.priority,
         category: category ?? this.category,
         dueDate: dueDate == _kKeep ? this.dueDate : dueDate as DateTime?,
+        startDate: startDate == _kKeep ? this.startDate : startDate as DateTime?,
         status: status ?? this.status,
         completedAt:
             completedAt == _kKeep ? this.completedAt : completedAt as DateTime?,
@@ -274,6 +281,7 @@ class Task {
         'priority': priority.name,
         'category': category.name,
         'dueDate': dueDate?.toIso8601String(),
+        'startDate': startDate?.toIso8601String(),
         'status': status.name,
         'done': done, // 保留旧字段，兼容历史备份/读取
         'completedAt': completedAt?.toIso8601String(),
@@ -323,6 +331,8 @@ class Task {
       category: Category.values.byName(j['category'] as String),
       dueDate:
           j['dueDate'] == null ? null : DateTime.parse(j['dueDate'] as String),
+      startDate:
+          j['startDate'] == null ? null : DateTime.parse(j['startDate'] as String),
       status: _parseStatus(j['status'] as String?, j['done'] as bool?),
       completedAt: j['completedAt'] == null
           ? null

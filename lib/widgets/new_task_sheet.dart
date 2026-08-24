@@ -39,6 +39,9 @@ class _TaskSheetState extends State<TaskSheet> {
   Category _category = Category.work;
   DateTime? _dueDate;
 
+  /// 任务开始时间（可空）。与截止时间并列，用于表达「时间段」类任务（如 14:00-15:00 开会）。
+  DateTime? _startDate;
+
   /// 子任务列表（编辑模式从任务预填）。
   List<SubTask> _subtasks = [];
   int? _editingIndex;
@@ -77,6 +80,7 @@ class _TaskSheetState extends State<TaskSheet> {
       _priority = t.priority;
       _category = t.category;
       _dueDate = t.dueDate;
+      _startDate = t.startDate;
       _repeat = t.repeat;
       _repeatWeekdays = List.from(t.repeatWeekdays);
       _repeatInterval = t.repeatInterval;
@@ -148,6 +152,42 @@ class _TaskSheetState extends State<TaskSheet> {
         }
       }
     });
+  }
+
+  /// 选择开始日期：默认今天；保留既有时间或默认 09:00。
+  Future<void> _pickStartDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _startDate ?? now,
+      firstDate: now.subtract(const Duration(days: 365)),
+      lastDate: now.add(const Duration(days: 365 * 5)),
+    );
+    if (picked != null) {
+      final int h = _startDate?.hour ?? 9;
+      final int m = _startDate?.minute ?? 0;
+      setState(() =>
+          _startDate = DateTime(picked.year, picked.month, picked.day, h, m));
+    }
+  }
+
+  /// 选择开始时间：需先选开始日期。
+  Future<void> _pickStartTime() async {
+    if (_startDate == null) return; // 需先选日期
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_startDate!),
+      helpText: '选择开始时间',
+    );
+    if (picked != null) {
+      setState(() => _startDate = DateTime(
+        _startDate!.year,
+        _startDate!.month,
+        _startDate!.day,
+        picked.hour,
+        picked.minute,
+      ));
+    }
   }
 
   Future<void> _pickTime() async {
@@ -263,6 +303,7 @@ class _TaskSheetState extends State<TaskSheet> {
         priority: _priority,
         category: _category,
         dueDate: _dueDate,
+        startDate: _startDate,
         repeat: _repeat,
         repeatWeekdays: weekdays,
         repeatInterval: _repeatInterval,
@@ -281,6 +322,7 @@ class _TaskSheetState extends State<TaskSheet> {
         priority: _priority,
         category: _category,
         dueDate: _dueDate,
+        startDate: _startDate,
         repeat: _repeat,
         repeatWeekdays: weekdays,
         repeatInterval: _repeatInterval,
@@ -682,6 +724,57 @@ class _TaskSheetState extends State<TaskSheet> {
                     ),
                   ),
                   Icon(Symbols.calendar_month, size: 20, color: ext.meta),
+                ],
+              ),
+            ),
+          ),
+          // 开始时间（可空）：与截止日期并列，表达「时间段」任务（如 14:00-15:00 开会）。
+          const SizedBox(height: 18),
+          _SectionLabel('开始时间'),
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: _pickStartDate,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: ext.chip,
+                borderRadius: BorderRadius.circular(AppColors.chipRadius),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    _startDate == null ? '选择日期（可选）' : _formatDate(_startDate!),
+                    style: TextStyle(
+                      color: _startDate == null ? ext.meta : scheme.onSurface,
+                      fontSize: 16,
+                    ),
+                  ),
+                  Icon(Symbols.event_available, size: 20, color: ext.meta),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          GestureDetector(
+            onTap: _startDate == null ? null : _pickStartTime,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: ext.chip,
+                borderRadius: BorderRadius.circular(AppColors.chipRadius),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    _startDate == null ? '请先选择日期' : _formatTime(_startDate!),
+                    style: TextStyle(
+                      color: _startDate == null ? ext.meta : scheme.onSurface,
+                      fontSize: 16,
+                    ),
+                  ),
+                  Icon(Symbols.schedule, size: 20, color: ext.meta),
                 ],
               ),
             ),

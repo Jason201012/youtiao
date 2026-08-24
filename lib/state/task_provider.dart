@@ -69,6 +69,22 @@ class TaskProvider extends ChangeNotifier {
     return hour >= _dndStartHour || hour < _dndEndHour;
   }
 
+  // ===== 每日专注目标（分钟）=====
+  /// 用户自定的「每日专注目标」分钟数；0 表示不启用目标（今日卡不展示进度环）。
+  /// 默认 120（与历史硬编码值一致）。在设置页可调，持久化到 SharedPreferences。
+  static const String _kFocusGoal = 'focus_goal_minutes';
+  int _focusGoalMinutes = 120;
+  int get focusGoalMinutes => _focusGoalMinutes;
+  /// 人类可读文案：0=关闭，否则「N 分钟」。
+  String get focusGoalLabel => _focusGoalMinutes <= 0 ? '关闭' : '$_focusGoalMinutes 分钟';
+  Future<void> setFocusGoalMinutes(int v) async {
+    final val = v.clamp(0, 1440);
+    if (val == _focusGoalMinutes) return;
+    _focusGoalMinutes = val;
+    notifyListeners();
+    await _persistSettings();
+  }
+
   // ===== 回收站自动清理（保留天数）=====
   /// 回收站条目超过该天数后，在每日 00:00 的原生重置接收器 + App 启动时兜底清理。
   /// -1 表示「永不自动清理」（回收站仅手动管理）。可选 7 / 30 / 90 / -1。
@@ -202,6 +218,7 @@ class TaskProvider extends ChangeNotifier {
     _dndStartHour = prefs.getInt(_kDndStart) ?? 22;
     _dndEndHour = prefs.getInt(_kDndEnd) ?? 7;
     _trashRetentionDays = prefs.getInt(_kTrashRetention) ?? 30;
+    _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
@@ -270,6 +287,7 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kDndStart, _dndStartHour);
     await prefs.setInt(_kDndEnd, _dndEndHour);
     await prefs.setInt(_kTrashRetention, _trashRetentionDays);
+    await prefs.setInt(_kFocusGoal, _focusGoalMinutes);
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
@@ -663,11 +681,13 @@ class TaskProvider extends ChangeNotifier {
         if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
-        // 无截止日期的排到今天列表末尾，不影响有日期任务的按时排序
-        if (a.dueDate == null && b.dueDate == null) return 0;
-        if (a.dueDate == null) return 1;
-        if (b.dueDate == null) return -1;
-        return a.dueDate!.compareTo(b.dueDate!);
+        // 排序键：优先用截止时间；无截止但有开始时间时用开始时间；两者皆无排末。
+        DateTime? keyA = a.dueDate ?? a.startDate;
+        DateTime? keyB = b.dueDate ?? b.startDate;
+        if (keyA == null && keyB == null) return 0;
+        if (keyA == null) return 1;
+        if (keyB == null) return -1;
+        return keyA.compareTo(keyB);
       });
     final future = active.where((t) {
       final d = dayDiff(t.dueDate);

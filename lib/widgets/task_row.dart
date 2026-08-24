@@ -293,6 +293,13 @@ class _MetaInfo extends StatelessWidget {
     if (task.isRepeating && task.repeatFull.isNotEmpty) {
       parts.add('↻ ${task.repeatFull}');
     }
+    // 开始时间（时间段起点）优先展示，体现「14:00-15:00」这类时段语义。
+    if (task.startDate != null) {
+      final s = task.startDate!;
+      final st =
+          '${s.hour.toString().padLeft(2, '0')}:${s.minute.toString().padLeft(2, '0')}';
+      parts.add('起 $st');
+    }
     parts.add(_dueLabel(task.dueDate));
     if (task.focusSecTotal > 0) {
       parts.add('⏱ ${_focusLabel(task.focusSecTotal)}');

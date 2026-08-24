@@ -117,7 +117,7 @@ class TodayAggregate {
       todoCount: todoCount,
       focusMinutes: focusMinutes,
       pomodoroCount: pomodoroCount,
-      focusGoalMinutes: 120,
+      focusGoalMinutes: task.focusGoalMinutes,
       sessions: sessions,
       habits: habits,
     );
