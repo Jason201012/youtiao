@@ -1,8 +1,8 @@
-﻿{
-  "version": "2.5.9",
-  "tag": "v2.5.9",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.5.9/app-release-v2.5.9-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.9",
-  "apkSha256": "F0E2CD8CE1F3E98CACE6793E86A03E09E4EC5D369D1C337C7D8FB6DD4976FF04",
-  "notes": "v2.5.9：四项实用功能——①通知栏「完成」按钮（点击直接标记完成并弹覆盖式确认，无需进 App）；②回收站自动清理（保留期 7/30/90 天或永不，每日 00:00 原生清理 + 启动兜底）；③稍后提醒自定义时长（10/30/60/120 分钟）+ 勿扰时段（整点区间、跨午夜，落区间的一次性提醒自动顺延到结束+5分）；④任务置顶/星标（置顶优先排序 + 列表星标标识）。沿用固定 release keystore 签名与 arm64-v8a 单架构。"
-}
+﻿{
+  "version": "2.6.0",
+  "tag": "v2.6.0",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.0/app-release-v2.6.0-arm64.apk",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.6.0",
+  "apkSha256": "58610c37683dfbf484467b91b2bb0d4cbf3c332e10ecb889bbb433ffcd74e067",
+  "notes": "v2.6.0：修复升级安装签名冲突——统一使用固定 release keystore 签名，覆盖安装不再报「与已安装应用签名不同」。沿用 arm64-v8a 单架构。"
+}
