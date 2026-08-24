@@ -164,6 +164,14 @@ void main() async {
     }
     return end;
   };
+  // S1：跨日首启自动生成当日滚动快照（纯本地，不上传）。
+  // 必须在 FocusProvider / HabitProvider 全部 load() 之后触发（P0-2），
+  // 否则快照会系统性缺失专注记录与习惯打卡。错误仅记日志，不阻断启动。
+  try {
+    await task.triggerAutoBackup();
+  } catch (e, s) {
+    debugPrint('自动备份触发失败（忽略）：$e\n$s');
+  }
   runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding, appLock: appLock));
 }
 

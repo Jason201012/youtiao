@@ -1,6 +1,6 @@
-﻿{
-  "version": "2.6.2",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.2/app-release-2.6.2-arm64.apk",
-  "apkSha256": "BC61BE19AC94D95AB3F00A565908798B6C4F6AC55E1E8A480D41B37260B5FEAF",
-  "releaseNotes": "v2.6.2：八项实用功能——①本地自动备份（滚动快照，allowBackup=false 后的唯一数据防线）；②子任务文本纳入全局搜索；③备份导入强校验（防恢复废档）；④任务一键转习惯；⑤周目标（本周完成任务数进度条）；⑥拼音首字母搜索；⑦专注时段分布图；⑧应用锁（生物识别）。沿用固定 release keystore 签名与 arm64-v8a 单架构。"
-}
+{
+  "version": "2.6.3",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.3/app-release-2.6.3-arm64.apk",
+  "apkSha256": "76A48B160AB02CE5C272A11D0D5EA5217DD3DE1DE1194A7C89164035D7DE921A",
+  "releaseNotes": "v2.6.3：发布后代码审查缺陷修复——P0 应用锁 Android 锁死（MainActivity 改 FlutterFragmentActivity）、自动备份缺专注/习惯数据（快照时序修正）；P1 拼音首字母误存全拼、恢复备份后拼音搜索失效、iOS 缺 FaceID 描述；P2 若干清理 + 新增 5 组回归测试。固定 release keystore 签名，arm64-v8a 单架构。"
+}

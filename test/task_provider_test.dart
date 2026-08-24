@@ -614,4 +614,29 @@ void main() {
       expect(p2.byId('1')!.subtasks.firstWhere((s) => s.id == 's2').done, isTrue);
     });
   });
+
+  group('本周完成数 weeklyCompletedCount（B1 / P2-7 补测）', () {
+    /// 复制 [TaskProvider._mondayOf] 口径，保证断言与当前星期几无关（周一也稳定）。
+    DateTime mondayOf(DateTime d) {
+      final today = DateTime(d.year, d.month, d.day);
+      return today.subtract(Duration(days: today.weekday - DateTime.monday));
+    }
+
+    test('仅统计本周一~周日且已完成的任务', () async {
+      final now = DateTime.now();
+      final mon = mondayOf(now);
+      final p = await buildWith([
+        mk('1', status: TaskStatus.done, completedAt: mon), // 本周一
+        mk('2', status: TaskStatus.done, completedAt: mon.add(const Duration(days: 3))), // 本周四
+        mk('3', status: TaskStatus.done, completedAt: mon.subtract(const Duration(days: 7))), // 上周一，排除
+        mk('4', status: TaskStatus.todo), // 未完成，排除
+      ]);
+      expect(p.weeklyCompletedCount, 2);
+    });
+
+    test('空库为 0', () async {
+      final p = await buildWith([]);
+      expect(p.weeklyCompletedCount, 0);
+    });
+  });
 }

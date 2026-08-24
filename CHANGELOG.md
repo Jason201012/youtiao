@@ -1,5 +1,30 @@
 # 更新日志（Changelog）
 
+## v2.6.3（2026-08-24）
+
+- **🔧 发布后代码审查缺陷修复（基于 v2.6.2 审查报告 P0/P1/P2）**：
+  - **P0-1 应用锁 Android 锁死**：`MainActivity` 由 `FlutterActivity` 改为 `FlutterFragmentActivity`，使 `local_auth` 的 BiometricPrompt 能正常拉起（否则 `authenticate()` 抛 `no_fragment_activity` 走「维持锁定」把用户锁死）。
+  - **P0-2 自动备份缺专注/习惯数据**：跨日首启快照从 `TaskProvider.load()` 内移除，改到 `main` 在 `FocusProvider`/`HabitProvider` 全部 `load()` 之后、首启前显式触发，备份不再遗漏专注/习惯数据。
+  - **P1-1 拼音首字母实为全拼**：`computePinyinInitials` 由 `getFirstWordPinyin`（全拼）改为 `getShortPinyin`（首字母，如「整理」→`zl`）。
+  - **P1-2 恢复备份后拼音搜索失效**：`restoreFromJson` 恢复时对每个任务按标题重算 `pinyinInitials`（旧备份该字段为空串）。
+  - **P1-3 iOS 缺 FaceID 描述**：`Info.plist` 补 `NSFaceIDUsageDescription`。
+  - **P2 清理**：移除未用 `_lastUnlockAt` 字段、`focus_hour_chart` 未用 import 与分钟「0」毛刺；`review_card` 两处 `read`→`watch`；`backup_sheet` 快照还原硬编码 `true`→`includeTrash` 透传；新增拼音/备份校验/时段分布/应用锁/周目标 5 组回归测试。
+- **签名**：固定 release keystore（与 v2.5.8 同源），arm64-v8a 单架构；双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。
+
+## v2.6.2（2026-08-24）
+
+- **✨ 八项实用功能（S/A/B 线）**：
+  - **S1 本地自动备份（滚动快照）**：设置页可开启「本地自动备份」，跨日首启自动在 App 私有目录生成当日滚动快照（保留最近 7 天），「备份与恢复」面板可一键还原；备份采用原子写（.tmp + rename），导入前经 `BackupValidator` 强校验拦截废档，纯本地不上传。
+  - **S2 子任务纳入搜索**：全局搜索现在命中任务子任务标题。
+  - **S3 备份导入强校验**：恢复前 `BackupValidator` 双重校验（来源判定 + 干跑解析），拒绝非「有条」备份 / 结构损坏，避免「校验失败后才清空数据」。
+  - **S5 任务一键转习惯**：任务详情页可把任务一键转为习惯（每天打卡），原任务可留在回收站。
+  - **B1 周目标（本周完成数）**：设置页可选「每周完成 N 个」目标（0/10/20/30/50），周报卡展示 `done/goal` 进度。
+  - **A1 拼音首字母搜索**：任务标题落库时计算拼音首字母（如「整理」→ `zl`），搜 `zl` 即可命中。
+  - **A2 专注时段分布图**：专注页新增 24 小时直方图，观察个人「专注生物钟」，零新增存储。
+  - **A4 应用锁（生物识别）**：设置页可开启应用锁，冷启动 / 回前台需指纹或面容验证；`biometricOnly` 不留 PIN 后门，零生物特征落盘，符合离线红线。
+- **⚠️ 发布后代码审查发现的缺陷（已在后续版本修复，见对应条目）**：应用锁在 Android 需宿主 Activity 继承 `FlutterFragmentActivity`（S1 自动备份启动时序导致快照缺专注/习惯数据）、拼音首字母 API 误用导致实际存全拼、恢复备份后拼音搜索静默失效。详见修复版本说明。
+- 版本号 v2.6.2（versionCode 83）；release 签名（与 v2.5.8 同源 keystore），双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。
+
 ## v2.6.1（2026-08-24）
 
 - **✨ 任务开始时间 / 时间段**：任务新增可选「开始时间」字段（`startDate`，可空、零迁移），与截止时间共同构成时间段；首页 / 看板 / 日历按「开始时间」与「截止时间」双锚点呈现任务跨度，未设开始时间的任务保持原「仅截止」行为。今日排序键改为 `截止时间 ?? 开始时间`。

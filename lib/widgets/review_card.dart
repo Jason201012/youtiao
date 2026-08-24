@@ -438,7 +438,7 @@ class WeeklyReviewCard extends StatelessWidget {
           // 周目标进度（B1）：本周完成任务数 / 周目标数，未设目标时不展示。
           Builder(
             builder: (ctx) {
-              final goal = ctx.read<TaskProvider>().weeklyGoalCount;
+              final goal = ctx.watch<TaskProvider>().weeklyGoalCount;
               if (goal <= 0) {
                 return Row(
                   children: [
@@ -455,7 +455,7 @@ class WeeklyReviewCard extends StatelessWidget {
                   ],
                 );
               }
-              final done = ctx.read<TaskProvider>().weeklyCompletedCount;
+              final done = ctx.watch<TaskProvider>().weeklyCompletedCount;
               final ratio = (done / goal).clamp(0.0, 1.0);
               final reached = done >= goal;
               return Column(

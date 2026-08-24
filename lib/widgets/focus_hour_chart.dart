@@ -2,8 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/state/focus_provider.dart';
-import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+
+/// 把秒数格式化为「分钟」标签：避免不足 30 秒四舍五入显示为 0 的视觉毛刺
+/// （有专注却标 0 分钟会让人误以为没数据）。
+String _formatMinutes(int secs) {
+  final mins = (secs / 60).round();
+  return (mins == 0 ? 1 : mins).toString();
+}
 
 /// 专注时段分布图（A2）：自绘 24 小时直方图。
 ///
@@ -53,7 +59,7 @@ class FocusHourChart extends StatelessWidget {
                       if (hours[h] > 0 && max > 0)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 4),
-                          child: Text('${(hours[h] / 60).round()}', // 分钟数
+                          child: Text(_formatMinutes(hours[h]), // 分钟数
                               style: TextStyle(fontSize: 9, color: ext.meta)),
                         ),
                       Container(

@@ -449,10 +449,10 @@ class Task {
   /// 是否为「重复任务」（任意规则）。
   bool get isRepeating => repeat != RepeatType.none;
 
-  /// 计算标题的拼音首字母串（小写，不含空格）。如「整理周会纪要」→ "zhenglizhouhuijiyao"。
+  /// 计算标题的拼音首字母串（小写，不含空格）。如「整理」→ "zl"、「整理周会纪要」→ "zlzhjy"。
   /// 依赖 [PinyinHelper]（lpinyin），纯 Dart、无平台调用；非汉字字符（数字/英文/标点）跳过，
   /// 仅取每个汉字的拼音首字母拼接。空标题返回空串。
-  /// 用于「拼音首字母搜索」（A1）：搜 "zl" 可命中「整理」。
+  /// 用于「拼音首字母搜索」（A1）：搜 "zl" 可命中「整理」，搜 "zz" 可命中「整理周…」。
   static String computePinyinInitials(String title) {
     if (title.isEmpty) return '';
     final buf = StringBuffer();
@@ -461,8 +461,9 @@ class Task {
       // 仅对 CJK 统一汉字区（含扩展 A）取拼音首字母；其余（字母/数字/符号）忽略，
       // 避免英文/数字干扰首字母匹配（搜 "abc" 不应被中文标题里的字母串命中）。
       if (_isCjk(rune)) {
-        // lpinyin 2.x：getFirstWordPinyin 对单字返回其拼音首字母（小写，如「整」→ "z"）。
-        final py = PinyinHelper.getFirstWordPinyin(ch);
+        // lpinyin 2.x：getShortPinyin 对单字返回其拼音首字母（小写，如「整」→ "z"）；
+        // 注意 getFirstWordPinyin 返回的是完整拼音（「整」→ "zheng"），不能用于首字母搜索。
+        final py = PinyinHelper.getShortPinyin(ch);
         if (py.isNotEmpty) buf.write(py.toLowerCase());
       }
     }

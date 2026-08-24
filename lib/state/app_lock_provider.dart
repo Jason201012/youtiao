@@ -28,9 +28,6 @@ class AppLockProvider extends ChangeNotifier {
   bool _locked = false;
   bool get locked => _locked;
 
-  /// 最近一次成功解锁的墙钟时刻，用于「短时间内回前台免重复验证」策略（预留）。
-  DateTime? _lastUnlockAt;
-
   /// 启动期探测生物识别可用性：不抛错、安静降级（不支持则开关不可用）。
   Future<void> probeBiometric() async {
     try {
@@ -93,7 +90,6 @@ class AppLockProvider extends ChangeNotifier {
       );
       if (ok) {
         _locked = false;
-        _lastUnlockAt = DateTime.now();
       }
       notifyListeners();
       return ok;

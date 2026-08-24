@@ -64,7 +64,10 @@ class BackupSheet {
                 ),
                 const Divider(height: 1),
                 // S1：本地自动备份（滚动快照）入口，展示开关状态 + 最近成功时间 + 快照列表。
-                _AutoBackupSection(taskProvider: taskProvider, context: context),
+                _AutoBackupSection(
+                    taskProvider: taskProvider,
+                    context: context,
+                    includeTrash: includeTrash),
               ],
             ),
           );
@@ -330,7 +333,12 @@ class BackupSheet {
 class _AutoBackupSection extends StatelessWidget {
   final TaskProvider taskProvider;
   final BuildContext context;
-  const _AutoBackupSection({required this.taskProvider, required this.context});
+  final bool includeTrash;
+  const _AutoBackupSection({
+    required this.taskProvider,
+    required this.context,
+    required this.includeTrash,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -384,7 +392,7 @@ class _AutoBackupSection extends StatelessWidget {
                         taskProvider,
                         this.context.read<FocusProvider>(),
                         this.context.read<HabitProvider>(),
-                        true,
+                        includeTrash,
                       );
                     },
                   ),

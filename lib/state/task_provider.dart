@@ -177,6 +177,11 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 供 [main] 在所有 Provider（FocusProvider / HabitProvider）加载完成后显式触发一次
+  /// 跨日快照。必须在单例注册之后调用，否则快照内 focus_sessions / 习惯打卡会因
+  /// [FocusProvider.instanceOrNull] / [HabitProvider.instanceOrNull] 尚未就绪而恒为空（P0-2）。
+  Future<void> triggerAutoBackup() => _autoBackupIfNeeded();
+
   /// 把当前全部数据（任务 + 回收站 + 偏好 + 专注 + 习惯 + 打卡）写入当日滚动快照。
   /// 文件名 backup/auto/YYYY-MM-DD.json，复用 [backupData] + 其余 Provider 的导出；
   /// 用 DataIo 原子写（.tmp + rename）避免写入中途打断导致快照损坏。
@@ -416,12 +421,6 @@ class TaskProvider extends ChangeNotifier {
     if (_notificationsEnabled) _rescheduleAllActive();
     _recomputeIdSeq();
     _startMidnightWatch();
-    // S1：跨日首启自动生成当日滚动快照（纯本地，不上传）。错误仅记日志，不阻断启动。
-    try {
-      await _autoBackupIfNeeded();
-    } catch (e, s) {
-      debugPrint('自动备份触发失败（忽略）：$e\n$s');
-    }
     notifyListeners();
   }
 
@@ -1243,9 +1242,14 @@ class TaskProvider extends ChangeNotifier {
           trashList.map((e) => Task.fromJson(e as Map<String, dynamic>)));
     }
     // 全部解析通过后，才真正覆盖内存态并落库。
+    // P1-2：恢复后统一按标题重算拼音首字母（旧版备份 pinyinInitials 多为空串，
+    // 直接采用会导致恢复后拼音搜索静默失效），保证搜索始终可用。
     _tasks
       ..clear()
-      ..addAll(parsed);
+      ..addAll(parsed
+          .map((t) =>
+              t.copyWith(pinyinInitials: Task.computePinyinInitials(t.title)))
+          .toList());
     if (includeTrash) {
       _trash
         ..clear()
