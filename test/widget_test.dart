@@ -4,6 +4,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 import 'test_helpers.dart';
 
 /// 构建冒烟测试：确保 MyApp 能正常初始化并渲染 6 个底部 Tab，
@@ -22,6 +23,7 @@ void main() {
         theme: ThemeProvider(),
         habit: HabitProvider(),
         onboarding: onboarding,
+        appLock: AppLockProvider(),
       ),
     );
     await tester.pump();

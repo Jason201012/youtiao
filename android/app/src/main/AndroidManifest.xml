@@ -16,6 +16,9 @@
     <!-- 专注结束自动写入系统日历所需权限（add_2_calendar 在运行时请求） -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- A4 应用锁（local_auth）：使用生物识别（指纹/面容）解锁所需权限 -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
     <application
         android:label="有条"
         android:name="${applicationName}"

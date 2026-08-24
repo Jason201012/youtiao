@@ -6,6 +6,7 @@ import 'package:todolist/models/checkin.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/backup_validator.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -61,6 +62,9 @@ class BackupSheet {
                         context, includeTrash);
                   },
                 ),
+                const Divider(height: 1),
+                // S1：本地自动备份（滚动快照）入口，展示开关状态 + 最近成功时间 + 快照列表。
+                _AutoBackupSection(taskProvider: taskProvider, context: context),
               ],
             ),
           );
@@ -126,6 +130,17 @@ class BackupSheet {
   ) async {
     final raw = await DataIo.pickJsonFile();
     if (raw == null) return;
+    // S3：恢复前置强校验，拦截「废档」——非「有条」备份 / 结构损坏 / 字段形态错误，
+    // 避免在校验失败后才清空当前数据（UI 直接提示原因，不弹覆盖确认框）。
+    final validation = BackupValidator.validate(raw);
+    if (!validation.ok) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('恢复被拒绝：${validation.message}')),
+        );
+      }
+      return;
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
@@ -215,5 +230,169 @@ class BackupSheet {
     final d = DateTime.now();
     final p = (int n) => n.toString().padLeft(2, '0');
     return '${d.year}${p(d.month)}${p(d.day)}-${p(d.hour)}${p(d.minute)}';
+  }
+
+  /// 从本地自动备份快照还原：读取该快照文件全文 → 走与「从备份恢复」相同的
+  /// 校验 + 覆盖流程（复用 [_doRestore] 的核心步骤，仅 raw 来源为本地文件）。
+  static Future<void> _restoreFromAutoBackup(
+    BuildContext context,
+    AutoBackupEntry entry,
+    TaskProvider provider,
+    FocusProvider focusProvider,
+    HabitProvider habitProvider,
+    bool includeTrash,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('从自动备份还原？'),
+        content: Text('这将用 ${entry.label} 的本地快照覆盖当前所有任务、习惯、设置与专注记录，且不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('还原'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      final raw = await entry.file.readAsString();
+      final validation = BackupValidator.validate(raw);
+      if (!validation.ok) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('还原被拒绝：${validation.message}')),
+          );
+        }
+        return;
+      }
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      // 干跑解析专注/习惯/打卡（与 _doRestore 一致）。
+      if (data['focus_sessions'] is List) {
+        (data['focus_sessions'] as List)
+            .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      if (data['habits'] is List) {
+        (data['habits'] as List)
+            .map((e) => Habit.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      if (data['check_ins'] is List) {
+        (data['check_ins'] as List)
+            .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      final failures = <String>[];
+      await provider.restoreFromJson(raw, includeTrash: includeTrash);
+      final focusList = data['focus_sessions'];
+      if (focusList is List) {
+        try {
+          await focusProvider.restoreSessions(focusList);
+        } catch (e) {
+          failures.add('专注记录（$e）');
+        }
+      }
+      if (data['habits'] is List || data['check_ins'] is List) {
+        try {
+          await habitProvider.restoreFromJson(data);
+        } catch (e) {
+          failures.add('习惯/打卡（$e）');
+        }
+      }
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: failures.isEmpty
+                ? Text('已从 ${entry.label} 的自动备份还原')
+                : Text('任务已还原，但：${failures.join('、')}'),
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('还原失败：$e')),
+        );
+      }
+    }
+  }
+}
+
+/// 自动备份（滚动快照）区块：开关 + 最近成功时间 + 快照列表（一键还原）。
+/// 设计为 Consumer<TaskProvider>，开关与最近时间变化即时刷新。
+class _AutoBackupSection extends StatelessWidget {
+  final TaskProvider taskProvider;
+  final BuildContext context;
+  const _AutoBackupSection({required this.taskProvider, required this.context});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = taskProvider;
+    final lastOk = provider.lastAutoBackupDate;
+    final err = provider.lastAutoBackupError;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('本地自动备份'),
+          subtitle: Text(err != null
+              ? '上次失败：$err'
+              : (lastOk != null
+                  ? '最近成功：${lastOk.month}月${lastOk.day}日（保留最近 7 天）'
+                  : '开启后每天自动生成本地快照')),
+          value: provider.autoBackupEnabled,
+          onChanged: (v) => provider.setAutoBackupEnabled(v),
+        ),
+        FutureBuilder<List<AutoBackupEntry>>(
+          future: provider.listAutoBackups(),
+          builder: (ctx, snap) {
+            final items = snap.data;
+            if (items == null) {
+              return const SizedBox(
+                height: 40,
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              );
+            }
+            if (items.isEmpty) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('暂无本地快照',
+                    style: TextStyle(fontSize: 13, color: Colors.grey)),
+              );
+            }
+            return Column(
+              children: [
+                for (final entry in items)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Symbols.history),
+                    title: Text('${entry.label} 快照'),
+                    trailing: const Icon(Symbols.restore),
+                    onTap: () {
+                      Navigator.pop(context); // 收起外层弹层
+                      BackupSheet._restoreFromAutoBackup(
+                        this.context,
+                        entry,
+                        taskProvider,
+                        this.context.read<FocusProvider>(),
+                        this.context.read<HabitProvider>(),
+                        true,
+                      );
+                    },
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
   }
 }

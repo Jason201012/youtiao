@@ -12,6 +12,7 @@ import 'package:todolist/widgets/focus_task_stats.dart';
 import 'package:todolist/services/focus_audio_service.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/focus_chart.dart';
+import 'package:todolist/widgets/focus_hour_chart.dart';
 
 /// 专注页（番茄钟）：大圆环倒计时 + 预设切换 + 可选关联任务 + 今日统计与记录。
 ///
@@ -548,6 +549,11 @@ class _FocusScreenState extends State<FocusScreen> {
 
                 // 今日记录
                 _RecordList(ext: ext, meta: ext.meta, onBg: onBg),
+
+                const SizedBox(height: 16),
+
+                // 专注时段分布图（A2）：24 小时桶直方图，看出一天中何时专注最多。
+                const FocusHourChart(),
 
                 const SizedBox(height: 24),
 

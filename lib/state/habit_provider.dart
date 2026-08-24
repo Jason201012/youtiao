@@ -10,6 +10,10 @@ import 'package:todolist/services/notification_service.dart';
 /// check_ins 两张表（整段 JSON 存储）。所有统计在内存中基于打卡日期集合计算，
 /// 逻辑单纯、易测。
 class HabitProvider extends ChangeNotifier {
+  /// 进程内单例引用（由 main 在构造后写入），供 TaskProvider 自动备份等场景安全取用。
+  /// 取前请判空（[instanceOrNull]）；测试/未初始化时为 null。
+  static HabitProvider? _instance;
+  static HabitProvider? get instanceOrNull => _instance;
   final List<Habit> _habits = [];
   final List<CheckIn> _checkIns = [];
 
@@ -35,6 +39,7 @@ class HabitProvider extends ChangeNotifier {
   }
 
   Future<void> load() async {
+    _instance = this; // 注册单例，供自动备份等场景安全取用
     try {
       final db = LocalDatabase.instance;
       // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。

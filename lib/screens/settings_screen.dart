@@ -15,6 +15,7 @@ import 'package:todolist/widgets/export_sheet.dart';
 import 'package:todolist/screens/help_screen.dart';
 import 'package:todolist/screens/trash_screen.dart';
 import 'package:todolist/services/update_checker.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 import 'package:todolist/widgets/update_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -181,6 +182,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // B1 周目标（本周完成数）：点按在 关闭/10/20/30/50 个间切换；0=关闭（周报卡不展示进度）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.event_repeat,
+                        label: '每周任务目标',
+                        value: provider.weeklyGoalLabel,
+                        onTap: () async {
+                          final options = [0, 10, 20, 30, 50];
+                          final picked = await showDialog<int>(
+                            context: context,
+                            builder: (d) => AlertDialog(
+                              title: const Text('每周任务目标'),
+                              content: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: options
+                                    .map((n) => RadioListTile<int>(
+                                          title: Text(n <= 0 ? '关闭' : '$n 个'),
+                                          value: n,
+                                          groupValue: provider.weeklyGoalCount,
+                                          onChanged: (v) => Navigator.pop(d, v),
+                                        ))
+                                    .toList(),
+                              ),
+                            ),
+                          );
+                          if (picked != null) provider.setWeeklyGoalCount(picked);
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     // 稍后提醒时长：点按在 10/30/60/120 分钟间切换。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(
@@ -325,6 +356,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       icon: Symbols.backup,
                       label: '备份与恢复',
                       onTap: () => BackupSheet.show(context),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // S1 本地自动备份（滚动快照）：默认开启；跨日首启生成当日快照，
+                    // 私有目录保留最近 7 份，作为 allowBackup=false 后的唯一数据防线。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.backup,
+                        label: '本地自动备份',
+                        // 副标题优先展示异常提示，否则展示最近快照日期。
+                        subtitle: provider.lastAutoBackupError != null
+                            ? '自动备份异常：${provider.lastAutoBackupError}'
+                            : provider.lastAutoBackupLabel,
+                        switchValue: provider.autoBackupEnabled,
+                        onSwitchChanged: (v) => provider.setAutoBackupEnabled(v),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // A4 应用锁：基于系统生物识别；设备不支持时禁用并提示。
+                    Consumer<AppLockProvider>(
+                      builder: (context, lock, _) => SettingsRow(
+                        icon: Symbols.lock,
+                        label: '应用锁（生物识别）',
+                        subtitle: lock.biometricAvailable
+                            ? '打开后每次进入需验证指纹/面容'
+                            : '当前设备不支持生物识别',
+                        switchValue: lock.appLockEnabled,
+                        onSwitchChanged: lock.biometricAvailable
+                            ? (v) async {
+                                final ok = await lock.setEnabled(v);
+                                if (!ok && mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('设备不支持生物识别，无法开启应用锁'),
+                                    ),
+                                  );
+                                }
+                              }
+                            : null,
+                      ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     // 回收站自动清理：选择保留天数（7/30/90/永不）。

@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
@@ -272,6 +273,17 @@ class TaskDetailScreen extends StatelessWidget {
           ),
           const SizedBox(height: 12),
 
+          // 转为习惯（S5）：把当前任务一键转为日常习惯，并询问是否删除原任务（走回收站可撤销）。
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => _convertToHabit(context, task),
+              icon: const Icon(Symbols.repeat),
+              label: const Text('转为习惯'),
+            ),
+          ),
+          const SizedBox(height: 12),
+
           // 删除（带二次确认，避免误删）
           SizedBox(
             width: double.infinity,
@@ -306,6 +318,54 @@ class TaskDetailScreen extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// 把任务一键转为习惯（S5）。
+///
+/// 逻辑：用任务标题建一条「每天」打卡的习惯（emoji 用默认✅，强调色用品牌色，
+/// 不携带提醒时间——让用户后续在习惯页自行设置提醒时机，避免误打扰）。
+/// 建完后询问是否删除原任务：选「删除」则走 deleteTask（进回收站、可撤销），
+/// 不选则保留任务（用户可同时保留任务与习惯，互不影响）。
+Future<void> _convertToHabit(BuildContext context, Task task) async {
+  final habit = context.read<HabitProvider>();
+  // 习惯默认「每天」打卡（weekdays 空=每天），emoji✅，品牌色，无提醒。
+  final brandColor = Theme.of(context).colorScheme.primary.value;
+  await habit.addHabit(
+    title: task.title,
+    emoji: '✅',
+    colorValue: brandColor,
+    weekdays: const [], // 空=每天
+    reminderMinute: null, // 不自动提醒，用户后续自行设置
+  );
+
+  if (!context.mounted) return;
+  // 询问是否删除原任务（默认保留，避免误删）。选「删除」才进回收站（可撤销）。
+  final remove = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('已转为习惯'),
+      content: const Text('已把该任务创建为「每天」打卡的习惯。是否同时删除原任务？（删除后可在回收站撤销）'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('保留任务'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('删除任务'),
+        ),
+      ],
+    ),
+  );
+  if (remove == true) {
+    context.read<TaskProvider>().deleteTask(task.id);
+  }
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('已转为习惯（可在「习惯」页设置提醒）')),
+    );
+    Navigator.pop(context);
   }
 }
 

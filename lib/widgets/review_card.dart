@@ -5,6 +5,8 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/models/review_narrative.dart';
+import 'package:todolist/state/task_provider.dart';
+import 'package:provider/provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/stat_card.dart';
@@ -433,19 +435,85 @@ class WeeklyReviewCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Text(
-                '查看完整周报',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: accent,
-                ),
-              ),
-              const SizedBox(width: 2),
-              Icon(Symbols.arrow_forward_ios, size: 13, color: accent),
-            ],
+          // 周目标进度（B1）：本周完成任务数 / 周目标数，未设目标时不展示。
+          Builder(
+            builder: (ctx) {
+              final goal = ctx.read<TaskProvider>().weeklyGoalCount;
+              if (goal <= 0) {
+                return Row(
+                  children: [
+                    Text(
+                      '查看完整周报',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: accent,
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                    Icon(Symbols.arrow_forward_ios, size: 13, color: accent),
+                  ],
+                );
+              }
+              final done = ctx.read<TaskProvider>().weeklyCompletedCount;
+              final ratio = (done / goal).clamp(0.0, 1.0);
+              final reached = done >= goal;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Symbols.flag, size: 14,
+                          color: reached ? accent : ext.meta),
+                      const SizedBox(width: 4),
+                      Text(
+                        '周目标 $done/$goal',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: reached ? accent : ext.meta,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        reached ? '已达成' : '${(ratio * 100).round()}%',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: ext.meta,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: ratio,
+                      minHeight: 6,
+                      backgroundColor: ext.track,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                          reached ? accent : ext.meta),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '查看完整周报',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: accent,
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      Icon(Symbols.arrow_forward_ios, size: 13, color: accent),
+                    ],
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),

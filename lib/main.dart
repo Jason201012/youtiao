@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:todolist/services/notification_service.dart';
@@ -10,6 +11,8 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/onboarding_provider.dart';
+import 'package:todolist/state/app_lock_provider.dart';
+import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/services/focus_audio_service.dart';
 import 'package:todolist/screens/onboarding_screen.dart';
 import 'package:todolist/widgets/bottom_nav.dart';
@@ -134,6 +137,8 @@ void main() async {
   await _safeLoad(habit, 'HabitProvider');
   final onboarding = OnboardingProvider();
   await _safeLoad(onboarding, 'OnboardingProvider');
+  final appLock = AppLockProvider();
+  await _safeLoad(appLock, 'AppLockProvider');
   // 启动后调度全部已设提醒的习惯（失败单个静默，不影响其它功能）。
   try {
     await habit.scheduleAllReminders();
@@ -159,7 +164,7 @@ void main() async {
     }
     return end;
   };
-  runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding));
+  runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding, appLock: appLock));
 }
 
 /// 安全加载 Provider：捕获所有异常避免 [runApp()] 永远不被调用（卡在 splash）。
@@ -175,6 +180,8 @@ Future<void> _safeLoad(ChangeNotifier provider, String name) async {
       await provider.load();
     } else if (provider is OnboardingProvider) {
       await provider.load();
+    } else if (provider is AppLockProvider) {
+      await provider.load();
     }
   } catch (e, stack) {
     debugPrint('[$name] 启动加载失败（已降级跳过）：$e\n$stack');
@@ -188,6 +195,7 @@ class MyApp extends StatelessWidget {
   final ThemeProvider theme;
   final HabitProvider habit;
   final OnboardingProvider onboarding;
+  final AppLockProvider appLock;
   const MyApp({
     super.key,
     required this.task,
@@ -195,6 +203,7 @@ class MyApp extends StatelessWidget {
     required this.theme,
     required this.habit,
     required this.onboarding,
+    required this.appLock,
   });
 
   @override
@@ -206,6 +215,7 @@ class MyApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: theme),
         ChangeNotifierProvider.value(value: habit),
         ChangeNotifierProvider.value(value: onboarding),
+        ChangeNotifierProvider.value(value: appLock),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, theme, _) {
@@ -323,6 +333,12 @@ class _MainScaffoldState extends State<MainScaffold>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 回到前台：若启用了应用锁，重新上锁，下次交互前需验证（A4）。
+    if (state == AppLifecycleState.resumed) {
+      try {
+        Provider.of<AppLockProvider>(context, listen: false).onResumed();
+      } catch (_) {}
+    }
     // 进程即将转入后台/被杀：把主题首选项重新落盘，规避 shared_preferences.apply()
     // 在激进 ROM 上杀进程时丢写（纯黑背景等唯一非默认项最易暴露）。
     if (state == AppLifecycleState.paused ||
@@ -357,22 +373,81 @@ class _MainScaffoldState extends State<MainScaffold>
       const HabitScreen(),
       const SettingsScreen(),
     ];
+    return Consumer<AppLockProvider>(
+      builder: (context, appLock, _) {
+        // A4 应用锁：未解锁时渲染独立解锁页，屏蔽主界面交互。
+        if (appLock.locked) {
+          return const AppLockGate();
+        }
+        return Scaffold(
+          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+          body: SafeArea(child: pages[_index]),
+          // FAB 仅首页，且搜索时隐藏（搜索页不需要新增任务的加号）
+          floatingActionButton: _index == 0 && !_homeSearching
+              ? NewTaskFab(
+                  onPressed: () => QuickEntrySheet.show(context),
+                )
+              : null,
+          // 搜索时隐藏底部导航（搜索页不需要切换 Tab）
+          bottomNavigationBar: _homeSearching
+              ? null
+              : AppBottomNav(
+                  currentIndex: _index,
+                  onTap: (i) => setState(() => _index = i),
+                ),
+        );
+      },
+    );
+  }
+}
+
+/// A4 应用锁解锁门禁页：全屏居中，调起系统生物识别。
+/// 验证成功后由 [AppLockProvider] 置 locked=false，MainScaffold 自动切回主界面。
+class AppLockGate extends StatelessWidget {
+  const AppLockGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final ext = appColors(context);
+    final onBg = scheme.onBackground;
     return Scaffold(
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      body: SafeArea(child: pages[_index]),
-      // FAB 仅首页，且搜索时隐藏（搜索页不需要新增任务的加号）
-      floatingActionButton: _index == 0 && !_homeSearching
-          ? NewTaskFab(
-              onPressed: () => QuickEntrySheet.show(context),
-            )
-          : null,
-      // 搜索时隐藏底部导航（搜索页不需要切换 Tab）
-      bottomNavigationBar: _homeSearching
-          ? null
-          : AppBottomNav(
-              currentIndex: _index,
-              onTap: (i) => setState(() => _index = i),
+      backgroundColor: scheme.background,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Symbols.lock, size: 56, color: ext.meta),
+                const SizedBox(height: 20),
+                Text(
+                  '有条',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    color: onBg,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '已开启应用锁，验证身份以进入',
+                  style: TextStyle(fontSize: 14, color: ext.meta),
+                ),
+                const SizedBox(height: 28),
+                FilledButton.icon(
+                  onPressed: () => context
+                      .read<AppLockProvider>()
+                      .authenticate(reason: '验证身份以进入有条'),
+                  icon: const Icon(Symbols.fingerprint),
+                  label: const Text('使用生物识别解锁'),
+                ),
+              ],
             ),
+          ),
+        ),
+      ),
     );
   }
 }

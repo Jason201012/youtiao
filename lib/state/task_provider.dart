@@ -1,10 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/services/local_database.dart';
+import 'package:todolist/services/data_io.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
+import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/state/habit_provider.dart';
 
 /// 首页列表筛选（看板统计卡点击后跳转首页并套用）。
 enum TaskFilter { all, todo, done, overdue }
@@ -84,6 +89,185 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
     await _persistSettings();
   }
+
+  // ===== 周目标（本周完成任务数，B1）=====
+  /// 用户自定的「每周完成任务数」目标；0 表示不启用目标（周报卡不展示进度）。
+  /// 默认 0（关闭）。在设置页可调，持久化到 SharedPreferences。
+  static const String _kWeeklyGoal = 'weekly_goal_count';
+  int _weeklyGoalCount = 0;
+  int get weeklyGoalCount => _weeklyGoalCount;
+  /// 人类可读文案：0=关闭，否则「N 个」。
+  String get weeklyGoalLabel => _weeklyGoalCount <= 0 ? '关闭' : '$_weeklyGoalCount 个';
+  Future<void> setWeeklyGoalCount(int v) async {
+    final val = v.clamp(0, 200);
+    if (val == _weeklyGoalCount) return;
+    _weeklyGoalCount = val;
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  /// 本周（周一 00:00 – 周日 23:59:59）已完成的任务数。基于全部任务（含回收站外的）的
+  /// completedAt 落在周区间内计数，与 [WeeklyReview.completedCount] 口径一致（复用同一区间逻辑）。
+  int get weeklyCompletedCount {
+    final start = _mondayOf(DateTime.now());
+    final end = start.add(const Duration(days: 6, hours: 23, minutes: 59, seconds: 59));
+    int n = 0;
+    for (final t in _tasks) {
+      if (t.done && t.completedAt != null) {
+        final d = DateTime(t.completedAt!.year, t.completedAt!.month, t.completedAt!.day);
+        if (!d.isBefore(start) && !d.isAfter(end)) n++;
+      }
+    }
+    return n;
+  }
+
+  /// 取 [d] 所在周的周一（00:00），与 [WeeklyReview._mondayOf] 口径一致。
+  static DateTime _mondayOf(DateTime d) {
+    final today = DateTime(d.year, d.month, d.day);
+    final diff = today.weekday - DateTime.monday;
+    return today.subtract(Duration(days: diff));
+  }
+
+  // ===== 本地自动备份（滚动快照，S1）=====
+  /// 是否启用「本地自动备份」：跨日首启自动生成当日滚动快照，默认开启。
+  /// 纯本地文件（App 私有文档目录 backup/auto/），不上传任何服务器。
+  static const String _kAutoBackup = 'auto_backup_enabled';
+  bool _autoBackupEnabled = true;
+  bool get autoBackupEnabled => _autoBackupEnabled;
+  /// 最近一次自动备份成功的本地日期（YYYY-MM-DD），null 表示从未成功过。
+  DateTime? _lastAutoBackupDate;
+  DateTime? get lastAutoBackupDate => _lastAutoBackupDate;
+  /// 最近一次自动备份失败的提示（用于设置页展示）；null = 无错误。
+  String? _lastAutoBackupError;
+  String? get lastAutoBackupError => _lastAutoBackupError;
+  /// 设置页副标题：展示最近一次成功备份的本地日期；从未成功则提示「未备份」。
+  String get lastAutoBackupLabel =>
+      _lastAutoBackupDate == null ? '尚未生成快照' : '最近快照：${_dateKey(_lastAutoBackupDate!)}';
+  Future<void> setAutoBackupEnabled(bool v) async {
+    if (v == _autoBackupEnabled) return;
+    _autoBackupEnabled = v;
+    notifyListeners();
+    await _persistSettings();
+    // 开启后立即尝试补一次（若今天还没备），关闭则不动作。
+    if (v) {
+      try {
+        await _autoBackupIfNeeded();
+      } catch (_) {
+        // 错误已在内部记录，不阻断 UI。
+      }
+    }
+  }
+
+  /// 跨日首启时生成当日滚动快照；今天已有快照则跳过。失败静默（仅记录 _lastAutoBackupError）。
+  Future<void> _autoBackupIfNeeded() async {
+    if (!_autoBackupEnabled) return;
+    final now = DateTime.now();
+    final todayKey = _dateKey(now);
+    if (_lastAutoBackupDate != null && _dateKey(_lastAutoBackupDate!) == todayKey) {
+      return; // 今天已备份
+    }
+    try {
+      await _writeAutoBackup(now);
+      _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
+      _lastAutoBackupError = null;
+    } catch (e, s) {
+      _lastAutoBackupError = '自动备份失败：$e';
+      debugPrint('$_lastAutoBackupError\n$s');
+    }
+    notifyListeners();
+  }
+
+  /// 把当前全部数据（任务 + 回收站 + 偏好 + 专注 + 习惯 + 打卡）写入当日滚动快照。
+  /// 文件名 backup/auto/YYYY-MM-DD.json，复用 [backupData] + 其余 Provider 的导出；
+  /// 用 DataIo 原子写（.tmp + rename）避免写入中途打断导致快照损坏。
+  Future<void> _writeAutoBackup(DateTime now) async {
+    final focus = FocusProvider.instanceOrNull;
+    final habit = HabitProvider.instanceOrNull;
+    final payload = <String, dynamic>{
+      'version': 3,
+      'app': '有条',
+      'schemaVersion': 1, // 自动备份标记（区别于手动导出的纯任务备份）
+      'generatedAt': now.toIso8601String(),
+      ...backupData(includeTrash: true),
+      'focus_sessions': focus?.sessionsJson ?? [],
+      ...habit?.backupData() ?? {'habits': [], 'check_ins': []},
+    };
+    final json =
+        const JsonEncoder.withIndent('  ').convert(payload);
+    await DataIo.saveToAppDocs('backup/auto/${_dateKey(now)}.json', json);
+    _rotateAutoBackups();
+  }
+
+  /// 滚动保留：仅保留最近 7 份当日快照（backup/auto/ 目录），删除更早的。
+  /// 用日期字符串排序即可（YYYY-MM-DD 字典序=时间序）。失败静默，不阻断主流程。
+  Future<void> _rotateAutoBackups() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final base = Directory('${dir.path}/backup/auto');
+      if (!await base.exists()) return;
+      final files = base
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.json'))
+          .toList();
+      files.sort((a, b) => a.path.compareTo(b.path)); // 旧→新
+      // 保留最新 7 份，其余删除
+      final excess = files.length - 7;
+      if (excess > 0) {
+        for (var i = 0; i < excess; i++) {
+          try {
+            await files[i].delete();
+          } catch (_) {
+            // 单文件删除失败不影响其余
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('滚动快照清理失败（忽略）：$e');
+    }
+  }
+
+  /// 列出本地自动备份快照（新→旧），供「备份与恢复」面板还原。
+  /// 每项含 date(DateTime) 与 file(File)。
+  Future<List<AutoBackupEntry>> listAutoBackups() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final base = Directory('${dir.path}/backup/auto');
+      if (!await base.exists()) return const [];
+      final files = base
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.json'))
+          .toList();
+      files.sort((a, b) => b.path.compareTo(a.path)); // 新→旧
+      final out = <AutoBackupEntry>[];
+      for (final f in files) {
+        final name = f.path.split(RegExp(r'[\\/]')).last;
+        // 文件名形如 YYYY-MM-DD.json
+        final key = name.replaceAll('.json', '');
+        final parts = key.split('-');
+        if (parts.length == 3) {
+          final y = int.tryParse(parts[0]);
+          final m = int.tryParse(parts[1]);
+          final d = int.tryParse(parts[2]);
+          if (y != null && m != null && d != null) {
+            out.add(AutoBackupEntry(
+              date: DateTime(y, m, d),
+              file: f,
+            ));
+          }
+        }
+      }
+      return out;
+    } catch (e) {
+      debugPrint('列出自动备份失败：$e');
+      return const [];
+    }
+  }
+
+  /// 把日期格式化为 YYYY-MM-DD（本地时区）。
+  static String _dateKey(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   // ===== 回收站自动清理（保留天数）=====
   /// 回收站条目超过该天数后，在每日 00:00 的原生重置接收器 + App 启动时兜底清理。
@@ -219,6 +403,8 @@ class TaskProvider extends ChangeNotifier {
     _dndEndHour = prefs.getInt(_kDndEnd) ?? 7;
     _trashRetentionDays = prefs.getInt(_kTrashRetention) ?? 30;
     _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
+    _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
+    _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
@@ -230,6 +416,12 @@ class TaskProvider extends ChangeNotifier {
     if (_notificationsEnabled) _rescheduleAllActive();
     _recomputeIdSeq();
     _startMidnightWatch();
+    // S1：跨日首启自动生成当日滚动快照（纯本地，不上传）。错误仅记日志，不阻断启动。
+    try {
+      await _autoBackupIfNeeded();
+    } catch (e, s) {
+      debugPrint('自动备份触发失败（忽略）：$e\n$s');
+    }
     notifyListeners();
   }
 
@@ -288,6 +480,8 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kDndEnd, _dndEndHour);
     await prefs.setInt(_kTrashRetention, _trashRetentionDays);
     await prefs.setInt(_kFocusGoal, _focusGoalMinutes);
+    await prefs.setInt(_kWeeklyGoal, _weeklyGoalCount);
+    await prefs.setBool(_kAutoBackup, _autoBackupEnabled);
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
@@ -872,7 +1066,11 @@ class TaskProvider extends ChangeNotifier {
   int _idSeq = 8;
   /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间或每日提醒则调度。
   void addTask(Task task) {
-    var newTask = task.copyWith(id: (_idSeq++).toString());
+    var newTask = task.copyWith(
+      id: (_idSeq++).toString(),
+      // A1：落库时统一计算拼音首字母，保证所有新建入口（NL 快速录入等）都自动覆盖。
+      pinyinInitials: Task.computePinyinInitials(task.title),
+    );
     // 落点到对应分区的末尾：取该分区现有最大 order + 1，避免新建任务跳到手动排序的区顶。
     final section = _sectionNameOf(newTask);
     double maxOrder = 0;
@@ -894,12 +1092,17 @@ class TaskProvider extends ChangeNotifier {
     final i = _tasks.indexWhere((t) => t.id == updated.id);
     if (i == -1) return;
     final old = _tasks[i];
+    // A1：标题变化时重算拼音首字母（标题不变则沿用旧值）。
+    final pin = updated.title == old.title
+        ? old.pinyinInitials
+        : Task.computePinyinInitials(updated.title);
     _tasks[i] = updated.copyWith(
       id: old.id,
       status: old.status,
       completedAt: old.completedAt,
       focusSecTotal: old.focusSecTotal,
       order: old.order,
+      pinyinInitials: pin,
     );
     // 截止时间或重复设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
     final remindersChanged = old.dueDate != updated.dueDate ||
@@ -1206,6 +1409,16 @@ class TaskProvider extends ChangeNotifier {
     final today = DateTime(now.year, now.month, now.day);
     return DateTime(d.year, d.month, d.day).isBefore(today);
   }
+}
+
+/// 自动备份快照的轻量描述（供「备份与恢复」面板列出与还原）。
+class AutoBackupEntry {
+  final DateTime date; // 快照对应的本地日期（YYYY-MM-DD）
+  final File file; // 快照文件（App 私有文档目录 backup/auto/ 下）
+  const AutoBackupEntry({required this.date, required this.file});
+
+  /// 友好展示：M月D日。
+  String get label => '${date.month}月${date.day}日';
 }
 
 /// 监听 App 生命周期：回到前台（resumed）时补一次每日重置检查，

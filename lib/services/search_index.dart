@@ -36,17 +36,22 @@ class GlobalSearch {
   }
 
   /// 任务命中规则：标题 / 分类（中文 label + 英文 name）/ 优先级（中文 + 英文）/
-  /// 备注 / 重复规则（label + 摘要）/ 标签。
+  /// 备注 / 重复规则（label + 摘要）/ 标签 / 子任务标题（S2）/ 拼音首字母（A1）。
   static bool _matchesTask(Task t, String q) {
-    return t.title.toLowerCase().contains(q) ||
-        t.category.label.toLowerCase().contains(q) ||
-        t.category.name.toLowerCase().contains(q) ||
-        _prioLabel(t.priority).contains(q) ||
-        t.priority.name.toLowerCase().contains(q) ||
-        t.note.toLowerCase().contains(q) ||
-        t.repeat.label.toLowerCase().contains(q) ||
-        t.repeatSummary.toLowerCase().contains(q) ||
-        t.tags.any((tag) => tag.toLowerCase().contains(q));
+    if (t.title.toLowerCase().contains(q)) return true;
+    if (t.category.label.toLowerCase().contains(q)) return true;
+    if (t.category.name.toLowerCase().contains(q)) return true;
+    if (_prioLabel(t.priority).contains(q)) return true;
+    if (t.priority.name.toLowerCase().contains(q)) return true;
+    if (t.note.toLowerCase().contains(q)) return true;
+    if (t.repeat.label.toLowerCase().contains(q)) return true;
+    if (t.repeatSummary.toLowerCase().contains(q)) return true;
+    if (t.tags.any((tag) => tag.toLowerCase().contains(q))) return true;
+    // S2：子任务标题纳入全局搜索（如任务里拆了「写大纲」，搜「大纲」即命中该任务）。
+    if (t.subtasks.any((s) => s.title.toLowerCase().contains(q))) return true;
+    // A1：拼音首字母匹配（搜 "zl" 命中「整理」），仅当首字母串非空时尝试，避免空串恒真。
+    if (t.pinyinInitials.isNotEmpty && t.pinyinInitials.contains(q)) return true;
+    return false;
   }
 
   /// 习惯命中规则：标题 / 频率文案（每天 / 每周 X）/ 提醒时间（HH:mm + 小时数字）。

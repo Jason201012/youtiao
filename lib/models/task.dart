@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lpinyin/lpinyin.dart';
 import 'package:todolist/theme/tokens.dart';
 
 /// 任务数据模型（对应设计稿：优先级色条、分类标签、截止日期、子任务、完成态）
@@ -194,6 +195,12 @@ class Task {
   /// 用于把高频/重要任务常驻列表顶部。序列化为 `pinned`，缺省 false（向后兼容，零迁移）。
   final bool pinned;
 
+  /// 标题拼音首字母串（如「整理周会纪要」→ "zhenglizhouhuijiyao"），用于「拼音首字母搜索」。
+  /// 由 [computePinyinInitials] 在新建/编辑任务时计算并落库，旧数据缺省为空串（向后兼容，零迁移）。
+  /// 搜索时与标题一起做包含匹配（见 [GlobalSearch._matchesTask]）。
+  /// 注意：此为派生字段，[copyWith] 默认保留旧值，调用方无需每次重算。
+  final String pinyinInitials;
+
   const Task({
     required this.id,
     required this.title,
@@ -216,6 +223,7 @@ class Task {
     this.order = 0.0,
     this.reminderOffsetMin = 0,
     this.pinned = false,
+    this.pinyinInitials = '',
   });
 
   // 哨兵：区分"未传该参数（保留旧值）"与"显式传 null（清空该字段）"。
@@ -245,6 +253,7 @@ class Task {
     double? order,
     int? reminderOffsetMin,
     bool? pinned,
+    String? pinyinInitials,
   }) =>
       Task(
         id: id ?? this.id,
@@ -272,6 +281,7 @@ class Task {
         order: order ?? this.order,
         reminderOffsetMin: reminderOffsetMin ?? this.reminderOffsetMin,
         pinned: pinned ?? this.pinned,
+        pinyinInitials: pinyinInitials ?? this.pinyinInitials,
       );
 
   /// 序列化为 JSON（用于 shared_preferences 持久化）
@@ -298,6 +308,7 @@ class Task {
         'order': order,
         'reminderOffsetMin': reminderOffsetMin,
         'pinned': pinned,
+        'pinyinInitials': pinyinInitials,
       };
 
   /// 从 JSON 反序列化（兼容旧版仅含 [done] 布尔的备份，以及 v1.9.4 之前
@@ -354,6 +365,7 @@ class Task {
       order: (j['order'] as num?)?.toDouble() ?? 0.0,
       reminderOffsetMin: j['reminderOffsetMin'] as int? ?? 0,
       pinned: j['pinned'] as bool? ?? false,
+      pinyinInitials: j['pinyinInitials'] as String? ?? '',
     );
   }
 
@@ -436,4 +448,29 @@ class Task {
 
   /// 是否为「重复任务」（任意规则）。
   bool get isRepeating => repeat != RepeatType.none;
+
+  /// 计算标题的拼音首字母串（小写，不含空格）。如「整理周会纪要」→ "zhenglizhouhuijiyao"。
+  /// 依赖 [PinyinHelper]（lpinyin），纯 Dart、无平台调用；非汉字字符（数字/英文/标点）跳过，
+  /// 仅取每个汉字的拼音首字母拼接。空标题返回空串。
+  /// 用于「拼音首字母搜索」（A1）：搜 "zl" 可命中「整理」。
+  static String computePinyinInitials(String title) {
+    if (title.isEmpty) return '';
+    final buf = StringBuffer();
+    for (final rune in title.runes) {
+      final ch = String.fromCharCode(rune);
+      // 仅对 CJK 统一汉字区（含扩展 A）取拼音首字母；其余（字母/数字/符号）忽略，
+      // 避免英文/数字干扰首字母匹配（搜 "abc" 不应被中文标题里的字母串命中）。
+      if (_isCjk(rune)) {
+        // lpinyin 2.x：getFirstWordPinyin 对单字返回其拼音首字母（小写，如「整」→ "z"）。
+        final py = PinyinHelper.getFirstWordPinyin(ch);
+        if (py.isNotEmpty) buf.write(py.toLowerCase());
+      }
+    }
+    return buf.toString();
+  }
+
+  /// 判断码点是否落在常用汉字区（CJK Unified Ideographs + 扩展 A）。
+  static bool _isCjk(int rune) =>
+      (rune >= 0x4E00 && rune <= 0x9FFF) || // 基本汉字
+      (rune >= 0x3400 && rune <= 0x4DBF); // 扩展 A
 }

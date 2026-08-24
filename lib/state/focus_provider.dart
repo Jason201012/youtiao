@@ -17,6 +17,10 @@ import 'package:todolist/services/calendar_exporter.dart';
 /// 打开 App 能从持久化的起点恢复，并继续累计；完成时刻另挂一条 setAlarmClock 系统
 /// 通知，即便 App 被杀也能准点提醒。
 class FocusProvider extends ChangeNotifier {
+  /// 进程内单例引用（由 main 在构造后写入），供 TaskProvider 自动备份等场景安全取用。
+  /// 取前请判空（[instanceOrNull]）；测试/未初始化时为 null。
+  static FocusProvider? _instance;
+  static FocusProvider? get instanceOrNull => _instance;
   static const String _kFocus = 'focus_sessions';
   static const String _kCustom = 'focus_custom_sec';
   static const String _kActive = 'focus_active_timer';
@@ -120,6 +124,7 @@ class FocusProvider extends ChangeNotifier {
       _sessions.toList()..sort((a, b) => b.endedAt.compareTo(a.endedAt));
 
   Future<void> load() async {
+    _instance = this; // 注册单例，供自动备份等场景安全取用
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getInt(_kCustom);
     if (saved != null && saved > 0) _customSec = saved;
@@ -645,6 +650,18 @@ class FocusProvider extends ChangeNotifier {
 
   /// 今日专注总秒数（含休息阶段，历史口径）。
   int get todayTotalSec => totalSecOn(DateTime.now());
+
+  /// 专注时段分布（A2）：按「开始时刻的小时」把全部专注会话（含休息阶段）聚合到 24 个桶，
+  /// 返回长度 24 的 int 列表（下标 0..23 对应 00:00..23:00 的累计专注秒数）。
+  /// 用于「专注时段分布图」自绘直方图。零新存储，纯基于现有 [_sessions] 现算。
+  List<int> hourDistribution() {
+    final buckets = List.filled(24, 0);
+    for (final s in _sessions) {
+      final h = s.startedAt.hour.clamp(0, 23);
+      buckets[h] += s.durationSec;
+    }
+    return buckets;
+  }
 
   /// 今日**专注阶段**总秒数（不含休息，推荐用于「今日专注」展示）。
   int get todayFocusSec => focusSecOn(DateTime.now());

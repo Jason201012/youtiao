@@ -9,6 +9,8 @@ class SettingsRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final String? value;
+  /// 副标题：存在时在 label 下方以小字展示（如开关状态说明、最近备份时间、错误提示）。
+  final String? subtitle;
   final bool showArrow;
   final VoidCallback? onTap;
   final bool? switchValue;
@@ -20,6 +22,7 @@ class SettingsRow extends StatelessWidget {
     required this.icon,
     required this.label,
     this.value,
+    this.subtitle,
     this.showArrow = true,
     this.onTap,
     this.switchValue,
@@ -31,8 +34,7 @@ class SettingsRow extends StatelessWidget {
     final ext = appColors(context);
     final onBg = Theme.of(context).colorScheme.onBackground;
     return Container(
-      height: 56,
-      padding: const EdgeInsets.only(left: 16, right: 12),
+      padding: const EdgeInsets.only(left: 16, right: 12, top: 10, bottom: 10),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(12),
@@ -46,8 +48,19 @@ class SettingsRow extends StatelessWidget {
             Icon(icon, size: 24, color: ext.meta),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(label,
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: onBg)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(label,
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: onBg)),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(subtitle!,
+                        style: TextStyle(fontSize: 12, color: ext.meta)),
+                  ],
+                ],
+              ),
             ),
             if (switchValue != null)
               Switch(

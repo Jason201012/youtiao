@@ -7,6 +7,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 import 'package:todolist/models/task.dart';
 import 'test_helpers.dart';
 
@@ -74,6 +75,7 @@ void main() {
         theme: theme,
         habit: hp,
         onboarding: await prepareSeenOnboarding(),
+        appLock: AppLockProvider(),
       ));
       await _settle(tester);
 
@@ -101,6 +103,7 @@ void main() {
         theme: theme,
         habit: hp,
         onboarding: await prepareSeenOnboarding(),
+        appLock: AppLockProvider(),
       ));
       await _settle(tester);
 
