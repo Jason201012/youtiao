@@ -1,6 +1,6 @@
-﻿{
-  "version": "2.6.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.1/app-release-v2.6.1-arm64.apk",
-  "apkSha256": "07934ACF984F72EA6987EECF57D411272B3275B944F567F98C6C153EFB9B0DFB",
-  "releaseNotes": "v2.6.1：任务开始时间/时间段、自定义专注目标（用户可设值）、备注链接可点击打开。"
-}
+﻿{
+  "version": "2.6.2",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.2/app-release-2.6.2-arm64.apk",
+  "apkSha256": "BC61BE19AC94D95AB3F00A565908798B6C4F6AC55E1E8A480D41B37260B5FEAF",
+  "releaseNotes": "v2.6.2：八项实用功能——①本地自动备份（滚动快照，allowBackup=false 后的唯一数据防线）；②子任务文本纳入全局搜索；③备份导入强校验（防恢复废档）；④任务一键转习惯；⑤周目标（本周完成任务数进度条）；⑥拼音首字母搜索；⑦专注时段分布图；⑧应用锁（生物识别）。沿用固定 release keystore 签名与 arm64-v8a 单架构。"
+}
