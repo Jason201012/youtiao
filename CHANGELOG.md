@@ -1,5 +1,53 @@
 # 更新日志（Changelog）
 
+## v2.6.1（2026-08-24）
+
+- **✨ 任务开始时间 / 时间段**：任务新增可选「开始时间」字段（`startDate`，可空、零迁移），与截止时间共同构成时间段；首页 / 看板 / 日历按「开始时间」与「截止时间」双锚点呈现任务跨度，未设开始时间的任务保持原「仅截止」行为。今日排序键改为 `截止时间 ?? 开始时间`。
+- **✨ 自定义每日专注目标（用户可设值）**：设置页新增「每日专注目标」行，可选 关闭 / 30 / 60 / 90 / 120 / 180 分钟（默认 120，0=关闭），持久化到 `focusGoalMinutes`；今日页专注目标进度从此读取用户设定值，而非硬编码。
+- **✨ 备注链接可点击打开**：任务详情页备注区识别 `https?://` 链接，渲染为可点击文本，点击经系统浏览器 `launchUrl` 打开；其余备注文本保持原样显示。
+- 改动文件：`models/task.dart`、`state/task_provider.dart`、`models/today.dart`、`widgets/new_task_sheet.dart`、`screens/task_detail_screen.dart`（含 `url_launcher` + `gestures`）、`widgets/task_row.dart`、`screens/settings_screen.dart`。`flutter analyze` 0 error。
+- 版本号 v2.6.1（versionCode 82）；release 签名（与 v2.5.8 同源 keystore），双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。
+
+## v2.6.0（2026-08-24）
+
+- **🔧 修复升级安装签名冲突（固定 release keystore）**：v2.5.9 因构建期未将签名环境变量传入 Gradle，回退到 debug keystore，导致手机上已装 release 版（v2.5.8）在覆盖安装时报「与已安装应用签名不同」。本次在构建前显式 `export` 4 个签名环境变量（`YOUTIAO_KEYSTORE` / `YOUTIAO_KEY_ALIAS` / `YOUTIAO_KEYSTORE_PASSWORD` / `YOUTIAO_KEY_PASSWORD`），重建后 apksigner 校验确认命中固定 release keystore（SHA-256 与 v2.5.8 一致）。
+- **⚠️ 注意**：v2.5.9 的 APK 为 debug 签名，建议已装该版本的用户先卸载再装 v2.6.0+，或直接升级到 v2.6.1。
+- 版本号 v2.6.0（versionCode 81）；无功能变更，纯签名修复 + 双站重发。
+
+## v2.5.9（2026-08-14）
+
+- **✨ 通知栏「完成」按钮**：任务 / 重复 / 习惯提醒新增「完成」action 按钮，点击直接在通知栏把任务标记为已完成，并弹出覆盖式确认，无需进入 App。
+- **✨ 回收站自动清理**：设置页新增「回收站保留期」选项（7 / 30 / 90 天 / 永不），每日 00:00 原生清理接收器 + App 启动兜底清理超期条目；`-1` 表示永不自动清理。
+- **✨ 稍后提醒自定义时长 + 勿扰时段**：「稍后提醒」支持 10 / 30 / 60 / 120 分钟可选（原固定 10 分钟）；新增「勿扰时段」（可跨午夜），落在区间内的一次性提醒自动顺延到勿扰结束后再响。
+- **✨ 任务置顶 / 星标**：任务支持「置顶」（所属分区内固定排最前，优先于手动 `order`）与「星标」（列表星标标识），常驻高频 / 重要任务于列表顶部。
+- 改动覆盖 `notification_service.dart`、`task_provider.dart`、`task.dart`、`main.dart`、`settings_screen.dart`、`new_task_sheet.dart`、`task_row.dart`、`home_screen.dart` 等；`flutter analyze` 0 error。
+- 版本号 v2.5.9（versionCode 80）。**注**：该版本 APK 误用 debug 签名（见 v2.6.0 修复说明），用户侧请以 v2.6.1 为准。
+
+## v2.5.8（2026-08-14）
+
+- **🐛 代码审查问题修复（6 缺陷 + 2 安全加固）**：
+  - Bug1 习惯提醒僵尸通知：恢复备份前先 `cancelHabitReminder` 旧 id，避免残留定时提醒。
+  - Bug2 测试通知 id 与习惯段重叠：测试通知 id 挪到 `1200000+` 独立段，不再与习惯提醒冲突。
+  - Bug3 备份恢复非原子：task / focus / habit 分步 `try/catch` 累积失败，避免单表失败导致整体中断。
+  - Bug4 专注结束时间落在未来：`ended` 取 `now` 与 `start + total` 的较大者，杜绝负时长 / 未来时间戳。
+  - Bug6 版本号含 `-beta` 比较异常：解析前剥离 pre-release 后缀再比对。
+  - Security1 FileProvider 路径用 `canonicalPath` 校验，防路径穿越。
+  - Security2 `AndroidManifest.xml` 关闭 `allowBackup`，降低数据被 adb 备份导出风险。
+  - （Bug5 undoDelete 索引按报告择机延后，本次未做。）
+- 版本号 v2.5.8（versionCode 79）。
+
+## v2.5.7（2026-08-13）
+
+- **🔧 固定 release 签名重发**：`android/app/build.gradle.kts` 接入固定 release keystore 配置——凭据从 4 个环境变量读取（绝不硬编码进仓库），不再依赖 AGP 自动生成的 debug keystore，避免跨机 / 重建导致的签名漂移（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。环境变量缺失时回退 debug（保持本地 `flutter run --release` 可用）。无功能变更，属签名可靠性重发。
+- 版本号 v2.5.7（versionCode 78）。
+
+## v2.5.6（2026-08-13）
+
+- **🐛 代码审查 19 项问题修复 + APK 完整性校验**：逐条验证审查报告 21 项，修复 19 项真实问题——午夜重置改读 SQLite（不再依赖内存态）、编辑任务丢字段、逾期口径统一、习惯周提醒 `skipToday`、番茄钟重入保护、备份恢复事务化、SQLite 快照防并发、`installApk` 路径前缀安全校验、APK 完整性 sha256 校验等。
+- **🔧 编译阻塞修复**：`data_io.dart` 适配 `file_picker` v12 的 API 变更（`FilePicker.pickFiles`，移除已移除的 `.platform` 访问器），解除编译失败。
+- `update.json` 同步 v2.5.6（含 `apkSha256` 完整性 pinning）；`flutter analyze` 0 error，280 项测试全绿。
+- 版本号 v2.5.6（versionCode 77）。
+
 ## v2.5.4（2026-08-13）
 
 - **✨ 单习惯详情弹层**：点击习惯进入详情，含专属「单习惯打卡热力图」、当前/最长/累计连续天数统计与「分享」入口。
