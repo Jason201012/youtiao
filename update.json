@@ -1,8 +1,6 @@
 ﻿{
-  "version": "2.6.0",
-  "tag": "v2.6.0",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.0/app-release-v2.6.0-arm64.apk",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.6.0",
-  "apkSha256": "58610c37683dfbf484467b91b2bb0d4cbf3c332e10ecb889bbb433ffcd74e067",
-  "notes": "v2.6.0：修复升级安装签名冲突——统一使用固定 release keystore 签名，覆盖安装不再报「与已安装应用签名不同」。沿用 arm64-v8a 单架构。"
+  "version": "2.6.1",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.1/app-release-v2.6.1-arm64.apk",
+  "apkSha256": "07934ACF984F72EA6987EECF57D411272B3275B944F567F98C6C153EFB9B0DFB",
+  "releaseNotes": "v2.6.1：任务开始时间/时间段、自定义专注目标（用户可设值）、备注链接可点击打开。"
 }
