@@ -1,6 +1,6 @@
 {
-  "version": "2.6.5",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.5/app-release-2.6.5-arm64.apk",
-  "apkSha256": "7717B0D985E21A62E842217C2CB56AC7ECDEB2B4246FA4B4FC52E524E2D53718",
-  "releaseNotes": "v2.6.5：应用锁支持手机锁屏密码降级解锁（指纹/面容不可用时可用 PIN/图案/密码）；系统验证弹窗文案全面汉化。固定 release keystore 签名，arm64-v8a 单架构。"
+  "version": "2.6.6",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.6/app-release-2.6.6-arm64.apk",
+  "apkSha256": "B25FF7679925701188CEB75EED2DF327F16327714E79E9B39D851D55E1410749",
+  "releaseNotes": "v2.6.6：修复自动备份因 backup/auto 子目录未创建而静默失败（PathNotFoundException）；自动备份扩展纳入主题配色/应用锁/番茄钟/免打扰等 26 个偏好键，换机后体验更完整。固定 release keystore 签名，arm64-v8a 单架构。"
 }

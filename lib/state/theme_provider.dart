@@ -64,6 +64,7 @@ class ThemeProvider extends ChangeNotifier {
     _useDynamic = prefs.getBool(_kUseDynamic) ?? true;
     _seedColor = prefs.getInt(_kSeed) ?? -1;
     _pureBlack = prefs.getBool(_kPureBlack) ?? false;
+    notifyListeners();
   }
 
   Future<void> setFollowSystem(bool v) async {

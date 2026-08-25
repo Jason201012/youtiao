@@ -24,6 +24,9 @@ class DataIo {
   static Future<File> saveToAppDocs(String fileName, String content) async {
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$fileName');
+    // 兼容子目录写入：如 backup/auto/YYYY-MM-DD.json 需先创建父目录，
+    // 否则 tmp.writeAsString() 会抛 PathNotFoundException。
+    await file.parent.create(recursive: true);
     final tmp = File('${file.path}.tmp');
     await tmp.writeAsString(content);
     if (await file.exists()) {

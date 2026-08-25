@@ -78,6 +78,19 @@ class AppLockProvider extends ChangeNotifier {
     return true;
   }
 
+  /// 还原备份后刷新应用锁开关，使其与持久化值一致；**不修改 [_locked]**，
+  /// 避免「还原过程中把正在使用的 App 立即锁屏」。
+  ///
+  /// 与 [load] 的区别：[load] 会在冷启动时按 `_enabled` 设置首帧是否需验证
+  /// （`_locked = _enabled`），但还原发生在 App 前台运行期，若强行锁屏会打断用户操作，
+  /// 因此这里只同步开关与生物特征可用性，真正的重新上锁交由下次生命周期回调处理。
+  Future<void> refreshEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    _enabled = prefs.getBool(_kEnabled) ?? false;
+    await probeBiometric();
+    notifyListeners();
+  }
+
   /// App 回到前台时调用：若启用锁则重新上锁（下次交互前需验证）。
   ///
   /// 两个豁免（均为真机实测出的竞态，缺一即出现「识别成功仍停留在锁定页」）：

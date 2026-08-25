@@ -7,9 +7,13 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/backup_validator.dart';
+import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/theme_provider.dart';
+import 'package:todolist/state/app_lock_provider.dart';
+import 'package:todolist/state/onboarding_provider.dart';
 
 /// 「备份与恢复」底部弹层：提供「备份到文件」「从备份恢复」，
 /// 并可选择是否把回收站一并备份 / 恢复。
@@ -245,6 +249,10 @@ class BackupSheet {
     HabitProvider habitProvider,
     bool includeTrash,
   ) async {
+    // 在首个 await 之前捕获各 Provider，避免跨异步间隙使用 BuildContext 的 lint。
+    final themeProvider = context.read<ThemeProvider>();
+    final appLockProvider = context.read<AppLockProvider>();
+    final onboardingProvider = context.read<OnboardingProvider>();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
@@ -306,6 +314,23 @@ class BackupSheet {
           await habitProvider.restoreFromJson(data);
         } catch (e) {
           failures.add('习惯/打卡（$e）');
+        }
+      }
+      // 还原 App 级偏好（外观/锁/专注/免打扰/通用开关）。
+      // 写回 SharedPreferences 后，触发各 Provider 重新读取使内存态即时生效。
+      // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
+      // 改用 refreshEnabled() 仅刷新开关、不触发锁。
+      if (data['prefs'] is Map) {
+        try {
+          await applyAppPrefs(data['prefs'] as Map<String, dynamic>);
+          await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
+          await focusProvider.load();
+          await habitProvider.load();
+          await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
+          await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
+          await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
+        } catch (e) {
+          failures.add('偏好设置（$e）');
         }
       }
       if (context.mounted) {

@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
@@ -196,6 +197,9 @@ class TaskProvider extends ChangeNotifier {
       ...backupData(includeTrash: true),
       'focus_sessions': focus?.sessionsJson ?? [],
       ...habit?.backupData() ?? {'habits': [], 'check_ins': []},
+      // 纳入 App 级偏好（外观/锁/专注/免打扰/通用开关），换机后体验更完整。
+      // 排除系统生物特征、更新检查状态、运行中的计时器（见 prefs_backup.dart）。
+      'prefs': await collectAppPrefs(),
     };
     final json =
         const JsonEncoder.withIndent('  ').convert(payload);

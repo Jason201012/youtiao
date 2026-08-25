@@ -24,6 +24,7 @@ class OnboardingProvider extends ChangeNotifier {
     } catch (_) {
       _seen = false;
     }
+    notifyListeners();
   }
 
   /// 标记引导已完成并落盘。
