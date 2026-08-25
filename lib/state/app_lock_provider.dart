@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:local_auth_android/local_auth_android.dart';
+import 'package:local_auth_darwin/local_auth_darwin.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 应用锁（A4）：基于系统生物识别（指纹 / 面容）的启动 / 回前台解锁门禁。
@@ -12,6 +14,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///   true，验证成功后置 false。冷启动首帧也需验证（MainScaffold 在 locked 时渲染
 ///   独立解锁页，而非主界面）。
 /// - 设备不支持生物识别时 [biometricAvailable] 为 false，设置页开关禁用并提示。
+/// - 指纹/面容之外允许降级用手机锁屏密码（PIN/图案/密码）解锁；
+///   系统验证弹窗文案统一汉化（v2.6.4 用户反馈部分文案为英文）。
 class AppLockProvider extends ChangeNotifier {
   static const String _kEnabled = 'app_lock_enabled';
 
@@ -106,9 +110,32 @@ class AppLockProvider extends ChangeNotifier {
       final ok = await _auth.authenticate(
         localizedReason: reason,
         options: const AuthenticationOptions(
-          biometricOnly: true,
+          // false = 指纹/面容之外允许降级用手机锁屏密码（PIN/图案/密码）解锁。
+          biometricOnly: false,
           stickyAuth: true,
         ),
+        // 系统验证弹窗文案汉化：Android 走 BiometricPrompt 各字段，
+        // iOS 走 FaceID/TouchID 弹窗按钮与回退标题。
+        authMessages: const [
+          AndroidAuthMessages(
+            signInTitle: '解锁「有条」',
+            biometricHint: '',
+            cancelButton: '取消',
+            biometricSuccess: '验证成功',
+            biometricNotRecognized: '未识别成功，请重试',
+            biometricRequiredTitle: '需要验证身份',
+            deviceCredentialsRequiredTitle: '需要验证锁屏密码',
+            deviceCredentialsSetupDescription: '需要设置手机锁屏密码',
+            goToSettingsButton: '去设置',
+            goToSettingsDescription:
+                '尚未设置手机锁屏密码，请到系统设置中设置后重试。',
+          ),
+          IOSAuthMessages(
+            cancelButton: '取消',
+            localizedFallbackTitle: '使用锁屏密码',
+            lockOut: '验证次数过多，已锁定。请稍后重试或改用锁屏密码。',
+          ),
+        ],
       );
       if (ok) {
         _locked = false;

@@ -1,6 +1,6 @@
 {
-  "version": "2.6.4",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.4/app-release-2.6.4-arm64.apk",
-  "apkSha256": "2B239B9455A818F9A55B5DE961F255D196B36DF2A4E5C5C0489C29B606ABF5B5",
-  "releaseNotes": "v2.6.4：修复生物识别解锁后仍停留在锁定页的问题（系统验证页关闭触发的生命周期竞态导致刚解锁被立即重新上锁）。固定 release keystore 签名，arm64-v8a 单架构。"
+  "version": "2.6.5",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.5/app-release-2.6.5-arm64.apk",
+  "apkSha256": "7717B0D985E21A62E842217C2CB56AC7ECDEB2B4246FA4B4FC52E524E2D53718",
+  "releaseNotes": "v2.6.5：应用锁支持手机锁屏密码降级解锁（指纹/面容不可用时可用 PIN/图案/密码）；系统验证弹窗文案全面汉化。固定 release keystore 签名，arm64-v8a 单架构。"
 }

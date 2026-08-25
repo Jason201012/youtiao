@@ -1,7 +1,7 @@
 name: todolist
 description: Material 3 TodoList 应用（设计稿 1:1 还原）
 publish_to: 'none'
-version: 2.6.4+85
+version: 2.6.5+86
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -31,6 +31,9 @@ dependencies:
   add_2_calendar: ^3.1.1
   lpinyin: ^2.0.3
   local_auth: ^2.1.8
+  # 显式声明平台包：应用锁需 import AndroidAuthMessages/IOSAuthMessages 定制中文文案
+  local_auth_android: ^1.0.48
+  local_auth_darwin: ^1.4.2
 
 dev_dependencies:
   flutter_test:

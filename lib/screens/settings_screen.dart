@@ -374,12 +374,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     // A4 应用锁：基于系统生物识别；设备不支持时禁用并提示。
+                    // v2.6.4+：验证失败/不可用时系统弹窗允许降级用手机锁屏密码。
                     Consumer<AppLockProvider>(
                       builder: (context, lock, _) => SettingsRow(
                         icon: Symbols.lock,
                         label: '应用锁（生物识别）',
                         subtitle: lock.biometricAvailable
-                            ? '打开后每次进入需验证指纹/面容'
+                            ? '打开后每次进入需验证指纹/面容，也可用手机锁屏密码'
                             : '当前设备不支持生物识别',
                         switchValue: lock.appLockEnabled,
                         onSwitchChanged: lock.biometricAvailable
