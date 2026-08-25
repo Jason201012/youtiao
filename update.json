@@ -1,6 +1,6 @@
 {
-  "version": "2.6.3",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.3/app-release-2.6.3-arm64.apk",
-  "apkSha256": "76A48B160AB02CE5C272A11D0D5EA5217DD3DE1DE1194A7C89164035D7DE921A",
-  "releaseNotes": "v2.6.3：发布后代码审查缺陷修复——P0 应用锁 Android 锁死（MainActivity 改 FlutterFragmentActivity）、自动备份缺专注/习惯数据（快照时序修正）；P1 拼音首字母误存全拼、恢复备份后拼音搜索失效、iOS 缺 FaceID 描述；P2 若干清理 + 新增 5 组回归测试。固定 release keystore 签名，arm64-v8a 单架构。"
+  "version": "2.6.4",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.4/app-release-2.6.4-arm64.apk",
+  "apkSha256": "2B239B9455A818F9A55B5DE961F255D196B36DF2A4E5C5C0489C29B606ABF5B5",
+  "releaseNotes": "v2.6.4：修复生物识别解锁后仍停留在锁定页的问题（系统验证页关闭触发的生命周期竞态导致刚解锁被立即重新上锁）。固定 release keystore 签名，arm64-v8a 单架构。"
 }

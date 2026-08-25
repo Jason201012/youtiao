@@ -28,6 +28,16 @@ class AppLockProvider extends ChangeNotifier {
   bool _locked = false;
   bool get locked => _locked;
 
+  /// 正在调起系统生物识别。期间系统验证页（独立 Activity）开关会导致
+  /// Flutter 收到 paused/resumed 生命周期抖动，[onResumed] 必须忽略，
+  /// 否则会在验证过程中/刚成功时被误重新上锁。
+  bool _authenticating = false;
+
+  /// 最近一次解锁时间戳。[onResumed] 在解锁后短宽限期内忽略 resumed——
+  /// 指纹成功关闭系统页触发的那次 resumed 与 authenticate() Future 完成存在
+  /// 竞态，若不宽限会出现「识别成功却立刻回到锁定页」。
+  DateTime? _lastUnlockAt;
+
   /// 启动期探测生物识别可用性：不抛错、安静降级（不支持则开关不可用）。
   Future<void> probeBiometric() async {
     try {
@@ -65,7 +75,17 @@ class AppLockProvider extends ChangeNotifier {
   }
 
   /// App 回到前台时调用：若启用锁则重新上锁（下次交互前需验证）。
+  ///
+  /// 两个豁免（均为真机实测出的竞态，缺一即出现「识别成功仍停留在锁定页」）：
+  /// 1. 生物识别验证进行中（[onResumed] 由系统验证页关闭触发）——忽略；
+  /// 2. 解锁后 3 秒宽限期内的那次 resumed（与 authenticate Future 完成存在竞态）——忽略。
   void onResumed() {
+    if (_authenticating) return;
+    final last = _lastUnlockAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 3)) {
+      return;
+    }
     if (_enabled && !_locked) {
       _locked = true;
       notifyListeners();
@@ -80,6 +100,8 @@ class AppLockProvider extends ChangeNotifier {
       notifyListeners();
       return true;
     }
+    // 标记验证中：系统验证页开关引发的生命周期抖动不得触发重新上锁。
+    _authenticating = true;
     try {
       final ok = await _auth.authenticate(
         localizedReason: reason,
@@ -90,6 +112,8 @@ class AppLockProvider extends ChangeNotifier {
       );
       if (ok) {
         _locked = false;
+        // 记录解锁时刻，供 [onResumed] 的宽限期判断（竞态豁免 2）。
+        _lastUnlockAt = DateTime.now();
       }
       notifyListeners();
       return ok;
@@ -97,6 +121,10 @@ class AppLockProvider extends ChangeNotifier {
       debugPrint('[AppLock] 验证异常：$e');
       // 异常时不自动解锁（安全优先），返回 false 让 UI 维持锁定页。
       return false;
+    } finally {
+      _authenticating = false;
+      // 状态可能已变（成功解锁），通知监听方刷新。
+      notifyListeners();
     }
   }
 }

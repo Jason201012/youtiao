@@ -76,4 +76,46 @@ void main() {
       expect(p.locked, isFalse);
     });
   });
+
+  group('解锁宽限期（v2.6.3 真机竞态回归）', () {
+    /// local_auth 主通道：mock 后可在 headless 下模拟「指纹验证成功」。
+    const channel = MethodChannel('plugins.flutter.io/local_auth');
+
+    test('验证成功即解锁；紧随的 onResumed（系统页关闭触发的竞态 resumed）不重新上锁',
+        () async {
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+      binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        switch (call.method) {
+          case 'authenticate':
+            return true;
+          case 'isDeviceSupported':
+            return true;
+          case 'canCheckBiometrics':
+            return false;
+          default:
+            return null;
+        }
+      });
+      addTearDown(() => binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null));
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('app_lock_enabled', true);
+      final p = AppLockProvider();
+      await p.load();
+      expect(p.appLockEnabled, isTrue);
+      expect(p.locked, isTrue);
+
+      // 模拟用户完成指纹验证：Future 返回 true 并解锁。
+      final ok = await p.authenticate(reason: '测试');
+      expect(ok, isTrue);
+      expect(p.locked, isFalse);
+
+      // 关键回归点：系统验证 Activity 关闭会再触发一次 resumed，
+      // 宽限期内必须忽略，否则刚解锁立刻被盖回锁定页（v2.6.3 真机 bug）。
+      p.onResumed();
+      expect(p.locked, isFalse);
+    });
+  });
 }
