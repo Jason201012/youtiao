@@ -1336,7 +1336,15 @@ class TaskProvider extends ChangeNotifier {
       p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
   static String _catLabel(Category c) =>
       c == Category.work ? '工作' : c == Category.life ? '生活' : '学习';
-  static String _esc(String s) => s.replaceAll('"', '""');
+  static String _esc(String s) {
+    final v = s.replaceAll('"', '""');
+    // S11 修复：CSV 公式注入防护。以 = + - @ 开头的单元格在 Excel/WPS 中会被当作公式执行
+    // （如任务名为 "=HYPERLINK(...)" 时）。前置单引号强制按文本处理（OWASP CSV Injection 惯例）。
+    if (v.isNotEmpty && const ['=', '+', '-', '@'].contains(v[0])) {
+      return "'$v";
+    }
+    return v;
+  }
 
   /// 新建任务时按 dueDate 调度本地通知
   Future<void> scheduleFor(Task task) async {

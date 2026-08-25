@@ -605,4 +605,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # S5 修复：此脚本已废弃，统一改用根目录的 _publish_v266.py 作为唯一发版入口。
+    # 旧脚本生成的 update.json 缺少 apkSha256 且指向旧仓库 youtiao-releases，
+    # 误用会削弱自更新防线（见审计报告 S5）。
+    print("⛔ _build2.py 已废弃：请改用 _publish_v266.py（唯一发版入口）。", file=sys.stderr)
+    sys.exit(1)

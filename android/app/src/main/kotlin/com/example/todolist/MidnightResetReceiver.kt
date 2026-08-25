@@ -7,6 +7,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
@@ -101,6 +102,73 @@ class MidnightResetReceiver : BroadcastReceiver() {
         android.util.Log.d("MidnightReset", msg)
     }
 
+    /** SQLITE_BUSY（并发写冲突）标志，主进程与 :guard 进程并发写 youtiao.db 时可能出现。 */
+    private const val SQLITE_BUSY_RETRY = 3
+
+    /**
+     * S10 修复：以跨进程安全方式打开主进程的 youtiao.db。
+     * - 尽力启用 WAL（PRAGMA journal_mode=WAL），降低 :guard 进程与主进程 sqflite 并发访问的锁冲突；
+     * - 设置 PRAGMA busy_timeout，使并发写入时等待而非立即抛 SQLITE_BUSY；
+     * - 打开失败不再静默吞掉，而是记录日志，便于排查每日重置未生效的问题。
+     * 若主进程当前以 DELETE 日志模式占用该 DB，WAL PRAGMA 会失败（SQLITE_BUSY），
+     * 此时退化为 busy_timeout 重试，不会破坏现有数据。
+     */
+    private fun openGuardDb(dbPath: String): SQLiteDatabase? {
+        val db = try {
+            SQLiteDatabase.openDatabase(
+                dbPath,
+                null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+            )
+        } catch (e: Exception) {
+            debugLog("打开 youtiao.db 失败（:guard 进程）：${e.message}")
+            return null
+        }
+        try {
+            db.execSQL("PRAGMA journal_mode=WAL")
+        } catch (_: Exception) {
+            // 主进程占用时 WAL 切换失败属正常，退化为 busy_timeout 重试。
+        }
+        try {
+            db.execSQL("PRAGMA busy_timeout=5000")
+        } catch (_: Exception) {
+            // 忽略
+        }
+        return db
+    }
+
+    /**
+     * S10 修复：在 :guard 进程中对主进程 DB 执行写入操作，带 SQLITE_BUSY 重试。
+     * 主进程（App）可能正持有该 DB 连接，并发写会触发 SQLITE_BUSY（"database is locked"）；
+     * 此处重试并等待 busy_timeout 释放锁，而不是像旧代码那样静默放弃每日重置。
+     */
+    private fun <R> withGuardDb(dbPath: String, block: (SQLiteDatabase) -> R): R? {
+        var lastErr: Exception? = null
+        for (attempt in 1..SQLITE_BUSY_RETRY) {
+            val db = openGuardDb(dbPath) ?: return null
+            try {
+                return block(db)
+            } catch (e: Exception) {
+                lastErr = e
+                val busy = e is SQLiteException &&
+                    e.message?.contains("locked", ignoreCase = true) == true
+                debugLog("youtiao.db 写入失败（尝试 $attempt/$SQLITE_BUSY_RETRY）：${e.message}")
+                if (!busy) break
+                if (attempt < SQLITE_BUSY_RETRY) Thread.sleep(800)
+            } finally {
+                try {
+                    db.close()
+                } catch (_: Exception) {
+                    // 忽略
+                }
+            }
+        }
+        if (lastErr != null) {
+            debugLog("youtiao.db 每日重置最终失败：${lastErr.message}")
+        }
+        return null
+    }
+
     /** 今天的 yyyy-MM-dd（与 ISO 日期串同序比较，无需解析时间/时区）。 */
     private fun todayStr(): String {
             val now = Calendar.getInstance()
@@ -162,34 +230,28 @@ class MidnightResetReceiver : BroadcastReceiver() {
     /** 直接打开 SQLite（youtiao.db，与 sqflite 同路径），重置 tasks 表中符合条件的重复任务。
      * 复用与 Dart Task 完全一致的 JSON 字段（status/done/completedAt/dueDate/repeat 等）。 */
     private fun resetDailyTasksSqlite(dbPath: String) {
-        try {
-            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-            try {
-                val cursor = db.query("tasks", arrayOf("id", "data"), null, null, null, null, null)
-                val updates = mutableListOf<Pair<String, String>>()
-                cursor.use {
-                    while (it.moveToNext()) {
-                        val id = it.getString(0)
-                        val dataStr = it.getString(1)
-                        val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
-                        if (shouldResetTask(obj)) {
-                            obj.put("status", "todo")
-                            obj.put("done", false)
-                            obj.remove("completedAt")
-                            updates.add(Pair(id, obj.toString()))
-                        }
+        // S10 修复：经 withGuardDb 打开，带 WAL + busy_timeout + SQLITE_BUSY 重试与失败日志。
+        withGuardDb(dbPath) { db ->
+            val cursor = db.query("tasks", arrayOf("id", "data"), null, null, null, null, null)
+            val updates = mutableListOf<Pair<String, String>>()
+            cursor.use {
+                while (it.moveToNext()) {
+                    val id = it.getString(0)
+                    val dataStr = it.getString(1)
+                    val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
+                    if (shouldResetTask(obj)) {
+                        obj.put("status", "todo")
+                        obj.put("done", false)
+                        obj.remove("completedAt")
+                        updates.add(Pair(id, obj.toString()))
                     }
                 }
-                for ((id, newData) in updates) {
-                    val cv = ContentValues()
-                    cv.put("data", newData)
-                    db.update("tasks", cv, "id = ?", arrayOf(id))
-                }
-            } finally {
-                db.close()
             }
-        } catch (_: Exception) {
-            // 打开/读写失败不崩溃
+            for ((id, newData) in updates) {
+                val cv = ContentValues()
+                cv.put("data", newData)
+                db.update("tasks", cv, "id = ?", arrayOf(id))
+            }
         }
     }
 
@@ -198,41 +260,35 @@ class MidnightResetReceiver : BroadcastReceiver() {
      * 负数表示「永不自动清理」。data 列存完整 Task JSON，deletedAt 为 ISO 时间戳。 */
     private fun cleanupTrashSqlite(dbPath: String, retentionDays: Int) {
         if (retentionDays < 0) return // 永不自动清理
-        try {
-            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-            try {
-                val cutoff = Calendar.getInstance().apply {
-                    add(Calendar.DAY_OF_MONTH, -retentionDays)
-                }
-                val cutoffStr = String.format(
-                    "%04d-%02d-%02d",
-                    cutoff.get(Calendar.YEAR),
-                    cutoff.get(Calendar.MONTH) + 1,
-                    cutoff.get(Calendar.DAY_OF_MONTH),
-                )
-                val cursor = db.query("trash", arrayOf("id", "data"), null, null, null, null, null)
-                val expired = mutableListOf<String>()
-                cursor.use {
-                    while (it.moveToNext()) {
-                        val id = it.getString(0)
-                        val dataStr = it.getString(1)
-                        val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
-                        val del = datePart(obj.opt("deletedAt")) ?: continue
-                        // 按 yyyy-MM-dd 字典序比较，早于 cutoffStr 视为过期
-                        if (del < cutoffStr) expired.add(id)
-                    }
-                }
-                for (id in expired) {
-                    db.delete("trash", "id = ?", arrayOf(id))
-                }
-                if (expired.isNotEmpty()) {
-                    debugLog("回收站自动清理：删除 ${expired.size} 条过期条目（保留 ${retentionDays} 天）")
-                }
-            } finally {
-                db.close()
+        // S10 修复：经 withGuardDb 打开，带 WAL + busy_timeout + SQLITE_BUSY 重试与失败日志。
+        withGuardDb(dbPath) { db ->
+            val cutoff = Calendar.getInstance().apply {
+                add(Calendar.DAY_OF_MONTH, -retentionDays)
             }
-        } catch (_: Exception) {
-            // 打开/读写失败不崩溃
+            val cutoffStr = String.format(
+                "%04d-%02d-%02d",
+                cutoff.get(Calendar.YEAR),
+                cutoff.get(Calendar.MONTH) + 1,
+                cutoff.get(Calendar.DAY_OF_MONTH),
+            )
+            val cursor = db.query("trash", arrayOf("id", "data"), null, null, null, null, null)
+            val expired = mutableListOf<String>()
+            cursor.use {
+                while (it.moveToNext()) {
+                    val id = it.getString(0)
+                    val dataStr = it.getString(1)
+                    val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
+                    val del = datePart(obj.opt("deletedAt")) ?: continue
+                    // 按 yyyy-MM-dd 字典序比较，早于 cutoffStr 视为过期
+                    if (del < cutoffStr) expired.add(id)
+                }
+            }
+            for (id in expired) {
+                db.delete("trash", "id = ?", arrayOf(id))
+            }
+            if (expired.isNotEmpty()) {
+                debugLog("回收站自动清理：删除 ${expired.size} 条过期条目（保留 ${retentionDays} 天）")
+            }
         }
     }
 
@@ -253,7 +309,10 @@ class MidnightResetReceiver : BroadcastReceiver() {
                 }
             }
             if (changed) {
-                prefs.edit().putString(KEY_TASKS, arr.toString()).apply()
+                // S10 修复：:guard 进程在 onReceive 返回后可能被系统立即回收，
+                // .apply() 为异步写，存在未落盘即被杀死导致重置丢失的风险；
+                // 改用同步 .commit() 保证写入落盘后再返回。
+                prefs.edit().putString(KEY_TASKS, arr.toString()).commit()
             }
         } catch (_: Exception) {
             // 解析/写入失败不崩溃

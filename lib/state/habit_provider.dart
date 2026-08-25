@@ -380,7 +380,15 @@ class HabitProvider extends ChangeNotifier {
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   static String _fmtMinute(int m) =>
       '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
-  static String _esc(String s) => s.replaceAll('"', '""');
+  static String _esc(String s) {
+    final v = s.replaceAll('"', '""');
+    // S11 修复：CSV 公式注入防护。以 = + - @ 开头的单元格在 Excel/WPS 中会被当作公式执行。
+    // 前置单引号强制按文本处理（OWASP CSV Injection 惯例）。
+    if (v.isNotEmpty && const ['=', '+', '-', '@'].contains(v[0])) {
+      return "'$v";
+    }
+    return v;
+  }
 
   Future<void> _persistHabits() async {
     try {

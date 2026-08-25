@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -11,7 +12,8 @@ import 'package:todolist/services/apk_installer.dart';
 import 'package:todolist/services/update_checker.dart';
 
 /// 应用内下载并安装更新包：流式下载 APK 到外部缓存目录（updates/），
-/// 实时显示进度，下载完成后经系统安装器安装。失败时提供「浏览器下载」兜底。
+/// 实时显示进度，下载完成后流式计算 sha256 校验完整性，再经系统安装器安装。
+/// 失败时提供「浏览器下载」兜底。
 class UpdateDownloadDialog {
   static Future<void> show(BuildContext context, UpdateInfo info) async {
     if (!context.mounted) return;
@@ -35,12 +37,30 @@ class _DownloadBodyState extends State<_DownloadBody> {
   double _progress = 0;
   String _status = '准备下载…';
   bool _done = false;
+  bool _cancelled = false;
   String? _error;
+  http.Client? _client;
+  IOSink? _sink;
+  File? _apkFile;
 
   @override
   void initState() {
     super.initState();
     _start();
+  }
+
+  @override
+  void dispose() {
+    _client?.close();
+    super.dispose();
+  }
+
+  /// 取消下载：关闭连接并退出下载循环（循环会在 catch 中统一清理不完整文件）。
+  Future<void> _cancel() async {
+    if (_done || _error != null || _cancelled) return;
+    _cancelled = true;
+    _client?.close(); // 终止下载流，循环会捕获异常后退出
+    if (mounted) Navigator.pop(context);
   }
 
   Future<void> _start() async {
@@ -61,8 +81,10 @@ class _DownloadBodyState extends State<_DownloadBody> {
       final apkFile =
           File('${cacheDir.path}/updates/app-release-v${widget.info.version}.apk');
       await apkFile.parent.create(recursive: true);
+      _apkFile = apkFile;
 
       final client = http.Client();
+      _client = client;
       final response = await client.send(http.Request('GET', Uri.parse(url)));
       if (response.statusCode != 200) {
         throw Exception('下载失败（HTTP ${response.statusCode}）');
@@ -70,8 +92,16 @@ class _DownloadBodyState extends State<_DownloadBody> {
       final total = response.contentLength ?? 0;
       var received = 0;
       final sink = apkFile.openWrite();
+      _sink = sink;
+      // S8 修复②：流式分块计算 sha256，避免把约 85MB 的 APK 整体读入内存（低内存机型 OOM 风险）。
+      Digest? digest;
+      final hashSink = sha256.startChunkedConversion(
+        ChunkedConversionSink<Digest>.withCallback((d) => digest = d.single),
+      );
       await for (final chunk in response.stream) {
+        if (_cancelled) return; // 取消分支在 catch 中统一清理
         sink.add(chunk);
+        hashSink.add(chunk);
         received += chunk.length;
         if (mounted) {
           setState(() {
@@ -83,15 +113,16 @@ class _DownloadBodyState extends State<_DownloadBody> {
           });
         }
       }
+      hashSink.close();
       await sink.close();
-      client.close();
+      _client = null;
+      _sink = null;
 
       // APK 完整性校验：若 update.json 提供了 apkSha256，则比对下载文件，
       // 不一致（篡改 / 下载不完整）直接拒绝安装，避免诱导安装恶意 APK。
       final expected = widget.info.apkSha256?.trim();
       if (expected != null && expected.isNotEmpty) {
-        final bytes = await apkFile.readAsBytes();
-        final actual = sha256.convert(bytes).toString();
+        final actual = (digest ?? sha256.convert(const <int>[])).toString();
         if (actual.toLowerCase() != expected.toLowerCase()) {
           if (!mounted) return;
           setState(() => _error = 'APK 校验失败：文件可能被篡改或下载不完整');
@@ -100,13 +131,45 @@ class _DownloadBodyState extends State<_DownloadBody> {
       }
 
       if (!mounted) return;
-      setState(() {
-        _progress = 1;
-        _status = '下载完成，正在唤起安装…';
-      });
+      // S8 修复①：校验通过后再征求用户确认，避免静默唤起安装器。
+      final proceed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('校验通过'),
+          content: const Text('APK 已下载并通过完整性校验，是否立即安装？'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('稍后'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('立即安装'),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true) {
+        if (mounted) Navigator.pop(context);
+        return;
+      }
+
       await ApkInstaller.install(apkFile.path);
       if (mounted) setState(() => _done = true);
     } catch (e) {
+      if (_cancelled) {
+        // S8 修复③：取消时清理不完整文件后退出，不报错。
+        try {
+          await _sink?.close();
+        } catch (_) {}
+        try {
+          if (_apkFile != null && await _apkFile!.exists()) {
+            await _apkFile!.delete();
+          }
+        } catch (_) {}
+        return;
+      }
       if (mounted) setState(() => _error = e.toString());
     }
   }
@@ -117,7 +180,7 @@ class _DownloadBodyState extends State<_DownloadBody> {
     return AlertDialog(
       title: Row(
         children: [
-          Icon(Symbols.system_update_alt, size: 22),
+          const Icon(Symbols.system_update_alt, size: 22),
           const SizedBox(width: 8),
           const Expanded(child: Text('更新中')),
         ],
@@ -167,7 +230,11 @@ class _DownloadBodyState extends State<_DownloadBody> {
             child: const Text('完成'),
           ),
         ] else ...[
-          const SizedBox.shrink(),
+          // S8 修复③：下载进行中提供「取消下载」按钮，弱网下不再被锁死在进度框里。
+          TextButton(
+            onPressed: _cancel,
+            child: const Text('取消下载'),
+          ),
         ],
       ],
     );

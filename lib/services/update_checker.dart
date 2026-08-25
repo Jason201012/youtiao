@@ -93,27 +93,38 @@ class UpdateChecker {
         return UpdateResult(hasUpdate: false, error: 'HTTP ${resp.statusCode}');
       }
       final Map<String, dynamic> data = jsonDecode(resp.body);
-      final version = (data['version'] as String? ?? '').toString().trim();
-      final tag = (data['tag'] as String? ?? 'v$version').toString().trim();
-      if (version.isEmpty) {
+      // 解析与版本比较逻辑抽到 [_parse]，便于单元测试固化清单 schema（见 S4/S5）。
+      final info = parseManifest(data);
+      if (info == null) {
         return const UpdateResult(hasUpdate: false, error: '清单缺少 version 字段');
       }
-
-      final info = UpdateInfo(
-        tagName: tag,
-        version: version,
-        releaseName: data['name'] as String?,
-        releaseNotes: data['notes'] as String?,
-        apkUrl: data['apkUrl'] as String?,
-        releaseUrl: data['releaseUrl'] as String? ??
-            'https://gitee.com/jason1012/youtiao-releases/releases/tag/$tag',
-        apkSha256: data['apkSha256'] as String?,
-      );
-      final has = compareVersion(local, version) > 0;
+      final has = compareVersion(local, info.version) > 0;
       return UpdateResult(hasUpdate: has, info: has ? info : null);
     } catch (e) {
       return UpdateResult(hasUpdate: false, error: e.toString());
     }
+  }
+
+  /// 将 Gitee 上的 update.json 反序列化为 [UpdateInfo]。
+  /// 清单 schema 约定（与发版脚本 _publish_v266.py 对齐）：
+  ///   version / apkUrl / apkSha256 / releaseNotes 为必填或可选；
+  ///   releaseUrl 缺省时兜底到 youtiao-releases-2。
+  /// 解析失败（缺 version）返回 null。
+  static UpdateInfo? parseManifest(Map<String, dynamic> data) {
+    final version = (data['version'] as String? ?? '').toString().trim();
+    if (version.isEmpty) return null;
+    final tag = (data['tag'] as String? ?? 'v$version').toString().trim();
+    return UpdateInfo(
+      tagName: tag,
+      version: version,
+      releaseName: data['name'] as String?,
+      // S4 修复：以现网 update.json 的 releaseNotes 为准（不再读旧的 notes 键）。
+      releaseNotes: data['releaseNotes'] as String?,
+      apkUrl: data['apkUrl'] as String?,
+      releaseUrl: data['releaseUrl'] as String? ??
+          'https://gitee.com/jason1012/youtiao-releases-2/releases/tag/$tag',
+      apkSha256: data['apkSha256'] as String?,
+    );
   }
 
   /// 是否应自动弹窗：每天最多一次（跨进程也生效）。

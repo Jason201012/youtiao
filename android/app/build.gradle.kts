@@ -58,12 +58,16 @@ android {
 
     buildTypes {
         release {
-            // 优先用固定 release keystore；若环境变量未设置则回退 debug（保持本地 flutter run --release 可用）。
-            signingConfig = if (useFixedReleaseSigning) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
+            // S2 修复：release 构建必须由固定 keystore 签名。缺环境变量时直接终止构建，
+            // 绝不静默回退到公开 debug keystore（历史上 v2.5.9 曾误发 debug 包，v2.6.0 专门修签名）。
+            if (!useFixedReleaseSigning) {
+                throw org.gradle.api.GradleException(
+                    "Release 构建缺少签名环境变量（YOUTIAO_KEYSTORE / YOUTIAO_KEY_ALIAS / " +
+                    "YOUTIAO_KEYSTORE_PASSWORD / YOUTIAO_KEY_PASSWORD）。" +
+                    "已拒绝静默回退到公开 debug keystore；请先 export 上述变量再构建。"
+                )
             }
+            signingConfig = signingConfigs.getByName("release")
             // 注：本机 Gradle 9.1 + JDK 25 在 release 构建中对 minifyReleaseWithR8 的
             // output-metadata.json / resourceShrinkingParams 快照报 "not a regular file"
             // （Gradle 9.1 严格快照 + JDK 25 文件属性读取的兼容问题，doNotTrackState 对该输入属性无效）。

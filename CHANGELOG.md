@@ -1,5 +1,16 @@
 # 更新日志（Changelog）
 
+## v2.6.7（2026-08-25）
+
+- **🔒 安全审计修复（S2 / S4 / S5 / S8 / S10 / S11）**：
+  - **S2 构建签名加固**：release 构建缺签名环境变量时直接抛 `GradleException` 终止，彻底杜绝静默回退到 debug keystore（v2.5.9 曾误发 debug 包的根因）。
+  - **S4 更新说明显示修复**：`update_checker` 改为读取 `update.json` 的 `releaseNotes` 字段（旧代码误读 `notes` 导致更新说明永远空白），并抽离 `parseManifest` 供回归测试覆盖。
+  - **S5 发版链路收敛**：废弃 `_build2.py`，统一走 `_publish_v266.py` 唯一入口；兜底 `releaseUrl` 由旧仓 `youtiao-releases` 改为 `youtiao-releases-2`，与权威清单一致。
+  - **S8 下载体验加固**：更新 APK 改为流式 `sha256` 校验（不再 `readAsBytes` 整包载入约 85MB，规避 OOM）；安装前二次确认；下载中可取消。
+  - **S10 跨进程 SQLite 写入加固**：`MidnightResetReceiver`（`:guard` 进程）写主进程 `youtiao.db` 时启用 WAL（尽力）+ `busy_timeout=5s` + `SQLITE_BUSY` 重试 3 次 + 失败日志，不再静默丢弃每日重置；回退路径 `SharedPreferences` 由 `.apply()` 改 `.commit()` 保证落盘。
+  - **S11 CSV 公式注入防护**：任务/习惯/专注 CSV 导出对以 `= + - @` 开头的单元格加 `'` 前缀，防 Excel/WPS 公式注入。
+- 版本号 v2.6.7（versionCode 88）；release 签名（固定 keystore），arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。
+
 ## v2.6.6（2026-08-25）
 
 - **🐛 自动备份目录创建修复**：自动备份写入 `backup/auto/YYYY-MM-DD.json` 时，因 `backup/auto/` 子目录此前从未被创建，`writeAsString()` 抛 `PathNotFoundException` 导致自动备份静默失败。修复公共方法 `DataIo.saveToAppDocs()`，在写 `.tmp` 前先 `parent.create(recursive: true)`，一次性覆盖所有带子路径的写入（自动备份 + 手动导出）。
