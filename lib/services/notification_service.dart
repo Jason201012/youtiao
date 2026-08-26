@@ -579,7 +579,18 @@ class NotificationService {
       result = tz.TZDateTime(
           loc, nextDate.year, nextDate.month, nextDate.day, m ~/ 60, m % 60);
     }
-    return result;
+    // 尊重 skipDates / repeatUntil：若算出的下次 occurrence 落在「跳过日」或「已超结束日」，
+    // 顺延到下一个真正命中的循环日（上限 60 次防死循环，覆盖最极端间隔）。
+    var guard = 0;
+    var candidate = result;
+    while (guard < 60 &&
+        !task.repeatsOn(
+            DateTime(candidate.year, candidate.month, candidate.day))) {
+      final next = candidate.add(const Duration(days: 1));
+      candidate = tz.TZDateTime(loc, next.year, next.month, next.day, m ~/ 60, m % 60);
+      guard++;
+    }
+    return candidate;
   }
 
   /// 按任务 id 取消全部「重复提醒」通知（daily 用 dayIndex=0；weekly/weekday 用 1..7）。

@@ -9,6 +9,7 @@ import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/background_service.dart';
+import 'package:todolist/services/widget_refresh.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 
@@ -493,6 +494,8 @@ class TaskProvider extends ChangeNotifier {
     try {
       await _persistSettings();
       await LocalDatabase.instance.replaceTasks(_tasks, _trash);
+      // 任务变更后主动刷新桌面小组件（今日任务列表），不必等系统定时刷新兜底。
+      requestWidgetRefresh();
     } catch (e, s) {
       debugPrint('TaskProvider 持久化失败（变更仅存于内存，重启将回退）：$e\n$s');
     }
@@ -1064,6 +1067,74 @@ class TaskProvider extends ChangeNotifier {
     _tasks[i] = _tasks[i].copyWith(pinned: !_tasks[i].pinned);
     notifyListeners();
     _persist();
+  }
+
+  /// 把 DateTime 格式化为 yyyy-MM-dd（date-only），与 [Task.skipDates] 的存储格式一致。
+  static String _ymd(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  /// 本次跳过：把 [day]（默认今天）追加进任务的 [Task.skipDates]。
+  /// 跳过 ≠ 完成——当天不出现、不打卡、不影响连续天数；次日恢复正常。
+  /// 对 interval 重复任务额外重排提醒，避免「跳过当天仍弹提醒」。
+  void skipOccurrence(String taskId, {DateTime? day}) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final d = day ?? DateTime.now();
+    final ymd = _ymd(DateTime(d.year, d.month, d.day));
+    if (_tasks[i].skipDates.contains(ymd)) return; // 已跳过，幂等
+    final updated = _tasks[i].copyWith(
+      skipDates: [..._tasks[i].skipDates, ymd],
+    );
+    _tasks[i] = updated;
+    if (updated.repeat == RepeatType.interval) {
+      // interval 为一次性闹钟，取消后按新 skipDates 重排到下一个有效循环日（自动跳过今天）。
+      _cancelRemindersFor(updated.id);
+      _scheduleRemindersFor(updated);
+    }
+    notifyListeners();
+    _persist();
+  }
+
+  /// 结束重复：把 [Task.repeatUntil] 设为昨天，从今天起不再循环（保留历史任务不删）。
+  /// 结束当天即停止出现 / 提醒 / 午夜重置。
+  void endRepeat(String taskId) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final yesterday = DateTime.now().subtract(const Duration(days: 1));
+    final updated = _tasks[i].copyWith(repeatUntil: _ymd(yesterday));
+    _tasks[i] = updated;
+    _cancelRemindersFor(updated.id);
+    notifyListeners();
+    _persist();
+  }
+
+  /// 仅此一次改期：跳过 [origDay]（默认今天）这一次 occurrence，并创建一条一次性副本任务，
+  /// 截止时间设为 [newDay]（其余字段沿用原任务）。实现上即现有 [addTask]，无需新概念。
+  void rescheduleOnceOccurrence(
+    String taskId,
+    DateTime newDay, {
+    DateTime? origDay,
+  }) {
+    final src = byId(taskId);
+    if (src == null) return;
+    // 1) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
+    skipOccurrence(taskId, day: origDay ?? DateTime.now());
+    // 2) 创建一次性副本（repeat=none），dueDate 指向改期后的日期，其余沿用。
+    final copy = src.copyWith(
+      id: '', // addTask 会分配新 id
+      repeat: RepeatType.none,
+      repeatWeekdays: const [],
+      repeatInterval: 2,
+      repeatMinute: null,
+      repeatAnchor: null,
+      skipDates: const [],
+      repeatUntil: null,
+      dueDate: DateTime(newDay.year, newDay.month, newDay.day,
+          src.dueDate?.hour ?? 9, src.dueDate?.minute ?? 0),
+      status: TaskStatus.todo,
+      completedAt: null,
+    );
+    addTask(copy);
   }
 
   int _idSeq = 8;

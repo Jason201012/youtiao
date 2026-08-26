@@ -13,15 +13,18 @@ import 'package:todolist/widgets/new_task_sheet.dart';
 /// 输入时实时解析并把识别结果以 chip 形式回显，让用户随打随确认系统的理解，
 /// 不必先学语法。解析不满意时可一键「更多选项」转入完整编辑弹层，草稿原样带过去。
 class QuickEntrySheet extends StatefulWidget {
-  const QuickEntrySheet({super.key});
+  /// 可选预填文本（如分享入口转发过来的文字），非空时录入层预填并实时解析。
+  final String? initialText;
+  const QuickEntrySheet({super.key, this.initialText});
 
   /// 打开快速录入。若用户选择「更多选项」，会带着草稿续开完整编辑弹层。
-  static Future<void> show(BuildContext context) async {
+  /// [initialText] 用于分享建任务等场景：预填文本并立即解析出标题/截止时间。
+  static Future<void> show(BuildContext context, {String? initialText}) async {
     final draft = await showModalBottomSheet<Task>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => const QuickEntrySheet(),
+      builder: (_) => QuickEntrySheet(initialText: initialText),
     );
     // 弹层内部只负责回传草稿，转场由调用方发起，避免 sheet 的 context 已销毁
     if (draft != null && context.mounted) {
@@ -36,6 +39,16 @@ class QuickEntrySheet extends StatefulWidget {
 class _QuickEntrySheetState extends State<QuickEntrySheet> {
   final _controller = TextEditingController();
   ParsedTask _parsed = TaskParser.parse('');
+
+  @override
+  void initState() {
+    super.initState();
+    // 分享建任务等场景：预填 initialText 并立即解析出标题/截止时间回显 chip。
+    if (widget.initialText != null && widget.initialText!.isNotEmpty) {
+      _controller.text = widget.initialText!;
+      _parsed = TaskParser.parse(widget.initialText!);
+    }
+  }
 
   @override
   void dispose() {

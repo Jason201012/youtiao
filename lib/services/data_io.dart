@@ -101,4 +101,17 @@ class DataIo {
     if (path == null) return null;
     return File(path).readAsString();
   }
+
+  /// 选择 .ics 日历文件并返回其文本内容；用户取消选择返回 null。
+  /// 用于 iCal 标准格式导入（与系统日历 / 其它待办应用互通）。
+  static Future<String?> pickIcsFile() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['ics'],
+    );
+    if (result.isEmpty) return null;
+    final path = result.single.path;
+    if (path == null) return null;
+    return File(path).readAsString();
+  }
 }

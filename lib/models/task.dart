@@ -170,6 +170,16 @@ class Task {
   /// 从这一天起每 N 天一次。创建时由 UI 默认填为当天；旧数据无此字段则回退为「不重复」。
   final DateTime? repeatAnchor;
 
+  /// 跳过的具体日期（yyyy-MM-dd 列表）。跳过 ≠ 完成：
+  /// 当天不出现、不打卡、不影响连续天数（统计完成率时也不计为缺勤）。
+  /// 旧 JSON 无此字段时缺省为空列表（向后兼容，零迁移）。
+  final List<String> skipDates;
+
+  /// 重复结束日期（yyyy-MM-dd，date-only，避免时区问题；null = 无限循环）。
+  /// 该日（含）之后不再循环出现、不再排提醒、午夜重置也不再重置它。
+  /// 旧 JSON 无此字段时缺省为 null（向后兼容）。「结束重复」即把此字段设为昨天。
+  final String? repeatUntil;
+
   /// 任务备注 / 解释：对任务的补充说明（链接、思路、细节等），可选，默认空串。
   final String note;
 
@@ -217,6 +227,8 @@ class Task {
     this.repeatInterval = 2,
     this.repeatMinute,
     this.repeatAnchor,
+    this.skipDates = const [],
+    this.repeatUntil,
     this.note = '',
     this.tags = const [],
     this.focusSecTotal = 0,
@@ -247,6 +259,8 @@ class Task {
     int? repeatInterval,
     Object? repeatMinute = _kKeep,
     Object? repeatAnchor = _kKeep,
+    List<String>? skipDates,
+    Object? repeatUntil = _kKeep,
     String? note,
     List<String>? tags,
     int? focusSecTotal,
@@ -275,6 +289,9 @@ class Task {
         repeatAnchor: repeatAnchor == _kKeep
             ? this.repeatAnchor
             : repeatAnchor as DateTime?,
+        skipDates: skipDates ?? this.skipDates,
+        repeatUntil:
+            repeatUntil == _kKeep ? this.repeatUntil : repeatUntil as String?,
         note: note ?? this.note,
         tags: tags ?? this.tags,
         focusSecTotal: focusSecTotal ?? this.focusSecTotal,
@@ -302,6 +319,8 @@ class Task {
         'repeatInterval': repeatInterval,
         'repeatMinute': repeatMinute,
         'repeatAnchor': repeatAnchor?.toIso8601String(),
+        'skipDates': skipDates,
+        'repeatUntil': repeatUntil,
         'note': note,
         'tags': tags,
         'focusSecTotal': focusSecTotal,
@@ -359,6 +378,8 @@ class Task {
       repeatAnchor: j['repeatAnchor'] == null
           ? null
           : DateTime.parse(j['repeatAnchor'] as String),
+      skipDates: _parseSkipDates(j['skipDates']),
+      repeatUntil: j['repeatUntil'] as String?,
       note: j['note'] as String? ?? '',
       tags: tags,
       focusSecTotal: j['focusSecTotal'] as int? ?? 0,
@@ -391,8 +412,22 @@ class Task {
   }
 
   /// 判断 [day]（任意时刻，内部按日期归一化）是否为该任务的「循环日」。
-  /// 与 android/.../MidnightResetReceiver.kt 的 isRecurrenceToday 保持一致。
+  /// 在 [_baseRepeatsOn] 的基础上叠加两段通用判定：
+  ///  1) [repeatUntil]（结束日期）：超过该日（不含当日）不再循环；
+  ///  2) [skipDates]（跳过日期）：命中当天的「跳过一次」则当天不出现、不打卡。
+  /// 与 android/.../MidnightResetReceiver.kt 的 isRecurrenceToday 保持两侧同步。
   bool repeatsOn(DateTime day) {
+    // B2：结束日期（含当日仍生效，故用 isAfter 排除次日及之后）。
+    final u = repeatUntil;
+    if (u != null && day.isAfter(_parseYmd(u))) return false;
+    // 原 switch 逻辑原样搬入 _baseRepeatsOn，避免散改进多个分支。
+    if (!_baseRepeatsOn(day)) return false;
+    // B1：跳过一次（今天在 skipDates 列表里 → 不出现、不打卡、不影响连续天数）。
+    return !skipDates.contains(_ymd(day));
+  }
+
+  /// repeatsOn 的「纯规则」核心（不含 until / skip 两段通用判定），便于两侧同步维护。
+  bool _baseRepeatsOn(DateTime day) {
     switch (repeat) {
       case RepeatType.none:
         return false;
@@ -413,6 +448,27 @@ class Task {
         final n = repeatInterval < 1 ? 1 : repeatInterval;
         return diff % n == 0;
     }
+  }
+
+  /// yyyy-MM-dd 形式的日期串（date-only，与时区无关，便于 skipDates 精确匹配）。
+  static String _ymd(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  /// 解析 yyyy-MM-dd 串为 DateTime（date-only，当天 00:00）；非法串回退为 1970-01-01（保证比较安全不抛）。
+  static DateTime _parseYmd(String s) {
+    final parts = s.split('-');
+    if (parts.length != 3) return DateTime(1970, 1, 1);
+    final y = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    final d = int.tryParse(parts[2]);
+    if (y == null || m == null || d == null) return DateTime(1970, 1, 1);
+    return DateTime(y, m, d);
+  }
+
+  /// 解析 skipDates 字段（兼容旧备份缺省 / 形态错误，缺省回退为空列表）。
+  static List<String> _parseSkipDates(dynamic raw) {
+    if (raw is! List) return const <String>[];
+    return raw.whereType<String>().toList();
   }
 
   /// 重复规则的人类可读摘要（不含时间）。如「每天」「工作日」「每周 一、三」「每2天」。
@@ -443,7 +499,10 @@ class Task {
     if (repeatMinute == null) return base;
     final hh = (repeatMinute! ~/ 60).toString().padLeft(2, '0');
     final mm = (repeatMinute! % 60).toString().padLeft(2, '0');
-    return '$base $hh:$mm';
+    // 结束日期：仅展示月-日（年通常即今年），让卡片「每天 07:00 至 08-31」一目了然。
+    final until =
+        repeatUntil == null ? '' : ' 至 ${repeatUntil!.substring(5).replaceFirst('-', '/')}';
+    return '$base $hh:$mm$until';
   }
 
   /// 是否为「重复任务」（任意规则）。

@@ -72,8 +72,12 @@ Future<Map<String, dynamic>> collectAppPrefs() async {
 Future<void> applyAppPrefs(Map<String, dynamic>? prefs) async {
   if (prefs == null || prefs.isEmpty) return;
   final sp = await SharedPreferences.getInstance();
+  // M1 安全修复：仅写回白名单 [_backedUpPrefKeys] 内的键。恢复来源不可信（可能被篡改的备份），
+  // 若直接回写任意键，攻击者可在备份里植入恶意偏好（如覆盖关键开关 / 注入未知键）。
+  // 白名单与 [collectAppPrefs] 共用同一份键集合，保证「导出什么、导入就只恢复什么」。
   for (final entry in prefs.entries) {
     final k = entry.key;
+    if (!_backedUpPrefKeys.contains(k)) continue; // 非白名单键直接丢弃
     final v = entry.value;
     if (v is bool) {
       await sp.setBool(k, v);

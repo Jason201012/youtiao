@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
@@ -38,6 +39,24 @@ String? _pendingSnoozeHabitId;
 
 /// 冷启动时点击通知「完成」action 先于导航器就绪到达，暂存任务 id。
 String? _pendingCompleteTaskId;
+
+/// 冷启动时由「分享」入口转发过来的文本先于导航器就绪到达，暂存，待首帧后弹出预填录入层。
+String? _pendingShareText;
+
+/// 冷启动时由桌面小组件点击任务项拉起（MainActivity 带 EXTRA_TASK_ID），原生经 widget_nav
+/// 通道请求直达详情页；导航器未就绪时暂存任务 id，待 MainScaffold 首帧后消费。
+String? _pendingWidgetTaskId;
+
+/// 分享建任务：原生侧经 com.example.todolist/share_intent 通道推送文本，在此弹出预填录入层。
+/// 导航器未就绪（冷启动）时暂存，待 MainScaffold 首帧后消费。
+void _openQuickEntry(String text) {
+  final state = _navigatorKey.currentState;
+  if (state == null) {
+    _pendingShareText = text;
+    return;
+  }
+  QuickEntrySheet.show(state.context, initialText: text);
+}
 
 /// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
 void _handleNotificationTap(String? payload) {
@@ -126,6 +145,31 @@ void main() async {
   NotificationService.onNotificationTap = _handleNotificationTap;
   NotificationService.onNotificationAction = _handleNotificationAction;
   await NotificationService.instance.init();
+
+  // 分享建任务：注册原生 → Dart 文本通道（与通知点击通道同理）。
+  const MethodChannel('com.example.todolist/share_intent')
+      .setMethodCallHandler((call) async {
+    if (call.method == 'onSharedText') {
+      final text = call.arguments;
+      if (text is String && text.isNotEmpty) _openQuickEntry(text);
+    }
+  });
+
+  // 桌面小组件点击任务项：原生 → Dart 通道，直达任务详情页（与通知点击同构）。
+  const MethodChannel('com.example.todolist/widget_nav')
+      .setMethodCallHandler((call) async {
+    if (call.method == 'openTask') {
+      final id = call.arguments;
+      if (id is String && id.isNotEmpty) {
+        final state = _navigatorKey.currentState;
+        if (state != null) {
+          _navigateFromPayload('task:$id', state);
+        } else {
+          _pendingWidgetTaskId = id;
+        }
+      }
+    }
+  });
 
   final task = TaskProvider();
   await _safeLoad(task, 'TaskProvider');
@@ -329,6 +373,28 @@ class _MainScaffoldState extends State<MainScaffold>
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final state = _navigatorKey.currentState;
         if (mounted && state != null) _doComplete(state, cId);
+      });
+    }
+    // 消费冷启动期间由「分享」入口转发、暂存的文本：首帧后弹出预填录入层。
+    if (_pendingShareText != null) {
+      final s = _pendingShareText;
+      _pendingShareText = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _navigatorKey.currentState;
+        if (mounted && state != null && s != null) {
+          QuickEntrySheet.show(state.context, initialText: s);
+        }
+      });
+    }
+    // 消费冷启动期间由桌面小组件点击任务项、经原生拉起并暂存的 id：首帧后直达详情页。
+    if (_pendingWidgetTaskId != null) {
+      final wId = _pendingWidgetTaskId;
+      _pendingWidgetTaskId = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _navigatorKey.currentState;
+        if (mounted && state != null && wId != null) {
+          _navigateFromPayload('task:$wId', state);
+        }
       });
     }
   }

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
@@ -21,6 +22,19 @@ class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL_BG = "com.example.todolist/background_service"
     private val CHANNEL_MIDNIGHT = "com.example.todolist/midnight_reset"
     private val CHANNEL_INSTALL = "com.example.todolist/installer"
+    /// 分享文本通道：其他 App（微信/QQ 等）通过 ACTION_SEND 把文字转发给「有条」时，
+    /// 原生侧把文本经此通道传给 Dart，由 QuickEntrySheet 预填并解析。
+    private val CHANNEL_SHARE = "com.example.todolist/share_intent"
+    private var shareHandler: MethodChannel? = null
+    /// Flutter 引擎尚未就绪时（冷启动）收到的分享文本先缓存，引擎就绪后补发。
+    private var pendingShareText: String? = null
+    /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity，再经此通道让 Dart 直达详情页。
+    private val CHANNEL_WIDGET_NAV = "com.example.todolist/widget_nav"
+    private var widgetNavHandler: MethodChannel? = null
+    /// Flutter 引擎尚未就绪时（冷启动）缓存小组件点击的任务 id，引擎就绪后补发。
+    private var pendingWidgetTaskId: String? = null
+    /// 小组件刷新通道：Dart 侧每次 _persist 后调用，主动刷新桌面部件（今日任务列表）。
+    private val CHANNEL_WIDGET_REFRESH = "com.example.todolist/widget_refresh"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -252,6 +266,40 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 分享文本通道：注册后，冷启动时 pendingShareText 由引擎就绪后的首帧补发到 Dart 侧。
+        shareHandler = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_SHARE)
+        // 若冷启动期间已收到分享文本（onCreate 早于引擎就绪），此刻补发给 Dart。
+        val pending = pendingShareText
+        if (pending != null) {
+            pendingShareText = null
+            shareHandler?.invokeMethod("onSharedText", pending)
+        }
+
+        // 小组件导航通道：原生点击任务项带 EXTRA_TASK_ID 启动 Activity 后，经此通道让 Dart 打开详情页。
+        widgetNavHandler = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_WIDGET_NAV)
+        // 冷启动期间由小组件点击拉起：onCreate 早于引擎就绪，此刻补发给 Dart。
+        val pw = pendingWidgetTaskId
+        if (pw != null) {
+            pendingWidgetTaskId = null
+            widgetNavHandler?.invokeMethod("openTask", pw)
+        }
+
+        // 小组件刷新通道：Dart 侧 _persist 后调用，主动刷新桌面部件（今日任务列表）。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_WIDGET_REFRESH)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "refresh" -> {
+                        try {
+                            TodayWidgetProvider.refreshAll(this)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("REFRESH_FAIL", e.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     private fun installApk(apk: File) {
@@ -281,5 +329,47 @@ class MainActivity : FlutterFragmentActivity() {
             flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
         }
         startActivity(intent)
+    }
+
+    /// 冷启动：若由「分享」入口拉起（ACTION_SEND + 文本），在引擎就绪前先接到 intent。
+    /// 缓存文本，待 configureFlutterEngine 注册通道后补发；引擎已就绪则直接发送。
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        dispatchShareText(intent)
+        dispatchWidgetTask(intent)
+    }
+
+    /// 热分享（App 已在前台，launchMode=singleTop）：新分享 intent 走 onNewIntent 而非重建 Activity，
+    /// 避免重复开 Activity，并把文本实时推送进 Dart 侧预填录入层。
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        dispatchShareText(intent)
+        dispatchWidgetTask(intent)
+    }
+
+    /// 从 SEND intent 取出 EXTRA_TEXT（纯文本），缓存并在引擎就绪后发给 Dart。
+    /// 末尾独立的分享页 URL（如 \nhttps://...）会被截掉，仅保留正文，交给 TaskParser 解析。
+    private fun dispatchShareText(i: Intent?) {
+        val text = i?.takeIf { it.action == Intent.ACTION_SEND }
+            ?.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: return
+        if (text.isEmpty()) return
+        // 去掉末尾独立的分享页 URL 行（微信/QQ 常附一条链接），避免污染任务标题。
+        val body = text
+            .replace(Regex("(?m)\\n?https?://\\S+$"), "")
+            .trim()
+        if (body.isEmpty()) return
+        // 引擎未就绪（冷启动）时 invokeMethod 会失败 → 缓存，configureFlutterEngine 末尾补发。
+        pendingShareText = body
+        shareHandler?.invokeMethod("onSharedText", body)
+    }
+
+    /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity 后，把任务 id
+    /// 经 widget_nav 通道转给 Dart，由 _navigateFromPayload('task:<id>') 直达详情页。
+    /// 引擎未就绪（冷启动）时先缓存 id，待 configureFlutterEngine 注册通道后补发。
+    private fun dispatchWidgetTask(i: Intent?) {
+        val id = i?.getStringExtra(TodayWidgetProvider.EXTRA_TASK_ID) ?: return
+        if (id.isEmpty()) return
+        pendingWidgetTaskId = id
+        widgetNavHandler?.invokeMethod("openTask", id)
     }
 }

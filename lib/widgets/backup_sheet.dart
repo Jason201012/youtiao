@@ -7,6 +7,7 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/backup_validator.dart';
+import 'package:todolist/services/backup_crypto.dart';
 import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -23,6 +24,10 @@ class BackupSheet {
     final focusProvider = context.read<FocusProvider>();
     final habitProvider = context.read<HabitProvider>();
     var includeTrash = true;
+    // 加密导出相关状态：开关 + 两次口令输入（校验一致后才允许备份）。
+    var encrypt = false;
+    final passCtrl = TextEditingController();
+    final passConfirmCtrl = TextEditingController();
     await showModalBottomSheet<void>(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -45,15 +50,69 @@ class BackupSheet {
                   value: includeTrash,
                   onChanged: (v) => setState(() => includeTrash = v),
                 ),
+                // 口令加密导出（AES-256-GCM）：开启后落盘/分享的都是密文，仅凭口令可恢复。
+                // 口令丢失 = 数据不可恢复（这是特性不是缺陷），下方明确提示。
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('加密备份（口令保护）'),
+                  subtitle: const Text('用口令加密后导出，落盘/分享都不裸奔；口令丢失将无法恢复'),
+                  value: encrypt,
+                  onChanged: (v) => setState(() => encrypt = v),
+                ),
+                if (encrypt) ...[
+                  const SizedBox(height: 4),
+                  TextField(
+                    controller: passCtrl,
+                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: '加密口令',
+                      hintText: '建议含大小写+数字，至少 8 位',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: passConfirmCtrl,
+                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: '确认口令',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      isDense: true,
+                    ),
+                  ),
+                ],
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Symbols.backup),
                   title: const Text('备份到文件'),
-                  subtitle: const Text('导出完整数据（任务、习惯、专注记录与设置），可分享保存'),
+                  subtitle: Text(encrypt
+                      ? '加密导出完整数据（凭口令恢复）'
+                      : '导出完整数据（任务、习惯、专注记录与设置），可分享保存'),
                   onTap: () {
+                    if (encrypt) {
+                      final p = passCtrl.text;
+                      if (p.length < 8) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                            content: Text('口令至少 8 位，请重新输入')));
+                        return;
+                      }
+                      if (p != passConfirmCtrl.text) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                            content: Text('两次输入的口令不一致')));
+                        return;
+                      }
+                      passCtrl.clear();
+                      passConfirmCtrl.clear();
+                    }
                     Navigator.pop(ctx);
                     _doBackup(taskProvider, focusProvider, habitProvider,
-                        context, includeTrash);
+                        context, includeTrash,
+                        encryptOn: encrypt, pass: passCtrl.text);
                   },
                 ),
                 ListTile(
@@ -85,29 +144,40 @@ class BackupSheet {
     FocusProvider focusProvider,
     HabitProvider habitProvider,
     BuildContext context,
-    bool includeTrash,
-  ) async {
+    bool includeTrash, {
+    bool encryptOn = false,
+    String? pass,
+  }) async {
     try {
-      final name = '有条-backup-${_ts()}.json';
       // 与任务数据合并番茄钟专注记录与习惯打卡记录，便于统一备份与恢复。
       final map = provider.backupData(includeTrash: includeTrash);
       map['focus_sessions'] = focusProvider.sessionsJson;
       final habitMap = habitProvider.backupData();
       map['habits'] = habitMap['habits'];
       map['check_ins'] = habitMap['check_ins'];
-      final json = const JsonEncoder.withIndent('  ').convert(map);
+      final plain = const JsonEncoder.withIndent('  ').convert(map);
+
+      // 口令加密导出：明文经 AES-256-GCM 信封化，落盘 / 分享的都是密文。
+      final isEnc = encryptOn && pass != null && pass.isNotEmpty;
+      final payload = isEnc ? encrypt(plain, pass!) : plain;
+      final name =
+          isEnc ? '有条-backup-${_ts()}.enc.json' : '有条-backup-${_ts()}.json';
       // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
-      final file = await DataIo.saveToAppDocs(name, json);
+      final file = await DataIo.saveToAppDocs(name, payload);
       // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见
-      String msg = '已保存到「下载」目录（Downloads）';
+      String msg = isEnc
+          ? '已加密保存到「下载」目录（凭口令恢复）'
+          : '已保存到「下载」目录（Downloads）';
       try {
         await DataIo.saveToDownloads(
           name,
-          json,
+          payload,
           mimeType: 'application/json',
         );
       } catch (e) {
-        msg = '已生成备份（下载目录写入失败，请改用「分享」保存）';
+        msg = isEnc
+            ? '已生成加密备份（下载目录写入失败，请改用「分享」保存）'
+            : '已生成备份（下载目录写入失败，请改用「分享」保存）';
       }
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -137,9 +207,31 @@ class BackupSheet {
   ) async {
     final raw = await DataIo.pickJsonFile();
     if (raw == null) return;
+    // 加密备份：先识别信封，弹出口令框解密成明文，再走与普通备份一致的校验/恢复流程。
+    String plaintext = raw;
+    if (isEncryptedEnvelope(raw)) {
+      final pass = await _requestPassword(context);
+      if (pass == null) return; // 用户取消
+      try {
+        plaintext = decryptEnvelope(raw, pass);
+      } on BackupDecryptException catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('恢复失败：${e.message}')));
+        }
+        return;
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('解密失败：$e')));
+        }
+        return;
+      }
+    }
     // S3：恢复前置强校验，拦截「废档」——非「有条」备份 / 结构损坏 / 字段形态错误，
     // 避免在校验失败后才清空当前数据（UI 直接提示原因，不弹覆盖确认框）。
-    final validation = BackupValidator.validate(raw);
+    // 加密备份已在此前解密为明文 plaintext；未加密则 plaintext == raw。
+    final validation = BackupValidator.validate(plaintext);
     if (!validation.ok) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -167,7 +259,7 @@ class BackupSheet {
     );
     if (ok != true) return;
     try {
-      final data = jsonDecode(raw) as Map<String, dynamic>;
+      final data = jsonDecode(plaintext) as Map<String, dynamic>;
       // 先干跑解析专注/习惯/打卡：任一失败则在任务被覆盖前抛错，
       // 避免「任务已恢复、专注失败」的部分恢复假象（修复前 tasks 已被清空）。
       if (data['focus_sessions'] is List) {
@@ -191,7 +283,7 @@ class BackupSheet {
       // 但任一步 IO 失败都应明确告诉用户哪一步失败，而不是笼统的「格式不正确」。
       // 任一步失败不中断已成功的前序步骤（各自已落盘），仅累计错误并提示。
       final failures = <String>[];
-      await provider.restoreFromJson(raw, includeTrash: includeTrash);
+      await provider.restoreFromJson(plaintext, includeTrash: includeTrash);
       // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
       final focusList = data['focus_sessions'];
       if (focusList is List) {
@@ -231,6 +323,41 @@ class BackupSheet {
         );
       }
     }
+  }
+
+  /// 解密导入时弹出口令输入框；返回输入的口令，用户取消则返回 null。
+  static Future<String?> _requestPassword(BuildContext context) async {
+    final ctrl = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (d) => AlertDialog(
+        title: const Text('输入备份口令'),
+        content: TextField(
+          controller: ctrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: InputDecoration(
+            hintText: '请输入加密该备份时设置的口令',
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          onSubmitted: (_) => Navigator.pop(d, ctrl.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, ctrl.text),
+            child: const Text('解密'),
+          ),
+        ],
+      ),
+    );
+    return result;
   }
 
   static String _ts() {

@@ -1,6 +1,6 @@
 {
-  "version": "2.6.7",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.7/app-release-2.6.7-arm64.apk",
-  "apkSha256": "B2C79203C354FEBF158F097E286A0E21933BCA2E14117289C6F1DAB292F8D778",
-  "releaseNotes": "v2.6.7：安全审计修复——S2 构建签名加固（缺签名变量即终止，杜绝回退 debug keystore）；S4 更新说明改读 releaseNotes 字段（修复更新说明空白）；S5 统一发版入口到 _publish_v266.py、兜底仓改 youtiao-releases-2；S8 下载改流式 sha256 校验（规避 OOM）+ 安装前二次确认 + 可取消；S10 跨进程 SQLite 写入加 WAL/busy_timeout/重试+失败日志、SharedPreferences 回退改 commit；S11 CSV 导出加公式注入防护（= + - @ 前缀转义）。固定 release keystore 签名，arm64-v8a 单架构。"
+  "version": "2.6.8",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.8/app-release-2.6.8-arm64.apk",
+  "apkSha256": "4F4B3BDC5F4009CC430BA88D26D6083995DBE7EC5BA736B9E1718D7F3BD0253C",
+  "releaseNotes": "v2.6.8：6 大功能 + R8 资源瘦身\n① 分享文本 → 快速建任务（系统分享面板直达「有条」，自动解析标题/清单）\n② 重复任务补全：支持「仅跳过本次 / 单次改期 / 设结束日期」三种语义，日历视图同步\n③ 备份口令加密导出：AES-256-GCM + PBKDF2（HMAC-SHA256, 15 万轮）本地加密，无口令无法还原\n④ 桌面小组件（4×2 今日清单）：跨进程读 SQLite（WAL + busy_timeout），点击直达任务\n⑤ iCal（.ics）标准导入导出：遵循 RFC 5545，支持 VTODO / RRULE 与多日历互导\n⑥ R8 资源收缩（isShrinkResources）：剔除未使用资源，包体更小、零混淆回归风险\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }

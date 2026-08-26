@@ -56,6 +56,7 @@ class _TaskSheetState extends State<TaskSheet> {
   List<int> _repeatWeekdays = [DateTime.monday];
   int _repeatInterval = 2;
   DateTime? _repeatAnchor; // interval 锚点，创建时填当天
+  DateTime? _repeatUntilDate; // 重复结束日期（date-only，null = 无限循环）
 
   /// 提醒提前量（分钟）：一次性截止提醒在截止前该分钟数触发（0 = 准时）。
   /// 仅对「不重复」且有截止时间的任务有意义。
@@ -89,6 +90,8 @@ class _TaskSheetState extends State<TaskSheet> {
       _repeatTime = t.repeatMinute != null
           ? TimeOfDay(hour: t.repeatMinute! ~/ 60, minute: t.repeatMinute! % 60)
           : const TimeOfDay(hour: 7, minute: 0);
+      _repeatUntilDate =
+          t.repeatUntil != null ? DateTime.parse(t.repeatUntil!) : null;
       _noteController.text = t.note;
       _subtasks = t.subtasks.map((s) => s.copyWith()).toList();
       _tags = List.from(t.tags);
@@ -217,6 +220,22 @@ class _TaskSheetState extends State<TaskSheet> {
     if (picked != null) setState(() => _repeatTime = picked);
   }
 
+  Future<void> _pickRepeatUntil() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _repeatUntilDate ??
+          DateTime.now().add(const Duration(days: 30)),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 3650)),
+      helpText: '选择重复结束日期（含当日仍循环，之后停止）',
+    );
+    if (picked != null) setState(() => _repeatUntilDate = picked);
+  }
+
+  /// yyyy-MM-dd（date-only），与 [Task.repeatUntil] 存储格式一致。
+  String _ymd(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
   void _addSubtask() {
     final title = _subtaskController.text.trim();
     if (title.isEmpty) return;
@@ -309,6 +328,7 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatInterval: _repeatInterval,
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
+        repeatUntil: _repeatUntilDate != null ? _ymd(_repeatUntilDate!) : null,
         note: _noteController.text.trim(),
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
@@ -328,6 +348,7 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatInterval: _repeatInterval,
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
+        repeatUntil: _repeatUntilDate != null ? _ymd(_repeatUntilDate!) : null,
         note: _noteController.text.trim(),
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
@@ -957,6 +978,49 @@ class _TaskSheetState extends State<TaskSheet> {
                 ),
               ),
             ),
+          const SizedBox(height: 12),
+          // 重复结束日期（可选）：到期后停止循环；点选即设，再点「清除」可清空。
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: _pickRepeatUntil,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: ext.chip,
+                      borderRadius:
+                          BorderRadius.circular(AppColors.chipRadius),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          _repeatUntilDate == null
+                              ? '无结束日期（无限循环）'
+                              : '结束于 ${_ymd(_repeatUntilDate!)}',
+                          style: TextStyle(
+                            color: scheme.onSurface, fontSize: 15,
+                            fontWeight: _repeatUntilDate == null
+                                ? FontWeight.normal
+                                : FontWeight.w600,
+                          ),
+                        ),
+                        Icon(Symbols.event_busy, size: 20, color: ext.meta),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              if (_repeatUntilDate != null)
+                IconButton(
+                  onPressed: () => setState(() => _repeatUntilDate = null),
+                  icon: const Icon(Symbols.close),
+                  tooltip: '清除结束日期',
+                ),
+            ],
+          ),
           const SizedBox(height: 18),
           // 保存
           SizedBox(

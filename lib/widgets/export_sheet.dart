@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/ical.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -55,6 +56,25 @@ class ExportSheet {
                     Navigator.pop(ctx);
                     _doExport(taskProvider, focusProvider, habitProvider, context,
                         'md', includeTrash);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Symbols.calendar_month),
+                  title: const Text('导出为 iCal (.ics)'),
+                  subtitle: const Text('标准日历格式，可导入系统日历 / Outlook / Google 日历'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _doExportIcs(taskProvider, context, includeTrash);
+                  },
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Symbols.playlist_add),
+                  title: const Text('从 iCal (.ics) 导入'),
+                  subtitle: const Text('把其它应用的 .ics 任务迁入「有条」（追加，不覆盖现有）'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _doImportIcs(taskProvider, context);
                   },
                 ),
               ],
@@ -117,6 +137,87 @@ class ExportSheet {
       if (context.mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      }
+    }
+  }
+
+  /// 把当前任务导出为 iCal (.ics) 标准格式（RFC 5545，CRLF 行尾），
+  /// 可被系统日历 / Outlook / Google 日历 / 其它待办应用导入。
+  static Future<void> _doExportIcs(
+    TaskProvider provider,
+    BuildContext context,
+    bool includeTrash,
+  ) async {
+    try {
+      final tasks = [...provider.tasks];
+      if (includeTrash) tasks.addAll(provider.trash);
+      if (tasks.isEmpty) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('没有可导出的任务')));
+        }
+        return;
+      }
+      final content = exportIcs(tasks);
+      final name = '有条-${_ts()}.ics';
+      // 1) App 私有目录留一份，供「分享」按钮兜底使用。
+      final file = await DataIo.saveToAppDocs(name, content);
+      // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见。
+      String msg = '已导出 iCal 到「下载」目录（可被系统日历导入）';
+      try {
+        await DataIo.saveToDownloads(name, content, mimeType: 'text/calendar');
+      } catch (e) {
+        msg = '已生成 .ics（下载目录写入失败，请改用「分享」）';
+      }
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            action: SnackBarAction(
+              label: '分享',
+              onPressed: () => DataIo.shareFile(file, mimeType: 'text/calendar'),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      }
+    }
+  }
+
+  /// 从 iCal (.ics) 导入任务：解析 VTODO/VEVENT → 逐条 addTask 追加（不覆盖现有）。
+  /// 复杂 RRULE 已降级为一次性任务；结果给出成功/简化/跳过计数。
+  static Future<void> _doImportIcs(
+    TaskProvider provider,
+    BuildContext context,
+  ) async {
+    final raw = await DataIo.pickIcsFile();
+    if (raw == null) return;
+    try {
+      final result = parseIcs(raw);
+      if (result.tasks.isEmpty) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('未解析到可导入的任务（${result.report}）')),
+          );
+        }
+        return;
+      }
+      for (final t in result.tasks) {
+        provider.addTask(t);
+      }
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('iCal 导入完成：${result.report}')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导入失败：$e')));
       }
     }
   }

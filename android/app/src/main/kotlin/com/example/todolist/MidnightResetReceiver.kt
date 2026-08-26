@@ -201,6 +201,8 @@ class MidnightResetReceiver : BroadcastReceiver() {
         resetDailyTasks(context)
         // 安排下一次，保证每天循环
         schedule(context)
+        // 顺带刷新桌面小组件（今日任务列表），使重置后的循环任务即时反映。
+        runCatching { TodayWidgetProvider.refreshAll(context) }
     }
 
     /** 读取回收站保留天数（天）。与 Dart prefs key [kTrashRetention] 一致；
@@ -356,6 +358,16 @@ class MidnightResetReceiver : BroadcastReceiver() {
 
     /** 判断今天（yyyy-MM-dd）是否为该重复任务的循环日。与 Dart Task.repeatsOn 完全一致。 */
     private fun isRecurrenceToday(obj: JSONObject, repeat: RepeatMode, today: String): Boolean {
+        // B2：结束日期（repeatUntil，yyyy-MM-dd，含当日仍生效 → 用字典序 > 排除次日及之后）。
+        val until = obj.optString("repeatUntil", "")
+        if (until.isNotEmpty() && today > until) return false
+        // B1：跳过日期（skipDates 列表命中今天 → 当天不出现、不打卡、不影响连续天数）。
+        val skip = obj.optJSONArray("skipDates")
+        if (skip != null) {
+            for (j in 0 until skip.length()) {
+                if (skip.optString(j, "") == today) return false
+            }
+        }
         when (repeat) {
             RepeatMode.NONE -> return false
             RepeatMode.DAILY -> return true

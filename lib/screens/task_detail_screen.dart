@@ -221,6 +221,80 @@ class TaskDetailScreen extends StatelessWidget {
             ),
           ),
 
+          // 重复管理（仅重复任务）：本次跳过 / 结束重复 / 仅此一次改期
+          if (task.isRepeating) ...[
+            const SizedBox(height: AppColors.contentGap),
+            _Card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _Label('重复管理'),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          provider.skipOccurrence(task.id);
+                          Navigator.pop(context);
+                        },
+                        icon: const Icon(Symbols.skip_next, size: 18),
+                        label: const Text('本次跳过'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final ok = await showDialog<bool>(
+                            context: context,
+                            builder: (c) => AlertDialog(
+                              title: const Text('结束重复'),
+                              content: const Text(
+                                  '将停止该任务在此之后的循环（今天起不再出现），历史不受影响。'),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(c, false),
+                                  child: const Text('取消'),
+                                ),
+                                FilledButton(
+                                  onPressed: () => Navigator.pop(c, true),
+                                  child: const Text('结束'),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (ok == true) {
+                            provider.endRepeat(task.id);
+                            Navigator.pop(context);
+                          }
+                        },
+                        icon: const Icon(Symbols.event_busy, size: 18),
+                        label: const Text('结束重复'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate:
+                                DateTime.now().add(const Duration(days: 1)),
+                            firstDate: DateTime.now(),
+                            lastDate:
+                                DateTime.now().add(const Duration(days: 365)),
+                          );
+                          if (picked != null) {
+                            provider.rescheduleOnceOccurrence(task.id, picked);
+                            Navigator.pop(context);
+                          }
+                        },
+                        icon: const Icon(Symbols.edit_calendar, size: 18),
+                        label: const Text('仅此一次改期'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+
           // 子任务
           if (task.subtasks.isNotEmpty) ...[
             const SizedBox(height: AppColors.contentGap),

@@ -30,3 +30,21 @@
 -keep class io.flutter.view.** { *; }
 -keep class io.flutter.** { *; }
 -keep class io.flutter.plugins.** { *; }
+
+# 桌面小组件（TodayWidgetProvider）：manifest 已声明，但显式保留避免被 R8 误删，
+# 且避免其跨进程读库 / RemoteViews 相关逻辑因混淆而异常。
+-keep class com.example.todolist.TodayWidgetProvider { *; }
+
+# local_auth（生物识别 / 锁屏密码）：Android 端依赖 androidx.biometric 反射与 Fragment 事务，
+# 混淆后可能导致解锁流程崩溃，整体保留其 Android 实现类。
+-keep class com.example.todolist.** { *; }
+-dontwarn androidx.biometric.**
+
+# just_audio：底层经 exoplayer / Android 媒体 API，release 下若被裁剪可能播放异常，
+# 放行其 missing-class 告警（仅 warning，不影响链接）。
+-dontwarn com.google.android.exoplayer2.**
+-dontwarn androidx.media3.**
+
+# 其它第三方 Android 依赖的 missing-class 放行（不进入正式包体的引用）。
+-dontwarn org.bouncycastle.**
+-dontwarn org.joda.time.**

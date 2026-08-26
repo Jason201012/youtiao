@@ -68,11 +68,13 @@ android {
                 )
             }
             signingConfig = signingConfigs.getByName("release")
-            // 注：本机 Gradle 9.1 + JDK 25 在 release 构建中对 minifyReleaseWithR8 的
-            // output-metadata.json / resourceShrinkingParams 快照报 "not a regular file"
-            // （Gradle 9.1 严格快照 + JDK 25 文件属性读取的兼容问题，doNotTrackState 对该输入属性无效）。
-            // 为稳定出包，暂时关闭 R8 压缩与资源收缩（APK 体积略增，功能完全一致）；
-            // proguard 规则保留以备后续在兼容 JDK 上重新开启。
+            // R8 瘦身重启（⑥）—— 采用文档「风险最低」一步：仅开启资源收缩，暂不开启代码混淆压缩。
+            // 资源收缩（isShrinkResources）必须搭配 isMinifyEnabled=true，AGP 不允许单独开启；
+            // 代码混淆压缩（isMinifyEnabled）因本机 Gradle 9.1 + JDK 25 在 minifyReleaseWithR8 快照步骤
+            // 报 "not a regular file"（严格快照 + JDK 25 文件属性读取兼容问题）暂不开。
+            // 故两者均关闭，与 v2.6.7 发布配置一致；待构建机换 JDK 21 LTS 并经一轮 release 冒烟回归后再单独评估开启。
+            // proguard 规则已按 flutter_local_notifications / gson / local_auth / just_audio /
+            // TodayWidgetProvider 备好，待 minify 开启后直接生效，无需再改。
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(
