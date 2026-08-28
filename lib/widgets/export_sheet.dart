@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
@@ -16,6 +17,8 @@ class ExportSheet {
     final focusProvider = context.read<FocusProvider>();
     final habitProvider = context.read<HabitProvider>();
     var includeTrash = false;
+    // P1-10：导出时可选「包含附件清单」（Excel/CSV 追加附件列 / 行）。
+    var includeAttachments = false;
     await showModalBottomSheet<void>(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -38,6 +41,13 @@ class ExportSheet {
                   value: includeTrash,
                   onChanged: (v) => setState(() => includeTrash = v),
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('包含附件清单'),
+                  subtitle: const Text('Excel/CSV 追加附件列（文件名与大小）'),
+                  value: includeAttachments,
+                  onChanged: (v) => setState(() => includeAttachments = v),
+                ),
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Symbols.table_chart),
@@ -46,7 +56,7 @@ class ExportSheet {
                   onTap: () {
                     Navigator.pop(ctx);
                     _doExport(taskProvider, focusProvider, habitProvider, context,
-                        'csv', includeTrash);
+                        'csv', includeTrash, includeAttachments);
                   },
                 ),
                 ListTile(
@@ -56,7 +66,7 @@ class ExportSheet {
                   onTap: () {
                     Navigator.pop(ctx);
                     _doExport(taskProvider, focusProvider, habitProvider, context,
-                        'md', includeTrash);
+                        'md', includeTrash, includeAttachments);
                   },
                 ),
                 ListTile(
@@ -66,7 +76,7 @@ class ExportSheet {
                   onTap: () {
                     Navigator.pop(ctx);
                     _doExportExcel(taskProvider, focusProvider, habitProvider,
-                        context, includeTrash);
+                        context, includeTrash, includeAttachments);
                   },
                 ),
                 ListTile(
@@ -103,12 +113,15 @@ class ExportSheet {
     BuildContext context,
     String kind,
     bool includeTrash,
+    bool includeAttachments,
   ) async {
     final isCsv = kind == 'csv';
     try {
       final contentTask = isCsv
-          ? provider.exportCsv(includeTrash: includeTrash)
-          : provider.exportMarkdown(includeTrash: includeTrash);
+          ? provider.exportCsv(
+              includeTrash: includeTrash, includeAttachments: includeAttachments)
+          : provider.exportMarkdown(
+              includeTrash: includeTrash, includeAttachments: includeAttachments);
       final contentFocus =
           isCsv ? focusProvider.exportCsv() : focusProvider.exportMarkdown();
       final contentHabit =
@@ -161,6 +174,7 @@ class ExportSheet {
     HabitProvider habitProvider,
     BuildContext context,
     bool includeTrash,
+    bool includeAttachments,
   ) async {
     try {
       final bytes = ReportExporter.buildDatasetExcel(
@@ -168,6 +182,7 @@ class ExportSheet {
         focus: focusProvider,
         habit: habitProvider,
         includeTrash: includeTrash,
+        includeAttachments: includeAttachments,
       );
       final name = '有条-tasks-${_ts()}.xlsx';
       final file = await DataIo.saveBytesToAppDocs(name, bytes);
@@ -249,6 +264,15 @@ class ExportSheet {
   ) async {
     final raw = await DataIo.pickIcsFile();
     if (raw == null) return;
+    // P2-4：限制 .ics 文件体积（≤2MB），避免超大文件拖垮解析 / 一次性灌注海量任务。
+    if (utf8.encode(raw).length > 2 * 1024 * 1024) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('文件过大（超过 2MB），请拆分后分批导入')),
+        );
+      }
+      return;
+    }
     try {
       final result = parseIcs(raw);
       if (result.tasks.isEmpty) {
@@ -259,12 +283,45 @@ class ExportSheet {
         }
         return;
       }
-      for (final t in result.tasks) {
-        provider.addTask(t);
-      }
+      // P0-3：先让用户选择导入策略（去重 / 覆盖 / 模糊去重），再走 importDedup 幂等入库，
+      // 打通「导出 → 导入 → 模板」整条数据闭环，避免从「有条」导回时产生重复任务。
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('iCal 导入完成：${result.report}')),
+        await showDialog<void>(
+          context: context,
+          builder: (dctx) => AlertDialog(
+            title: const Text('选择导入方式'),
+            content: Text(
+              '共解析到 ${result.tasks.length} 条任务。'
+              '${result.simplifiedRepeat > 0 ? '其中 ${result.simplifiedRepeat} 条复杂重复已简化为一次性。' : ''}'
+              '请选择重复任务的处理方式：',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dctx);
+                  _runImportDedup(provider, context, result,
+                      skipExisting: true, overwrite: false, fingerprint: false);
+                },
+                child: const Text('跳过重复（推荐）'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dctx);
+                  _runImportDedup(provider, context, result,
+                      skipExisting: false, overwrite: true, fingerprint: false);
+                },
+                child: const Text('覆盖更新'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dctx);
+                  _runImportDedup(provider, context, result,
+                      skipExisting: true, overwrite: false, fingerprint: true);
+                },
+                child: const Text('模糊去重（标题+日期）'),
+              ),
+            ],
+          ),
         );
       }
     } catch (e) {
@@ -273,6 +330,34 @@ class ExportSheet {
             .showSnackBar(SnackBar(content: Text('导入失败：$e')));
       }
     }
+  }
+
+  /// P0-3：按选定策略执行 iCal 幂等导入，并以 SnackBar 展示新增/覆盖/跳过计数。
+  static Future<void> _runImportDedup(
+    TaskProvider provider,
+    BuildContext context,
+    IcsImportResult result, {
+    required bool skipExisting,
+    required bool overwrite,
+    required bool fingerprint,
+  }) async {
+    final stats = provider.importDedup(
+      result.tasks,
+      result.uids,
+      skipExisting: skipExisting,
+      overwrite: overwrite,
+      fingerprint: fingerprint,
+    );
+    if (!context.mounted) return;
+    final parts = <String>['新增 ${stats.added}'];
+    if (stats.overwritten > 0) parts.add('覆盖 ${stats.overwritten}');
+    if (stats.skipped > 0) parts.add('跳过 ${stats.skipped}');
+    final extra = result.simplifiedRepeat > 0
+        ? '（${result.simplifiedRepeat} 条复杂重复已简化为一次性）'
+        : '';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('iCal 导入完成：${parts.join('，')}$extra')),
+    );
   }
 
   static String _ts() {

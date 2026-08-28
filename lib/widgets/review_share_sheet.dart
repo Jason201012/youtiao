@@ -288,19 +288,32 @@ class _PeriodReviewShareSheet extends StatefulWidget {
 
 class _PeriodReviewShareSheetState extends State<_PeriodReviewShareSheet> {
   final GlobalKey _cardKey = GlobalKey();
+  /// P1-10：结构化明细页的离屏渲染键（栅格化后作为 PDF 第 2 页）。
+  final GlobalKey _detailKey = GlobalKey();
   bool _dark = false;
   bool _busy = false;
 
   /// 把当前回顾长图（与预览同一张卡片）包成 PDF 导出：捕获 PNG → 生成 PDF →
   /// 落盘 App 文档目录 → 系统分享。复用 Flutter 引擎渲染，中文正常显示。
+  ///
+  /// P1-10 多页：第 1 页为回顾长图；若明细卡片栅格化成功，则追加为第 2 页。
   Future<void> _exportPdf() async {
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _busy = true);
     try {
       final png = await _capture();
+      // P1-10：明细页（结构化文本 → 栅格化 PNG），栅格化失败不阻断主图导出。
+      final detailPages = <Uint8List>[];
+      try {
+        final d = await _captureDetail();
+        if (d != null) detailPages.add(d);
+      } catch (_) {
+        // 明细页渲染异常时降级为单页 PDF。
+      }
       final pdfBytes = await ReportExporter.buildPeriodReportPdf(
         png,
         title: '有条${widget.review.period.label}',
+        detailPages: detailPages,
       );
       final name = _fileName.replaceAll('.png', '.pdf');
       final file = await DataIo.saveBytesToAppDocs(name, pdfBytes);
@@ -332,6 +345,75 @@ class _PeriodReviewShareSheetState extends State<_PeriodReviewShareSheet> {
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
     image.dispose();
     return byteData!.buffer.asUint8List();
+  }
+
+  /// P1-10：把明细卡片栅格化为 PNG 字节（与 [_capture] 同机制）。
+  Future<Uint8List?> _captureDetail() async {
+    final boundary = _detailKey.currentContext?.findRenderObject();
+    if (boundary is! RenderRepaintBoundary) return null;
+    final image = await boundary.toImage(pixelRatio: 3);
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    return byteData?.buffer.asUint8List();
+  }
+
+  /// P1-10：明细卡片（预览中可见，导出 PDF 时作为第 2 页栅格化）。
+  Widget _detailSection() {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 18),
+        Text('明细（PDF 第 2 页）',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: onBg)),
+        const SizedBox(height: 10),
+        RepaintBoundary(
+          key: _detailKey,
+          child: Container(
+            width: 720,
+            decoration: BoxDecoration(
+              color: _dark ? AppColors.darkBackground : AppColors.lightBackground,
+              borderRadius: BorderRadius.circular(AppColors.cardRadius),
+              border: Border.all(color: ext.track),
+            ),
+            padding: const EdgeInsets.all(20),
+            child: Text(
+              _buildDetailText(),
+              style: TextStyle(fontSize: 14, height: 1.5, color: onBg),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// P1-10：从 [PeriodReview] 派生结构化明细文本（中文，由 Flutter 引擎栅格化，规避 CJK 字体问题）。
+  String _buildDetailText() {
+    final r = widget.review;
+    final b = StringBuffer();
+    b.writeln('${r.title}（${r.rangeLabel}）');
+    b.writeln('完成 ${r.completedCount} 个任务 ｜ ${r.completedDeltaLabel}');
+    b.writeln('专注 ${r.focusMinutes} 分钟 ｜ 番茄 ${r.pomodoroCount} 个'
+        '（较${r.period.prevLabel} ${r.focusMinutesDelta >= 0 ? '+' : ''}${r.focusMinutesDelta}）');
+    b.writeln('活跃 ${r.activeDays} / 共 ${r.totalDays} 天');
+    b.writeln('习惯达成 ${r.habitPercent}%（${r.habitDone}/${r.habitExpected}）');
+    if (r.focusTop.isNotEmpty) {
+      b.writeln('');
+      b.writeln('—— 专注去向 Top ——');
+      for (var i = 0; i < r.focusTop.length; i++) {
+        final f = r.focusTop[i];
+        b.writeln('${i + 1}. ${f.title} · ${(f.totalSec / 60).round()} 分钟');
+      }
+    }
+    if (r.habits.isNotEmpty) {
+      b.writeln('');
+      b.writeln('—— 习惯达成 ——');
+      for (final h in r.habits) {
+        b.writeln('${h.habit.title} ${(h.rate * 100).round()}%（${h.done}/${h.expected}）');
+      }
+    }
+    return b.toString();
   }
 
   String get _fileName {
@@ -442,6 +524,7 @@ class _PeriodReviewShareSheetState extends State<_PeriodReviewShareSheet> {
                         )),
                     const SizedBox(height: 10),
                     _appearance(),
+                    _detailSection(),
                   ],
                 ),
               ),

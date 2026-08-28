@@ -15,6 +15,8 @@ class Habit {
   final int? reminderMinute;
   final DateTime createdAt;
   final bool archived;
+  /// 每周目标打卡次数（0 = 不启用，1..14）。新增字段，旧数据缺省 0（零迁移）。
+  final int weeklyGoal;
 
   const Habit({
     required this.id,
@@ -25,6 +27,7 @@ class Habit {
     this.reminderMinute,
     required this.createdAt,
     this.archived = false,
+    this.weeklyGoal = 0,
   });
 
   /// 某天是否应打卡（按 weekday 过滤；空列表=每天）。
@@ -40,6 +43,7 @@ class Habit {
         'reminderMinute': reminderMinute,
         'createdAt': createdAt.toIso8601String(),
         'archived': archived,
+        'weeklyGoal': weeklyGoal,
       };
 
   factory Habit.fromJson(Map<String, dynamic> j) => Habit(
@@ -53,6 +57,7 @@ class Habit {
             ? DateTime.parse(j['createdAt'] as String)
             : DateTime.now(),
         archived: j['archived'] as bool? ?? false,
+        weeklyGoal: j['weeklyGoal'] as int? ?? 0,
       );
 
   /// 复制并覆盖部分字段。
@@ -67,6 +72,7 @@ class Habit {
     int? reminderMinute,
     bool clearReminder = false,
     bool? archived,
+    int? weeklyGoal,
   }) =>
       Habit(
         id: id,
@@ -78,5 +84,6 @@ class Habit {
             clearReminder ? null : (reminderMinute ?? this.reminderMinute),
         createdAt: createdAt,
         archived: archived ?? this.archived,
+        weeklyGoal: weeklyGoal ?? this.weeklyGoal,
       );
 }

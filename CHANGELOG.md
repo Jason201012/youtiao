@@ -1,5 +1,22 @@
 # 更新日志（Changelog）
 
+## v2.7.0（2026-08-28）
+
+- 早晚简报 + 今日回顾（daily_briefing / today_review_screen）：每日晨/晚本地推送，含今日完成/专注/习惯汇总，晚间可进入当日复盘页
+- 附件管理页（storage_screen / attachment_service）：统一查看本地附件占用、预览、清理无主文件
+- iCal / CSV 导入幂等去重（importDedup）：去重 / 覆盖 / 模糊去重可选，重复导入不再产生副本
+- 用户模板可视化编辑（user_template_editor / task_templates）：内置模板库 + 自定义常用任务模板
+- 重复「未来 30 天预览」（occurrence_sheet）：逐次实例可单独标记完成 / 跳过 / 顺延
+- 农历重复（task_parser）：支持按农历日期设置重复任务（离线转换，不联网）
+- 专注时段面板（focus_screen）：周视图按日展示当天专注时段条
+- 命令面板（command_palette）：全局快捷命令入口（Ctrl/Cmd+F 聚焦搜索等）
+- 导出增强（report_exporter）：回顾 / 任务导出可选「包含附件清单」列
+- 系统分享建任务（MainActivity + quick_entry_sheet）：其它 App 分享图片 / 文件直接建任务并带附件
+- 回收站过期预告（notification_service）：即将永久删除的任务本地通知提醒
+- 全局标签管理（tag_manage_screen）：重命名 / 合并 / 归档 / 删除、批量绑定任务
+- 通知稍后提醒（snooze）：到期提醒一键延后、按时长顺延
+- 版本升至 v2.7.0（versionCode 91）。
+
 ## v2.6.9（2026-08-27）
 
 - 任务附件（P0-1）：图片 / 拍照 / 录音 / 任意文件，全程本地落盘，严格离线不联网

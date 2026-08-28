@@ -1,6 +1,6 @@
 {
-  "version": "2.6.9",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.9/app-release-2.6.9-arm64.apk",
-  "apkSha256": "506D89A520D07DDA7D8377541752A65CC899A5786A404DEF292B16FA520F015F",
-  "releaseNotes": "v2.6.9：任务附件（全程本地，严格离线）\n① 任务附件：图片 / 拍照 / 录音 / 任意文件，全部落盘 App 私有目录，不联网、不上传\n② 详情页附件：图片全屏缩放预览、录音内联播放/停止、其它文件经系统分享打开\n③ 附件随本地加密备份（AES-256-GCM）打包还原，自动备份 + 手动备份均纳入\n④ 修复：录音原始文件孤儿、播放订阅泄漏、编辑模式取消保存孤儿清理\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.0",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.0/app-release-2.7.0-arm64.apk",
+  "apkSha256": "A4CCBC744FBDAD58A4B2B707648496C291A10B97583F9B0167A534C81791561F",
+  "releaseNotes": "v2.7.0（13 项新功能，全程本地 / 严格离线）：\n① 早晚简报：每日晨/晚本地推送，含今日完成/专注/习惯汇总\n② 附件管理页：查看附件占用、清理无主文件\n③ iCal/CSV 导入幂等去重：去重/覆盖/模糊去重可选\n④ 用户模板可视化编辑：内置模板库 + 自定义常用任务模板\n⑤ 重复「未来 30 天预览」：逐次标记完成/跳过/顺延\n⑥ 农历重复：支持按农历日期设置重复（离线转换）\n⑦ 专注时段面板：周视图按日展示当天专注时段条\n⑧ 命令面板：全局快捷命令入口（Ctrl/Cmd+F 聚焦搜索等）\n⑨ 导出增强：回顾/任务导出可选「包含附件清单」列\n⑩ 系统分享建任务：其它 App 分享图片/文件直接建任务并带附件\n⑪ 回收站过期预告：即将永久删除的任务本地通知提醒\n⑫ 全局标签管理：重命名/合并/归档/删除、批量绑定任务\n⑬ 通知稍后提醒（snooze）：到期提醒一键延后、按时长顺延\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }

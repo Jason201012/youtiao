@@ -111,7 +111,7 @@ class TrashScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '${t.category.label} ｜ ${_deletedLabel(t.deletedAt)}',
+                                '${t.category.label} ｜ ${_deletedLabel(t.deletedAt, provider.trashRemainingDays(t), provider.trashRetentionDays)}',
                                 style: TextStyle(fontSize: 12, color: ext.meta),
                                 maxLines: 1,
                                 softWrap: false,
@@ -159,9 +159,12 @@ class TrashScreen extends StatelessWidget {
     );
   }
 
-  String _deletedLabel(DateTime? d) {
-    if (d == null) return '已删除';
-    return '删除于 ${_fmt(d)}';
+  /// P1-12：副标题含剩余天数提示。[remaining] 为距永久删除的天数（-1=永不清理）。
+  String _deletedLabel(DateTime? d, int remaining, int retention) {
+    final del = d != null ? '删除于 ${_fmt(d)}' : '已删除';
+    if (retention < 0) return '$del（永不清理）';
+    if (remaining <= 0) return '今天到期 · $del';
+    return '剩余 $remaining 天 · $del';
   }
 
   String _fmt(DateTime d) {

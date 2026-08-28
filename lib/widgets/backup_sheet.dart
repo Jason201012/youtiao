@@ -66,7 +66,7 @@ class BackupSheet {
                     obscureText: true,
                     decoration: InputDecoration(
                       labelText: '加密口令',
-                      hintText: '建议含大小写+数字，至少 8 位',
+                      hintText: '至少 8 位，含大小写或数字中至少两类',
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -99,6 +99,13 @@ class BackupSheet {
                       if (p.length < 8) {
                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                             content: Text('口令至少 8 位，请重新输入')));
+                        return;
+                      }
+                      // P2-6：强制口令复杂度——至少包含「大小写 / 数字」中两类字符，
+                      // 杜绝纯数字等可被 GPU 数分钟爆破的弱口令（结合 P1-2 的 35 万轮迭代）。
+                      if (!_isStrongPassword(p)) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                            content: Text('口令过弱：需含大小写字母或数字中至少两类')));
                         return;
                       }
                       if (p != passConfirmCtrl.text) {
@@ -398,6 +405,16 @@ class BackupSheet {
     final d = DateTime.now();
     final p = (int n) => n.toString().padLeft(2, '0');
     return '${d.year}${p(d.month)}${p(d.day)}-${p(d.hour)}${p(d.minute)}';
+  }
+
+  /// P2-6：口令强度判定——至少包含「小写字母 / 大写字母 / 数字」中的两类字符。
+  /// 纯数字 / 纯小写等弱口令可被 GPU 快速爆破，故强制多类组合。
+  static bool _isStrongPassword(String p) {
+    var classes = 0;
+    if (p.contains(RegExp(r'[a-z]'))) classes++;
+    if (p.contains(RegExp(r'[A-Z]'))) classes++;
+    if (p.contains(RegExp(r'[0-9]'))) classes++;
+    return classes >= 2;
   }
 
   /// 从本地自动备份快照还原：读取该快照文件全文 → 走与「从备份恢复」相同的

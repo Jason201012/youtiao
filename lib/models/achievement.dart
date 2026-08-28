@@ -59,6 +59,11 @@ class AchievementContext {
   /// 晚上 22 点后完成的任务数。
   final int nightTasks;
 
+  /// 全部习惯中「连续达成周目标」的最大周数（取各习惯
+  /// [HabitProvider.consecutiveGoalWeeks] 的上限，默认窗口 4 周）。
+  /// 用于「连续 4 周达成周目标」成就；无任何周目标习惯时为 0。
+  final int maxGoalWeeks;
+
   const AchievementContext({
     this.totalCheckIns = 0,
     this.longestStreak = 0,
@@ -71,6 +76,7 @@ class AchievementContext {
     this.maxTasksInDay = 0,
     this.earlyTasks = 0,
     this.nightTasks = 0,
+    this.maxGoalWeeks = 0,
   });
 
   /// 从三个 Provider 的公开状态现算一份成就上下文（零新存储）。
@@ -106,8 +112,16 @@ class AchievementContext {
           .add(DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day));
     }
 
+    // —— 习惯侧：连续达成周目标的最大周数（取各习惯上限）——
+    int maxGoalWeeks = 0;
+    for (final h in habit.habits) {
+      final w = habit.consecutiveGoalWeeks(h);
+      if (w > maxGoalWeeks) maxGoalWeeks = w;
+    }
+
     return AchievementContext(
       totalCheckIns: habit.totalCheckIns,
+      maxGoalWeeks: maxGoalWeeks,
       longestStreak: habit.overallLongestStreak,
       currentStreak: habit.overallCurrentStreak,
       habitCount: habit.habitCount,
@@ -262,6 +276,15 @@ final List<Achievement> allAchievements = [
     group: AchievementGroup.habit,
     target: 3,
     value: (c) => c.habitCount,
+  ),
+  Achievement.counter(
+    id: 'habit_goal_4w',
+    title: '周目标达人',
+    desc: '连续 4 周达成习惯周目标',
+    emoji: '🎯',
+    group: AchievementGroup.habit,
+    target: 4,
+    value: (c) => c.maxGoalWeeks,
   ),
 
   // ===== 任务 =====

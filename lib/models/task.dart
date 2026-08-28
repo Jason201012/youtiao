@@ -592,6 +592,25 @@ class Task {
     return raw.whereType<String>().toList();
   }
 
+  /// 未来 N 天内「循环命中」的日期序列（date-only，含 [start] 当日）。
+  /// 纯函数、无副作用，便于单测；命中判定复用 [repeatsOn]（已含 repeatUntil / skipDates）。
+  /// [days] 扫描窗口（默认 30 天）；[limit] 返回条数上限（默认 60，防止每隔1天等极端规则下列表过长）。
+  List<DateTime> occurrencesBetween(DateTime start, {int days = 30, int limit = 60}) {
+    final out = <DateTime>[];
+    final s = DateTime(start.year, start.month, start.day);
+    for (var i = 0; i < days && out.length < limit; i++) {
+      final d = DateTime(s.year, s.month, s.day + i);
+      if (repeatsOn(d)) out.add(d);
+    }
+    return out;
+  }
+
+  /// yyyy-MM-dd 串（对外复用 [repeatsOn] 的 skipDates 匹配键）。
+  static String ymdKey(DateTime d) => _ymd(d);
+
+  /// 两个日期是否同年月日（date-only 比较）。
+  static bool isSameDay(DateTime a, DateTime b) => _ymd(a) == _ymd(b);
+
   /// 重复规则的人类可读摘要（不含时间）。如「每天」「工作日」「每周 一、三」「每2天」。
   String get repeatSummary {
     switch (repeat) {

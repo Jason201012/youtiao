@@ -5,6 +5,9 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+import 'package:flutter/gestures.dart';
+import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/widgets/occurrence_sheet.dart';
 
 /// 任务行：高 64，圆角 14，surface 填充。
 /// 左：优先级色条(3×36) → 勾选框(22) → 标题(15) → 截止信息(12)
@@ -289,10 +292,30 @@ class _MetaInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final parts = <String>[];
+    final primary = Theme.of(context).colorScheme.primary;
+    final spans = <InlineSpan>[];
     if (task.isRepeating && task.repeatFull.isNotEmpty) {
-      parts.add('↻ ${task.repeatFull}');
+      // P0-5：重复芯片可点开「未来30天预览」，便于逐次补打 / 跳过。
+      void open() => OccurrenceSheet.show(
+            context,
+            task,
+            Provider.of<TaskProvider>(context, listen: false),
+          );
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: GestureDetector(
+          onTap: open,
+          child: Icon(Symbols.repeat, size: 13, color: primary),
+        ),
+      ));
+      spans.add(TextSpan(
+        text: ' ${task.repeatFull}',
+        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: primary),
+        recognizer: TapGestureRecognizer()..onTap = open,
+      ));
+      spans.add(const TextSpan(text: '  '));
     }
+    final parts = <String>[];
     // 开始时间（时间段起点）优先展示，体现「14:00-15:00」这类时段语义。
     if (task.startDate != null) {
       final s = task.startDate!;
@@ -304,15 +327,14 @@ class _MetaInfo extends StatelessWidget {
     if (task.focusSecTotal > 0) {
       parts.add('⏱ ${_focusLabel(task.focusSecTotal)}');
     }
-    return Text(
-      parts.join('  '),
-      style: TextStyle(
-        fontSize: 12,
-        fontWeight: FontWeight.w500,
-        color: ext.meta,
-      ),
-      overflow: TextOverflow.ellipsis,
+    spans.add(TextSpan(
+      text: parts.join('  '),
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
+    ));
+    return RichText(
+      text: TextSpan(children: spans),
       maxLines: 1,
+      overflow: TextOverflow.ellipsis,
     );
   }
 }

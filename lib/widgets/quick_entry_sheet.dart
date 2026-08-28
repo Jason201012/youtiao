@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:todolist/models/attachment.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -15,20 +19,44 @@ import 'package:todolist/widgets/new_task_sheet.dart';
 class QuickEntrySheet extends StatefulWidget {
   /// 可选预填文本（如分享入口转发过来的文字），非空时录入层预填并实时解析。
   final String? initialText;
-  const QuickEntrySheet({super.key, this.initialText});
+  /// P2-8：分享来源包名（原生侧经 getCallingActivity 取得），非空时显示「来自 XX」。
+  final String? sourcePackage;
+  /// P1-11：系统分享接收的图片/文件附件（已落盘到暂存目录的 [AttachmentRef]）。
+  /// 非空时录入层展示附件预览，确认保存后挂到任务；[attachmentSession] 为该附件所在的暂存会话 id，
+  /// 保存后由 [AttachmentService.promoteStaging] 提升为正式目录，取消则清理。
+  final AttachmentRef? initialAttachment;
+  final String? attachmentSession;
+  const QuickEntrySheet(
+      {super.key,
+      this.initialText,
+      this.sourcePackage,
+      this.initialAttachment,
+      this.attachmentSession});
 
   /// 打开快速录入。若用户选择「更多选项」，会带着草稿续开完整编辑弹层。
   /// [initialText] 用于分享建任务等场景：预填文本并立即解析出标题/截止时间。
-  static Future<void> show(BuildContext context, {String? initialText}) async {
+  /// [sourcePackage] 为分享来源包名，用于在录入层提示用户内容来自哪个 App。
+  /// [initialAttachment]/[attachmentSession] 为系统分享接收的附件（P1-11）。
+  static Future<void> show(BuildContext context,
+      {String? initialText,
+      String? sourcePackage,
+      AttachmentRef? initialAttachment,
+      String? attachmentSession}) async {
     final draft = await showModalBottomSheet<Task>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => QuickEntrySheet(initialText: initialText),
+      builder: (_) => QuickEntrySheet(
+        initialText: initialText,
+        sourcePackage: sourcePackage,
+        initialAttachment: initialAttachment,
+        attachmentSession: attachmentSession,
+      ),
     );
     // 弹层内部只负责回传草稿，转场由调用方发起，避免 sheet 的 context 已销毁
     if (draft != null && context.mounted) {
-      await TaskSheet.show(context, draft: draft);
+      await TaskSheet.show(context,
+          draft: draft, inheritedAttachmentSession: attachmentSession);
     }
   }
 
@@ -40,6 +68,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   final _controller = TextEditingController();
   ParsedTask _parsed = TaskParser.parse('');
 
+  /// P1-11：系统分享接收的附件（已落盘暂存目录）。非空时展示预览，保存后挂到任务。
+  AttachmentRef? _pendingAttachment;
+  String? _attachmentSession;
+  /// 附件所有权是否已转移（直接保存或转入完整编辑）：转移后 dispose 不再清理暂存目录。
+  bool _consumed = false;
+
   @override
   void initState() {
     super.initState();
@@ -48,10 +82,19 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
       _controller.text = widget.initialText!;
       _parsed = TaskParser.parse(widget.initialText!);
     }
+    // P1-11：预填分享接收的附件（已落盘暂存目录），保存后挂到任务。
+    if (widget.initialAttachment != null) {
+      _pendingAttachment = widget.initialAttachment;
+      _attachmentSession = widget.attachmentSession;
+    }
   }
 
   @override
   void dispose() {
+    // P1-11：用户未保存（关闭/返回）且附件所有权仍在快速录入层时，清理未消费的暂存目录。
+    if (!_consumed && _attachmentSession != null) {
+      AttachmentService.removeStaging(_attachmentSession!).catchError((_) {});
+    }
     _controller.dispose();
     super.dispose();
   }
@@ -63,7 +106,17 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   /// 直接入库并关闭
   void _submit() {
     if (!_parsed.isValid) return;
-    context.read<TaskProvider>().addTask(_parsed.toTask());
+    final provider = context.read<TaskProvider>();
+    // P1-11：分享接收的附件随任务一并保存，并把暂存目录提升为正式目录。
+    final base = _parsed.toTask();
+    final created = provider.addTask(base.copyWith(
+      attachments: _pendingAttachment != null ? [_pendingAttachment!] : const [],
+    ));
+    if (_attachmentSession != null) {
+      AttachmentService.promoteStaging(_attachmentSession!, created.id)
+          .catchError((_) {});
+    }
+    _consumed = true;
     Navigator.pop(context);
   }
 
@@ -83,12 +136,24 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
 
   /// 把当前解析结果作为草稿回传给调用方，由它续开完整编辑弹层
   void _openFullEditor() {
-    Navigator.pop(context, _parsed.isValid ? _parsed.toTask() : Task(
-      id: '',
-      title: _controller.text.trim(),
-      priority: Priority.medium,
-      category: Category.work,
-    ));
+    // P1-11：附件所有权转移给完整编辑弹层（由其负责提升/清理暂存目录）。
+    _consumed = true;
+    final draft = _parsed.isValid
+        ? _parsed.toTask().copyWith(
+            attachments: _pendingAttachment != null
+                ? [_pendingAttachment!]
+                : const [],
+          )
+        : Task(
+            id: '',
+            title: _controller.text.trim(),
+            priority: Priority.medium,
+            category: Category.work,
+            attachments: _pendingAttachment != null
+                ? [_pendingAttachment!]
+                : const [],
+          );
+    Navigator.pop(context, draft);
   }
 
   @override
@@ -144,6 +209,35 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
                   ],
                 ),
                 const SizedBox(height: 4),
+                // 来源提示（P2-8）：分享建任务时展示来源包名，便于识别可疑来源。
+                if (widget.sourcePackage != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      '来自应用：${widget.sourcePackage}',
+                      style: TextStyle(fontSize: 12, color: ext.meta),
+                    ),
+                  ),
+                // P1-11：分享接收的附件预览（图片缩略图 / 文件卡片），可移除。
+                if (_pendingAttachment != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _SharedAttachmentPreview(
+                      ref: _pendingAttachment!,
+                      sessionId: _attachmentSession,
+                      onRemove: () {
+                        setState(() {
+                          _pendingAttachment = null;
+                          // 附件移除即视为放弃：清理暂存目录（所有权仍在本层）。
+                          if (_attachmentSession != null) {
+                            AttachmentService.removeStaging(_attachmentSession!)
+                                .catchError((_) {});
+                            _attachmentSession = null;
+                          }
+                        });
+                      },
+                    ),
+                  ),
                 // 输入区
                 TextField(
                   controller: _controller,
@@ -209,6 +303,83 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// P1-11：分享接收附件的预览卡片（快速录入层内）。图片显示缩略图，其余显示类型+体积；
+/// 点击可移除（移除即清理暂存目录）。
+class _SharedAttachmentPreview extends StatelessWidget {
+  final AttachmentRef ref;
+  final String? sessionId;
+  final VoidCallback onRemove;
+  const _SharedAttachmentPreview(
+      {required this.ref, this.sessionId, required this.onRemove});
+
+  Future<File?> _file() async {
+    if (sessionId == null) return null;
+    try {
+      final dir = await AttachmentService.stagingDir(sessionId!);
+      final f = File('${dir.path}/${ref.fileName}');
+      return f.existsSync() ? f : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final ext = appColors(context);
+    final icon = ref.type == AttachmentType.image
+        ? Symbols.image
+        : ref.type == AttachmentType.audio
+            ? Symbols.graphic_eq
+            : Symbols.description;
+    return FutureBuilder<File?>(
+      future: _file(),
+      builder: (context, snap) {
+        final file = snap.data;
+        return Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: ext.chip,
+            borderRadius: BorderRadius.circular(AppColors.cardRadius),
+          ),
+          child: Row(
+            children: [
+              if (ref.type == AttachmentType.image && file != null)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(file, width: 44, height: 44, fit: BoxFit.cover),
+                )
+              else
+                Icon(icon, size: 28, color: ext.meta),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('已附附件',
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: scheme.onSurface)),
+                    const SizedBox(height: 2),
+                    Text('${ref.type.label} · ${ref.sizeLabel}',
+                        style: TextStyle(fontSize: 12, color: ext.meta)),
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: Icon(Symbols.close, size: 18, color: ext.meta),
+                onPressed: onRemove,
+                tooltip: '移除附件',
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

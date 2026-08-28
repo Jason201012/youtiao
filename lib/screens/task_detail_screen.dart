@@ -14,6 +14,8 @@ import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/widgets/task_template_sheet.dart';
+import 'package:todolist/widgets/occurrence_sheet.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:todolist/models/attachment.dart';
 import 'package:todolist/services/attachment_service.dart';
@@ -103,6 +105,11 @@ class TaskDetailScreen extends StatelessWidget {
             icon: const Icon(Symbols.edit),
             tooltip: '编辑',
             onPressed: () => TaskSheet.show(context, task: task),
+          ),
+          IconButton(
+            icon: const Icon(Symbols.playlist_add),
+            tooltip: '另存为模板',
+            onPressed: () => TaskTemplateSheet.saveTaskAsTemplate(context, task),
           ),
         ],
       ),
@@ -295,6 +302,13 @@ class TaskDetailScreen extends StatelessWidget {
                         },
                         icon: const Icon(Symbols.edit_calendar, size: 18),
                         label: const Text('仅此一次改期'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          OccurrenceSheet.show(context, task, provider);
+                        },
+                        icon: const Icon(Symbols.calendar_month, size: 18),
+                        label: const Text('未来30天预览'),
                       ),
                     ],
                   ),

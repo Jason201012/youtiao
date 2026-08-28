@@ -150,11 +150,19 @@ class IcsImportResult {
   final int simplifiedRepeat;
   final int failed;
   final String report;
+  /// P2-4：是否因超过单批解析上限（[parseIcs] 的 [maxItems]）被截断。
+  final bool truncated;
+  /// P0-3：与 [tasks] 平行的原始 UID 列表（可能为 null，第三方 .ics 往往无 UID）。
+  /// youtiao 导出的 UID 形如 `<数字id>@youtiao`，解析层已把对应任务 id 设为该数字 id，
+  /// 故 [tasks] 中这些任务的 id 非空，可直接用于 [TaskProvider.importDedup] 的 UID 去重。
+  final List<String?> uids;
   const IcsImportResult({
     required this.tasks,
     required this.simplifiedRepeat,
     required this.failed,
     required this.report,
+    this.truncated = false,
+    this.uids = const [],
   });
 }
 
@@ -162,7 +170,10 @@ class IcsImportResult {
 ///
 /// 只识别 [VTODO]（含 [VEVENT] 的 DTSTART 当 dueDate）。复杂 [RRULE]
 ///（非 DAILY/WEEKLY、含 COUNT/EXDATE 等）降级为一次性任务并计入 [simplifiedRepeat]。
-IcsImportResult parseIcs(String content) {
+///
+/// P2-4：单批最多解析 [maxItems] 条（默认 500），超出截断并标记 [truncated]，
+/// 避免数万条 VTODO 一次性入库导致卡顿/存储膨胀（调用方应提示用户分批导入）。
+IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   // 1) 展开 RFC5545 行折叠（以空格/Tab 开头的续行拼到上一行）。
   final lines = _unfold(content);
   // 2) 切分为以 BEGIN:VTODO / BEGIN:VEVENT 起、END 止的块。
@@ -194,9 +205,19 @@ IcsImportResult parseIcs(String content) {
   }
   // 3) 逐块映射为 Task。
   final tasks = <Task>[];
+  // P0-3：与 [tasks] 平行的原始 UID 列表（可能为 null）。youtiao 导出的 UID 形如
+  // `<数字id>@youtiao`，解析层已把对应任务 id 设为该数字 id，故这些任务可直接用于
+  // [TaskProvider.importDedup] 的 UID 去重；第三方 .ics 往往无 UID → null。
+  final uids = <String?>[];
   var simplified = 0;
   var failed = 0;
+  var truncated = false;
   for (final b in blocks) {
+    // P2-4：达到单批上限即停止，剩余块不再解析，避免批量灌注 DoS。
+    if (tasks.length >= maxItems) {
+      truncated = true;
+      break;
+    }
     try {
       final task = _blockToTask(b);
       if (task != null) {
@@ -205,6 +226,8 @@ IcsImportResult parseIcs(String content) {
           simplified++;
         }
         tasks.add(task);
+        // 同步收集该块的原始 UID（可能是 null），保持与 tasks 平行。
+        uids.add(b['UID']);
       } else {
         failed++;
       }
@@ -214,12 +237,15 @@ IcsImportResult parseIcs(String content) {
   }
   final report = '成功解析 ${tasks.length} 条'
       '${simplified > 0 ? '（其中 $simplified 条复杂重复已简化为一次性）' : ''}'
-      '${failed > 0 ? '，跳过 $failed 条' : ''}';
+      '${failed > 0 ? '，跳过 $failed 条' : ''}'
+      '${truncated ? '，已截断（最多 $maxItems 条，请分批导入）' : ''}';
   return IcsImportResult(
     tasks: tasks,
     simplifiedRepeat: simplified,
     failed: failed,
     report: report,
+    truncated: truncated,
+    uids: uids,
   );
 }
 
@@ -371,8 +397,18 @@ Task? _blockToTask(Map<String, String> b) {
     }
   }
 
+  // youtiao 导出的 UID 形如 `<数字id>@youtiao`；保留数字 id 以支持「导出→导入」幂等去重
+  // （[TaskProvider.importDedup] 会按 task.id 直查现有任务）。第三方 .ics 多无 UID 或带其它
+  // 后缀，则留空（入库时由 addTask 分配新 id）。
+  String idForImport = '';
+  final rawUid = b['UID'];
+  if (rawUid != null && rawUid.endsWith('@youtiao')) {
+    final numPart = rawUid.substring(0, rawUid.length - '@youtiao'.length);
+    if (int.tryParse(numPart) != null) idForImport = numPart;
+  }
+
   return Task(
-    id: '', // 入库时由 addTask 分配
+    id: idForImport,
     title: title,
     priority: priority,
     category: category,

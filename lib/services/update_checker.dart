@@ -155,17 +155,38 @@ class UpdateChecker {
     final version = (data['version'] as String? ?? '').toString().trim();
     if (version.isEmpty) return null;
     final tag = (data['tag'] as String? ?? 'v$version').toString().trim();
+    // P2-7 加固：apkUrl 仅信任 https（明文 http 视为被篡改/不安全，拒绝直链）。
+    final rawUrl = data['apkUrl'] as String?;
+    final apkUrl =
+        (rawUrl != null && rawUrl.startsWith('https://')) ? rawUrl : null;
+    // P2-7 加固：apkSha256 仅接受 64 位小写十六进制；形态非法则丢弃（不信任），
+    // 避免拼接/误用畸形哈希。真正的「独立签名信任锚」为远期项——需在 App 内预置
+    // 公钥、并由发版脚本对 update.json 做签名，届时把签名校验接在这里。
+    final rawSha = data['apkSha256'] as String?;
+    final apkSha256 = (rawSha != null && _isSha256Hex(rawSha)) ? rawSha : null;
     return UpdateInfo(
       tagName: tag,
       version: version,
       releaseName: data['name'] as String?,
       // S4 修复：以现网 update.json 的 releaseNotes 为准（不再读旧的 notes 键）。
       releaseNotes: data['releaseNotes'] as String?,
-      apkUrl: data['apkUrl'] as String?,
+      apkUrl: apkUrl,
       releaseUrl: data['releaseUrl'] as String? ??
           'https://gitee.com/jason1012/youtiao-releases-2/releases/tag/$tag',
-      apkSha256: data['apkSha256'] as String?,
+      apkSha256: apkSha256,
     );
+  }
+
+  /// P2-7：校验 apkSha256 是否为合法的 64 位小写十六进制串（SHA-256 标准形态）。
+  /// 仅接受 0-9 与 a-f，拒绝大写/非十六进制/长度异常，避免被畸形哈希误导。
+  static bool _isSha256Hex(String s) {
+    if (s.length != 64) return false;
+    for (final c in s.codeUnits) {
+      final ok = (c >= 0x30 && c <= 0x39) || // 0-9
+          (c >= 0x61 && c <= 0x66); // a-f（小写）
+      if (!ok) return false;
+    }
+    return true;
   }
 
   /// 是否应自动弹窗：每天最多一次（跨进程也生效）。

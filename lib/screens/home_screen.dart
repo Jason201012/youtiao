@@ -60,10 +60,12 @@ class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, this.onSearchingChanged, this.onOpenHabit});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<HomeScreen> createState() => HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+/// 状态类设为公开：P1-9 桌面端 Ctrl/Cmd+F 需由宿主 MainScaffold 经
+/// GlobalKey<HomeScreenState> 调用 [focusSearch] / [exitSearch]，故不能私有。
+class HomeScreenState extends State<HomeScreen> {
   /// 同一进程内只自动检测一次（防止 Tab 切换导致 State 重建重复触发）。
   static bool _autoUpdateChecked = false;
 
@@ -104,6 +106,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// 搜索关键字输入框
   final TextEditingController _searchCtl = TextEditingController();
+
+  /// 搜索输入框焦点：P1-9 供桌面端 Ctrl/Cmd+F 快捷键从外部聚焦。
+  final FocusNode _searchFocus = FocusNode();
 
   /// 长按进入多选模式，并把当前任务预选上。
   void _enterSelect(Task task) {
@@ -146,12 +151,27 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.onSearchingChanged?.call(false);
   }
 
+  /// P1-9：供桌面端 Ctrl/Cmd+F 快捷键从宿主 Scaffold 调用——进入搜索并聚焦输入框。
+  /// 已处于搜索态时仅重新聚焦，避免重复重建。
+  void focusSearch() {
+    if (!_searching) _enterSearch();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) FocusScope.of(context).requestFocus(_searchFocus);
+    });
+  }
+
+  /// P1-9：供桌面端 Esc 快捷键从宿主 Scaffold 调用——退出搜索（仅搜索态有效）。
+  void exitSearch() {
+    if (_searching) _exitSearch();
+  }
+
   // 搜索匹配逻辑已下沉到 GlobalSearch（lib/services/search_index.dart），
   // 纯 Dart、可单测，不在此处重复实现。
 
   @override
   void dispose() {
     _searchCtl.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -456,6 +476,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       Expanded(
                         child: TextField(
                           controller: _searchCtl,
+                          focusNode: _searchFocus,
                           autofocus: true,
                           onChanged: (_) => setState(() {}),
                           style: TextStyle(fontSize: 16, color: onBg),

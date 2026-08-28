@@ -2,6 +2,16 @@ import 'dart:convert';
 
 import 'package:todolist/models/task.dart';
 
+/// 路径段白名单（与 [AttachmentService._isSafeSegment] 口径一致）：仅允许
+/// 字母数字、点、下划线、连字符；禁止空串、`.`、`..` 及含 `/`、`\`、`..` 的串。
+/// 用于备份校验层拒绝携带路径穿越的 taskId / fileName。P1-1。
+bool _isSafeSegment(String s) {
+  if (s.isEmpty || s.length > 128) return false;
+  if (s == '.' || s == '..') return false;
+  if (s.contains('..') || s.contains('/') || s.contains('\\')) return false;
+  return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(s);
+}
+
 /// 备份文件结构校验（S3：防恢复废档）。
 ///
 /// 设计要点：
@@ -81,6 +91,39 @@ class BackupValidator {
           Task.fromJson(Map<String, dynamic>.from(e as Map));
         } catch (err) {
           return BackupValidationResult(false, '回收站第 ${i + 1} 条解析失败（字段非法）：$err');
+        }
+      }
+    }
+
+    // 5b) 附件字段形态校验（P1-1 加固）：若存在 attachments，则必须是
+    // Map<String, List>，且每个元素的 ref 为对象、data 为字符串；taskId / fileName
+    // 不得含路径分隔符或父目录序列。结构非法则拒绝恢复，避免脏备份绕过还原层校验。
+    final attachRaw = data['attachments'];
+    if (attachRaw != null) {
+      if (attachRaw is! Map) {
+        return const BackupValidationResult(false, '附件字段形态非法（应为对象）');
+      }
+      for (final entry in (attachRaw as Map).entries) {
+        final tid = entry.key;
+        final items = entry.value;
+        if (tid is! String || items is! List || !_isSafeSegment(tid)) {
+          return const BackupValidationResult(
+              false, '附件字段形态非法（taskId 越界或结构错误）');
+        }
+        for (final it in items) {
+          if (it is! Map) {
+            return const BackupValidationResult(false, '附件条目形态非法');
+          }
+          final ref = it['ref'];
+          final blob = it['data'];
+          if (ref is! Map || blob is! String) {
+            return const BackupValidationResult(false, '附件条目缺少 ref/data');
+          }
+          final fn = ref['fileName'];
+          if (fn is! String || !_isSafeSegment(fn)) {
+            return const BackupValidationResult(
+                false, '附件 fileName 含非法路径字符，已拒绝恢复');
+          }
         }
       }
     }

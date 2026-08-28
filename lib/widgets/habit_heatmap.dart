@@ -12,6 +12,8 @@ class HabitHeatmap extends StatelessWidget {
   final int Function(DateTime)? levelOf;
   final int weeks;
   final Color? accent;
+  /// 当前周是否达成周目标；为 true 时给「本周」列（最后一列）加高亮边框。
+  final bool goalMet;
   final double cellSize;
   final double gap;
   final bool showWeekdayLabels;
@@ -24,6 +26,7 @@ class HabitHeatmap extends StatelessWidget {
     this.levelOf,
     this.weeks = 18,
     this.accent,
+    this.goalMet = false,
     this.cellSize = 12,
     this.gap = 3,
     this.showWeekdayLabels = true,
@@ -103,10 +106,22 @@ class HabitHeatmap extends StatelessWidget {
           ),
         ));
       }
-      weekColumns.add(Padding(
+      Widget weekCol = Padding(
         padding: EdgeInsets.only(right: gap),
         child: Column(children: col),
-      ));
+      );
+      // 本周（最后一列）达成周目标时，加一圈强调色边框作为达成标记。
+      if (goalMet && c == weeks - 1) {
+        weekCol = Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            border: Border.all(color: accentColor, width: 2),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: weekCol,
+        );
+      }
+      weekColumns.add(weekCol);
     }
 
     final weekdaysCol = showWeekdayLabels

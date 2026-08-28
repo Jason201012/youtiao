@@ -5,7 +5,9 @@ import 'package:provider/provider.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
@@ -15,6 +17,8 @@ import 'package:todolist/widgets/export_sheet.dart';
 import 'package:todolist/widgets/task_template_sheet.dart';
 import 'package:todolist/screens/help_screen.dart';
 import 'package:todolist/screens/trash_screen.dart';
+import 'package:todolist/screens/storage_screen.dart';
+import 'package:todolist/screens/tag_manage_screen.dart'; // P1-13
 import 'package:todolist/services/update_checker.dart';
 import 'package:todolist/state/app_lock_provider.dart';
 import 'package:todolist/widgets/update_dialog.dart';
@@ -47,9 +51,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// 简报设置变更后，立即重排通知（沿用同 id 覆盖机制，避免旧时间残留）。
+  Future<void> _rescheduleBrief(TaskProvider p) => rescheduleBriefings(
+        p,
+        Provider.of<FocusProvider>(context, listen: false),
+        Provider.of<HabitProvider>(context, listen: false),
+      );
+
   /// 手动检查更新：有新版弹窗，无新版提示「已是最新」。
-  Future<void> _checkUpdateManually(BuildContext context) async {
-    final res = await UpdateChecker.check();
+  Future<void> _checkUpdateManually(BuildContext context) async {    final res = await UpdateChecker.check();
     if (!mounted) return;
     if (res.hasUpdate && res.info != null) {
       await UpdateDialog.show(context, res.info!);
@@ -340,15 +350,94 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       },
                     ),
                     const SizedBox(height: 24),
+                    _GroupTitle('简报推送'),
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.nightlight,
+                        label: '晚间小结',
+                        subtitle: '每日定时推送今日完成 / 专注 / 习惯汇总',
+                        value:
+                            '${provider.briefingEveningHour}:${provider.briefingEveningMinute.toString().padLeft(2, '0')}',
+                        switchValue: provider.briefingEveningEnabled,
+                        onSwitchChanged: (v) async {
+                          provider.setBriefingEvening(enabled: v);
+                          await _rescheduleBrief(provider);
+                        },
+                        onTap: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: TimeOfDay(
+                                hour: provider.briefingEveningHour,
+                                minute: provider.briefingEveningMinute),
+                          );
+                          if (picked != null) {
+                            provider.setBriefingEvening(
+                                enabled: provider.briefingEveningEnabled,
+                                hour: picked.hour, minute: picked.minute);
+                            await _rescheduleBrief(provider);
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.wb_sunny,
+                        label: '晨间待办',
+                        subtitle: '每日定时推送今日到期 / 逾期 / 昨日未完',
+                        value:
+                            '${provider.briefingMorningHour}:${provider.briefingMorningMinute.toString().padLeft(2, '0')}',
+                        switchValue: provider.briefingMorningEnabled,
+                        onSwitchChanged: (v) async {
+                          provider.setBriefingMorning(enabled: v);
+                          await _rescheduleBrief(provider);
+                        },
+                        onTap: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: TimeOfDay(
+                                hour: provider.briefingMorningHour,
+                                minute: provider.briefingMorningMinute),
+                          );
+                          if (picked != null) {
+                            provider.setBriefingMorning(
+                                enabled: provider.briefingMorningEnabled,
+                                hour: picked.hour, minute: picked.minute);
+                            await _rescheduleBrief(provider);
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 24),
                     _GroupTitle('数据'),
+                    // P1-12：回收站行 + 过期预告统计
                     SettingsRow(
                       icon: Symbols.delete,
                       label: '回收站',
                       value: provider.trashCount > 0 ? '${provider.trashCount}' : null,
+                      subtitle: provider.trashRetentionDays < 0
+                          ? null // 永不清理，不显示过期提示
+                          : () {
+                              final expiring = provider.trashExpiringCountWithin(7);
+                              if (expiring <= 0) return null;
+                              return '$expiring 条将于 7 天内被永久删除';
+                            }(),
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (_) => const TrashScreen(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P1-13：全局标签管理
+                    SettingsRow(
+                      icon: Symbols.label,
+                      label: '标签管理',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const TagManageScreen(),
                         ),
                       ),
                     ),
@@ -371,6 +460,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             : provider.lastAutoBackupLabel,
                         switchValue: provider.autoBackupEnabled,
                         onSwitchChanged: (v) => provider.setAutoBackupEnabled(v),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P2-5 桌面小组件标题隐私：开启后在桌面仅显示占位，避免任务标题被旁人看见。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.visibility_off,
+                        label: '桌面小组件隐藏标题',
+                        subtitle: '开启后桌面仅显示占位，避免任务标题被旁人看见',
+                        switchValue: provider.widgetHideTitles,
+                        onSwitchChanged: (v) => provider.setWidgetHideTitles(v),
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
@@ -441,6 +541,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       icon: Symbols.upload,
                       label: '导出数据',
                       onTap: () => ExportSheet.show(context),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P0-2 附件管理页 + 全局存储统计入口。
+                    SettingsRow(
+                      icon: Symbols.storage,
+                      label: '存储空间',
+                      subtitle: '查看附件占用、清理无主文件',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const StorageScreen(),
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 24),
                     _GroupTitle('关于'),

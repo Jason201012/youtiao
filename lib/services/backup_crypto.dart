@@ -36,8 +36,19 @@ class BackupDecryptException implements Exception {
 /// 口令加密备份的版本号（v3 = 带加密信封的备份）。
 const int kEncryptedBackupVersion = 3;
 
-/// PBKDF2 迭代次数（在「暴力破解成本」与「解锁耗时」之间取平衡；15 万次约几百毫秒）。
-const int _pbkdf2Iterations = 150000;
+/// PBKDF2 迭代次数（在「暴力破解成本」与「解锁耗时」之间取平衡）。
+/// 由 15 万上调至 35 万，贴合 OWASP 现行建议（30 万–60 万），显著抬高本地字典爆破成本。
+const int _pbkdf2Iterations = 350000;
+
+/// P1-2：解密时对迭代次数的上下限（不可信输入白名单）。
+/// 下限防弱口令被快速爆破；上限防恶意信封用超大迭代次数拖垮 PBKDF2（计算 DoS）。
+const int _pbkdf2IterationsMin = 100000;
+const int _pbkdf2IterationsMax = 5000000;
+
+/// 信封中各固定长度字段的预期字节数（GCM/AES 标准），用于解密前形态校验。
+const int _saltBytes = 16;
+const int _ivBytes = 12;
+const int _tagBytes = 16;
 
 /// 加密一个明文备份 JSON，返回信封结构 JSON 字符串。
 ///
@@ -110,10 +121,16 @@ String decryptEnvelope(String raw, String pass) {
     if (kdf == null || aead == null || ctB64 == null) {
       throw const BackupDecryptException('文件结构非法，缺少必要字段');
     }
-    final salt = base64.decode(kdf['salt'] as String);
-    final iterations = (kdf['iterations'] as num?)?.toInt() ?? _pbkdf2Iterations;
-    final iv = base64.decode(aead['iv'] as String);
-    final tag = base64.decode(aead['tag'] as String);
+    // P1-2：不可信输入白名单校验（防计算 DoS / 结构越界）。
+    // 先校验迭代次数上下限，再校验 salt/iv/tag 的固定长度，任一不合法立即拒绝。
+    final iterationsRaw = kdf['iterations'];
+    final iterations = (iterationsRaw is num) ? iterationsRaw.toInt() : _pbkdf2Iterations;
+    if (iterations < _pbkdf2IterationsMin || iterations > _pbkdf2IterationsMax) {
+      throw const BackupDecryptException('迭代次数非法（超出允许范围，疑似恶意备份）');
+    }
+    final salt = _decodeFixedBytes(kdf['salt'], _saltBytes, 'salt');
+    final iv = _decodeFixedBytes(aead['iv'], _ivBytes, 'iv');
+    final tag = _decodeFixedBytes(aead['tag'], _tagBytes, 'tag');
     final ct = base64.decode(ctB64);
     final key = _deriveKey(pass, salt, iterations);
     final cipher = GCMBlockCipher(AESEngine());
@@ -131,6 +148,26 @@ String decryptEnvelope(String raw, String pass) {
   } catch (e) {
     throw BackupDecryptException('解密失败：$e');
   }
+}
+
+/// 解码固定长度字段（salt/iv/tag）：必须存在、为合法 base64，且长度恰好等于
+/// [expectedLen]。用于 P1-2 的解密前形态校验，长度异常直接转 [BackupDecryptException]
+/// 而非喂给 GCM/PBKDF2 产生不可预期行为。
+Uint8List _decodeFixedBytes(dynamic v, int expectedLen, String name) {
+  if (v is! String) {
+    throw BackupDecryptException('$name 字段缺失或类型非法');
+  }
+  Uint8List bytes;
+  try {
+    bytes = base64.decode(v);
+  } on Exception {
+    throw BackupDecryptException('$name 不是合法的 base64');
+  }
+  if (bytes.length != expectedLen) {
+    throw BackupDecryptException(
+        '$name 长度非法（应为 $expectedLen 字节，实际 ${bytes.length}）');
+  }
+  return bytes;
 }
 
 /// 由口令 + salt 经 PBKDF2-HMAC-SHA256 派生 32 字节（256-bit）AES 密钥。

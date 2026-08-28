@@ -41,6 +41,44 @@ class TaskProvider extends ChangeNotifier {
     await _persistSettings();
   }
 
+  // ===== 早晚简报推送（P0-1）=====
+  /// 晚间「今日小结」默认 22:00；晨间「今日待办」默认 07:30；两者默认均开启。
+  static const String _kBriefEveningOn = 'brief_evening_on';
+  static const String _kBriefEveningH = 'brief_evening_h';
+  static const String _kBriefEveningM = 'brief_evening_m';
+  static const String _kBriefMorningOn = 'brief_morning_on';
+  static const String _kBriefMorningH = 'brief_morning_h';
+  static const String _kBriefMorningM = 'brief_morning_m';
+  bool _briefingEveningEnabled = true;
+  int _briefingEveningHour = 22;
+  int _briefingEveningMinute = 0;
+  bool _briefingMorningEnabled = true;
+  int _briefingMorningHour = 7;
+  int _briefingMorningMinute = 30;
+  bool get briefingEveningEnabled => _briefingEveningEnabled;
+  int get briefingEveningHour => _briefingEveningHour;
+  int get briefingEveningMinute => _briefingEveningMinute;
+  bool get briefingMorningEnabled => _briefingMorningEnabled;
+  int get briefingMorningHour => _briefingMorningHour;
+  int get briefingMorningMinute => _briefingMorningMinute;
+  Future<void> setBriefingEvening(
+      {required bool enabled, int? hour, int? minute}) async {
+    _briefingEveningEnabled = enabled;
+    if (hour != null) _briefingEveningHour = hour.clamp(0, 23);
+    if (minute != null) _briefingEveningMinute = minute.clamp(0, 59);
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  Future<void> setBriefingMorning(
+      {required bool enabled, int? hour, int? minute}) async {
+    _briefingMorningEnabled = enabled;
+    if (hour != null) _briefingMorningHour = hour.clamp(0, 23);
+    if (minute != null) _briefingMorningMinute = minute.clamp(0, 59);
+    notifyListeners();
+    await _persistSettings();
+  }
+
   // ===== 勿扰时段（本地时间，小时 0-23）=====
   /// 勿扰开始/结束小时；[dndEnabled]=false 时表示不启用勿扰。
   /// 一次性提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹（重复/习惯提醒不动）。
@@ -135,6 +173,10 @@ class TaskProvider extends ChangeNotifier {
   /// 是否启用「本地自动备份」：跨日首启自动生成当日滚动快照，默认开启。
   /// 纯本地文件（App 私有文档目录 backup/auto/），不上传任何服务器。
   static const String _kAutoBackup = 'auto_backup_enabled';
+  /// 桌面小组件是否隐藏任务标题（仅显示占位，保护桌面隐私）。P2-5。
+  static const String _kWidgetHideTitles = 'widget_hide_titles';
+  /// P1-13：已归档标签名集合（JSON 数组），归档后首页筛选不可见但数据保留。
+  static const String _kArchivedTags = 'archived_tags';
   bool _autoBackupEnabled = true;
   bool get autoBackupEnabled => _autoBackupEnabled;
   /// 最近一次自动备份成功的本地日期（YYYY-MM-DD），null 表示从未成功过。
@@ -158,6 +200,155 @@ class TaskProvider extends ChangeNotifier {
       } catch (_) {
         // 错误已在内部记录，不阻断 UI。
       }
+    }
+  }
+
+  // ===== 桌面小组件标题隐私（P2-5）=====
+  /// 是否在桌面小组件中隐藏任务标题（他人经桌面可见性）。默认 false（显示标题）。
+  /// 开启后小组件仅展示占位文案，兼顾「应用锁防 App 内、防不了桌面」的隐私张力。
+  bool _widgetHideTitles = false;
+  bool get widgetHideTitles => _widgetHideTitles;
+  Future<void> setWidgetHideTitles(bool v) async {
+    if (v == _widgetHideTitles) return;
+    _widgetHideTitles = v;
+    notifyListeners();
+    await _persistSettings();
+    // 设置变化后立即刷新桌面小组件，使其即时应用新的显隐策略。
+    requestWidgetRefresh();
+  }
+
+  // ===== P1-13：全局标签管理 =====
+
+  /// 已归档标签名集合（JSON 数组持久化）。归档后首页筛选不可见，但数据保留。
+  Set<String> _archivedTags = {};
+  Set<String> get archivedTags => Set.unmodifiable(_archivedTags);
+
+  /// 归档标签：标记为不可见但保留数据。返回是否实际变更。
+  Future<void> archiveTag(String name) async {
+    if (!_archivedTags.add(name)) return;
+    notifyListeners();
+    await _persistTagArchive();
+  }
+
+  /// 取消归档：重新在首页筛选中可见。
+  Future<void> unarchiveTag(String name) async {
+    if (!_archivedTags.remove(name)) return;
+    notifyListeners();
+    await _persistTagArchive();
+  }
+
+  /// 重命名标签：全库替换所有任务上的 [oldName] 为 [newName]，并持久化。
+  /// 重命名后旧标签不再存在，新标签自动加入筛选。
+  Future<void> renameTag(String oldName, String newName) async {
+    if (oldName == newName || newName.trim().isEmpty) return;
+    final trimmed = newName.trim();
+    var changed = false;
+    for (final t in _tasks) {
+      if (t.tags.contains(oldName)) {
+        final newTags = t.tags.map((e) => e == oldName ? trimmed : e).toList();
+        updateTask(t.copyWith(tags: newTags));
+        changed = true;
+      }
+    }
+    // 归档状态迁移：旧标签已归档 → 新标签继承归档状态
+    if (_archivedTags.remove(oldName)) {
+      _archivedTags.add(trimmed);
+    }
+    if (changed) {
+      notifyListeners();
+      await _persist();
+      await _persistTagArchive();
+    }
+  }
+
+  /// 合并标签：把 [source] 标签的所有任务改为 [target] 标签，然后删除 [source]。
+  Future<void> mergeTags(String source, String target) async {
+    if (source == target) return;
+    var changed = false;
+    for (final t in _tasks) {
+      if (t.tags.contains(source)) {
+        final newTags = <String>[];
+        for (final e in t.tags) {
+          if (e == source) {
+            if (!newTags.contains(target)) newTags.add(target);
+          } else {
+            if (!newTags.contains(e)) newTags.add(e);
+          }
+        }
+        updateTask(t.copyWith(tags: newTags));
+        changed = true;
+      }
+    }
+    _archivedTags.remove(source);
+    if (changed) {
+      notifyListeners();
+      await _persist();
+      await _persistTagArchive();
+    }
+  }
+
+  /// 删除标签：从所有任务中移除 [name]。
+  Future<void> deleteTag(String name) async {
+    var changed = false;
+    for (final t in _tasks) {
+      if (t.tags.contains(name)) {
+        final newTags = t.tags.where((e) => e != name).toList();
+        updateTask(t.copyWith(tags: newTags));
+        changed = true;
+      }
+    }
+    _archivedTags.remove(name);
+    if (changed) {
+      notifyListeners();
+      await _persist();
+      await _persistTagArchive();
+    }
+  }
+
+  /// 某标签下的任务数（含所有状态）。
+  int tagTaskCount(String name) =>
+      _tasks.where((t) => t.tags.contains(name)).length;
+
+  /// 某标签的任务完成率（0.0~1.0，无任务时返回 0.0）。
+  double tagCompletionRate(String name) {
+    final matched = _tasks.where((t) => t.tags.contains(name)).toList();
+    if (matched.isEmpty) return 0.0;
+    return matched.where((t) => t.status == TaskStatus.done).length / matched.length;
+  }
+
+  /// 获取所有标签（首页筛选用，排除已归档）。
+  List<String> get allTags {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final t in _tasks) {
+      for (final tag in t.tags) {
+        if (tag.isNotEmpty && !_archivedTags.contains(tag) && seen.add(tag)) {
+          out.add(tag);
+        }
+      }
+    }
+    return out;
+  }
+
+  /// 获取所有标签（含已归档，仅管理页使用）。
+  List<String> get allTagsIncludingArchived {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final t in _tasks) {
+      for (final tag in t.tags) {
+        if (tag.isNotEmpty && seen.add(tag)) out.add(tag);
+      }
+    }
+    return out;
+  }
+
+  /// 仅持久化归档标签集合（写入 SharedPreferences JSON 数组）。
+  Future<void> _persistTagArchive() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_archivedTags.isEmpty) {
+      await prefs.remove(_kArchivedTags);
+    } else {
+      await prefs.setStringList(_kArchivedTags, _archivedTags.toList());
     }
   }
 
@@ -299,6 +490,7 @@ class TaskProvider extends ChangeNotifier {
     await _persistSettings();
     // 立即按新规则清理一次（仅影响内存中的回收站，落盘在 _persist）。
     _cleanupTrashIfNeeded(persist: true);
+    _syncTrashExpireNotice(); // P1-12：保留期变更后重排预告通知
   }
 
   /// 按当前保留期移除过期的回收站条目；[persist]=true 时变更会落 SQLite。
@@ -314,6 +506,39 @@ class TaskProvider extends ChangeNotifier {
     final removed = _trash.length != before;
     if (removed && persist) _persist();
     return removed;
+  }
+
+  // ===== P1-12：回收站过期预告 =====
+
+  /// 某条回收站任务的剩余保留天数（按日期口径，与原生 MidnightResetReceiver 一致）。
+  /// 0 = 今天到期（即将被清理），负数 = 已过期（理论上不应出现在列表中）。
+  /// -1（永不清理）统一返回 99999。
+  int trashRemainingDays(Task t) {
+    if (_trashRetentionDays < 0) return 99999;
+    if (t.deletedAt == null) return _trashRetentionDays; // 无删除时间视为新近
+    final deletedDate = DateTime(t.deletedAt!.year, t.deletedAt!.month, t.deletedAt!.day);
+    final today = DateTime.now();
+    final todayDate = DateTime(today.year, today.month, today.day);
+    final elapsed = todayDate.difference(deletedDate).inDays;
+    return _trashRetentionDays - elapsed;
+  }
+
+  /// 将于明天 00:00 被永久删除的任务列表（trashRemainingDays == 1）。
+  List<Task> get trashExpiringTomorrow =>
+      _trash.where((t) => trashRemainingDays(t) == 1).toList();
+
+  /// N 天内将被删除的回收站任务数量（含今天到期、明天到期……）。
+  int trashExpiringCountWithin(int days) =>
+      _trash.where((t) {
+        final r = trashRemainingDays(t);
+        return r >= 0 && r <= days;
+      }).length;
+
+  /// 同步「回收站过期预告」通知：有将于明天删除的任务则调度聚合预告，否则取消。
+  /// 为 fire-and-forget（由 [_cleanupTrashIfNeeded] / [load] 触发，无需等待）。
+  void _syncTrashExpireNotice() {
+    final expiring = trashExpiringTomorrow;
+    NotificationService.instance.scheduleTrashExpireNotice(expiring).catchError((_) {});
   }
 
   // ===== 通知总开关 =====
@@ -412,6 +637,7 @@ class TaskProvider extends ChangeNotifier {
       // 兜底清理：App 启动时按保留期移除过期回收站条目（原生 MidnightResetReceiver
       // 负责「App 已关闭」的每日 00:00 清理，这里覆盖 App 已开、长期未跨午夜边界的情况）。
       _cleanupTrashIfNeeded(persist: true);
+      _syncTrashExpireNotice(); // P1-12：启动时兜底重排过期预告通知
       // 已有数据，或用户已做过首启示例决策（含「从零开始」）：标记已预置，
       // 日后即便任务库被清空也不再复活示例。
       await prefs.setBool(_kSeeded, true);
@@ -427,6 +653,14 @@ class TaskProvider extends ChangeNotifier {
     _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
     _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
     _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
+    _widgetHideTitles = prefs.getBool(_kWidgetHideTitles) ?? false;
+    _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet(); // P1-13
+    _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
+    _briefingEveningHour = prefs.getInt(_kBriefEveningH) ?? 22;
+    _briefingEveningMinute = prefs.getInt(_kBriefEveningM) ?? 0;
+    _briefingMorningEnabled = prefs.getBool(_kBriefMorningOn) ?? true;
+    _briefingMorningHour = prefs.getInt(_kBriefMorningH) ?? 7;
+    _briefingMorningMinute = prefs.getInt(_kBriefMorningM) ?? 30;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
@@ -498,6 +732,13 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kFocusGoal, _focusGoalMinutes);
     await prefs.setInt(_kWeeklyGoal, _weeklyGoalCount);
     await prefs.setBool(_kAutoBackup, _autoBackupEnabled);
+    await prefs.setBool(_kWidgetHideTitles, _widgetHideTitles);
+    await prefs.setBool(_kBriefEveningOn, _briefingEveningEnabled);
+    await prefs.setInt(_kBriefEveningH, _briefingEveningHour);
+    await prefs.setInt(_kBriefEveningM, _briefingEveningMinute);
+    await prefs.setBool(_kBriefMorningOn, _briefingMorningEnabled);
+    await prefs.setInt(_kBriefMorningH, _briefingMorningHour);
+    await prefs.setInt(_kBriefMorningM, _briefingMorningMinute);
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
@@ -540,6 +781,7 @@ class TaskProvider extends ChangeNotifier {
   Future<void> clearSampleTasks() async {
     _tasks.clear();
     _trash.clear();
+    NotificationService.instance.cancelTrashExpireNotice(); // P1-12：首启清空时取消预告
     _recomputeIdSeq(); // 重置自增 id 起点（空库 → 8 起）
     notifyListeners();
     await _persist();
@@ -982,18 +1224,6 @@ class TaskProvider extends ChangeNotifier {
     return 'future';
   }
 
-  /// 所有任务上出现过的标签（去重、按出现顺序），供首页「标签筛选」与编辑页联想。
-  List<String> get allTags {
-    final seen = <String>{};
-    final out = <String>[];
-    for (final t in _tasks) {
-      for (final tag in t.tags) {
-        if (tag.isNotEmpty && seen.add(tag)) out.add(tag);
-      }
-    }
-    return out;
-  }
-
   /// 专注会话回填：把某次专注时长（秒）累加到关联任务的 [Task.focusSecTotal]，
   /// 并持久化。任务已删除（不在 _tasks）则忽略。回调自 FocusProvider.addSession。
   void addFocusSec(String taskId, int sec) {
@@ -1171,8 +1401,13 @@ class TaskProvider extends ChangeNotifier {
   /// 返回创建后的 [Task]（含已分配 id），便于调用方把暂存附件目录提升为正式目录
   /// （见 [new_task_sheet] 的附件保存流程）。
   Task addTask(Task task) {
+    // P0-3：若调用方传入了非空且不与现有任务冲突的 id（如 iCal 导入的 youtiao UID），
+    // 则保留该 id，使「从有条导出再导回」能稳定去重；否则用自增序列分配新 id。
+    final useId = task.id.isNotEmpty && byId(task.id) == null
+        ? task.id
+        : (_idSeq++).toString();
     var newTask = task.copyWith(
-      id: (_idSeq++).toString(),
+      id: useId,
       // A1：落库时统一计算拼音首字母，保证所有新建入口（NL 快速录入等）都自动覆盖。
       pinyinInitials: Task.computePinyinInitials(task.title),
     );
@@ -1188,6 +1423,63 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
     _persist();
     return newTask;
+  }
+
+  /// P0-3：iCal / CSV 导入幂等去重。
+  /// [incoming] 为解析出的任务（其 id 已由解析层设为 youtiao UID 前缀，或无 UID 留空）；
+  /// [uids] 为与 [incoming] 平行的原始 UID 列表（用于判断是否为 youtiao 来源）。
+  /// [skipExisting]=true 时，已存在的任务跳过（不新增）；[overwrite]=true 时对已存在任务
+  /// 以新内容覆盖更新（仍不新增）；[fingerprint]=true 时对「无 UID 的第三方 .ics」按
+  /// 「标题 + 截止日期」指纹去重（默认关闭，避免同名任务被误合并）。
+  /// 返回 {added, skipped, overwritten} 计数，供调用方展示导入报告。
+  ({int added, int skipped, int overwritten}) importDedup(
+    List<Task> incoming,
+    List<String?> uids, {
+    bool skipExisting = true,
+    bool overwrite = false,
+    bool fingerprint = false,
+  }) {
+    var added = 0, skipped = 0, overwritten = 0;
+    for (var i = 0; i < incoming.length; i++) {
+      final task = incoming[i];
+      final uid = i < uids.length ? uids[i] : null;
+      // 判定是否已存在：
+      //  1) youtiao UID（task.id 非空即解析层写入的数字 id）→ byId 直查；
+      //  2) 指纹去重开启且非 youtiao 来源 → 标题 + 截止日期匹配。
+      Task? existing;
+      if (task.id.isNotEmpty) existing = byId(task.id);
+      if (existing == null &&
+          fingerprint &&
+          (uid == null || !uid.endsWith('@youtiao'))) {
+        existing = _matchByFingerprint(task);
+      }
+      if (existing == null) {
+        addTask(task);
+        added++;
+      } else if (overwrite) {
+        updateTask(task.copyWith(id: existing.id));
+        overwritten++;
+      } else {
+        skipped++;
+      }
+    }
+    return (added: added, skipped: skipped, overwritten: overwritten);
+  }
+
+  /// 按「标题 + 截止日期」指纹查找现有任务（供无 UID 的第三方 .ics 去重）。
+  Task? _matchByFingerprint(Task task) {
+    final key = _fingerprintKey(task);
+    for (final t in _tasks) {
+      if (_fingerprintKey(t) == key) return t;
+    }
+    return null;
+  }
+
+  /// 任务指纹：标题 + 截止日期（date-only）。用于第三方 .ics 的无 UID 去重。
+  static String _fingerprintKey(Task t) {
+    final d = t.dueDate;
+    final day = d == null ? 'none' : '${d.year}-${d.month}-${d.day}';
+    return '${t.title.trim()}@$day';
   }
 
   /// 更新已有任务：以调用方传入的 [updated]（已携带全部可编辑字段）为基础落库，
@@ -1251,6 +1543,7 @@ class TaskProvider extends ChangeNotifier {
     _lastBatchIndices = sortedIdx; // 升序，与 _lastBatch 一一对应
     notifyListeners();
     _persist();
+    _syncTrashExpireNotice(); // P1-12：新入回收站后重排过期预告
     return _lastBatch;
   }
 
@@ -1278,6 +1571,7 @@ class TaskProvider extends ChangeNotifier {
     _lastBatchIndices = [];
     notifyListeners();
     _persist();
+    _syncTrashExpireNotice(); // P1-12：撤销删除后重排
   }
 
   /// 从回收站恢复任务到任务列表（清除 deletedAt，放回顶部），并恢复其本地提醒。
@@ -1290,6 +1584,7 @@ class TaskProvider extends ChangeNotifier {
     _scheduleRemindersFor(restored);
     notifyListeners();
     _persist();
+    _syncTrashExpireNotice(); // P1-12：恢复后重排
   }
 
   /// 在回收站中彻底删除某任务（不可恢复），并取消其本地提醒。
@@ -1300,6 +1595,7 @@ class TaskProvider extends ChangeNotifier {
     AttachmentService.removeDir(id);
     notifyListeners();
     _persist();
+    _syncTrashExpireNotice(); // P1-12：彻底删除后重排
   }
 
   /// 清空回收站（全部彻底删除），并取消其中所有任务的本地提醒。
@@ -1313,6 +1609,7 @@ class TaskProvider extends ChangeNotifier {
     _trash.clear();
     notifyListeners();
     _persist();
+    NotificationService.instance.cancelTrashExpireNotice(); // P1-12：清空回收站即取消预告
   }
 
   /// 完整备份数据（任务 + 偏好 + 可选回收站），用于「备份与恢复」导出。
@@ -1391,15 +1688,15 @@ class TaskProvider extends ChangeNotifier {
 
   /// 导出可读 CSV（标题,优先级,分类,截止时间,状态,完成时间,是否已删除）。
   /// [includeTrash] 为 true 时，回收站任务也一并列出（最后一列标记为「是」）。
-  String exportCsv({bool includeTrash = false}) {
+  String exportCsv({bool includeTrash = false, bool includeAttachments = false}) {
     final buf = StringBuffer();
-    buf.writeln('标题,优先级,分类,截止时间,状态,完成时间,是否已删除');
+    buf.writeln('标题,优先级,分类,截止时间,状态,完成时间,是否已删除,附件');
     void writeRow(Task t, bool deleted) {
       final due = t.dueDate == null ? '' : _fmt(t.dueDate!);
       final completed = t.completedAt == null ? '' : _fmt(t.completedAt!);
       buf.writeln('"${_esc(t.title)}","${_prioLabel(t.priority)}",'
           '"${_catLabel(t.category)}","$due","${t.done ? '已完成' : '未完成'}","$completed",'
-          '"${deleted ? '是' : '否'}"');
+          '"${deleted ? '是' : '否'}","${_esc(_attachmentSummary(t, includeAttachments))}"');
     }
 
     for (final t in _tasks) {
@@ -1415,7 +1712,7 @@ class TaskProvider extends ChangeNotifier {
 
   /// 导出可读 Markdown 清单（未完成 / 已完成两组；可选回收站）。
   /// [includeTrash] 为 true 且回收站非空时，追加「回收站」分组。
-  String exportMarkdown({bool includeTrash = false}) {
+  String exportMarkdown({bool includeTrash = false, bool includeAttachments = false}) {
     final buf = StringBuffer();
     buf.writeln('# 有条 任务导出');
     buf.writeln('');
@@ -1425,21 +1722,25 @@ class TaskProvider extends ChangeNotifier {
     for (final t in _tasks.where((e) => !e.done)) {
       final due = t.dueDate == null ? '' : ' ｜ 截止 ${_fmt(t.dueDate!)}';
       final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
-      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep');
+      // P1-10：开启「包含附件清单」时，任务行后追加附件摘要。
+      final att = _attachmentSummary(t, includeAttachments);
+      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
     }
     buf.writeln('');
     buf.writeln('## 已完成（${_tasks.where((e) => e.done).length}）');
     for (final t in _tasks.where((e) => e.done)) {
       final c = t.completedAt == null ? '' : ' ｜ 完成于 ${_fmt(t.completedAt!)}';
       final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
-      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep');
+      final att = _attachmentSummary(t, includeAttachments);
+      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
     }
     if (includeTrash && _trash.isNotEmpty) {
       buf.writeln('');
       buf.writeln('## 回收站（${_trash.length}）');
       for (final t in _trash) {
         final d = t.deletedAt == null ? '' : ' ｜ 删除于 ${_fmt(t.deletedAt!)}';
-        buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$d');
+        final att = _attachmentSummary(t, includeAttachments);
+        buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$d${att.isNotEmpty ? ' ｜ $att' : ''}');
       }
     }
     return buf.toString();
@@ -1462,6 +1763,18 @@ class TaskProvider extends ChangeNotifier {
       return "'$v";
     }
     return v;
+  }
+
+  /// P1-10：从任务附件派生「附件：a.jpg(1.2MB), b.m4a(34KB)」摘要文本。
+  /// [enabled] 为 false 或任务无附件时返回空串；超长截断省略，避免单元格过大。
+  static String _attachmentSummary(Task t, bool enabled) {
+    if (!enabled || t.attachments.isEmpty) return '';
+    final parts = t.attachments
+        .map((ref) => '${ref.fileName}(${ref.sizeLabel})')
+        .toList();
+    var s = '附件：${parts.join(', ')}';
+    if (s.length > 200) s = '${s.substring(0, 197)}…';
+    return s;
   }
 
   /// 新建任务时按 dueDate 调度本地通知

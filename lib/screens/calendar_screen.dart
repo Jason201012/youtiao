@@ -9,6 +9,7 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/focus_chart.dart';
 
 /// 任务日历（月 / 周视图）：
 /// - 按任务到期日（dueDate）排布，月视图每格显示当天到期任务，周视图为 7 天列；
@@ -25,6 +26,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   late DateTime _focused; // 月视图锚点（当月 1 号）
   late DateTime _viewDate; // 周视图锚点（所在周的某天）
   String _view = 'month'; // 'month' | 'week'
+  DateTime? _timelineDay; // 周视图专注时段面板所选日期（null = 今天）
 
   @override
   void initState() {
@@ -438,6 +440,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ],
           ),
           const SizedBox(height: 10),
+          // 专注时段块状映射（P1-7）
+          _buildFocusTimeline(provider, base, isDark, onBg, ext, today, days),
+          const SizedBox(height: 16),
           // 横向 7 天列
           SizedBox(
             height: 460,
@@ -454,6 +459,63 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 专注时段块状映射面板（P1-7）：在周视图中按所选日期展示当天的专注时段条。
+  Widget _buildFocusTimeline(TaskProvider provider, Color base, bool isDark,
+      Color onBg, dynamic ext, DateTime today, List<DateTime> days) {
+    final focus = Provider.of<FocusProvider>(context);
+    final selected = _timelineDay ?? today;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Symbols.schedule, size: 18, color: ext.accent),
+            const SizedBox(width: 6),
+            Text('专注时段',
+                style: TextStyle(
+                    fontSize: 15, fontWeight: FontWeight.bold, color: onBg)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (final d in days)
+                _dayChip(d, _sameDay(d, selected), onBg, ext, base, today),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        FocusDayTimeline(day: selected, focus: focus),
+      ],
+    );
+  }
+
+  Widget _dayChip(DateTime d, bool active, Color onBg, dynamic ext, Color base,
+      DateTime today) {
+    final isToday = _sameDay(d, today);
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: GestureDetector(
+        onTap: () => setState(() => _timelineDay = d),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: active ? base : ext.chip,
+            borderRadius: BorderRadius.circular(20),
+            border: isToday && !active ? Border.all(color: base, width: 1) : null,
+          ),
+          child: Text('${d.month}/${d.day}${isToday ? ' 今' : ''}',
+              style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: active ? Colors.white : ext.meta)),
+        ),
       ),
     );
   }

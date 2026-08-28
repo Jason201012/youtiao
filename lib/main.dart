@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -5,8 +8,11 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/background_service.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/services/attachment_service.dart';
+import 'package:todolist/models/attachment.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
@@ -25,7 +31,9 @@ import 'package:todolist/screens/calendar_screen.dart';
 import 'package:todolist/screens/focus_screen.dart';
 import 'package:todolist/screens/habit_screen.dart';
 import 'package:todolist/screens/settings_screen.dart';
+import 'package:todolist/screens/today_review_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
+import 'package:todolist/widgets/command_palette.dart';
 
 /// 全局根导航键：供通知点击回调在脱离 widget context 时仍能 push 路由。
 final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
@@ -43,20 +51,137 @@ String? _pendingCompleteTaskId;
 /// 冷启动时由「分享」入口转发过来的文本先于导航器就绪到达，暂存，待首帧后弹出预填录入层。
 String? _pendingShareText;
 
+/// 冷启动时由「分享」入口转发过来的来源包名（用于预填录入层展示「来自 XX」）。
+String? _pendingShareSource;
+
+/// P1-11：冷启动时由「系统分享接收附件」入口（ACTION_SEND + EXTRA_STREAM）先于导航器就绪到达，
+/// 暂存已落盘暂存目录的附件引用与其会话 id，待 MainScaffold 首帧后弹出带附件的预填录入层。
+AttachmentRef? _pendingSharedAttachment;
+String? _pendingSharedSession;
+
 /// 冷启动时由桌面小组件点击任务项拉起（MainActivity 带 EXTRA_TASK_ID），原生经 widget_nav
 /// 通道请求直达详情页；导航器未就绪时暂存任务 id，待 MainScaffold 首帧后消费。
 String? _pendingWidgetTaskId;
 
 /// 分享建任务：原生侧经 com.example.todolist/share_intent 通道推送文本，在此弹出预填录入层。
 /// 导航器未就绪（冷启动）时暂存，待 MainScaffold 首帧后消费。
-void _openQuickEntry(String text) {
+///
+/// P2-8：对「短时间多次相同分享」做节流（500ms 内忽略重复文本），避免恶意 App 反复弹窗骚扰。
+/// [sourcePackage] 为分享来源包名（原生侧经 getCallingActivity 取得），用于预填层展示来源。
+String? _lastShareText;
+int _lastShareAtMs = 0;
+void _openQuickEntry(String text, {String? sourcePackage}) {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  if (text == _lastShareText && now - _lastShareAtMs < 500) {
+    return; // 500ms 内的重复分享直接忽略
+  }
+  _lastShareText = text;
+  _lastShareAtMs = now;
   final state = _navigatorKey.currentState;
   if (state == null) {
     _pendingShareText = text;
+    _pendingShareSource = sourcePackage;
     return;
   }
-  QuickEntrySheet.show(state.context, initialText: text);
+  QuickEntrySheet.show(
+    state.context,
+    initialText: text,
+    sourcePackage: sourcePackage,
+  );
 }
+
+/// P1-11：系统分享接收图片/文件。原生侧已把 content URI 二进制复制进应用私有缓存并传回
+/// 本地路径 + 类型/大小等元数据；此处把该临时文件二次导入到本次分享专用的暂存目录，
+/// 再唤起带附件预填的快速录入层，由用户确认后保存（不做自动保存，防骚扰）。离线、不联网。
+Future<void> _openQuickEntryUri(Map<String, dynamic> meta) async {
+  try {
+    final localPath = meta['localPath'] as String?;
+    if (localPath == null || localPath.isEmpty) return;
+    final typeStr = (meta['type'] as String?) ?? 'file';
+    final type = typeStr == 'image'
+        ? AttachmentType.image
+        : typeStr == 'audio'
+            ? AttachmentType.audio
+            : AttachmentType.file;
+    final rawMime = meta['mimeType'] as String?;
+    final mimeType = (rawMime != null && rawMime.isNotEmpty) ? rawMime : null;
+    // 生成独立暂存会话 id（与 TaskSheet 自身会话区分），保存后由 promoteStaging 提升。
+    final sessionId =
+        '${DateTime.now().millisecondsSinceEpoch}_${DateTime.now().microsecondsSinceEpoch % 100000}';
+    final ref = await AttachmentService.importSharedFile(
+      localPath: localPath,
+      sessionId: sessionId,
+      type: type,
+      mimeType: mimeType,
+    );
+    final state = _navigatorKey.currentState;
+    if (state == null) {
+      // 导航器未就绪（极端冷启动）：暂存，待 MainScaffold 首帧后消费。
+      _pendingSharedAttachment = ref;
+      _pendingSharedSession = sessionId;
+      return;
+    }
+    await QuickEntrySheet.show(
+      state.context,
+      initialAttachment: ref,
+      attachmentSession: sessionId,
+    );
+  } catch (e) {
+    // 导入失败（超大/非法）：静默忽略，不打扰用户；临时缓存文件由 importSharedFile 清理。
+    debugPrint('分享附件导入失败：$e');
+  }
+}
+
+/// P1-9：桌面端全局快捷键开关。仅在桌面平台（Windows/Linux/macOS）启用，
+/// 移动端（Android/iOS）与 Web 无物理键盘，保持原有触摸交互，不挂任何快捷键。
+bool get _isDesktopShortcutsEnabled {
+  if (kIsWeb) return false;
+  return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+}
+
+/// P1-9 快捷键意图：复用既有的快速录入 / 首页搜索 / 命令面板路由。
+class _OpenQuickEntryIntent extends Intent {
+  const _OpenQuickEntryIntent();
+}
+
+class _NewTaskIntent extends Intent {
+  const _NewTaskIntent();
+}
+
+class _FocusSearchIntent extends Intent {
+  const _FocusSearchIntent();
+}
+
+class _OpenCommandPaletteIntent extends Intent {
+  const _OpenCommandPaletteIntent();
+}
+
+class _EscapeIntent extends Intent {
+  const _EscapeIntent();
+}
+
+/// P1-9：Ctrl/Cmd 组合键映射（同时照顾 Windows/Linux 的 Ctrl 与 macOS 的 Cmd）。
+/// Esc 单独成组，用于关闭最上层模态路由 / 退出首页搜索。
+/// 注意：`LogicalKeySet` 构造非 const，故整个映射不可声明为 const（保持顶层 final）。
+final Map<ShortcutActivator, Intent> _appShortcuts = {
+  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyK):
+      const _OpenQuickEntryIntent(),
+  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyK):
+      const _OpenQuickEntryIntent(),
+  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyN):
+      const _NewTaskIntent(),
+  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyN):
+      const _NewTaskIntent(),
+  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyF):
+      const _FocusSearchIntent(),
+  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyF):
+      const _FocusSearchIntent(),
+  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyP):
+      const _OpenCommandPaletteIntent(),
+  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyP):
+      const _OpenCommandPaletteIntent(),
+  LogicalKeySet(LogicalKeyboardKey.escape): const _EscapeIntent(),
+};
 
 /// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
 void _handleNotificationTap(String? payload) {
@@ -69,13 +194,21 @@ void _handleNotificationTap(String? payload) {
   }
 }
 
-/// 按前缀跳转：task: → 任务详情；habit: → 习惯页。其它（专注完成/测试）忽略。
+/// 按前缀跳转：task: → 任务详情；habit: → 习惯页；brief: → 简报汇总页。其它忽略。
 void _navigateFromPayload(String payload, NavigatorState nav) {
   if (payload.startsWith(NotificationService.payloadTaskPrefix)) {
     final id = payload.substring(NotificationService.payloadTaskPrefix.length);
     nav.push(MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: id)));
   } else if (payload.startsWith(NotificationService.payloadHabitPrefix)) {
     nav.push(MaterialPageRoute(builder: (_) => const HabitScreen()));
+  } else if (payload.startsWith(NotificationService.payloadBriefPrefix)) {
+    final kind = payload.substring(NotificationService.payloadBriefPrefix.length);
+    if (kind == 'evening') {
+      nav.push(MaterialPageRoute(builder: (_) => const TodayReviewScreen()));
+    } else {
+      // 晨间待办：进入首页「今日」分区（首页默认即展示今日任务）。
+      nav.push(MaterialPageRoute(builder: (_) => const HomeScreen()));
+    }
   }
 }
 
@@ -150,8 +283,25 @@ void main() async {
   const MethodChannel('com.example.todolist/share_intent')
       .setMethodCallHandler((call) async {
     if (call.method == 'onSharedText') {
-      final text = call.arguments;
-      if (text is String && text.isNotEmpty) _openQuickEntry(text);
+      // P2-8：原生侧以 Map 形式推送 {text, source}，兼顾「来源提示」。
+      final args = call.arguments;
+      final text = args is Map ? (args['text'] as String?) : (args as String?);
+      final source =
+          args is Map ? (args['source'] as String?) : null;
+      if (text is String && text.isNotEmpty) {
+        _openQuickEntry(text, sourcePackage: source);
+      }
+    }
+  });
+
+  // 系统分享接收附件（图片/文件）：注册原生 → Dart 通道，把临时缓存路径 + 元数据交给 Dart 导入。
+  const MethodChannel('com.example.todolist/share_uri')
+      .setMethodCallHandler((call) async {
+    if (call.method == 'onSharedUri') {
+      final args = call.arguments;
+      if (args is Map) {
+        await _openQuickEntryUri(Map<String, dynamic>.from(args));
+      }
     }
   });
 
@@ -189,6 +339,12 @@ void main() async {
   } catch (e) {
     debugPrint('[HabitProvider] 调度习惯提醒失败：$e');
   }
+  // P0-1：启动后按设置重排早晚简报（失败单个静默，不影响其它功能）。
+  try {
+    await rescheduleBriefings(task, focus, habit);
+  } catch (e) {
+    debugPrint('[DailyBriefing] 调度简报失败：$e');
+  }
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);
@@ -215,6 +371,12 @@ void main() async {
     await task.triggerAutoBackup();
   } catch (e, s) {
     debugPrint('自动备份触发失败（忽略）：$e\n$s');
+  }
+  // P2-9：启动兜底清理——删除超过 24h 的附件暂存残留（编辑弹层中途被杀会留下）。
+  try {
+    await AttachmentService.cleanupStaleStaging();
+  } catch (e, s) {
+    debugPrint('附件暂存清理失败（忽略）：$e\n$s');
   }
   runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding, appLock: appLock));
 }
@@ -337,6 +499,9 @@ class _MainScaffoldState extends State<MainScaffold>
   int _index = 0;
   bool _homeSearching = false;
 
+  /// P1-9：首页 State 句柄，供 Ctrl/Cmd+F 快捷键从宿主 Scaffold 聚焦首页搜索。
+  final GlobalKey<HomeScreenState> _homeKey = GlobalKey<HomeScreenState>();
+
   @override
   void initState() {
     super.initState();
@@ -378,11 +543,30 @@ class _MainScaffoldState extends State<MainScaffold>
     // 消费冷启动期间由「分享」入口转发、暂存的文本：首帧后弹出预填录入层。
     if (_pendingShareText != null) {
       final s = _pendingShareText;
+      final src = _pendingShareSource;
       _pendingShareText = null;
+      _pendingShareSource = null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final state = _navigatorKey.currentState;
         if (mounted && state != null && s != null) {
-          QuickEntrySheet.show(state.context, initialText: s);
+          QuickEntrySheet.show(state.context, initialText: s, sourcePackage: src);
+        }
+      });
+    }
+    // 消费冷启动期间由「系统分享接收附件」入口、暂存的附件：首帧后弹出带附件的预填录入层（P1-11）。
+    if (_pendingSharedAttachment != null) {
+      final a = _pendingSharedAttachment;
+      final sess = _pendingSharedSession;
+      _pendingSharedAttachment = null;
+      _pendingSharedSession = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _navigatorKey.currentState;
+        if (mounted && state != null && a != null) {
+          QuickEntrySheet.show(
+            state.context,
+            initialAttachment: a,
+            attachmentSession: sess,
+          );
         }
       });
     }
@@ -434,10 +618,33 @@ class _MainScaffoldState extends State<MainScaffold>
     }
   }
 
+  /// P1-9：Ctrl/Cmd+F —— 切回首页并聚焦搜索框。若当前不在首页，先切 Tab，
+  /// 待首帧后首页挂载再从外部触发其搜索聚焦（首页状态需先重建）。
+  void _focusHomeSearch() {
+    if (_index != 0) setState(() => _index = 0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _homeKey.currentState?.focusSearch();
+    });
+  }
+
+  /// P1-9：Esc —— 优先关闭最上层模态路由（快速录入层 / 命令面板 / 任务详情页），
+  /// 否则若首页处于搜索态则退出搜索。与 WidgetsApp 默认「Esc 关闭」行为保持一致。
+  void _handleEscape() {
+    final nav = _navigatorKey.currentState;
+    if (nav != null && nav.canPop()) {
+      nav.pop();
+      return;
+    }
+    if (_homeSearching) {
+      _homeKey.currentState?.exitSearch();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
       HomeScreen(
+        key: _homeKey,
         onSearchingChanged: (v) => setState(() => _homeSearching = v),
         onOpenHabit: () => setState(() => _index = 4),
       ),
@@ -455,7 +662,7 @@ class _MainScaffoldState extends State<MainScaffold>
         }
         final task = context.watch<TaskProvider>();
         final safeMode = task.dbLoadFailed;
-        return Scaffold(
+        final scaffold = Scaffold(
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
           body: SafeArea(
             child: Column(
@@ -480,6 +687,53 @@ class _MainScaffoldState extends State<MainScaffold>
                   onTap: (i) => setState(() => _index = i),
                 ),
         );
+        // P1-9：桌面端挂全局快捷键；移动端原样返回 Scaffold，保持触摸交互不变。
+        if (_isDesktopShortcutsEnabled) {
+          return Shortcuts(
+            shortcuts: _appShortcuts,
+            child: Actions(
+              actions: {
+                _OpenQuickEntryIntent: CallbackAction<_OpenQuickEntryIntent>(
+                  onInvoke: (_) {
+                    QuickEntrySheet.show(context);
+                    return null;
+                  },
+                ),
+                _NewTaskIntent: CallbackAction<_NewTaskIntent>(
+                  onInvoke: (_) {
+                    QuickEntrySheet.show(context);
+                    return null;
+                  },
+                ),
+                _FocusSearchIntent: CallbackAction<_FocusSearchIntent>(
+                  onInvoke: (_) {
+                    _focusHomeSearch();
+                    return null;
+                  },
+                ),
+                _OpenCommandPaletteIntent:
+                    CallbackAction<_OpenCommandPaletteIntent>(
+                  onInvoke: (_) {
+                    CommandPalette.show(
+                      context,
+                      currentIndex: _index,
+                      onPick: (i) => setState(() => _index = i),
+                    );
+                    return null;
+                  },
+                ),
+                _EscapeIntent: CallbackAction<_EscapeIntent>(
+                  onInvoke: (_) {
+                    _handleEscape();
+                    return null;
+                  },
+                ),
+              },
+              child: scaffold,
+            ),
+          );
+        }
+        return scaffold;
       },
     );
   }

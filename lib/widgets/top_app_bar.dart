@@ -6,7 +6,7 @@ import 'package:todolist/theme/tokens.dart';
 /// - [title] 始终显示
 /// - [onBack] 非空时显示返回箭头（24px，onBackground 色），与标题间距 8，匹配设计稿「顶部应用栏」
 /// - [actions] 标题右侧附加控件（如清空按钮），传入后自动撑开
-class TopAppBar extends StatelessWidget {
+class TopAppBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
   final VoidCallback? onBack;
   final List<Widget>? actions;
@@ -17,6 +17,9 @@ class TopAppBar extends StatelessWidget {
     this.onBack,
     this.actions,
   });
+
+  @override
+  final Size preferredSize = const Size.fromHeight(64);
 
   @override
   Widget build(BuildContext context) {

@@ -29,11 +29,13 @@ class ReportExporter {
     required FocusProvider focus,
     required HabitProvider habit,
     bool includeTrash = false,
+    /// P1-10：为任务表追加「附件」列（从 [Task.attachments] 派生，不改存储）。
+    bool includeAttachments = false,
   }) {
     final excel = Excel.createExcel();
     // 默认 Sheet1 改名成第一张表，避免末尾多出一个空表。
     excel.rename('Sheet1', '任务');
-    _fillTaskSheet(excel['任务'], task, includeTrash);
+    _fillTaskSheet(excel['任务'], task, includeTrash, includeAttachments);
     _fillFocusSheet(excel['专注记录'], focus);
     _fillHabitSheet(excel['习惯'], habit);
     _fillCheckInSheet(excel['打卡记录'], habit);
@@ -42,7 +44,8 @@ class ReportExporter {
     return Uint8List.fromList(raw ?? const []);
   }
 
-  static void _fillTaskSheet(Sheet s, TaskProvider task, bool includeTrash) {
+  static void _fillTaskSheet(
+      Sheet s, TaskProvider task, bool includeTrash, bool includeAttachments) {
     const headers = [
       '标题',
       '优先级',
@@ -51,6 +54,8 @@ class ReportExporter {
       '状态',
       '完成时间',
       '是否已删除',
+      // P1-10：附件清单列（开启「包含附件清单」时填充，否则整列为空）。
+      '附件',
     ];
     for (var c = 0; c < headers.length; c++) {
       _set(s, 0, c, headers[c]);
@@ -64,6 +69,8 @@ class ReportExporter {
       _set(s, r, 4, t.done ? '已完成' : '未完成');
       _set(s, r, 5, t.completedAt == null ? '' : _fmt(t.completedAt!));
       _set(s, r, 6, deleted ? '是' : '否');
+      // P1-10：附件清单（如 a.jpg(1.2MB), b.m4a(34KB)）；无附件则空。
+      _set(s, r, 7, includeAttachments ? _attachmentSummary(t) : '');
       r++;
     }
 
@@ -142,13 +149,18 @@ class ReportExporter {
 
   // ===== PDF =====
 
-  /// 把一张已栅格化的回顾长图（PNG 字节）包成单页 PDF，便于归档 / 打印。
+  /// 把一张已栅格化的回顾长图（PNG 字节）包成 PDF，便于归档 / 打印。
   ///
   /// 复用 Flutter 引擎渲染（含中文），因此 PDF 内中文正常显示，无需内嵌 CJK 字体。
   /// 页面用 A4 + contain 适配，长图按比例居中，不被拉伸。
+  ///
+  /// P1-10 多页：第 1 页为回顾长图；[detailPages] 非空时，其每个 PNG（同样由
+  /// Flutter 引擎栅格化、含中文）依次作为后续页追加。保持「先栅格化再包 PDF」
+  /// 思路，规避 `pdf` 包缺 CJK 字体导致的中文空白问题。
   static Future<Uint8List> buildPeriodReportPdf(
     Uint8List pngBytes, {
     required String title,
+    List<Uint8List>? detailPages,
   }) async {
     final pdf = pw.Document(title: title, author: '有条');
     final image = pw.MemoryImage(pngBytes);
@@ -160,7 +172,31 @@ class ReportExporter {
             pw.Center(child: pw.Image(image, fit: pw.BoxFit.contain)),
       ),
     );
+    // P1-10：结构化明细页（已栅格化的 PNG，由调用方从回顾文本现渲染）。
+    for (final page in detailPages ?? const <Uint8List>[]) {
+      final img = pw.MemoryImage(page);
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(16),
+          build: (context) =>
+              pw.Center(child: pw.Image(img, fit: pw.BoxFit.contain)),
+        ),
+      );
+    }
     return pdf.save();
+  }
+
+  /// P1-10：从任务附件派生「附件：a.jpg(1.2MB), b.m4a(34KB)」摘要文本。
+  /// 无附件返回空串；超长截断省略，避免单元格过大。
+  static String _attachmentSummary(Task t) {
+    if (t.attachments.isEmpty) return '';
+    final parts = t.attachments
+        .map((ref) => '${ref.fileName}(${ref.sizeLabel})')
+        .toList();
+    var s = '附件：${parts.join(', ')}';
+    if (s.length > 200) s = '${s.substring(0, 197)}…';
+    return s;
   }
 
   // ===== 内部工具 =====

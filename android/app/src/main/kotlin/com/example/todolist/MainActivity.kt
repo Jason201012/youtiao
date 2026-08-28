@@ -9,7 +9,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -28,6 +30,19 @@ class MainActivity : FlutterFragmentActivity() {
     private var shareHandler: MethodChannel? = null
     /// Flutter 引擎尚未就绪时（冷启动）收到的分享文本先缓存，引擎就绪后补发。
     private var pendingShareText: String? = null
+    /// 冷启动时分享的来源包名（P2-8：用于展示「来自 XX」）。
+    private var pendingShareSource: String? = null
+    /// P1-11：系统分享接收图片/文件：其他 App 经 ACTION_SEND + EXTRA_STREAM 把单个 content Uri
+    /// 发给「有条」，原生侧把二进制复制进应用私有缓存后，经此通道把本地临时路径 + 类型/大小
+    /// 等元数据传给 Dart，由 QuickEntrySheet 预填附件并解析标题，用户确认后落盘。
+    /// （这是「接收系统分发」，App 自身不发起任何网络请求。）
+    private val CHANNEL_SHARE_URI = "com.example.todolist/share_uri"
+    private var shareUriHandler: MethodChannel? = null
+    /// Flutter 引擎尚未就绪时（冷启动）收到的分享附件元数据先缓存，引擎就绪后补发。
+    private var pendingShareUriMeta: Map<String, Any>? = null
+    /// P1-11：分享附件单次导入的体积上限（字节），与 AttachmentService.maxImportFileBytes 对齐（200 MB）。
+    /// 超过则直接拒绝落盘，防止本地超大文件被当作附件滥用。
+    private val MAX_SHARE_BYTES = 200L * 1024 * 1024
     /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity，再经此通道让 Dart 直达详情页。
     private val CHANNEL_WIDGET_NAV = "com.example.todolist/widget_nav"
     private var widgetNavHandler: MethodChannel? = null
@@ -271,9 +286,19 @@ class MainActivity : FlutterFragmentActivity() {
         shareHandler = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_SHARE)
         // 若冷启动期间已收到分享文本（onCreate 早于引擎就绪），此刻补发给 Dart。
         val pending = pendingShareText
+        val pendingSrc = pendingShareSource
         if (pending != null) {
             pendingShareText = null
-            shareHandler?.invokeMethod("onSharedText", pending)
+            pendingShareSource = null
+            shareHandler?.invokeMethod("onSharedText", mapOf("text" to pending, "source" to pendingSrc))
+        }
+
+        // 分享附件（图片/文件）通道：注册后，冷启动时 pendingShareUriMeta 由引擎就绪后的首帧补发到 Dart 侧。
+        shareUriHandler = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_SHARE_URI)
+        val pendingUri = pendingShareUriMeta
+        if (pendingUri != null) {
+            pendingShareUriMeta = null
+            shareUriHandler?.invokeMethod("onSharedUri", pendingUri)
         }
 
         // 小组件导航通道：原生点击任务项带 EXTRA_TASK_ID 启动 Activity 后，经此通道让 Dart 打开详情页。
@@ -336,6 +361,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         dispatchShareText(intent)
+        dispatchShareStream(intent)
         dispatchWidgetTask(intent)
     }
 
@@ -344,6 +370,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         dispatchShareText(intent)
+        dispatchShareStream(intent)
         dispatchWidgetTask(intent)
     }
 
@@ -358,9 +385,109 @@ class MainActivity : FlutterFragmentActivity() {
             .replace(Regex("(?m)\\n?https?://\\S+$"), "")
             .trim()
         if (body.isEmpty()) return
+        // P2-8：记录分享来源包名（来自 getCallingActivity），用于预填录入层展示「来自 XX」。
+        val source = callingActivity?.packageName
         // 引擎未就绪（冷启动）时 invokeMethod 会失败 → 缓存，configureFlutterEngine 末尾补发。
         pendingShareText = body
-        shareHandler?.invokeMethod("onSharedText", body)
+        pendingShareSource = source
+        shareHandler?.invokeMethod("onSharedText", mapOf("text" to body, "source" to source))
+    }
+
+    /// P1-11：从 SEND intent 取出 EXTRA_STREAM（单个 content Uri，图片/文件），复制其二进制流到
+    /// 应用私有缓存目录，并把本地路径 + 类型/大小等元数据经 [CHANNEL_SHARE_URI] 通道发给 Dart。
+    /// 复制成功后立即 [revokeUriPermission] 收回读取授权（消费完即释放），不长期持有来源 App 的授权。
+    /// 类型/大小预检：仅接受 image/audio/file 三类；超限文件拒绝落盘（防本地超大文件滥用）。
+    /// 与 [dispatchShareText] 互斥：文本分享走 EXTRA_TEXT、附件分享走 EXTRA_STREAM，互不干扰。
+    @Suppress("DEPRECATION")
+    private fun dispatchShareStream(i: Intent?) {
+        val uri = i?.takeIf { it.action == Intent.ACTION_SEND }
+            ?.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
+        // 读 content URI 的显示名 / 大小 / MIME（部分来源不返回大小，记为 -1，复制后二次校验）。
+        val cr = contentResolver
+        var mimeType: String? = i.type
+        var displayName: String? = null
+        var size: Long = -1
+        try {
+            cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0) displayName = c.getString(nameIdx)
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                }
+            }
+        } catch (_: Exception) {
+            // 查询元数据失败不阻断，仍尝试按 intent.type 复制。
+        }
+        if (mimeType == null) {
+            try {
+                mimeType = cr.getType(uri)
+            } catch (_: Exception) {
+                // 退回 */*，Dart 侧归为 file 类型。
+            }
+        }
+        // 类型归并：image/* → image，audio/* → audio，其余（含 */*）→ file。
+        val type = when {
+            mimeType?.startsWith("image/") == true -> "image"
+            mimeType?.startsWith("audio/") == true -> "audio"
+            else -> "file"
+        }
+        // 已知大小超限：直接拒绝（引用 MAX_SHARE_BYTES 与 Dart 侧 importFile 上限一致）。
+        if (size > MAX_SHARE_BYTES) {
+            runOnUiThread { Toast.makeText(this, "附件过大，已忽略", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        // 复制到应用私有缓存目录（getCacheDir == Flutter getTemporaryDirectory），离线、不联网。
+        val sessionId = "${System.currentTimeMillis()}_${(Math.random() * 100000).toInt()}"
+        val safeName = sanitizeSharedName(displayName ?: "shared_$sessionId")
+        val outDir = File(getCacheDir(), "share_inbox/$sessionId")
+        if (!outDir.mkdirs() && !outDir.exists()) return
+        val outFile = File(outDir, safeName)
+        try {
+            cr.openInputStream(uri)?.use { input ->
+                outFile.outputStream().use { output -> input.copyTo(output) }
+            } ?: run {
+                // 无法打开输入流（来源撤销授权等）：放弃。
+                return
+            }
+        } catch (_: Exception) {
+            // 读取/写入失败：清理残留，放弃分享。
+            try { outDir.deleteRecursively() } catch (_: Exception) {}
+            return
+        }
+        // 复制后按实际体积二次校验（未知大小时 size=-1，此处用真实落盘大小兜底）。
+        val realSize = outFile.length()
+        if (realSize > MAX_SHARE_BYTES) {
+            try { outDir.deleteRecursively() } catch (_: Exception) {}
+            runOnUiThread { Toast.makeText(this, "附件过大，已忽略", Toast.LENGTH_SHORT).show() }
+            return
+        }
+        // 复制成功：立即收回读取授权（消费完 content URI 即释放，不长期持有）。
+        try {
+            revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: Exception) {
+            // 无授权可收回时静默忽略。
+        }
+        // 分享来源包名（用于 Dart 侧预填层展示「来自 XX」）。
+        val source = callingActivity?.packageName
+        val meta = mapOf(
+            "localPath" to outFile.absolutePath,
+            "fileName" to safeName,
+            "mimeType" to (mimeType ?: ""),
+            "sizeBytes" to realSize,
+            "type" to type,
+            "source" to (source ?: ""),
+        )
+        // 引擎未就绪（冷启动）时 invokeMethod 会失败 → 缓存，configureFlutterEngine 末尾补发。
+        pendingShareUriMeta = meta
+        shareUriHandler?.invokeMethod("onSharedUri", meta)
+    }
+
+    /// P1-11：把来源提供的显示名净化为安全文件名（仅保留字母数字、点、下划线、连字符与中文，
+    /// 其余替换为下划线），杜绝 content URI 显示名携带路径穿越字符写入私有缓存目录。
+    private fun sanitizeSharedName(raw: String): String {
+        val cleaned = raw.replace(Regex("[^\\w.\\-一-龥]"), "_")
+        return if (cleaned.isEmpty()) "shared" else cleaned
     }
 
     /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity 后，把任务 id

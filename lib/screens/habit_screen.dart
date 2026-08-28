@@ -302,6 +302,9 @@ class _HabitTile extends StatelessWidget {
     final freq = habit.weekdays.isEmpty
         ? '每天'
         : '每周 ${habit.weekdays.map(_wdLabel).join(' ')}';
+    final goalN = hp.weeklyCheckIns(habit);
+    final goalM = habit.weeklyGoal;
+    final goalMet = goalN >= goalM;
 
     // 左侧整块（头像 + 标题 + 连续/频率）点击进入单习惯详情；
     // 提醒 chip 是独立兄弟节点，点它只改提醒、不会误开详情。
@@ -331,6 +334,25 @@ class _HabitTile extends StatelessWidget {
                         const SizedBox(width: 8),
                         Text(freq,
                             style: TextStyle(color: ext.meta, fontSize: 12)),
+                        if (habit.weeklyGoal > 0) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: goalMet
+                                  ? primary.withOpacity(0.14)
+                                  : ext.chip,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text('本周 $goalN/$goalM',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: goalMet ? primary : ext.meta,
+                                )),
+                          ),
+                        ],
                       ],
                     ),
                   ],
@@ -629,6 +651,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   final Set<int> _weekdays = {};
   /// 每日提醒时间（分钟数，null = 不提醒）。
   int? _reminderMinute;
+  /// 每周目标打卡次数（0 = 不启用，1..14）。
+  int _weeklyGoal = 0;
 
   String _formatReminder() {
     if (_reminderMinute == null) return '未设置';
@@ -794,6 +818,26 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                 ),
             ],
           ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              const Text('每周目标',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              const Spacer(),
+              DropdownButton<int>(
+                value: _weeklyGoal,
+                items: List.generate(
+                  15,
+                  (i) => DropdownMenuItem(
+                    value: i,
+                    child: Text(i == 0 ? '关闭' : '每周 $i 次'),
+                  ),
+                ),
+                onChanged: (v) => setState(() => _weeklyGoal = v ?? 0),
+                underline: const SizedBox.shrink(),
+              ),
+            ],
+          ),
           const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
@@ -808,6 +852,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       colorValue: _colorValue,
                       weekdays: _weekdays.toList(),
                       reminderMinute: _reminderMinute,
+                      weeklyGoal: _weeklyGoal,
                     );
                 Navigator.pop(context);
               },
@@ -903,6 +948,15 @@ class _HabitDetailSheet extends StatelessWidget {
                         const SizedBox(height: 4),
                         Text('$freq · 创建于 $created',
                             style: TextStyle(fontSize: 12, color: ext.meta)),
+                        if (habit.weeklyGoal > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              '本周 ${hp.weeklyCheckIns(habit)}/${habit.weeklyGoal} 次'
+                              '（目标 每周 ${habit.weeklyGoal} 次）',
+                              style: TextStyle(fontSize: 12, color: ext.meta),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -965,6 +1019,7 @@ class _HabitDetailSheet extends StatelessWidget {
                       checkedDays: checked,
                       weeks: weeks,
                       accent: primary,
+                      goalMet: hp.goalMetThisWeek(habit),
                     ),
                   ],
                 ),

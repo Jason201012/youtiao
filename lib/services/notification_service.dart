@@ -69,6 +69,8 @@ class NotificationService {
   /// - 定时测试系统闹钟：  _kTestTimerId = 999999（固定）
   /// - 定时测试应用内延迟：_kTestTimerId + 1 = 1000000（固定）
   /// - 即时测试通知：      1200000 + ms%100000     = [1200000, 1299999]（见 [showTest]）
+  /// - 早晚简报：          briefingEveningNotifyId=1300001 / briefingMorningNotifyId=1300002（见 [scheduleBriefing]）
+  /// - 回收站过期预告：    trashExpireNotifyId = 1400000（固定，见 [scheduleTrashExpireNotice]）
   ///
   /// 即时测试通知此前落在 800000 段，与习惯提醒段重叠，会以相同 id 顶掉用户当天
   /// 尚未触发的习惯打卡闹钟（约 10% 习惯被波及）。现整体移出习惯段到 1200000+。
@@ -77,10 +79,22 @@ class NotificationService {
   /// 即时测试通知 id 段起点（避开习惯提醒段 [800000,1800007] 与定时测试段 [999999,1000000]）。
   static const int _kTestInstantBase = 1200000;
 
+  /// 早晚简报固定通知 id：独立于任务/重复/习惯/聚焦/测试各段，互不重叠。
+  /// 晚间简报 [briefingEveningNotifyId]=1300001、晨间简报 [briefingMorningNotifyId]=1300002（见 [scheduleBriefing]）。
+  static const int briefingEveningNotifyId = 1300001;
+  static const int briefingMorningNotifyId = 1300002;
+
+  /// 回收站过期预告固定通知 id（P1-12）：避开任务/重复/习惯/专注/测试/简报全部段位。
+  /// 采用**单个固定 id**（1400000）每天覆盖式更新，把「将于明天被永久删除」的任务
+  /// 聚合进同一条通知，避免每任务一条导致通知泛滥。见 [scheduleTrashExpireNotice]。
+  static const int trashExpireNotifyId = 1400000;
+
   /// 通知 payload 前缀：携带任务 id，点击通知时据此跳转到对应任务详情页。
   static const String payloadTaskPrefix = 'task:';
   /// 通知 payload 前缀：携带习惯 id，点击习惯提醒跳转到习惯页。
   static const String payloadHabitPrefix = 'habit:';
+  /// 通知 payload 前缀：早晚简报。'brief:evening' → 今日回顾；'brief:morning' → 首页今日分区。
+  static const String payloadBriefPrefix = 'brief:';
 
   /// 通知「稍后提醒」action 按钮的 actionId。
   static const String snoozeActionId = 'snooze';
@@ -924,6 +938,127 @@ class NotificationService {
     _deadlineGen.clear();
     return _plugin.cancelAll();
   }
+
+  /// P0-1 早晚简报调度：每日在 [hour]:[minute] 重复触发一条本地通知（setAlarmClock，
+  /// 不被 ColorOS 等国产 ROM 拦截）。[evening]=true 为晚间「今日小结」，
+  /// false 为晨间「今日待办」。文案由调用方在排程时烘焙进 [title]/[body]。
+  /// 复用同一固定 id（[briefingEveningNotifyId]/[briefingMorningNotifyId]），
+  /// 修改时间后重新调用即覆盖旧通知（与习惯每日提醒同模式）。
+  Future<bool> scheduleBriefing(
+    bool evening,
+    int hour,
+    int minute, {
+    required String title,
+    required String body,
+  }) async {
+    if (!enabled) {
+      debugPrint('[通知] 未调度简报：通知总开关关闭');
+      return false;
+    }
+    try {
+      final loc = _loc ?? tz.UTC;
+      final hh = hour.clamp(0, 23);
+      final mm = minute.clamp(0, 59);
+      final id = evening ? briefingEveningNotifyId : briefingMorningNotifyId;
+      final now = tz.TZDateTime.now(loc);
+      var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+      when = when.isAfter(now)
+          ? when
+          : when.add(const Duration(days: 1));
+      final mode = await _scheduleMode;
+      final detail = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _chSound,
+          '任务提醒',
+          channelDescription: '任务截止时间提醒',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: true,
+        ),
+      );
+      await _plugin.zonedSchedule(
+        id,
+        title,
+        body,
+        when,
+        detail,
+        payload: '$payloadBriefPrefix${evening ? 'evening' : 'morning'}',
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+      debugPrint('[通知] 已调度${evening ? "晚间" : "晨间"}简报 -> $when (id=$id)');
+      return true;
+    } catch (e, s) {
+      debugPrint('[通知] 简报调度失败(evening=$evening): $e');
+      debugPrint('$s');
+      return false;
+    }
+  }
+
+  /// 取消某条简报通知（关闭对应开关时调用）。
+  Future<void> cancelBriefing(bool evening) =>
+      _plugin.cancel(evening ? briefingEveningNotifyId : briefingMorningNotifyId);
+
+  /// P1-12：调度「回收站过期预告」通知——把将于明天 00:00 被永久删除的任务
+  /// 聚合成一条通知，调度到「明天 00:00」触发。用固定 id [trashExpireNotifyId]
+  /// 覆盖式更新：每天重排时旧通知自动被替换，不会堆积多条。
+  ///
+  /// [expiringTomorrow] 为将于明天 00:00 被清理的回收站任务（剩余天数 == 1）。
+  /// 为空则取消该固定 id 的通知（无预告可发时不留残留）。离线、纯本地调度。
+  Future<void> scheduleTrashExpireNotice(List<Task> expiringTomorrow) async {
+    if (!enabled) {
+      // 通知总开关关闭：不调度任何预告，同时清掉可能残留的旧预告。
+      await _plugin.cancel(trashExpireNotifyId);
+      return;
+    }
+    if (expiringTomorrow.isEmpty) {
+      await _plugin.cancel(trashExpireNotifyId);
+      return;
+    }
+    try {
+      final loc = _loc ?? tz.UTC;
+      final now = tz.TZDateTime.now(loc);
+      // 明天 00:00（与原生 MidnightResetReceiver 清理同一时刻，口径一致）。
+      final when = tz.TZDateTime(loc, now.year, now.month, now.day + 1);
+      final mode = await _scheduleMode;
+      // 标题/正文：聚合最多展示前几条任务名，避免通知体过长。
+      final titles = expiringTomorrow.take(5).map((t) => t.title.trim()).toList();
+      final more = expiringTomorrow.length - titles.length;
+      final body = more > 0
+          ? '${titles.join('、')} 等 ${expiringTomorrow.length} 条任务将于明天被永久删除'
+          : '${titles.join('、')} 将于明天被永久删除';
+      final detail = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _chSound,
+          '任务提醒',
+          channelDescription: '任务截止时间提醒',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: true,
+          autoCancel: true,
+        ),
+      );
+      await _plugin.zonedSchedule(
+        trashExpireNotifyId,
+        '回收站即将清空',
+        body,
+        when,
+        detail,
+        payload: '',
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      debugPrint('[通知] 回收站过期预告已调度 -> $when（${expiringTomorrow.length} 条）');
+    } catch (e, s) {
+      debugPrint('[通知] 回收站过期预告调度失败: $e\n$s');
+    }
+  }
+
+  /// P1-12：取消回收站过期预告通知（清空回收站 / 恢复全部时调用）。
+  Future<void> cancelTrashExpireNotice() => _plugin.cancel(trashExpireNotifyId);
 
   /// 通知「完成」action 后的覆盖式确认通知：用任务通知 id 在原通知位弹出
   /// 「已完成 ✓」，既不刷屏、也不叠加新通知。用户点开无跳转（payload 置空）。

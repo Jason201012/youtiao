@@ -23,14 +23,20 @@ class TaskSheet extends StatefulWidget {
   /// 与 [task] 的区别：[draft] 只把字段填好，保存时仍走新建路径。
   final Task? draft;
 
-  const TaskSheet({super.key, this.task, this.draft});
+  const TaskSheet({super.key, this.task, this.draft, this.inheritedAttachmentSession});
 
-  static Future<void> show(BuildContext context, {Task? task, Task? draft}) {
+  /// P1-11：从快速录入层（系统分享接收）继承来的附件暂存会话 id。新建任务保存后，
+  /// 除本弹层自身的暂存会话外，还要把该会话提升为正式目录；取消保存时也一并清理。
+  final String? inheritedAttachmentSession;
+
+  static Future<void> show(BuildContext context,
+      {Task? task, Task? draft, String? inheritedAttachmentSession}) {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => TaskSheet(task: task, draft: draft),
+      builder: (_) => TaskSheet(
+          task: task, draft: draft, inheritedAttachmentSession: inheritedAttachmentSession),
     );
   }
 
@@ -143,8 +149,11 @@ class _TaskSheetState extends State<TaskSheet> {
         AttachmentService.pruneOrphans(
             widget.task!.id, _baselineAttachmentFiles ?? const {});
       } else {
-        // 新建模式：暂存目录整体清理。
+        // 新建模式：暂存目录整体清理（含 P1-11 继承的分享附件暂存会话）。
         AttachmentService.removeStaging(_attachmentSession);
+        if (widget.inheritedAttachmentSession != null) {
+          AttachmentService.removeStaging(widget.inheritedAttachmentSession!);
+        }
       }
     }
     super.dispose();
@@ -593,9 +602,15 @@ class _TaskSheetState extends State<TaskSheet> {
         attachments: List.from(_attachments),
       ));
       // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
+      // P1-11：同时提升从快速录入层继承的分享附件暂存会话。
       await AttachmentService.promoteStaging(_attachmentSession, created.id);
+      if (widget.inheritedAttachmentSession != null) {
+        await AttachmentService.promoteStaging(
+            widget.inheritedAttachmentSession!, created.id);
+      }
     }
     _saved = true;
+    if (!mounted) return;
     Navigator.pop(context);
   }
 

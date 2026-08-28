@@ -70,6 +70,7 @@ class HabitProvider extends ChangeNotifier {
     required int colorValue,
     required List<int> weekdays,
     int? reminderMinute,
+    int weeklyGoal = 0,
   }) async {
     final id = '${DateTime.now().microsecondsSinceEpoch}.${_habitSeq++}';
     final h = Habit(
@@ -79,6 +80,7 @@ class HabitProvider extends ChangeNotifier {
       colorValue: colorValue,
       weekdays: weekdays,
       reminderMinute: reminderMinute,
+      weeklyGoal: weeklyGoal,
       createdAt: DateTime.now(),
     );
     _habits.add(h);
@@ -131,6 +133,51 @@ class HabitProvider extends ChangeNotifier {
     final k = CheckIn.dateKey(DateTime.now());
     return _checkIns.any(
         (c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
+  }
+
+  /// 本周（周一~周日）某习惯的打卡天数（date-only 去重），用于「每周目标」进度。
+  int weeklyCheckIns(Habit habit) {
+    final monday = _mondayOf(DateTime.now());
+    final sunday = monday.add(const Duration(days: 6));
+    return _checkIns.where((c) {
+      if (c.habitId != habit.id) return false;
+      final d = DateTime(c.date.year, c.date.month, c.date.day);
+      return !d.isBefore(monday) && !d.isAfter(sunday);
+    }).map((c) => CheckIn.dateKey(c.date)).toSet().length;
+  }
+
+  /// 本周是否达成了周目标（weeklyGoal>0 且打卡天数 ≥ 目标）。
+  bool goalMetThisWeek(Habit habit) =>
+      habit.weeklyGoal > 0 && weeklyCheckIns(habit) >= habit.weeklyGoal;
+
+  /// 从本周往前连续达成周目标的周数（断一周即止）；weeklyGoal<=0 返回 0。
+  /// 用于「连续 4 周达成周目标」成就判定。
+  int consecutiveGoalWeeks(Habit habit, {int weeks = 4}) {
+    if (habit.weeklyGoal <= 0) return 0;
+    int run = 0;
+    final today = DateTime.now();
+    for (int w = 0; w < weeks; w++) {
+      final monday = _mondayOf(DateTime(today.year, today.month, today.day)
+          .subtract(Duration(days: 7 * w)));
+      final sunday = monday.add(const Duration(days: 6));
+      final count = _checkIns.where((c) {
+        if (c.habitId != habit.id) return false;
+        final d = DateTime(c.date.year, c.date.month, c.date.day);
+        return !d.isBefore(monday) && !d.isAfter(sunday);
+      }).map((c) => CheckIn.dateKey(c.date)).toSet().length;
+      if (count >= habit.weeklyGoal) {
+        run++;
+      } else {
+        break;
+      }
+    }
+    return run;
+  }
+
+  /// 返回某日期所在周的周一（每周首日）。
+  static DateTime _mondayOf(DateTime d) {
+    final base = DateTime(d.year, d.month, d.day);
+    return base.subtract(Duration(days: base.weekday - 1));
   }
 
   /// 切换今天的打卡状态：已打卡则取消，否则打卡。
