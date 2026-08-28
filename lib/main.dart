@@ -453,9 +453,19 @@ class _MainScaffoldState extends State<MainScaffold>
         if (appLock.locked) {
           return const AppLockGate();
         }
+        final task = context.watch<TaskProvider>();
+        final safeMode = task.dbLoadFailed;
         return Scaffold(
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-          body: SafeArea(child: pages[_index]),
+          body: SafeArea(
+            child: Column(
+              children: [
+                // S13 安全模式横幅：数据库加载失败时提示只读、不落盘，引导修复。
+                if (safeMode) const _DbSafeModeBanner(),
+                Expanded(child: pages[_index]),
+              ],
+            ),
+          ),
           // FAB 仅首页，且搜索时隐藏（搜索页不需要新增任务的加号）
           floatingActionButton: _index == 0 && !_homeSearching
               ? NewTaskFab(
@@ -471,6 +481,42 @@ class _MainScaffoldState extends State<MainScaffold>
                 ),
         );
       },
+    );
+  }
+}
+
+/// S13 安全模式横幅：数据库加载失败时显示在顶部，提示用户当前为只读、
+/// 修改不会保存，并引导前往「设置 → 备份与恢复」导出/修复，避免误覆盖坏库。
+class _DbSafeModeBanner extends StatelessWidget {
+  const _DbSafeModeBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.warning_amber_rounded,
+                color: scheme.onErrorContainer, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                '数据库加载失败，已进入只读安全模式：本次修改不会保存。'
+                '请前往「设置 → 备份与恢复」导出或修复数据。',
+                style: TextStyle(
+                  color: scheme.onErrorContainer,
+                  fontSize: 13,
+                  height: 1.3,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

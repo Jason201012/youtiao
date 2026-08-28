@@ -1,9 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:lpinyin/lpinyin.dart';
 import 'package:todolist/theme/tokens.dart';
+import 'package:todolist/models/attachment.dart';
 
 /// 任务数据模型（对应设计稿：优先级色条、分类标签、截止日期、子任务、完成态）
 enum Priority { high, medium, low }
+
+/// 优先级短名（用于导出 / 标签展示）。
+/// 直接作为枚举成员，避免依赖外部 extension 的可见性。
+extension PriorityLabel on Priority {
+  String get label {
+    switch (this) {
+      case Priority.high:
+        return '高';
+      case Priority.medium:
+        return '中';
+      case Priority.low:
+        return '低';
+    }
+  }
+}
 
 enum Category { work, life, study }
 
@@ -13,7 +29,7 @@ enum Category { work, life, study }
 /// - weekly：每周指定的若干星期（[Task.repeatWeekdays]）
 /// - interval：每隔 N 天（[Task.repeatInterval]，以 [Task.repeatAnchor] 为锚点）
 /// - weekday：仅工作日（周一至周五）
-enum RepeatType { none, daily, weekly, interval, weekday }
+enum RepeatType { none, daily, weekly, interval, weekday, monthly }
 
 extension RepeatTypeLabel on RepeatType {
   /// 弹层 / 标签上的短名
@@ -29,6 +45,8 @@ extension RepeatTypeLabel on RepeatType {
         return '每隔N天';
       case RepeatType.weekday:
         return '仅工作日';
+      case RepeatType.monthly:
+        return '每月';
     }
   }
 }
@@ -180,6 +198,20 @@ class Task {
   /// 旧 JSON 无此字段时缺省为 null（向后兼容）。「结束重复」即把此字段设为昨天。
   final String? repeatUntil;
 
+  /// 每月重复的「日」(1-31)。仅当 [repeat]==[RepeatType.monthly] 且 [monthlyWeekday]==null 时有意义，
+  /// 表示「每月 N 号」循环（如「每月 15 号交房租」）。溢出月份（如 31 在 2 月）自动夹到当月最后一天。
+  /// 旧 JSON 无此字段时缺省为 1（向后兼容，零迁移）。
+  final int monthlyDay;
+
+  /// 每月第几个周几（仅 [repeat]==monthly 且不为 null 时有意义）。
+  /// [monthlyWeekday] 取值 1..7（周一..周日）；[monthlyWeekIndex] 取值 1..4 表示第 N 个，
+  /// 5 表示「最后一个」（如「每月最后一个周日」）。二者同时存在时优先于 [monthlyDay]。
+  /// 旧 JSON 无此字段时缺省为 null（向后兼容，零迁移）。
+  final int? monthlyWeekday;
+
+  /// 每月第几个周几的「第几」(1..5，5=最后一个)。与 [monthlyWeekday] 配套使用。
+  final int? monthlyWeekIndex;
+
   /// 任务备注 / 解释：对任务的补充说明（链接、思路、细节等），可选，默认空串。
   final String note;
 
@@ -211,6 +243,15 @@ class Task {
   /// 注意：此为派生字段，[copyWith] 默认保留旧值，调用方无需每次重算。
   final String pinyinInitials;
 
+  /// 本地最后更新时间（UTC）。用于本地增量持久化/备份的排序与去重依据，
+  /// 不参与联网（纯离线）。序列化为 `updatedAt`，旧数据缺省为 null（向后兼容）。
+  final DateTime? updatedAt;
+
+  /// 任务附件引用列表（图片 / 录音 / 文件）。元数据随 Task 持久化到 SQLite，
+  /// 二进制文件存于 App 私有 `attachments/<taskId>/` 目录，全程本地、不联网。
+  /// 旧 JSON 无此字段时缺省为空列表（向后兼容，零迁移）。
+  final List<AttachmentRef> attachments;
+
   const Task({
     required this.id,
     required this.title,
@@ -229,6 +270,9 @@ class Task {
     this.repeatAnchor,
     this.skipDates = const [],
     this.repeatUntil,
+    this.monthlyDay = 1,
+    this.monthlyWeekday,
+    this.monthlyWeekIndex,
     this.note = '',
     this.tags = const [],
     this.focusSecTotal = 0,
@@ -236,6 +280,8 @@ class Task {
     this.reminderOffsetMin = 0,
     this.pinned = false,
     this.pinyinInitials = '',
+    this.updatedAt,
+    this.attachments = const [],
   });
 
   // 哨兵：区分"未传该参数（保留旧值）"与"显式传 null（清空该字段）"。
@@ -261,6 +307,9 @@ class Task {
     Object? repeatAnchor = _kKeep,
     List<String>? skipDates,
     Object? repeatUntil = _kKeep,
+    int? monthlyDay,
+    int? monthlyWeekday,
+    int? monthlyWeekIndex,
     String? note,
     List<String>? tags,
     int? focusSecTotal,
@@ -268,6 +317,8 @@ class Task {
     int? reminderOffsetMin,
     bool? pinned,
     String? pinyinInitials,
+    Object? updatedAt = _kKeep,
+    List<AttachmentRef>? attachments,
   }) =>
       Task(
         id: id ?? this.id,
@@ -292,6 +343,9 @@ class Task {
         skipDates: skipDates ?? this.skipDates,
         repeatUntil:
             repeatUntil == _kKeep ? this.repeatUntil : repeatUntil as String?,
+        monthlyDay: monthlyDay ?? this.monthlyDay,
+        monthlyWeekday: monthlyWeekday ?? this.monthlyWeekday,
+        monthlyWeekIndex: monthlyWeekIndex ?? this.monthlyWeekIndex,
         note: note ?? this.note,
         tags: tags ?? this.tags,
         focusSecTotal: focusSecTotal ?? this.focusSecTotal,
@@ -299,6 +353,8 @@ class Task {
         reminderOffsetMin: reminderOffsetMin ?? this.reminderOffsetMin,
         pinned: pinned ?? this.pinned,
         pinyinInitials: pinyinInitials ?? this.pinyinInitials,
+        updatedAt: updatedAt == _kKeep ? this.updatedAt : updatedAt as DateTime?,
+        attachments: attachments ?? this.attachments,
       );
 
   /// 序列化为 JSON（用于 shared_preferences 持久化）
@@ -321,6 +377,9 @@ class Task {
         'repeatAnchor': repeatAnchor?.toIso8601String(),
         'skipDates': skipDates,
         'repeatUntil': repeatUntil,
+        'monthlyDay': monthlyDay,
+        'monthlyWeekday': monthlyWeekday,
+        'monthlyWeekIndex': monthlyWeekIndex,
         'note': note,
         'tags': tags,
         'focusSecTotal': focusSecTotal,
@@ -328,6 +387,8 @@ class Task {
         'reminderOffsetMin': reminderOffsetMin,
         'pinned': pinned,
         'pinyinInitials': pinyinInitials,
+        'updatedAt': updatedAt?.toIso8601String(),
+        'attachments': attachments.map((a) => a.toJson()).toList(),
       };
 
   /// 从 JSON 反序列化（兼容旧版仅含 [done] 布尔的备份，以及 v1.9.4 之前
@@ -354,11 +415,16 @@ class Task {
     final List<String> tags = tagsRaw is List
         ? tagsRaw.whereType<String>().toList()
         : const <String>[];
+    // P0-1：附件原始列表（向后兼容：旧备份无此字段时缺省空列表）。
+    final attRaw = j['attachments'];
     return Task(
-      id: j['id'] as String,
+      // S6 修复：id 缺省时回退空串而非抛异常（配合备份校验兜底，避免恢复直接崩）。
+      id: (j['id'] as String?) ?? '',
       title: (j['title'] as String?) ?? '',
-      priority: Priority.values.byName(j['priority'] as String),
-      category: Category.values.byName(j['category'] as String),
+      // S6 修复：枚举字段容错——未知值/缺省回退到默认优先级/分类，
+      // 与 repeat 既有的 asNameMap 容错口径一致，避免"非法枚举"备份恢复时整体失败。
+      priority: _parsePriority(j['priority']),
+      category: _parseCategory(j['category']),
       dueDate:
           j['dueDate'] == null ? null : DateTime.parse(j['dueDate'] as String),
       startDate:
@@ -380,6 +446,9 @@ class Task {
           : DateTime.parse(j['repeatAnchor'] as String),
       skipDates: _parseSkipDates(j['skipDates']),
       repeatUntil: j['repeatUntil'] as String?,
+      monthlyDay: j['monthlyDay'] as int? ?? 1,
+      monthlyWeekday: j['monthlyWeekday'] as int?,
+      monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
       note: j['note'] as String? ?? '',
       tags: tags,
       focusSecTotal: j['focusSecTotal'] as int? ?? 0,
@@ -387,6 +456,16 @@ class Task {
       reminderOffsetMin: j['reminderOffsetMin'] as int? ?? 0,
       pinned: j['pinned'] as bool? ?? false,
       pinyinInitials: j['pinyinInitials'] as String? ?? '',
+      updatedAt: j['updatedAt'] == null
+          ? null
+          : DateTime.parse(j['updatedAt'] as String),
+      // P0-1：附件列表（向后兼容：旧备份无 attachments 字段时缺省空列表）。
+      attachments: attRaw is List
+          ? attRaw
+              .whereType<Map>()
+              .map((e) => AttachmentRef.fromJson(Map<String, dynamic>.from(e)))
+              .toList()
+          : const <AttachmentRef>[],
     );
   }
 
@@ -397,6 +476,25 @@ class Task {
     if (s == 'done') return TaskStatus.done;
     if (s == 'todo' || s == 'doing' || s == null) return TaskStatus.todo;
     return (done ?? false) ? TaskStatus.done : TaskStatus.todo;
+  }
+
+  /// S6 修复：优先级字段容错解析。未知字符串 / null 回退 [Priority.medium]，
+  /// 与 [RepeatType] 既有的 [asNameMap] 容错口径一致，避免非法备份恢复时整体崩溃。
+  static Priority _parsePriority(dynamic v) {
+    if (v is String) {
+      final p = Priority.values.asNameMap()[v];
+      if (p != null) return p;
+    }
+    return Priority.medium;
+  }
+
+  /// S6 修复：分类字段容错解析。未知字符串 / null 回退 [Category.life]。
+  static Category _parseCategory(dynamic v) {
+    if (v is String) {
+      final c = Category.values.asNameMap()[v];
+      if (c != null) return c;
+    }
+    return Category.life;
   }
 
   /// 解析子任务列表；旧数据无 `subtasks` 字段时回退为空列表（向后兼容）。
@@ -447,7 +545,30 @@ class Task {
         if (diff < 0) return false;
         final n = repeatInterval < 1 ? 1 : repeatInterval;
         return diff % n == 0;
+      case RepeatType.monthly:
+        if (monthlyWeekday != null && monthlyWeekIndex != null) {
+          return _monthlyNthWeekday(day, monthlyWeekday!, monthlyWeekIndex!);
+        }
+        return day.day == _monthlyDayTarget(day.year, day.month, monthlyDay);
     }
+  }
+
+  /// 每月第 N 个周几 是否命中 [day]；[idx] 1..4 为第几个，5 为「最后一个」。
+  static bool _monthlyNthWeekday(DateTime day, int wd, int idx) {
+    if (day.weekday != wd) return false;
+    final occ = ((day.day - 1) ~/ 7) + 1; // 该星期在本月是第几个
+    if (idx >= 1 && idx <= 4) return occ == idx;
+    if (idx == 5) {
+      final dim = DateTime(day.year, day.month + 1, 0).day; // 当月天数
+      return day.day + 7 > dim; // 再加 7 天将跨月 → 即本月最后一个
+    }
+    return false;
+  }
+
+  /// 每月 X 号在 [y] 年 [m] 月对应的「日」(1-28/29/30/31)；溢出则夹到当月最后一天。
+  static int _monthlyDayTarget(int y, int m, int day) {
+    final dim = DateTime(y, m + 1, 0).day;
+    return day.clamp(1, dim);
   }
 
   /// yyyy-MM-dd 形式的日期串（date-only，与时区无关，便于 skipDates 精确匹配）。
@@ -489,6 +610,14 @@ class Task {
         return days.isEmpty ? '每周' : '每周 $days';
       case RepeatType.interval:
         return '每${repeatInterval < 1 ? 1 : repeatInterval}天';
+      case RepeatType.monthly:
+        if (monthlyWeekday != null && monthlyWeekIndex != null) {
+          const names = ['一', '二', '三', '四', '五', '六', '日'];
+          final w = names[(monthlyWeekday! - 1).clamp(0, 6)];
+          final idxLabel = monthlyWeekIndex == 5 ? '最后' : '第$monthlyWeekIndex个';
+          return '每月$idxLabel周$w';
+        }
+        return '每月${monthlyDay}号';
     }
   }
 

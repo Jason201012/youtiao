@@ -10,9 +10,10 @@
 library;
 
 import 'package:todolist/models/task.dart';
+import 'package:lunar/lunar.dart';
 
 /// 被识别出来的片段类型（供 UI 渲染 chip / 高亮）。
-enum TokenKind { date, time, priority, category, tag, repeat }
+enum TokenKind { date, time, priority, category, tag, repeat, reminder }
 
 /// 一个被识别的片段：记录它在原串中的位置与语义。
 class ParseSegment {
@@ -69,6 +70,16 @@ class ParsedTask {
   /// 重复提醒时刻（自 00:00 起的分钟数）
   final int? repeatMinute;
 
+  /// 每月重复的「日」(1-31)；仅 [repeat]==monthly 且 [monthlyWeekday]==null 时有意义。
+  final int monthlyDay;
+
+  /// 每月第几个周几（1..7）与「第几」(1..5，5=最后)；仅 [repeat]==monthly 且不为 null 时有意义。
+  final int? monthlyWeekday;
+  final int? monthlyWeekIndex;
+
+  /// 提醒提前量（分钟）：一次性截止提醒在到期前该分钟数触发。null=未识别。
+  final int? reminderOffsetMin;
+
   /// 全部识别片段，按在原串中的位置升序
   final List<ParseSegment> segments;
 
@@ -85,6 +96,10 @@ class ParsedTask {
     this.repeatWeekdays = const [],
     this.repeatInterval = 2,
     this.repeatMinute,
+    this.monthlyDay = 1,
+    this.monthlyWeekday,
+    this.monthlyWeekIndex,
+    this.reminderOffsetMin,
     this.segments = const [],
     this.anchorBase,
   });
@@ -110,6 +125,10 @@ class ParsedTask {
           : const [],
       repeatInterval: repeatInterval,
       repeatMinute: repeatMinute,
+      monthlyDay: monthlyDay,
+      monthlyWeekday: monthlyWeekday,
+      monthlyWeekIndex: monthlyWeekIndex,
+      reminderOffsetMin: reminderOffsetMin ?? 0,
       repeatAnchor:
           repeat == RepeatType.interval ? DateTime(anchor.year, anchor.month, anchor.day) : null,
       tags: tags,
@@ -145,6 +164,10 @@ class TaskParser {
     RepeatType repeat = RepeatType.none;
     var repeatWeekdays = <int>[];
     var repeatInterval = 2;
+    var monthlyDay = 1;
+    int? monthlyWeekday;
+    int? monthlyWeekIndex;
+    int? reminderOffsetMin;
     DateTime? datePart;
     int? hour;
     int? minute;
@@ -230,6 +253,43 @@ class TaskParser {
       }
     }
 
+    // ── 3.5 每月重复（必须在日期前解析，避免与「N月N日」冲突）──
+    if (repeat == RepeatType.none) {
+      // 每月最后一个周日 / 每月第2个周一
+      final mNth = RegExp(r'每月(最后一个|最后|第([1-5])个)(?:周|星期|礼拜)([一二三四五六日天])');
+      final mn = mNth.firstMatch(src);
+      if (mn != null && free(mn.start, mn.end)) {
+        final wd = _weekdayMap[mn.group(3)!]!;
+        final idxRaw = mn.group(2);
+        final idx = idxRaw != null ? int.parse(idxRaw) : 5; // 「最后」→ 5
+        repeat = RepeatType.monthly;
+        monthlyWeekday = wd;
+        monthlyWeekIndex = idx;
+        const names = ['一', '二', '三', '四', '五', '六', '日'];
+        final w = names[(wd - 1).clamp(0, 6)];
+        final idxLabel = idx == 5 ? '最后' : '第$idx个';
+        mark(mn.start, mn.end, TokenKind.repeat, '每月$idxLabel周$w');
+      } else {
+        // 每月15号 / 每月15 / 每月（裸写默认 1 号）
+        final mDay = RegExp(r'每月(\d{1,2})[日号]?');
+        final md = mDay.firstMatch(src);
+        if (md != null && free(md.start, md.end)) {
+          final d = int.parse(md.group(1)!).clamp(1, 31);
+          repeat = RepeatType.monthly;
+          monthlyDay = d;
+          mark(md.start, md.end, TokenKind.repeat, '每月${d}号');
+        } else {
+          final mBare = RegExp(r'每月');
+          final mb = mBare.firstMatch(src);
+          if (mb != null && free(mb.start, mb.end)) {
+            repeat = RepeatType.monthly;
+            monthlyDay = 1;
+            mark(mb.start, mb.end, TokenKind.repeat, '每月1号');
+          }
+        }
+      }
+    }
+
     // ── 4. 日期 ────────────────────────────────────────────────
     final dateRe = RegExp(
       r'大后天|后天|明天|明日|今天|今日'
@@ -251,6 +311,39 @@ class TaskParser {
       mark(m.start, m.end, TokenKind.date, _dateLabel(d, base));
     }
 
+    // ── 4.5 农历日期（离线转换，不联网）──
+    if (datePart == null) {
+      final lunarRe = RegExp(
+        r'农历([正一二三四五六七八九十冬腊\d]{1,2})月([初一二三四五六七八九十\d]{1,3})(?:[日号])?',
+      );
+      final lm = lunarRe.firstMatch(src);
+      if (lm != null && free(lm.start, lm.end)) {
+        final lunarMonth = _cnToInt(lm.group(1)!);
+        final dayRaw = lm.group(2)!;
+        final lunarDay = _cnToInt(dayRaw.startsWith('初') ? dayRaw.substring(1) : dayRaw);
+        DateTime? resolved;
+        if (lunarMonth >= 1 && lunarMonth <= 12 && lunarDay >= 1 && lunarDay <= 30) {
+          // 今年优先；若转出的阳历日期已过，则用明年（覆盖跨年农历，如腊月生日在年初）。
+          for (final year in [base.year, base.year + 1]) {
+            try {
+              final solar = Lunar.fromYmd(year, lunarMonth, lunarDay).getSolar();
+              final d = DateTime.parse(solar.toFullString().substring(0, 10));
+              if (resolved == null || d.isAfter(base)) {
+                resolved = d;
+                if (d.isAfter(base)) break;
+              }
+            } catch (_) {
+              // 非法农历日期（如小月 30 号、闰月不存在）忽略
+            }
+          }
+        }
+        if (resolved != null) {
+          datePart = resolved;
+          mark(lm.start, lm.end, TokenKind.date, _dateLabel(resolved, base));
+        }
+      }
+    }
+
     // ── 5. 时间 ────────────────────────────────────────────────
     const meridiem = r'(?:上午|早上|早晨|凌晨|中午|下午|晚上|傍晚|夜里)';
     final timeRe = RegExp(
@@ -269,6 +362,26 @@ class TaskParser {
       minute = t.$2;
       mark(m.start, m.end, TokenKind.time,
           '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}');
+    }
+
+    // ── 5.5 提醒提前量：提前 N 分钟/小时/天，或「到期前 N ...」──
+    final offRe = RegExp(r'(提前|到期前)(\d+)(分钟|分|小时|时|天)');
+    final om = offRe.firstMatch(src);
+    if (om != null && free(om.start, om.end)) {
+      final n = int.parse(om.group(2)!);
+      final unit = om.group(3)!;
+      final mins = switch (unit) {
+        '天' => n * 1440,
+        '小时' || '时' => n * 60,
+        _ => n,
+      };
+      reminderOffsetMin = mins;
+      final label = mins >= 1440
+          ? '提前${mins ~/ 1440}天'
+          : mins >= 60
+              ? '提前${mins ~/ 60}小时'
+              : '提前${mins}分钟';
+      mark(om.start, om.end, TokenKind.reminder, label);
     }
 
     // ── 6. 合并日期与时间 ──────────────────────────────────────
@@ -308,6 +421,10 @@ class TaskParser {
       repeatWeekdays: repeatWeekdays,
       repeatInterval: repeatInterval,
       repeatMinute: repeat != RepeatType.none && hour != null ? hour * 60 + (minute ?? 0) : null,
+      monthlyDay: monthlyDay,
+      monthlyWeekday: monthlyWeekday,
+      monthlyWeekIndex: monthlyWeekIndex,
+      reminderOffsetMin: reminderOffsetMin,
       segments: segments,
       anchorBase: base,
     );
@@ -354,6 +471,33 @@ class TaskParser {
   }
 
   /// 解析「一三五」「1,3,5」这类星期列表
+  /// 把农历月/日的中文（或阿拉伯）数字串转成整数；无法解析返回 0（调用方忽略）。
+  /// 支持：正/一..九/十/冬/腊（月），初X（日），十一..十九、二十..二十九、三十，以及纯阿拉伯数字。
+  static int _cnToInt(String s) {
+    if (RegExp(r'^\d+$').hasMatch(s)) return int.tryParse(s) ?? 0;
+    const d = {
+      '正': 1, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+      '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '冬': 11, '腊': 12,
+    };
+    var total = 0;
+    var section = 0;
+    for (final ch in s.split('')) {
+      final v = d[ch];
+      if (v == null) return 0; // 含非法字符 → 解析失败
+      if (v >= 11) {
+        total += v; // 冬/腊 直接作为完整月份值
+        section = 0;
+      } else if (v == 10) {
+        section = section == 0 ? 10 : section * 10;
+        total += section;
+        section = 0;
+      } else {
+        section = v;
+      }
+    }
+    return total + section;
+  }
+
   static List<int> _parseWeekdayList(String raw) {
     final out = <int>[];
     for (final ch in raw.split('')) {

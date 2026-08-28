@@ -98,7 +98,8 @@ String buildPeriodNarrative(PeriodReview r) {
 
   // —— 最佳日 / 最佳月 ——
   if (r.bestBucketLabel != null && r.bestBucketCount > 0) {
-    final unit = r.period == ReviewPeriod.year ? '月' : '日';
+    // 月报按「天」分桶，年报 / 学期报按「月」分桶。
+    final unit = r.period == ReviewPeriod.month ? '日' : '月';
     parts.add('最高产的$unit是 ${r.bestBucketLabel}（${r.bestBucketCount} 个任务）');
   }
 

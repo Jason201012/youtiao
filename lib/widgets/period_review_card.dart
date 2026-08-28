@@ -144,12 +144,13 @@ class PeriodTrend extends StatelessWidget {
     final max = values.isEmpty ? 1 : values.reduce((a, b) => a > b ? a : b);
     final avg = r.totalDays == 0 ? 0.0 : r.completedCount / r.totalDays;
     final bestLabel = r.bestBucketLabel ?? '—';
-    final isYear = r.period == ReviewPeriod.year;
+    // 月报按「天」分桶（标签稀疏），年报 / 学期报按「月」分桶（标签全显）。
+    final monthly = r.period == ReviewPeriod.month;
 
-    final rangeText = isYear ? '${r.start.year} 年' : r.rangeLabel;
+    final rangeText = r.period == ReviewPeriod.year ? '${r.start.year} 年' : r.rangeLabel;
 
     bool showLabel(int i) =>
-        isYear || i % 5 == 0 || i == values.length - 1;
+        !monthly || i % 5 == 0 || i == values.length - 1;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -240,7 +241,7 @@ class PeriodTrend extends StatelessWidget {
                   showLabel(i) ? labels[i] : '',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: isYear ? 10 : 9,
+                    fontSize: monthly ? 10 : 9,
                     fontWeight: FontWeight.w500,
                     color: meta,
                   ),
@@ -268,7 +269,7 @@ class PeriodTrend extends StatelessWidget {
                 meta: meta),
             _TrendMetric(
                 value: bestLabel,
-                label: isYear ? '最佳月' : '最佳日',
+                label: monthly ? '最佳日' : '最佳月',
                 valueColor: onBg,
                 meta: meta),
           ],

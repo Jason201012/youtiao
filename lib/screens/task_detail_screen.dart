@@ -1,3 +1,7 @@
+import 'dart:io';
+
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
@@ -10,6 +14,10 @@ import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:todolist/models/attachment.dart';
+import 'package:todolist/services/attachment_service.dart';
+import 'package:todolist/services/data_io.dart';
 
 /// 识别备注中的 http(s) 链接并渲染为可点击文本（其余部分保持普通文本）。
 /// 正则匹配 http:// 或 https:// 起头的连续非空白字符。点击用 url_launcher 打开。
@@ -331,6 +339,30 @@ class TaskDetailScreen extends StatelessWidget {
             ),
           ],
 
+          // 附件（P0-1）：图片 / 录音 / 文件，全程本地不联网，不触发任何网络请求。
+          // 与编辑页一致：图片缩略图点击全屏预览、录音内联播放、其它文件经系统分享打开。
+          if (task.attachments.isNotEmpty) ...[
+            const SizedBox(height: AppColors.contentGap),
+            _Card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const _Label('附件'),
+                      const Spacer(),
+                      Text('${task.attachments.length}',
+                          style: TextStyle(fontSize: 13, color: ext.meta)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  for (final ref in task.attachments)
+                    _AttachmentTile(taskId: task.id, ref: ref),
+                ],
+              ),
+            ),
+          ],
+
           const SizedBox(height: 24),
 
           // 开始专注
@@ -564,4 +596,191 @@ String _focusLabel(int sec) {
   final h = m ~/ 60;
   final mm = m % 60;
   return mm == 0 ? '${h}小时' : '${h}小时$mm分';
+}
+
+/// 详情页附件条目（P0-1）：图片缩略图点击全屏预览（可缩放）、录音内联播放 / 停止、
+/// 其它文件经系统分享打开。音频播放用 just_audio 的 [AudioPlayer]，其生命周期随本组件释放
+/// （dispose 时 dispose，避免后台持续占用音频通道）。所有文件均位于 App 私有目录，不联网。
+class _AttachmentTile extends StatefulWidget {
+  final String taskId;
+  final AttachmentRef ref;
+  const _AttachmentTile({required this.taskId, required this.ref});
+
+  @override
+  State<_AttachmentTile> createState() => _AttachmentTileState();
+}
+
+class _AttachmentTileState extends State<_AttachmentTile> {
+  final AudioPlayer _player = AudioPlayer();
+  bool _playing = false;
+  bool _loading = false;
+  // 播放状态流订阅：仅在播放期间持有，dispose 时取消，避免悬挂监听。
+  StreamSubscription<PlayerState>? _sub;
+  // 附件实体文件在 App 私有目录（attachments/<taskId>/<fileName>），不存绝对路径。
+  late final Future<File> _fileFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _fileFuture = AttachmentService.fileFor(widget.taskId, widget.ref);
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  Future<void> _onTap() async {
+    final ref = widget.ref;
+    final file = await _fileFuture;
+    if (!await file.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('附件文件不存在')));
+      }
+      return;
+    }
+    if (ref.type == AttachmentType.image) {
+      // 图片全屏预览：Dialog + InteractiveViewer 支持双指缩放（本地文件，不联网）。
+      if (mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (_) => Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(12),
+            child: InteractiveViewer(child: Image.file(file, fit: BoxFit.contain)),
+          ),
+        );
+      }
+    } else if (ref.type == AttachmentType.audio) {
+      // 录音：首次点击播放，播放中点击停止；播放结束自动复位按钮态。
+      if (_playing) {
+        _sub?.cancel();
+        _sub = null;
+        await _player.stop();
+        if (mounted) setState(() => _playing = false);
+        return;
+      }
+      if (mounted) setState(() => _loading = true);
+      try {
+        // 取消上一次可能残留的订阅，避免「停止后再播」场景下的重复监听 / 泄漏。
+        _sub?.cancel();
+        _sub = null;
+        await _player.setFilePath(file.path);
+        await _player.play();
+        if (mounted) setState(() => _playing = true);
+        _sub = _player.playerStateStream.listen((s) {
+          if (s.processingState == ProcessingState.completed) {
+            if (mounted) setState(() => _playing = false);
+          }
+        });
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('播放失败：$e')));
+        }
+      } finally {
+        if (mounted) setState(() => _loading = false);
+      }
+    } else {
+      // 其它文件：经系统分享面板选择对应 App 打开（不联网）。
+      await DataIo.shareFile(
+          file, mimeType: ref.mimeType ?? 'application/octet-stream');
+    }
+  }
+
+  IconData _icon() {
+    switch (widget.ref.type) {
+      case AttachmentType.image:
+        return Symbols.image;
+      case AttachmentType.audio:
+        return _playing ? Symbols.stop : Symbols.graphic_eq;
+      case AttachmentType.file:
+        return Symbols.description;
+    }
+  }
+
+  /// 录音时长 mm:ss（仅音频有意义）。
+  String _durationLabel(int ms) {
+    final s = (ms / 1000).round();
+    final m = s ~/ 60;
+    final ss = s % 60;
+    return '$m:${ss.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ref = widget.ref;
+    final ext = appColors(context);
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: _loading ? null : _onTap,
+      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+      child: Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: ext.chip,
+          borderRadius: BorderRadius.circular(AppColors.chipRadius),
+        ),
+        child: Row(
+          children: [
+            if (ref.type == AttachmentType.image)
+              // 图片缩略图预览（本地文件，不联网）。
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: FutureBuilder<File>(
+                  future: _fileFuture,
+                  builder: (ctx, snap) {
+                    if (snap.hasData && snap.data!.existsSync()) {
+                      return Image.file(
+                        snap.data!,
+                        width: 40,
+                        height: 40,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) =>
+                            Icon(Symbols.image, size: 24, color: ext.meta),
+                      );
+                    }
+                    return Icon(Symbols.image, size: 24, color: ext.meta);
+                  },
+                ),
+              )
+            else
+              Icon(_icon(), size: 22, color: ext.meta),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(ref.fileName,
+                      style: TextStyle(fontSize: 14, color: scheme.onSurface),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 2),
+                  Text(
+                    <String>[
+                      ref.type.label,
+                      ref.sizeLabel,
+                      if (ref.type == AttachmentType.audio && ref.durationMs != null)
+                        _durationLabel(ref.durationMs!),
+                    ].join(' · '),
+                    style: TextStyle(fontSize: 12, color: ext.meta),
+                  ),
+                ],
+              ),
+            ),
+            if (ref.type == AttachmentType.audio && _loading)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }

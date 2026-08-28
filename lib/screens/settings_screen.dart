@@ -12,6 +12,7 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/settings_row.dart';
 import 'package:todolist/widgets/backup_sheet.dart';
 import 'package:todolist/widgets/export_sheet.dart';
+import 'package:todolist/widgets/task_template_sheet.dart';
 import 'package:todolist/screens/help_screen.dart';
 import 'package:todolist/screens/trash_screen.dart';
 import 'package:todolist/services/update_checker.dart';
@@ -42,7 +43,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '2.5.4');
+      if (mounted) setState(() => _version = '2.6.9');
     }
   }
 
@@ -380,7 +381,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Symbols.lock,
                         label: '应用锁（生物识别）',
                         subtitle: lock.biometricAvailable
-                            ? '打开后每次进入需验证指纹/面容，也可用手机锁屏密码'
+                            ? '仅遮挡界面，本地数据库仍为明文（非真加密）。每次进入需验证指纹/面容，防止身边人随手翻看'
                             : '当前设备不支持生物识别',
                         switchValue: lock.appLockEnabled,
                         onSwitchChanged: lock.biometricAvailable
@@ -427,6 +428,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           }
                         },
                       ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    SettingsRow(
+                      icon: Symbols.playlist_add,
+                      label: '任务模板库',
+                      subtitle: '一键套用内置清单（开学 / 旅行 / 考试等）',
+                      onTap: () => TaskTemplateSheet.show(context),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(

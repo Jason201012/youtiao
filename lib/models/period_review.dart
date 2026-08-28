@@ -5,18 +5,24 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 
-/// 回顾的周期粒度。周报见 [WeeklyReview]，这里承接更长的自然月 / 自然年。
-enum ReviewPeriod { month, year }
+/// 回顾的周期粒度。周报见 [WeeklyReview]，这里承接更长的自然月 / 自然年 / 学期。
+enum ReviewPeriod { month, year, semester }
 
 extension ReviewPeriodLabel on ReviewPeriod {
   /// 分段控件上的短名。
-  String get label => this == ReviewPeriod.month ? '月报' : '年报';
+  String get label => this == ReviewPeriod.month
+      ? '月报'
+      : (this == ReviewPeriod.year ? '年报' : '学期报');
 
-  /// 指标卡前缀，如「本月完成」。
-  String get unitLabel => this == ReviewPeriod.month ? '本月' : '本年';
+  /// 指标卡前缀，如「本月完成」/「本学期完成」。
+  String get unitLabel => this == ReviewPeriod.month
+      ? '本月'
+      : (this == ReviewPeriod.year ? '本年' : '本学期');
 
-  /// 环比文案里的上一周期，如「上月」。
-  String get prevLabel => this == ReviewPeriod.month ? '上月' : '去年';
+  /// 环比文案里的上一周期，如「上月」/「上学期」。
+  String get prevLabel => this == ReviewPeriod.month
+      ? '上月'
+      : (this == ReviewPeriod.year ? '去年' : '上学期');
 }
 
 /// 单个活动习惯在某周期内的达成情况。
@@ -122,10 +128,18 @@ class PeriodReview {
 
   // ===== 展示派生 =====
 
-  /// 标题，如「2026 年 8 月」/「2026 年」。
-  String get title => period == ReviewPeriod.month
-      ? '${start.year} 年 ${start.month} 月'
-      : '${start.year} 年';
+  /// 标题，如「2026 年 8 月」/「2026 年」/「2026 春季学期」/「2026 – 2027 秋季学期」。
+  String get title {
+    if (period == ReviewPeriod.month) {
+      return '${start.year} 年 ${start.month} 月';
+    }
+    if (period == ReviewPeriod.year) return '${start.year} 年';
+    // 学期：春季固定 2–7 月，秋季 9 月–次年 1 月（跨年显示起止年份）。
+    if (start.month == 2) return '${start.year} 春季学期';
+    return end.year == start.year
+        ? '${start.year} 秋季学期'
+        : '${start.year} – ${end.year} 秋季学期';
+  }
 
   /// 区间文案，如「8月1日 – 8月31日」。
   String get rangeLabel {
@@ -147,12 +161,15 @@ class PeriodReview {
   double get dailyAverage =>
       totalDays == 0 ? 0.0 : completedCount / totalDays;
 
-  /// 最高产的那个桶的文案，如「8月14日」/「3月」；无数据时为 null。
+  /// 最高产的那个桶的文案，如「8月14日」/「3月」/「5月」（学期按月份计）；无数据时为 null。
   String? get bestBucketLabel {
     if (bestBucketIndex < 0 || bestBucketCount <= 0) return null;
-    return period == ReviewPeriod.month
-        ? '${start.month}月${bestBucketIndex + 1}日'
-        : '${bestBucketIndex + 1}月';
+    if (period == ReviewPeriod.month) {
+      return '${start.month}月${bestBucketIndex + 1}日';
+    }
+    // 年 / 学期的桶都是「月」：按 start 所在月 + 下标换算成实际月份（跨年回绕）。
+    final m = ((start.month + bestBucketIndex - 1) % 12) + 1;
+    return '$m月';
   }
 
   /// 环比描述，如「较上月 +12」；持平返回「与上月持平」。
@@ -179,12 +196,22 @@ class PeriodReview {
     final end = range.$2;
 
     // —— 桶初始化 ——
-    final bucketCount = period == ReviewPeriod.month ? end.day : 12;
+    // 月报按「天」(end.day 个)、年报按「月」(12 个)、学期按「月」(跨年月数)。
+    final bucketCount = period == ReviewPeriod.month
+        ? end.day
+        : (period == ReviewPeriod.semester
+            ? (end.year - start.year) * 12 + (end.month - start.month) + 1
+            : 12);
     final buckets = List<int>.filled(bucketCount, 0);
-    final bucketLabels = List<String>.generate(
-      bucketCount,
-      (i) => period == ReviewPeriod.month ? '${i + 1}' : '${i + 1}月',
-    );
+    final bucketLabels = List<String>.generate(bucketCount, (i) {
+      if (period == ReviewPeriod.month) return '${i + 1}';
+      if (period == ReviewPeriod.semester) {
+        // 学期桶是月份：按区间首月 + 下标换算实际月份（跨年回绕，如 9→10→…→1）。
+        final m = ((start.month + i - 1) % 12) + 1;
+        return '$m月';
+      }
+      return '${i + 1}月';
+    });
 
     // —— 任务完成 ——
     int completedCount = 0;
@@ -199,7 +226,12 @@ class PeriodReview {
       completedCount++;
       categoryCount[t.category] = categoryCount[t.category]! + 1;
       doneDays.add(d);
-      final idx = period == ReviewPeriod.month ? d.day - 1 : d.month - 1;
+      // 月报按「日」、年报按「月」、学期按「跨年月偏移」定位桶。
+      final idx = period == ReviewPeriod.month
+          ? d.day - 1
+          : (period == ReviewPeriod.semester
+              ? (d.year - start.year) * 12 + (d.month - start.month)
+              : d.month - 1);
       if (idx >= 0 && idx < bucketCount) buckets[idx]++;
     }
 
@@ -323,18 +355,58 @@ class PeriodReview {
         DateTime(anchor.year, anchor.month + 1, 0),
       );
     }
-    return (DateTime(anchor.year, 1, 1), DateTime(anchor.year, 12, 31));
+    if (p == ReviewPeriod.year) {
+      return (DateTime(anchor.year, 1, 1), DateTime(anchor.year, 12, 31));
+    }
+    return _semesterRange(anchor); // 学期
   }
 
+  /// 学期区间（date-only）。
+  ///
+  /// 固定口径（与学校常见校历一致，离线、无需联网校历）：
+  /// - 春季学期：当年 2 月 1 日 – 7 月 31 日；
+  /// - 秋季学期：当年 9 月 1 日 – 次年 1 月 31 日；
+  /// - 锚点在 1 月时，归入「上一年秋季学期」的尾巴（9 月 – 次年 1 月）。
+  static (DateTime, DateTime) _semesterRange(DateTime a) {
+    if (a.month >= 2 && a.month <= 7) {
+      return (DateTime(a.year, 2, 1), DateTime(a.year, 7, 31));
+    }
+    if (a.month >= 9) {
+      return (DateTime(a.year, 9, 1), DateTime(a.year + 1, 1, 31));
+    }
+    // a.month == 1：上一年秋季学期的末段。
+    return (DateTime(a.year - 1, 9, 1), DateTime(a.year, 1, 31));
+  }
+
+  /// 公开的「当前学期首日」查询，供 UI 判定是否还能继续翻到下一学期。
+  static DateTime semesterStartOf(DateTime a) => _semesterRange(a).$1;
+
   /// 上一周期的锚点日期。
-  static DateTime _prevAnchor(ReviewPeriod p, DateTime anchor) =>
-      p == ReviewPeriod.month
-          ? DateTime(anchor.year, anchor.month - 1, 1)
-          : DateTime(anchor.year - 1, 1, 1);
+  static DateTime _prevAnchor(ReviewPeriod p, DateTime anchor) {
+    if (p == ReviewPeriod.month) return DateTime(anchor.year, anchor.month - 1, 1);
+    if (p == ReviewPeriod.year) return DateTime(anchor.year - 1, 1, 1);
+    // 学期：取当前学期，再回到相邻的上一学期。
+    final cur = _semesterRange(anchor);
+    return cur.$1.month == 2
+        ? DateTime(cur.$1.year - 1, 9, 1) // 春季 → 上年秋季
+        : DateTime(cur.$1.year, 2, 1); // 秋季 → 本年春季
+  }
 
   /// 相对 [anchor] 前后翻页的新锚点（[delta] 为 -1 / +1）。
-  static DateTime shiftAnchor(ReviewPeriod p, DateTime anchor, int delta) =>
-      p == ReviewPeriod.month
-          ? DateTime(anchor.year, anchor.month + delta, 1)
-          : DateTime(anchor.year + delta, 1, 1);
+  static DateTime shiftAnchor(ReviewPeriod p, DateTime anchor, int delta) {
+    if (p == ReviewPeriod.month) {
+      return DateTime(anchor.year, anchor.month + delta, 1);
+    }
+    if (p == ReviewPeriod.year) return DateTime(anchor.year + delta, 1, 1);
+    // 学期：相邻学期切换（春季↔秋季，跨年已内含在 _semesterRange 中）。
+    final cur = _semesterRange(anchor);
+    if (delta >= 0) {
+      return cur.$1.month == 2
+          ? DateTime(cur.$1.year, 9, 1) // 春季 → 同年秋季
+          : DateTime(cur.$1.year + 1, 2, 1); // 秋季 → 次年春季
+    }
+    return cur.$1.month == 2
+        ? DateTime(cur.$1.year - 1, 9, 1) // 春季 → 上年秋季
+        : DateTime(cur.$1.year, 2, 1); // 秋季 → 同年春季
+  }
 }

@@ -63,6 +63,20 @@ class _DownloadBodyState extends State<_DownloadBody> {
     if (mounted) Navigator.pop(context);
   }
 
+  /// S3 修复②：APK 下载地址域名白名单。仅允许官方托管域名，降低清单被投毒后
+  /// 指向任意 https 地址下发恶意 APK 的风险。如需放开到自有域，在此列表追加 host。
+  static bool _isAllowedApkHost(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    const allowed = {
+      'gitee.com',
+      'github.com',
+      'raw.githubusercontent.com',
+    };
+    final host = uri.host.toLowerCase();
+    return host.isNotEmpty && allowed.contains(host);
+  }
+
   Future<void> _start() async {
     final url = widget.info.apkUrl ?? widget.info.releaseUrl;
     if (url == null) {
@@ -72,6 +86,12 @@ class _DownloadBodyState extends State<_DownloadBody> {
     // 仅允许 https 直链，避免明文 http 被中间人劫持后下载恶意 APK。
     if (!url.startsWith('https://')) {
       setState(() => _error = '更新地址不安全（需 https）');
+      return;
+    }
+    // S3 修复②：下载地址域名白名单，仅允许官方托管域名，防止清单被投毒
+    // （Gitee 账号被盗 / 协作仓库被改）后指向任意 https 地址下发恶意 APK。
+    if (!_isAllowedApkHost(url)) {
+      setState(() => _error = '下载地址域名不在允许列表（仅限 gitee.com / github.com），已拒绝安装');
       return;
     }
     try {
@@ -118,9 +138,14 @@ class _DownloadBodyState extends State<_DownloadBody> {
       _client = null;
       _sink = null;
 
-      // APK 完整性校验：若 update.json 提供了 apkSha256，则比对下载文件，
-      // 不一致（篡改 / 下载不完整）直接拒绝安装，避免诱导安装恶意 APK。
+      // S3 修复①：完整性校验强制化。
+      // - 清单提供了 apkSha256：比对下载文件，不一致（篡改/下载不完整）直接拒绝安装；
+      // - 清单**未**提供 apkSha256：绝不谎称"校验通过"，改为明确要求用户
+      //   二次确认（风险自担）后才允许安装。
       final expected = widget.info.apkSha256?.trim();
+      final bool verified;
+      final String verifyTitle;
+      final String verifyBody;
       if (expected != null && expected.isNotEmpty) {
         final actual = (digest ?? sha256.convert(const <int>[])).toString();
         if (actual.toLowerCase() != expected.toLowerCase()) {
@@ -128,16 +153,25 @@ class _DownloadBodyState extends State<_DownloadBody> {
           setState(() => _error = 'APK 校验失败：文件可能被篡改或下载不完整');
           return;
         }
+        verified = true;
+        verifyTitle = '校验通过';
+        verifyBody = 'APK 已下载并通过 SHA-256 完整性校验，是否立即安装？';
+      } else {
+        // 清单缺省校验值：任何"校验通过"的措辞都属误导，必须如实告知并二次确认。
+        verified = false;
+        verifyTitle = '未校验完整性';
+        verifyBody =
+            '本次更新清单未提供 SHA-256 校验值，无法验证来源完整性。是否仍要安装（风险自担）？';
       }
 
       if (!mounted) return;
-      // S8 修复①：校验通过后再征求用户确认，避免静默唤起安装器。
+      // S8 修复①：校验（或明确告知未校验）后再征求用户确认，避免静默唤起安装器。
       final proceed = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
         builder: (ctx) => AlertDialog(
-          title: const Text('校验通过'),
-          content: const Text('APK 已下载并通过完整性校验，是否立即安装？'),
+          title: Text(verifyTitle),
+          content: Text(verifyBody),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -145,7 +179,7 @@ class _DownloadBodyState extends State<_DownloadBody> {
             ),
             FilledButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('立即安装'),
+              child: Text(verified ? '立即安装' : '仍要安装'),
             ),
           ],
         ),

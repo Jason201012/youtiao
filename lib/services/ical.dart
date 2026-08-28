@@ -125,6 +125,14 @@ String? _toRrule(Task t) {
       base = 'FREQ=WEEKLY;BYDAY=${days.isEmpty ? 'MO' : days}';
     case RepeatType.interval:
       base = 'FREQ=DAILY;INTERVAL=${t.repeatInterval < 1 ? 1 : t.repeatInterval}';
+    case RepeatType.monthly:
+      if (t.monthlyWeekday != null && t.monthlyWeekIndex != null) {
+        final wd = _dartWeekdayToIcs[t.monthlyWeekday!];
+        final pos = t.monthlyWeekIndex == 5 ? -1 : t.monthlyWeekIndex!;
+        base = wd != null ? 'FREQ=MONTHLY;BYDAY=$wd;BYSETPOS=$pos' : 'FREQ=MONTHLY';
+      } else {
+        base = 'FREQ=MONTHLY;BYMONTHDAY=${t.monthlyDay.clamp(1, 31)}';
+      }
     case RepeatType.none:
       return null;
   }
@@ -279,6 +287,10 @@ Task? _blockToTask(Map<String, String> b) {
   List<int> weekdays = const <int>[];
   int interval = 2;
   String? repeatUntil;
+  // 每月重复（.ics 往返用）：day-of-month 或 第 N 个周几。
+  int monthlyDayIcs = 1;
+  int? monthlyWeekdayIcs;
+  int? monthlyWeekIndexIcs;
   if (rrule != null) {
     final map = <String, String>{};
     for (final part in rrule.split(';')) {
@@ -319,8 +331,35 @@ Task? _blockToTask(Map<String, String> b) {
         repeat = RepeatType.weekly;
         weekdays = const [1];
       }
+    } else if (freq == 'MONTHLY') {
+      // 每月 N 号：BYMONTHDAY；每月第 N 个周几：BYDAY + BYSETPOS（-1=最后一个）。
+      final byMonthDay = map['BYMONTHDAY'];
+      if (byMonthDay != null) {
+        final d = int.tryParse(byMonthDay);
+        if (d != null && d >= 1 && d <= 31) {
+          repeat = RepeatType.monthly;
+          monthlyDayIcs = d;
+          monthlyWeekdayIcs = null;
+          monthlyWeekIndexIcs = null;
+        }
+      } else {
+        final byday = map['BYDAY'] ?? '';
+        final wd = _icsWeekdayToDart[byday.trim().toUpperCase()];
+        final setposRaw = map['BYSETPOS'];
+        if (wd != null && setposRaw != null) {
+          final p = int.tryParse(setposRaw);
+          final pos = (p == -1)
+              ? 5
+              : (p != null && p >= 1 && p <= 4 ? p : null);
+          if (pos != null) {
+            repeat = RepeatType.monthly;
+            monthlyWeekdayIcs = wd;
+            monthlyWeekIndexIcs = pos;
+          }
+        }
+      }
     } else {
-      // MONTHLY / YEARLY / 含 COUNT 等 → 降级为一次性。
+      // YEARLY / 含 COUNT 等 → 降级为一次性。
       repeat = RepeatType.none;
     }
     if (map.containsKey('UNTIL')) {
@@ -346,6 +385,9 @@ Task? _blockToTask(Map<String, String> b) {
     repeatWeekdays: weekdays,
     repeatInterval: interval,
     repeatUntil: repeatUntil,
+    monthlyDay: monthlyDayIcs,
+    monthlyWeekday: monthlyWeekdayIcs,
+    monthlyWeekIndex: monthlyWeekIndexIcs,
     pinyinInitials: Task.computePinyinInitials(title),
   );
 }

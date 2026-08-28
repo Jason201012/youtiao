@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/models/task.dart' hide Priority;
@@ -59,12 +60,12 @@ class NotificationService {
 
   /// 定时测试用固定 id（不与任务 id 冲突）。
   ///
-  /// 【通知 id 段分配表（固化，新增 id 必须避开以下区间）】
-  /// - 任务一次性截止提醒：_notifyIdOf(id)         ≈ [0, ~2.1e9]（纯数字任务 id）
-  /// - 任务重复提醒：      +500000 + dayIndex*13   ≈ [500000, ~2.1e9]
+  /// 【通知 id 段分配表（固化，新增 id 必须避开以下区间；S10 已改为互不重叠的大区段）】
+  /// - 任务一次性截止提醒：_notifyIdOf(id)            ≈ [0, ~2.1e9]（纯数字任务 id）
+  /// - 任务重复提醒：      _repeatNotifyIdOf(id, d)   ≈ [2.0e9, ~2.1e9]（独立大连段）
   /// - 专注完成通知：      777777（固定）
   /// - 专注进行中常驻：    777778（固定）
-  /// - 习惯提醒：          800000 + slot*10 + day  = [800000, ~1800007]
+  /// - 习惯提醒：          _habitNotifyIdOf(id, d)    ≈ [1.0e9, ~1.001e9]（独立大连段）
   /// - 定时测试系统闹钟：  _kTestTimerId = 999999（固定）
   /// - 定时测试应用内延迟：_kTestTimerId + 1 = 1000000（固定）
   /// - 即时测试通知：      1200000 + ms%100000     = [1200000, 1299999]（见 [showTest]）
@@ -116,18 +117,22 @@ class NotificationService {
   /// 否则编辑/删除时取消会错位。
   static int _notifyIdOf(String id) => int.tryParse(id) ?? id.hashCode;
 
-  /// 记录「已取消的一次性截止提醒」任务 id。任务提前完成后我们会 [cancel] 一次性
-  /// 截止提醒，但 [scheduleForTask] 内部还有一条「应用内兜底」延迟定时器（到期 ≤1 天
-  /// 时启用），它不依赖系统 AlarmManager，[cancel] 拦不住。用此集合在兜底定时器触发时
-  /// 二次校验，确保提前完成的任务不会再弹出提醒。重新调度时会清除对应标记。
-  final Set<String> _deadlineCancelled = {};
+  /// S4 修复：「幽灵提醒」根因是旧方案用会被重新调度清空的全局集合做取消标志，
+  /// 导致改期到远期的旧兜底定时器在错误时间仍弹出。改为**单调代号（generation）**：
+  /// 每次 [scheduleForTask] / [cancel] / [snoozeTaskReminder] 都让该任务的代号 +1，
+  /// 兜底定时器触发时校验「自己是否仍是当前最新一代」，不是则静默作废。
+  final Map<String, int> _deadlineGen = {};
 
-  /// 重复提醒使用独立 id 段（基础 id + 固定偏移 + 星期索引），与一次性「截止提醒」区分开，
+  /// 重复提醒使用独立 id 段，与一次性「截止提醒」（0..N）、习惯提醒（1e9+）都互不重叠，
   /// 避免同一任务的两种提醒互相 cancel 掉。dayIndex：daily / interval 用 0；
   /// weekly / weekday 用 1..7（对应周一..周日），每个星期一个独立 id。
-  /// 偏移量远小于 int32 上限，且本 App 任务 id 为较小的纯数字，不会越界。
-  static int _repeatNotifyIdOf(String id, int dayIndex) =>
-      _notifyIdOf(id) + 500000 + dayIndex * 13;
+  ///
+  /// S10 修复：原方案用 `id + 500000`，当任务自增 id 增长到 50 万后即与一次性提醒段
+  /// 重叠、互相顶掉。现统一落到 20 亿起的独立大连段，彻底消除远期碰撞。
+  static int _repeatNotifyIdOf(String id, int dayIndex) {
+    final base = int.tryParse(id) ?? id.hashCode;
+    return 2000000000 + (base % 100000000).abs() + (dayIndex % 8);
+  }
 
   /// 仅比较「年月日」，忽略时分秒（用于判断 completedAt 是否为今天）。
   static bool _sameDay(DateTime a, DateTime b) =>
@@ -157,9 +162,32 @@ class NotificationService {
     );
     // 显式创建两个渠道：避免首次调度时因渠道未注册被系统静默丢弃。
     await _createChannels();
+    // S10：通知 id 段方案变更后，首次启动清掉旧方案遗留的通知，
+    // 避免新旧 id 映射不一致导致的重复/陈旧通知。仅执行一次。
+    await _purgeLegacyNotificationsIfNeeded();
     // Android 13+ 需授权通知权限（首次会自动弹窗）
     await _android?.requestNotificationsPermission();
     _initialized = true;
+  }
+
+  /// 通知 id 段方案版本（S10）。升级到新段分配后用于一次性清理旧通知，
+  /// 避免旧 id 段遗留的提醒与新建提醒混淆。
+  static const int _kNotifIdScheme = 1;
+  static const String _kNotifIdSchemePref = 'notif_id_scheme';
+
+  /// 仅首次（或跨版本）执行一次：清掉旧 id 段方案遗留的全部通知，随后正常重排
+  /// 会按新段重建。失败不影响主流程。
+  Future<void> _purgeLegacyNotificationsIfNeeded() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cur = prefs.getInt(_kNotifIdSchemePref) ?? 0;
+      if (cur < _kNotifIdScheme) {
+        await _plugin.cancelAll();
+        await prefs.setInt(_kNotifIdSchemePref, _kNotifIdScheme);
+      }
+    } catch (e) {
+      debugPrint('[通知] 旧通知清理跳过：$e');
+    }
   }
 
   /// 显式创建有声 / 静音两个通知渠道。
@@ -336,12 +364,16 @@ class NotificationService {
     }
     if (task.done) {
       // 已完成（含提前完成）的任务不再挂一次性「截止时间提醒」，避免完成后仍弹。
-      _deadlineCancelled.add(task.id);
+      // 作废在途兜底定时器（若有），使其触发时判定为过期一代而静默退出。
+      _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
       debugPrint('[通知] 未调度 id=${task.id}：任务已完成（不挂截止提醒）');
       return false;
     }
-    // 重新调度：清除该任务的「已取消」标记（若曾因完成被取消），使后续取消能再次生效。
-    _deadlineCancelled.remove(task.id);
+    // S4 修复：进入调度即让该任务代号 +1（作废任何在途兜底定时器）。
+    // 旧方案在此 remove 掉「取消标记」正是"幽灵提醒"根因：改期到远期会把标记清空，
+    // 使旧兜底定时器误以为自己仍有效。现仅靠代号判断，不再清除任何标记。
+    final id = task.id;
+    final g = (_deadlineGen[id] = (_deadlineGen[id] ?? 0) + 1);
     try {
       final loc = _loc ?? tz.UTC;
       final due = task.dueDate!;
@@ -397,11 +429,11 @@ class NotificationService {
       // 仅对较短延时（≤1 天）启用，长期任务依赖上面的 setAlarmClock 即可。
       final delay = when.difference(tz.TZDateTime.now(loc));
       if (!delay.isNegative && delay <= const Duration(days: 1)) {
-        final id = task.id;
         Future.delayed(delay, () {
-          // 任务在到期前已完成/被取消则不再弹：应用内兜底定时器不受系统 AlarmManager
-          // cancel 影响，必须用 _deadlineCancelled 二次校验拦截。
-          if (_deadlineCancelled.contains(id)) return;
+          // S4 修复：用单调代号判断自己是否仍是当前最新一代调度；
+          // 任务改期/取消会让代号 +1，陈旧一代的定时器此处判定过期而静默退出，
+          // 彻底消除"幽灵提醒"（旧方案用 _deadlineCancelled，改期时会被清空而失效）。
+          if (_deadlineGen[id] != g) return;
           _plugin.show(_notifyIdOf(id), '任务提醒', task.title.isNotEmpty ? task.title : '无标题任务', detail, payload: payload);
         });
       }
@@ -415,9 +447,11 @@ class NotificationService {
   }
 
   /// 按任务 id 取消单条已调度的「截止提醒」通知。
-  /// 同时记入 [_deadlineCancelled]，让应用内兜底定时器也能正确拦截（提前完成场景）。
+  /// 同时作废在途的「应用内兜底定时器」（代号 +1，使其触发时判定为过期一代），
+  /// 让提前完成/改期的任务不再弹出陈旧提醒（S4）。
   Future<void> cancel(String id) {
-    _deadlineCancelled.add(id);
+    // S4 修复：作废该任务在途的兜底定时器（代号 +1 使其判定为过期一代）。
+    _deadlineGen[id] = (_deadlineGen[id] ?? 0) + 1;
     return _plugin.cancel(_notifyIdOf(id));
   }
 
@@ -547,6 +581,29 @@ class NotificationService {
               '(skipToday=$skipToday)');
           return true;
 
+        case RepeatType.monthly:
+          final when = _nextMonthlyOccurrence(task, skipToday: skipToday);
+          if (when == null) {
+            debugPrint('[通知] 未调度 monthly 提醒 id=${task.id}：缺提醒时间');
+            return false;
+          }
+          await _plugin.zonedSchedule(
+            _repeatNotifyIdOf(task.id, 0),
+            task.repeatSummary,
+            task.title.isNotEmpty ? task.title : '无标题任务',
+            when,
+            detail,
+            payload: '$payloadTaskPrefix${task.id}',
+            androidScheduleMode: mode,
+            uiLocalNotificationDateInterpretation:
+                UILocalNotificationDateInterpretation.absoluteTime,
+            matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
+          );
+          debugPrint('[通知] 已调度重复提醒(monthly) id=${task.id} '
+              '${task.repeatSummary} @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
+              '(skipToday=$skipToday)');
+          return true;
+
         case RepeatType.none:
           return false;
       }
@@ -555,6 +612,55 @@ class NotificationService {
       debugPrint('$s');
       return false;
     }
+  }
+
+  /// 计算 monthly 任务下一次 occurrence 的「日期+时刻」。
+  /// 优先本月目标日；若已过（或 skipToday 且恰为今天）则顺延到下一月。
+  /// 「每月 N 号」模式用 [Task.monthlyDay]（溢出夹到当月最后一天）；
+  /// 「第 N 个周几 / 最后一个周几」模式用 [Task.monthlyWeekday]+[Task.monthlyWeekIndex]。
+  tz.TZDateTime? _nextMonthlyOccurrence(Task task, {bool skipToday = false}) {
+    if (task.repeatMinute == null) return null;
+    final loc = _loc ?? tz.UTC;
+    final m = task.repeatMinute!;
+    final hh = m ~/ 60;
+    final mm = m % 60;
+    final now = tz.TZDateTime.now(loc);
+
+    int targetDay(int y, int mo) {
+      if (task.monthlyWeekday != null && task.monthlyWeekIndex != null) {
+        var d = 1;
+        while (DateTime(y, mo, d).weekday != task.monthlyWeekday) {
+          d++;
+          if (d > 31) return 1; // 安全兜底，理论不可达
+        }
+        d += (task.monthlyWeekIndex! - 1) * 7;
+        final dim = DateTime(y, mo + 1, 0).day;
+        if (d > dim) d -= 7; // 「最后一个」时第 5 个不存在则回退到第 4 个
+        return d;
+      }
+      final dim = DateTime(y, mo + 1, 0).day;
+      return task.monthlyDay.clamp(1, dim);
+    }
+
+    var y = now.year;
+    var mo = now.month;
+    for (var step = 0; step < 3; step++) {
+      final d = targetDay(y, mo);
+      final candidate = tz.TZDateTime(loc, y, mo, d, hh, mm);
+      final isToday = _sameDay(
+        DateTime(candidate.year, candidate.month, candidate.day),
+        DateTime(now.year, now.month, now.day),
+      );
+      if (candidate.isAfter(now) && !(skipToday && isToday)) return candidate;
+      mo += 1;
+      if (mo > 12) {
+        mo = 1;
+        y += 1;
+      }
+    }
+    // 极端兜底（正常 3 步内必命中）：返回两个月后的目标日。
+    final d = targetDay(y, mo);
+    return tz.TZDateTime(loc, y, mo, d, hh, mm);
   }
 
   /// 计算 interval 任务下一次 occurrence 的「日期+时刻」（date-only 锚点 + N 天步进）。
@@ -590,6 +696,12 @@ class NotificationService {
       candidate = tz.TZDateTime(loc, next.year, next.month, next.day, m ~/ 60, m % 60);
       guard++;
     }
+    // S11 修复：60 次仍未找到合法的循环日（跳过日密集 / 临近结束日期），
+    // 不再返回一个不满足条件的候选日期去照常调度，而是本次不提醒（返回 null）。
+    if (!task.repeatsOn(
+        DateTime(candidate.year, candidate.month, candidate.day))) {
+      return null;
+    }
     return candidate;
   }
 
@@ -606,12 +718,17 @@ class NotificationService {
   /// 这里把 id 折叠到 10 万个槽位（习惯数量为个位数，碰撞可忽略）。
   static int _habitSlotOf(String id) => (id.hashCode & 0x7fffffff) % 100000;
 
-  /// 习惯提醒使用独立的 id 段（80 万起 + 槽位*10 + 星期索引），与任务的
+  /// 习惯提醒使用独立的 id 段（10 亿起 + 槽位*10 + 星期索引），与任务的
   /// 「截止提醒 / 重复提醒」区分开，避免互相 cancel 掉。dayIndex：每天提醒用 0；
-  /// 按星期提醒用 1..7。最大值 800000+99999*10+7 ≈ 180 万，远小于 int32 上限。
+  /// 按星期提醒用 1..7。最大值 1e9 + 99999*10 + 7 ≈ 1.001e9，远小于 int32 上限。
+  ///
+  /// S10 修复：原方案落在 80 万段，虽与一次性段（0..N）实测不冲突，但与新迁到
+  /// 20 亿段的重复提醒保持清晰的大段隔离，杜绝任何远期碰撞。
   /// schedule / cancel 必须走同一函数，否则删除习惯时取消会错位。
-  static int _habitNotifyIdOf(String id, int dayIndex) =>
-      800000 + _habitSlotOf(id) * 10 + dayIndex;
+  static int _habitNotifyIdOf(String id, int dayIndex) {
+    final s = _habitSlotOf(id);
+    return 1000000000 + s * 10 + (dayIndex % 8);
+  }
 
   /// 为习惯调度每日打卡提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
   /// [checkedToday] 为 true（今天已打卡）且提醒时刻尚未到来时，跳过今日这一次，
@@ -728,8 +845,8 @@ class NotificationService {
     }
     final loc = _loc ?? tz.UTC;
     final when = tz.TZDateTime.now(loc).add(delay);
-    // 清除「已取消」标记，保证 snooze 后的提醒能正常弹出。
-    _deadlineCancelled.remove(task.id);
+    // S4 修复：作废在途兜底定时器（若有），使本次 snooze 的提醒能正常弹出。
+    _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
     final chId = playSound ? _chSound : _chSilent;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -804,7 +921,7 @@ class NotificationService {
 
   /// 清空所有已调度的通知（关闭总开关时调用）。
   Future<void> cancelAll() {
-    _deadlineCancelled.clear();
+    _deadlineGen.clear();
     return _plugin.cancelAll();
   }
 

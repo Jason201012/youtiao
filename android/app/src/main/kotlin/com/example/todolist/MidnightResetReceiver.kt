@@ -338,7 +338,7 @@ class MidnightResetReceiver : BroadcastReceiver() {
     }
 
     /** 重复规则枚举，与 Dart RepeatType 对应。 */
-    private enum class RepeatMode { NONE, DAILY, WEEKLY, INTERVAL, WEEKDAY }
+    private enum class RepeatMode { NONE, DAILY, WEEKLY, INTERVAL, WEEKDAY, MONTHLY }
 
     /** 从 task JSON 解析重复规则：兼容旧版 dailyReminder 布尔字段。 */
     private fun parseRepeat(obj: JSONObject): RepeatMode {
@@ -349,6 +349,7 @@ class MidnightResetReceiver : BroadcastReceiver() {
                 "weekly" -> RepeatMode.WEEKLY
                 "interval" -> RepeatMode.INTERVAL
                 "weekday" -> RepeatMode.WEEKDAY
+                "monthly" -> RepeatMode.MONTHLY
                 else -> RepeatMode.NONE
             }
         }
@@ -390,6 +391,14 @@ class MidnightResetReceiver : BroadcastReceiver() {
                 val n = obj.optInt("repeatInterval", 2).coerceAtLeast(1)
                 return diff % n == 0L
             }
+            RepeatMode.MONTHLY -> {
+                val parts = today.split("-")
+                val y = parts[0].toInt()
+                val m = parts[1].toInt()
+                val target = monthlyTargetDay(obj, y, m)
+                val targetStr = String.format("%04d-%02d-%02d", y, m, target)
+                return targetStr == today
+            }
         }
     }
 
@@ -418,5 +427,33 @@ class MidnightResetReceiver : BroadcastReceiver() {
             set(Calendar.MILLISECOND, 0)
         }
         return ((cb.timeInMillis - ca.timeInMillis) / (24 * 60 * 60 * 1000L))
+    }
+
+    /** 每月重复在 [y]年[m]月的目标「日」(1-28/29/30/31)；与 Dart Task._baseRepeatsOn 一致。
+     *  - monthlyWeekday+monthlyWeekIndex 命中：第 N 个周几（idx=5 为最后一个）；
+     *  - 否则用 monthlyDay（溢出夹到当月最后一天）。 */
+    private fun monthlyTargetDay(obj: JSONObject, y: Int, m: Int): Int {
+        val wd = obj.optInt("monthlyWeekday", -1)
+        val idx = obj.optInt("monthlyWeekIndex", -1)
+        if (wd in 1..7 && idx in 1..5) {
+            var day = 1
+            while (weekdayOf(String.format("%04d-%02d-%02d", y, m, day)) != wd) {
+                day++
+                if (day > 31) return 1 // 安全兜底，理论不可达
+            }
+            day += (idx - 1) * 7
+            val dim = daysInMonth(y, m)
+            if (day > dim) day -= 7 // 「最后一个」时第 5 个不存在则回退到第 4 个
+            return day
+        }
+        val md = obj.optInt("monthlyDay", 1).coerceIn(1, daysInMonth(y, m))
+        return md
+    }
+
+    /** [y]年[m]月的总天数（用于每月重复溢出夹取）。 */
+    private fun daysInMonth(y: Int, m: Int): Int {
+        val cal = Calendar.getInstance()
+        cal.set(y, m - 1, 1)
+        return cal.getActualMaximum(Calendar.DAY_OF_MONTH)
     }
 }

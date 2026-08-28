@@ -9,9 +9,9 @@ const MethodChannel _channel = MethodChannel('com.example.todolist/widget_refres
 
 /// 请求原生侧刷新桌面小组件。fire-and-forget，不阻塞持久化流程。
 void requestWidgetRefresh() {
-  try {
-    _channel.invokeMethod<void>('refresh');
-  } catch (_) {
-    // 平台不支持 / 通道未注册时忽略，不影响主流程。
-  }
+  // S1 修复：MethodChannel.invokeMethod 返回的是 Future，在 flutter test、
+  // iOS、Windows 等「通道未注册」平台上会**异步**以 MissingPluginException 失败。
+  // 同步 try-catch 只能抓同步抛出，抓不到这个 rejected Future，会变成未处理
+  // 异步错误导致测试失败（曾致 69 个用例失败）。必须用 .catchError 兜住异步错误。
+  _channel.invokeMethod<void>('refresh').catchError((_) {});
 }

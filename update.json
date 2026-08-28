@@ -1,6 +1,6 @@
 {
-  "version": "2.6.8",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.8/app-release-2.6.8-arm64.apk",
-  "apkSha256": "4F4B3BDC5F4009CC430BA88D26D6083995DBE7EC5BA736B9E1718D7F3BD0253C",
-  "releaseNotes": "v2.6.8：6 大功能 + R8 资源瘦身\n① 分享文本 → 快速建任务（系统分享面板直达「有条」，自动解析标题/清单）\n② 重复任务补全：支持「仅跳过本次 / 单次改期 / 设结束日期」三种语义，日历视图同步\n③ 备份口令加密导出：AES-256-GCM + PBKDF2（HMAC-SHA256, 15 万轮）本地加密，无口令无法还原\n④ 桌面小组件（4×2 今日清单）：跨进程读 SQLite（WAL + busy_timeout），点击直达任务\n⑤ iCal（.ics）标准导入导出：遵循 RFC 5545，支持 VTODO / RRULE 与多日历互导\n⑥ R8 资源收缩（isShrinkResources）：剔除未使用资源，包体更小、零混淆回归风险\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.6.9",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.9/app-release-2.6.9-arm64.apk",
+  "apkSha256": "506D89A520D07DDA7D8377541752A65CC899A5786A404DEF292B16FA520F015F",
+  "releaseNotes": "v2.6.9：任务附件（全程本地，严格离线）\n① 任务附件：图片 / 拍照 / 录音 / 任意文件，全部落盘 App 私有目录，不联网、不上传\n② 详情页附件：图片全屏缩放预览、录音内联播放/停止、其它文件经系统分享打开\n③ 附件随本地加密备份（AES-256-GCM）打包还原，自动备份 + 手动备份均纳入\n④ 修复：录音原始文件孤儿、播放订阅泄漏、编辑模式取消保存孤儿清理\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }

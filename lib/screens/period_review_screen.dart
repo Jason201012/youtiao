@@ -33,7 +33,9 @@ class _PeriodReviewScreenState extends State<PeriodReviewScreen> {
     final now = DateTime.now();
     final currentStart = _period == ReviewPeriod.month
         ? DateTime(now.year, now.month, 1)
-        : DateTime(now.year, 1, 1);
+        : (_period == ReviewPeriod.year
+            ? DateTime(now.year, 1, 1)
+            : PeriodReview.semesterStartOf(now));
     return _anchor.isBefore(currentStart);
   }
 
@@ -104,6 +106,8 @@ class _PeriodReviewScreenState extends State<PeriodReviewScreen> {
                           value: ReviewPeriod.month, label: Text('月报')),
                       ButtonSegment(
                           value: ReviewPeriod.year, label: Text('年报')),
+                      ButtonSegment(
+                          value: ReviewPeriod.semester, label: Text('学期报')),
                     ],
                     selected: {_period},
                     showSelectedIcon: false,

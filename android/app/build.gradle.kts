@@ -32,11 +32,15 @@ android {
     }
 
     // 固定 release 签名：凭据从环境变量读取，绝不硬编码进仓库文件。
-    // 使用方式（构建前 export）：
-    //   YOUTIAO_KEYSTORE=E:/WorkBuddy/6/youtiao-release-keys/youtiao-release.jks
-    //   YOUTIAO_KEY_ALIAS=youtiao
-    //   YOUTIAO_KEYSTORE_PASSWORD=youtiao-release-2026
-    //   YOUTIAO_KEY_PASSWORD=youtiao-release-2026
+    // 使用方式（构建前 export；真实口令请通过 CI Secret / 本地不入库的 .env 注入，
+    // 切勿将真实值写进任何会被 git 跟踪的文件）：
+    //   YOUTIAO_KEYSTORE=<path-to-keystore>
+    //   YOUTIAO_KEY_ALIAS=<key-alias>
+    //   YOUTIAO_KEYSTORE_PASSWORD=<set-me>
+    //   YOUTIAO_KEY_PASSWORD=<set-me>
+    // 安全提示：历史上此处注释曾误写入真实口令并随 git 提交，已整改为占位符。
+    // 若怀疑口令已泄露，请用 keytool 轮换（keytool -storepasswd / -keypasswd），
+    // 必要时重新生成签名（换签名后老用户无法覆盖安装，需在 App 内做一次迁移说明）。
     // keystore 存放于项目外（E:/WorkBuddy/6/youtiao-release-keys/），不会被 git 跟踪，
     // 且不再依赖 AGP 自动生成的 debug keystore，避免跨机/重建导致的签名漂移（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
     val keystorePath = System.getenv("YOUTIAO_KEYSTORE")

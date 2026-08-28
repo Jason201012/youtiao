@@ -67,6 +67,20 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     Navigator.pop(context);
   }
 
+  /// 点击识别 chip 上的「×」：从输入文本中移除该片段区间并重新解析。
+  void _removeSegment(ParseSegment s) {
+    final t = _controller.text;
+    if (s.start < 0 || s.end > t.length) return;
+    final newText =
+        (t.substring(0, s.start) + t.substring(s.end)).replaceAll(RegExp(r'\s+'), ' ').trim();
+    _parsed = TaskParser.parse(newText);
+    _controller.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newText.length),
+    );
+    setState(() {});
+  }
+
   /// 把当前解析结果作为草稿回传给调用方，由它续开完整编辑弹层
   void _openFullEditor() {
     Navigator.pop(context, _parsed.isValid ? _parsed.toTask() : Task(
@@ -158,13 +172,13 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
                   curve: Curves.easeOut,
                   alignment: Alignment.topCenter,
                   child: _parsed.hasStructuredInfo
-                      ? _PreviewSection(parsed: _parsed)
+                      ? _PreviewSection(parsed: _parsed, onRemoveSegment: _removeSegment)
                       : const SizedBox(width: double.infinity),
                 ),
                 const SizedBox(height: 12),
                 // 语法提示
                 Text(
-                  '支持：日期时间 · !优先级 · #标签 · 每天/每周X 等重复',
+                  '支持：每月/农历 · 提前量 · 日期时间 · !优先级 · #标签 · 每天/每周X',
                   style: TextStyle(fontSize: 12, color: ext.meta),
                 ),
                 const SizedBox(height: 16),
@@ -202,7 +216,8 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
 /// 「已识别」区：chip 行 + 提取出的纯标题
 class _PreviewSection extends StatelessWidget {
   final ParsedTask parsed;
-  const _PreviewSection({required this.parsed});
+  final void Function(ParseSegment) onRemoveSegment;
+  const _PreviewSection({required this.parsed, required this.onRemoveSegment});
 
   @override
   Widget build(BuildContext context) {
@@ -223,7 +238,8 @@ class _PreviewSection extends StatelessWidget {
           spacing: 8,
           runSpacing: 8,
           children: [
-            for (final s in parsed.segments) _SegmentChip(segment: s),
+            for (final s in parsed.segments)
+              _SegmentChip(segment: s, onRemove: () => onRemoveSegment(s)),
           ],
         ),
         const SizedBox(height: 10),
@@ -262,7 +278,8 @@ class _PreviewSection extends StatelessWidget {
 /// 单个识别片段 chip：按语义类型上色配图标
 class _SegmentChip extends StatelessWidget {
   final ParseSegment segment;
-  const _SegmentChip({required this.segment});
+  final VoidCallback? onRemove;
+  const _SegmentChip({required this.segment, this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -299,10 +316,14 @@ class _SegmentChip extends StatelessWidget {
         bg = scheme.tertiaryContainer;
         fg = scheme.onTertiaryContainer;
         icon = Symbols.repeat;
+      case TokenKind.reminder:
+        bg = scheme.errorContainer;
+        fg = scheme.onErrorContainer;
+        icon = Symbols.alarm;
     }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+    final chip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(AppColors.chipRadius),
@@ -316,8 +337,18 @@ class _SegmentChip extends StatelessWidget {
             segment.label,
             style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: fg),
           ),
+          if (onRemove != null) ...[
+            const SizedBox(width: 2),
+            Icon(Icons.close, size: 14, color: fg.withOpacity(0.8)),
+          ],
         ],
       ),
+    );
+    if (onRemove == null) return chip;
+    return InkWell(
+      onTap: onRemove,
+      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+      child: chip,
     );
   }
 

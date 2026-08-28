@@ -16,6 +16,15 @@
     <!-- 专注结束自动写入系统日历所需权限（add_2_calendar 在运行时请求） -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- 附件（P0-1）：拍照所需相机权限 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 附件（P0-1）：录音所需麦克风权限 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 附件（P0-1）：Android 13+ 读取相册图片 / 视频所需权限 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- 附件（P0-1）：Android 12 及以下读取外部存储（相册 / 文件）所需权限 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <!-- A4 应用锁（local_auth）：使用生物识别（指纹/面容）解锁所需权限 -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />

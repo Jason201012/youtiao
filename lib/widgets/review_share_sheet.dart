@@ -9,6 +9,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/review.dart';
 import 'package:todolist/models/period_review.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/report_exporter.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/review_card.dart';
@@ -290,6 +291,38 @@ class _PeriodReviewShareSheetState extends State<_PeriodReviewShareSheet> {
   bool _dark = false;
   bool _busy = false;
 
+  /// 把当前回顾长图（与预览同一张卡片）包成 PDF 导出：捕获 PNG → 生成 PDF →
+  /// 落盘 App 文档目录 → 系统分享。复用 Flutter 引擎渲染，中文正常显示。
+  Future<void> _exportPdf() async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      final png = await _capture();
+      final pdfBytes = await ReportExporter.buildPeriodReportPdf(
+        png,
+        title: '有条${widget.review.period.label}',
+      );
+      final name = _fileName.replaceAll('.png', '.pdf');
+      final file = await DataIo.saveBytesToAppDocs(name, pdfBytes);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('已生成 PDF · $name'),
+          action: SnackBarAction(
+            label: '分享',
+            onPressed: () =>
+                DataIo.shareFile(file, mimeType: 'application/pdf'),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      messenger.showSnackBar(SnackBar(content: Text('导出 PDF 失败：$e')));
+    }
+  }
+
   /// 把预览中的卡片渲染成 PNG 字节（pixelRatio 3 → 约 1080px 宽）。
   Future<Uint8List> _capture() async {
     await WidgetsBinding.instance.endOfFrame;
@@ -303,7 +336,7 @@ class _PeriodReviewShareSheetState extends State<_PeriodReviewShareSheet> {
 
   String get _fileName {
     final start = widget.review.start;
-    final label = widget.review.period == ReviewPeriod.month ? '月报' : '年报';
+    final label = widget.review.period.label;
     final stamp = widget.review.period == ReviewPeriod.month
         ? DateFormat('yyyyMM').format(start)
         : DateFormat('yyyy').format(start);
@@ -467,34 +500,53 @@ class _PeriodReviewShareSheetState extends State<_PeriodReviewShareSheet> {
   Widget _actions() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-      child: Row(
+      child: Column(
         children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: _busy ? null : _saveToGallery,
-              icon: const Icon(Symbols.download, size: 20),
-              label: const Text('保存到相册'),
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(46),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(23),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _busy ? null : _saveToGallery,
+                  icon: const Icon(Symbols.download, size: 20),
+                  label: const Text('保存到相册'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(46),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(23),
+                    ),
+                  ),
                 ),
               ),
-            ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : _share,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Symbols.ios_share, size: 20),
+                  label: Text(_busy ? '生成中' : '分享'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(46),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(23),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: FilledButton.icon(
-              onPressed: _busy ? null : _share,
-              icon: _busy
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Symbols.ios_share, size: 20),
-              label: Text(_busy ? '生成中' : '分享'),
-              style: FilledButton.styleFrom(
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _busy ? null : _exportPdf,
+              icon: const Icon(Symbols.picture_as_pdf, size: 20),
+              label: const Text('导出 PDF'),
+              style: OutlinedButton.styleFrom(
                 minimumSize: const Size.fromHeight(46),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(23),

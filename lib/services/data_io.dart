@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -29,10 +30,62 @@ class DataIo {
     await file.parent.create(recursive: true);
     final tmp = File('${file.path}.tmp');
     await tmp.writeAsString(content);
-    if (await file.exists()) {
-      await file.delete();
+    // S9 修复：原子落盘按平台区分，降低「删完旧文件、改名前崩溃/断电」导致
+    // 旧备份已失、新备份未成、整文件 JSON 损坏的概率。
+    if (Platform.isWindows) {
+      // Windows 的 rename 不能覆盖已存在目标，且须防「先删后改名」窗口丢备份。
+      // 策略：把旧文件改名 .bak，再 rename 新临时文件到位；任一环节失败则回滚。
+      if (await file.exists()) {
+        final bak = File('${file.path}.bak');
+        if (await bak.exists()) await bak.delete();
+        await file.rename(bak.path); // 旧 → .bak
+        try {
+          await tmp.rename(file.path); // 新 → 目标（原子覆盖）
+        } catch (e) {
+          await bak.rename(file.path); // 回滚：恢复旧文件
+          rethrow;
+        }
+        await bak.delete(); // 成功：清掉 .bak
+      } else {
+        await tmp.rename(file.path);
+      }
+    } else {
+      // POSIX（Android / Linux / macOS）：rename 覆盖目标为原子操作，
+      // 直接 rename 即可，无需先删旧文件，崩溃窗口内旧文件始终可用。
+      await tmp.rename(file.path);
     }
-    await tmp.rename(file.path);
+    return file;
+  }
+
+  /// 把二进制内容（如 .xlsx / .pdf）写入 App 私有文档目录，返回生成的文件。
+  ///
+  /// 与 [saveToAppDocs] 同款原子写策略（先写 .tmp 再 rename），区别在入参为字节。
+  /// 二进制导出走这里落地，再经 [shareFile] 交给用户选定的目标（系统分享面板
+  /// 可存到下载 / 微信 / 邮件等），不依赖额外的原生通道。
+  static Future<File> saveBytesToAppDocs(String fileName, Uint8List bytes) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/$fileName');
+    await file.parent.create(recursive: true);
+    final tmp = File('${file.path}.tmp');
+    await tmp.writeAsBytes(bytes, flush: true);
+    if (Platform.isWindows) {
+      if (await file.exists()) {
+        final bak = File('${file.path}.bak');
+        if (await bak.exists()) await bak.delete();
+        await file.rename(bak.path);
+        try {
+          await tmp.rename(file.path);
+        } catch (e) {
+          await bak.rename(file.path);
+          rethrow;
+        }
+        await bak.delete();
+      } else {
+        await tmp.rename(file.path);
+      }
+    } else {
+      await tmp.rename(file.path);
+    }
     return file;
   }
 

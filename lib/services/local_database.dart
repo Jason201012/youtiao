@@ -181,8 +181,45 @@ class LocalDatabase {
         .toList();
   }
 
-  /// 整表替换：清空 tasks / trash 后重新写入。数据量小（数百条内），整表重写
-  /// 与旧版「整存整取」语义一致，但改为按行持久化，天然支持增量且不锁整个 JSON。
+  /// 增量 upsert 通用实现（S5 修复核心）。在单个事务内对单表做「差量合并」：
+  ///   - 仅对「数据发生变化的行」落盘（insert/replace），未变行跳过，降低写放大；
+  ///   - 删除「库中存在但本次列表未包含」的 id（被删项 / 已清出回收站的项）；
+  ///   - 全部操作包进一个事务，保证原子性（要么全成，要么全不成），且不会在
+  ///     写入中途清空整表，崩溃时旧数据仍可被抢救。
+  /// [incomingIds] 与 [incomingData] 为「id → JSON 字符串」的对应；JSON 取自各
+  /// 模型的 `toJson()`，Dart 的 Map 字面量迭代顺序稳定，`jsonEncode` 输出可比较。
+  static Future<void> _incrementalUpsert(
+    DatabaseExecutor txn,
+    String table,
+    List<String> incomingIds,
+    Map<String, String> incomingData,
+  ) async {
+    final existing = await txn.query(table, columns: ['id', 'data']);
+    final existingData = <String, String>{};
+    final existingIds = <String>{};
+    for (final r in existing) {
+      final id = r['id'] as String;
+      existingIds.add(id);
+      existingData[id] = r['data'] as String;
+    }
+    for (final id in incomingIds) {
+      final json = incomingData[id]!;
+      if (existingData[id] == json) continue; // 未变化，跳过写（减少写放大）
+      await txn.insert(
+        table,
+        {'id': id, 'data': json},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    final toDelete = existingIds.difference(incomingIds.toSet());
+    for (final id in toDelete) {
+      await txn.delete(table, where: 'id = ?', whereArgs: [id]);
+    }
+  }
+
+  /// 增量持久化（S5 修复）：不再「整表 DELETE 后全量重插」，改为按主键差量合并。
+  /// 调用方仍传入完整列表（Provider 持有全量），本方法内部按 id 做 upsert / 删除，
+  /// 对外接口不变，无需改动任何上层调用点。
   Future<void> replaceTasks(List<Task> tasks, List<Task> trash) async {
     // 快照：调用方传入的是 Provider 持有的可变列表引用，事务内多个 await 之间
     // 用户操作（addTask 的 insert / _removeMany 的 removeAt）可能修改原列表，
@@ -190,8 +227,11 @@ class LocalDatabase {
     final tasksCopy = List<Task>.from(tasks);
     final trashCopy = List<Task>.from(trash);
     if (testUseMemory) {
-      _memTasks.clear();
-      _memTrash.clear();
+      // 内存后端已是按 id 的 Map：先删「本次未传入」的键，再写入传入项。
+      final taskIds = <String>{for (final t in tasksCopy) t.id};
+      final trashIds = <String>{for (final t in trashCopy) t.id};
+      _memTasks.removeWhere((k, _) => !taskIds.contains(k));
+      _memTrash.removeWhere((k, _) => !trashIds.contains(k));
       for (final t in tasksCopy) {
         _memTasks[t.id] = jsonEncode(t.toJson());
       }
@@ -202,20 +242,16 @@ class LocalDatabase {
     }
     final d = await db;
     await d.transaction((txn) async {
-      await txn.delete(kTasks);
-      await txn.delete(kTrash);
-      for (final t in tasksCopy) {
-        await txn.insert(kTasks, {
-          'id': t.id,
-          'data': jsonEncode(t.toJson()),
-        });
-      }
-      for (final t in trashCopy) {
-        await txn.insert(kTrash, {
-          'id': t.id,
-          'data': jsonEncode(t.toJson()),
-        });
-      }
+      final taskIds = <String>[for (final t in tasksCopy) t.id];
+      final taskData = <String, String>{
+        for (final t in tasksCopy) t.id: jsonEncode(t.toJson())
+      };
+      await _incrementalUpsert(txn, kTasks, taskIds, taskData);
+      final trashIds = <String>[for (final t in trashCopy) t.id];
+      final trashData = <String, String>{
+        for (final t in trashCopy) t.id: jsonEncode(t.toJson())
+      };
+      await _incrementalUpsert(txn, kTrash, trashIds, trashData);
     });
   }
 
@@ -246,7 +282,8 @@ class LocalDatabase {
   Future<void> replaceFocus(List<FocusSession> sessions) async {
     final copy = List<FocusSession>.from(sessions); // 快照，避免迭代期被并发修改
     if (testUseMemory) {
-      _memFocus.clear();
+      final ids = <String>{for (final s in copy) s.id};
+      _memFocus.removeWhere((k, _) => !ids.contains(k));
       for (final s in copy) {
         _memFocus[s.id] = jsonEncode(s.toJson());
       }
@@ -254,13 +291,11 @@ class LocalDatabase {
     }
     final d = await db;
     await d.transaction((txn) async {
-      await txn.delete(kFocus);
-      for (final s in copy) {
-        await txn.insert(kFocus, {
-          'id': s.id,
-          'data': jsonEncode(s.toJson()),
-        });
-      }
+      final ids = <String>[for (final s in copy) s.id];
+      final data = <String, String>{
+        for (final s in copy) s.id: jsonEncode(s.toJson())
+      };
+      await _incrementalUpsert(txn, kFocus, ids, data);
     });
   }
 
@@ -291,7 +326,8 @@ class LocalDatabase {
   Future<void> replaceHabits(List<Habit> habits) async {
     final copy = List<Habit>.from(habits); // 快照，避免迭代期被并发修改
     if (testUseMemory) {
-      _memHabits.clear();
+      final ids = <String>{for (final h in copy) h.id};
+      _memHabits.removeWhere((k, _) => !ids.contains(k));
       for (final h in copy) {
         _memHabits[h.id] = jsonEncode(h.toJson());
       }
@@ -299,13 +335,11 @@ class LocalDatabase {
     }
     final d = await db;
     await d.transaction((txn) async {
-      await txn.delete(kHabits);
-      for (final h in copy) {
-        await txn.insert(kHabits, {
-          'id': h.id,
-          'data': jsonEncode(h.toJson()),
-        });
-      }
+      final ids = <String>[for (final h in copy) h.id];
+      final data = <String, String>{
+        for (final h in copy) h.id: jsonEncode(h.toJson())
+      };
+      await _incrementalUpsert(txn, kHabits, ids, data);
     });
   }
 
@@ -327,7 +361,8 @@ class LocalDatabase {
   Future<void> replaceCheckIns(List<CheckIn> checkIns) async {
     final copy = List<CheckIn>.from(checkIns); // 快照，避免迭代期被并发修改
     if (testUseMemory) {
-      _memCheckIns.clear();
+      final ids = <String>{for (final c in copy) c.id};
+      _memCheckIns.removeWhere((k, _) => !ids.contains(k));
       for (final c in copy) {
         _memCheckIns[c.id] = jsonEncode(c.toJson());
       }
@@ -335,13 +370,11 @@ class LocalDatabase {
     }
     final d = await db;
     await d.transaction((txn) async {
-      await txn.delete(kCheckIns);
-      for (final c in copy) {
-        await txn.insert(kCheckIns, {
-          'id': c.id,
-          'data': jsonEncode(c.toJson()),
-        });
-      }
+      final ids = <String>[for (final c in copy) c.id];
+      final data = <String, String>{
+        for (final c in copy) c.id: jsonEncode(c.toJson())
+      };
+      await _incrementalUpsert(txn, kCheckIns, ids, data);
     });
   }
 

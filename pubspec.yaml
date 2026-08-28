@@ -1,7 +1,7 @@
 name: todolist
 description: Material 3 TodoList 应用（设计稿 1:1 还原）
 publish_to: 'none'
-version: 2.6.8+89
+version: 2.6.9+90
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -21,7 +21,18 @@ dependencies:
   intl: ^0.20.2
   timezone: ^0.9.4
   path_provider: ^2.1.5
+  # 附件（P0-1）：相册选图 / 拍照，全程本地不联网。
+  image_picker: ^1.0.7
   file_picker: ^12.0.0-beta.1
+  # 附件（P0-1）：本地录音（语音备忘），全程本地不联网。
+  # 语音备忘（P0-1）：本地录音。record 7.x 为纯 Dart 元包（无 android 模块，
+  # 实现委托给 record_android，其 android/build.gradle 已声明 namespace，兼容 AGP/Gradle 9.1）；
+  # 应用代码已迁移到 AudioRecorder（start(RecordConfig, {path}) / stop / hasPermission API）。
+  # 注：record 5.2.1 的依赖约束自相矛盾（允许 record_platform_interface 1.6.0，却锁死旧桌面包
+  # record_linux<1.0.0 / record_windows^1.0.5，后者基于 1.5.x 接口、不实现 startStream /
+  # hasPermission(request:)，导致 kernel 快照编译桌面实现失败）；升 7.1.1 使整套依赖统一在
+  # record_platform_interface 2.1.0 生态（record_android/linux/windows/web 均为 2.x），消除死锁。
+  record: ^7.0.0
   share_plus: ^13.0.0
   package_info_plus: ^10.0.0
   http: ^1.2.0
@@ -35,6 +46,12 @@ dependencies:
   # 显式声明平台包：应用锁需 import AndroidAuthMessages/IOSAuthMessages 定制中文文案
   local_auth_android: ^1.0.48
   local_auth_darwin: ^1.4.2
+  # 离线农历转换：纯 Dart、无第三方依赖、不联网。用于自然语言录入「农历八月十五」等。
+  lunar: ^1.7.8
+  # 本地导出 Excel / PDF（严格离线，不联网）：Excel 多表工作簿、PDF 包裹回顾长图。
+  excel: ^4.0.6
+  # pdf 锁 <3.12.0：本项目 environment.sdk 为 '>=3.3.0'，避免解析到要求更高 Dart 的 3.13。
+  pdf: '>=3.10.8 <3.12.0'
 
 dev_dependencies:
   flutter_test:

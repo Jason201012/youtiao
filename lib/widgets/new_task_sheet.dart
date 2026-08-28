@@ -1,7 +1,15 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:record/record.dart';
+import 'package:todolist/models/attachment.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/attachment_service.dart';
+import 'package:todolist/services/data_io.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -65,6 +73,23 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 是否置顶/星标：置顶任务在所属分区内固定排最前。仅编辑模式可切换。
   bool _pinned = false;
 
+  /// 附件列表（编辑模式从任务预填；新建模式逐步添加，保存时一并写入）。
+  List<AttachmentRef> _attachments = [];
+  // 编辑模式进入时正式目录已有的附件文件名集合；取消保存时用于清理本次新增的孤儿文件。
+  Set<String>? _baselineAttachmentFiles;
+
+  /// 新建任务的暂存会话 id：真实 taskId 分配前，附件先落 `attachments/_staging/<_attachmentSession>`，
+  /// 保存后由 [AttachmentService.promoteStaging] 提升到正式目录。
+  final String _attachmentSession =
+      '${DateTime.now().millisecondsSinceEpoch}_${DateTime.now().microsecondsSinceEpoch % 100000}';
+
+  /// 录音状态：true 表示正在录音（显示「停止」按钮）。
+  bool _isRecording = false;
+  final AudioRecorder _recorder = AudioRecorder();
+
+  /// 是否已成功保存（用于 dispose 时决定是否清理暂存目录）。
+  bool _saved = false;
+
   /// 提前量候选：0（准时）/ 5 / 10 / 15 / 30 / 60 分钟。
   static const List<int> _offsetOptions = [0, 5, 10, 15, 30, 60];
   static String _offsetLabel(int m) => m == 0 ? '准时（不提前）' : '提前 $m 分钟';
@@ -96,6 +121,10 @@ class _TaskSheetState extends State<TaskSheet> {
       _subtasks = t.subtasks.map((s) => s.copyWith()).toList();
       _tags = List.from(t.tags);
       _pinned = t.pinned;
+      // 编辑模式预填已有附件（新建模式 _attachments 为空，暂存于 _attachmentSession）。
+      _attachments = List.from(t.attachments);
+      // 记录进入编辑前正式目录的附件文件名集合，供取消保存时清理孤儿。
+      _baselineAttachmentFiles = _attachments.map((a) => a.fileName).toSet();
     }
   }
 
@@ -106,6 +135,18 @@ class _TaskSheetState extends State<TaskSheet> {
     _subtaskController.dispose();
     _subtaskEditController.dispose();
     _tagController.dispose();
+    // P0-1：未保存时清理无意义附件文件，避免孤儿占用空间。
+    if (!_saved) {
+      if (_isEdit) {
+        // 编辑模式：本次会话新增的附件已落正式目录，但元数据未回写，
+        // 清理之使正式目录回到进入编辑前的状态。
+        AttachmentService.pruneOrphans(
+            widget.task!.id, _baselineAttachmentFiles ?? const {});
+      } else {
+        // 新建模式：暂存目录整体清理。
+        AttachmentService.removeStaging(_attachmentSession);
+      }
+    }
     super.dispose();
   }
 
@@ -303,7 +344,201 @@ class _TaskSheetState extends State<TaskSheet> {
     });
   }
 
-  void _save() {
+  // ===== 附件（P0-1，全程本地、不联网）=====
+
+  /// 计算附件落盘目录：编辑模式用正式目录（taskId 已知），新建模式用暂存目录。
+  Future<Directory> _targetDir() async {
+    if (_isEdit) return AttachmentService.dirFor(widget.task!.id);
+    return AttachmentService.stagingDir(_attachmentSession);
+  }
+
+  /// 把已选文件（XFile）导入为附件并加入列表。
+  Future<void> _importPicked(XFile picked, AttachmentType type,
+      {String? mimeType}) async {
+    try {
+      final dir = await _targetDir();
+      final ref = await AttachmentService.importFile(
+        parentDir: dir,
+        src: File(picked.path),
+        type: type,
+        mimeType: mimeType ?? picked.mimeType,
+      );
+      setState(() => _attachments.add(ref));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('添加附件失败：$e')));
+      }
+    }
+  }
+
+  /// 从相册选图片（插图）。
+  Future<void> _addImage() async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked != null) await _importPicked(picked, AttachmentType.image);
+  }
+
+  /// 拍照（相机）。
+  Future<void> _takePhoto() async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.camera);
+    if (picked != null) await _importPicked(picked, AttachmentType.image);
+  }
+
+  /// 从本地文件系统选任意文件（文档 / 图片 / 音频等），按扩展名粗判类型。
+  Future<void> _addFile() async {
+    final result = await FilePicker.pickFiles();
+    if (result == null || result.isEmpty) return;
+    final f = result.single;
+    if (f.path == null) return;
+    // file_picker 12 / platform_interface 3.x 的 PlatformFile 已移除 .extension getter，
+    // 改为从文件名自行解析扩展名（不含点）。
+    final rawName = f.name;
+    final dot = rawName.lastIndexOf('.');
+    final ext = dot >= 0 ? rawName.substring(dot + 1).toLowerCase() : '';
+    final type = ['m4a', 'mp3', 'wav', 'aac', 'ogg', 'amr'].contains(ext)
+        ? AttachmentType.audio
+        : ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].contains(ext)
+            ? AttachmentType.image
+            : AttachmentType.file;
+    try {
+      final dir = await _targetDir();
+      final ref = await AttachmentService.importFile(
+        parentDir: dir,
+        src: File(f.path!),
+        type: type,
+        // file_picker 12 的 PlatformFile 已移除 .mimeType getter；
+        // AttachmentService.importFile 会按源文件原名自动派生扩展名，故此处传 null。
+        mimeType: null,
+      );
+      setState(() => _attachments.add(ref));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('添加附件失败：$e')));
+      }
+    }
+  }
+
+  /// 开始 / 停止录音（本地语音备忘）。实时录音落盘到目标目录。
+  Future<void> _toggleRecording() async {
+    if (_isRecording) {
+      final path = await _recorder.stop();
+      setState(() => _isRecording = false);
+      if (path != null) {
+        final file = File(path);
+        if (await file.exists()) {
+          final dir = await _targetDir();
+          final ref = await AttachmentService.importFile(
+            parentDir: dir,
+            src: file,
+            type: AttachmentType.audio,
+            mimeType: 'audio/m4a',
+          );
+          setState(() => _attachments.add(ref));
+          // 录音原始文件（voice_*.m4a）已复制为带时间戳前缀的规范化附件，
+          // 删除原始文件，避免产生不在元数据列表里的孤儿。
+          try {
+            await file.delete();
+          } catch (_) {
+            // 原始文件删除失败不影响已落库的规范化附件。
+          }
+        }
+      }
+      return;
+    }
+    // 开始前检查麦克风权限。
+    if (!await _recorder.hasPermission()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('需要麦克风权限才能录音')),
+        );
+      }
+      return;
+    }
+    final dir = await _targetDir();
+    final path =
+        '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    await _recorder.start(const RecordConfig(), path: path);
+    setState(() => _isRecording = true);
+  }
+
+  /// 删除某附件：同步删除磁盘文件（编辑模式正式目录 / 新建模式暂存目录）。
+  Future<void> _removeAttachment(int i) async {
+    final ref = _attachments[i];
+    setState(() => _attachments.removeAt(i));
+    try {
+      final dir = await _targetDir();
+      final file = File('${dir.path}/${ref.fileName}');
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // 文件删除失败不阻断（元数据已从列表移除）。
+    }
+  }
+
+  /// 在编辑页内预览 / 打开附件：图片全屏预览、音频 / 文件经系统分享。
+  Future<void> _openAttachment(AttachmentRef ref) async {
+    final dir = await _targetDir();
+    final file = File('${dir.path}/${ref.fileName}');
+    if (!await file.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('附件文件不存在')));
+      }
+      return;
+    }
+    if (ref.type == AttachmentType.image) {
+      if (mounted) {
+        await showDialog(context: context, builder: (_) => Dialog(child: Image.file(file)));
+      }
+    } else {
+      await DataIo.shareFile(file,
+          mimeType: ref.mimeType ?? 'application/octet-stream');
+    }
+  }
+
+  /// 附件区块 UI：四个添加入口 + 已添加附件的 chip 列表。
+  Widget _buildAttachments() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            _AttachSourceChip(icon: Symbols.image, label: '图片', onTap: _addImage),
+            _AttachSourceChip(
+                icon: Symbols.photo_camera, label: '拍照', onTap: _takePhoto),
+            _AttachSourceChip(
+                icon: Symbols.folder_open, label: '文件', onTap: _addFile),
+            _AttachSourceChip(
+              icon: Symbols.mic,
+              label: _isRecording ? '停止录音' : '录音',
+              onTap: _toggleRecording,
+              recording: _isRecording,
+            ),
+          ],
+        ),
+        if (_attachments.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var i = 0; i < _attachments.length; i++)
+                  _AttachmentChip(
+                    ref: _attachments[i],
+                    onRemove: () => _removeAttachment(i),
+                    onOpen: () => _openAttachment(_attachments[i]),
+                  ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _save() async {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
     final provider = Provider.of<TaskProvider>(context, listen: false);
@@ -334,9 +569,10 @@ class _TaskSheetState extends State<TaskSheet> {
         subtasks: List.from(_subtasks),
         reminderOffsetMin: _reminderOffsetMin,
         pinned: _pinned,
+        attachments: List.from(_attachments),
       ));
     } else {
-      provider.addTask(Task(
+      final created = provider.addTask(Task(
         id: '',
         title: title,
         priority: _priority,
@@ -354,8 +590,12 @@ class _TaskSheetState extends State<TaskSheet> {
         subtasks: List.from(_subtasks),
         reminderOffsetMin: _reminderOffsetMin,
         pinned: _pinned,
+        attachments: List.from(_attachments),
       ));
+      // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
+      await AttachmentService.promoteStaging(_attachmentSession, created.id);
     }
+    _saved = true;
     Navigator.pop(context);
   }
 
@@ -478,6 +718,11 @@ class _TaskSheetState extends State<TaskSheet> {
             ),
             style: TextStyle(color: scheme.onSurface, fontSize: 15),
           ),
+          const SizedBox(height: 18),
+          // 附件（P0-1）：图片 / 拍照 / 本地文件 / 录音，全程本地不联网。
+          _SectionLabel('附件'),
+          const SizedBox(height: 8),
+          _buildAttachments(),
           const SizedBox(height: 18),
           // 子任务
           _SectionLabel('子任务'),
@@ -1026,7 +1271,11 @@ class _TaskSheetState extends State<TaskSheet> {
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              onPressed: canSave ? _save : null,
+              onPressed: canSave
+                  ? () async {
+                      await _save();
+                    }
+                  : null,
               child: Text(_isEdit ? '保存修改' : '保存'),
             ),
           ),
@@ -1113,6 +1362,100 @@ class _CategoryChip extends StatelessWidget {
       backgroundColor: appColors(context).chip,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppColors.chipRadius)),
       side: BorderSide.none,
+    );
+  }
+}
+
+/// 附件添加入口（图片 / 拍照 / 文件 / 录音）。
+class _AttachSourceChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool recording;
+  const _AttachSourceChip({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.recording = false,
+  });
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final ext = appColors(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: recording ? scheme.primary : ext.chip,
+          borderRadius: BorderRadius.circular(AppColors.chipRadius),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 18, color: recording ? scheme.onPrimary : ext.meta),
+            const SizedBox(width: 6),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 13,
+                    color: recording ? scheme.onPrimary : scheme.onSurface)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 已添加附件的 chip：图标 + 类型·体积 + 删除；点击预览 / 打开。
+class _AttachmentChip extends StatelessWidget {
+  final AttachmentRef ref;
+  final VoidCallback onRemove;
+  final VoidCallback onOpen;
+  const _AttachmentChip({
+    required this.ref,
+    required this.onRemove,
+    required this.onOpen,
+  });
+  IconData _typeIcon(AttachmentType t) {
+    switch (t) {
+      case AttachmentType.image:
+        return Symbols.image;
+      case AttachmentType.audio:
+        return Symbols.graphic_eq;
+      case AttachmentType.file:
+        return Symbols.description;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final ext = appColors(context);
+    return InkWell(
+      onTap: onOpen,
+      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: ext.chip,
+          borderRadius: BorderRadius.circular(AppColors.chipRadius),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(_typeIcon(ref.type), size: 18, color: ext.meta),
+            const SizedBox(width: 6),
+            Text('${ref.type.label} · ${ref.sizeLabel}',
+                style: TextStyle(fontSize: 13, color: scheme.onSurface)),
+            const SizedBox(width: 4),
+            GestureDetector(
+              onTap: onRemove,
+              child: Icon(Symbols.close, size: 16, color: ext.meta),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

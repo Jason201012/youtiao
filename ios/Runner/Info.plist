@@ -18,6 +18,15 @@
 	<string>有条</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>使用 Face ID 解锁「有条」应用锁</string>
+	<!-- 附件（P0-1）：拍照所需相机用途描述 -->
+	<key>NSCameraUsageDescription</key>
+	<string>用于为任务拍摄照片附件（全程本地，不上传）</string>
+	<!-- 附件（P0-1）：录音所需麦克风用途描述 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>用于为任务录制语音附件（全程本地，不上传）</string>
+	<!-- 附件（P0-1）：从相册添加图片所需照片库用途描述 -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>用于为任务添加相册图片附件（全程本地，不上传）</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

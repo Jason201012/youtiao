@@ -155,6 +155,9 @@ class BackupSheet {
       final habitMap = habitProvider.backupData();
       map['habits'] = habitMap['habits'];
       map['check_ins'] = habitMap['check_ins'];
+      // P0-1：手动备份同步纳入附件二进制（base64 内联），与自动备份 (_writeAutoBackup)
+      // 一致，保证手动导出的备份也能完整还原附件；缺失文件由 collectBlobs 自动跳过。
+      map['attachments'] = await provider.collectAttachmentBlobs(includeTrash);
       final plain = const JsonEncoder.withIndent('  ').convert(map);
 
       // 口令加密导出：明文经 AES-256-GCM 信封化，落盘 / 分享的都是密文。
@@ -239,6 +242,37 @@ class BackupSheet {
         );
       }
       return;
+    }
+    // S7 修复：空备份二次确认。备份为空（无任务、无回收站）而当前仍有任务时，
+    // 直接覆盖会清空现有数据，必须强提示「将清空现有 N 条任务」并要求显式二次确认；
+    // 空备份默认不允许直接覆盖有数据的库（用户需主动点击危险操作才放行）。
+    if (validation.isEmpty) {
+      final currentCount = provider.tasks.length;
+      if (currentCount > 0) {
+        final wipe = await showDialog<bool>(
+          context: context,
+          builder: (d) => AlertDialog(
+            title: const Text('空备份将清空现有任务'),
+            content: Text(
+              '这份备份里没有任何任务或回收站内容，但你当前共有 $currentCount 条任务。'
+              '继续恢复会用空内容覆盖，清空你现有的全部任务，且不可撤销。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(d, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () => Navigator.pop(d, true),
+                child: const Text('仍要清空并恢复'),
+              ),
+            ],
+          ),
+        );
+        if (wipe != true) return;
+      }
+      // 当前也为空：空覆盖空无数据损失，走下方常规确认即可。
     }
     final ok = await showDialog<bool>(
       context: context,
@@ -408,6 +442,36 @@ class BackupSheet {
           );
         }
         return;
+      }
+      // S7 修复（自动备份分支）：与「从备份恢复」一致的空备份二次确认。
+      // 空快照且当前仍有任务时，必须强提示「将清空现有 N 条任务」并要求显式二次确认。
+      if (validation.isEmpty) {
+        final currentCount = provider.tasks.length;
+        if (currentCount > 0) {
+          final wipe = await showDialog<bool>(
+            context: context,
+            builder: (d) => AlertDialog(
+              title: const Text('空备份将清空现有任务'),
+              content: Text(
+                '这份自动备份快照里没有任何任务或回收站内容，但你当前共有 '
+                '$currentCount 条任务。继续还原会用空内容覆盖，清空你现有的全部任务，'
+                '且不可撤销。',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(d, false),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                  onPressed: () => Navigator.pop(d, true),
+                  child: const Text('仍要清空并还原'),
+                ),
+              ],
+            ),
+          );
+          if (wipe != true) return;
+        }
       }
       final data = jsonDecode(raw) as Map<String, dynamic>;
       // 干跑解析专注/习惯/打卡（与 _doRestore 一致）。

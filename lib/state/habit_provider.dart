@@ -26,6 +26,9 @@ class HabitProvider extends ChangeNotifier {
   /// 全部习惯（含归档）。UI 可按需过滤。
   List<Habit> get habits => List.unmodifiable(_habits);
 
+  /// 全部打卡记录（导出 Excel 的「打卡记录」表使用，避免直接暴露内部可变列表）。
+  List<CheckIn> get checkIns => List.unmodifiable(_checkIns);
+
   /// 未归档的习惯（首页/今日列表展示用）。
   List<Habit> get activeHabits =>
       _habits.where((h) => !h.archived).toList();

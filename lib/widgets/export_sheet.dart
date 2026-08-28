@@ -3,6 +3,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/ical.dart';
+import 'package:todolist/services/report_exporter.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -56,6 +57,16 @@ class ExportSheet {
                     Navigator.pop(ctx);
                     _doExport(taskProvider, focusProvider, habitProvider, context,
                         'md', includeTrash);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Symbols.grid_on),
+                  title: const Text('导出为 Excel'),
+                  subtitle: const Text('表格工作簿，含任务 / 专注 / 习惯 / 打卡记录，可用 Excel / WPS 打开'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _doExportExcel(taskProvider, focusProvider, habitProvider,
+                        context, includeTrash);
                   },
                 ),
                 ListTile(
@@ -128,6 +139,48 @@ class ExportSheet {
               onPressed: () => DataIo.shareFile(
                 file,
                 mimeType: isCsv ? 'text/csv' : 'text/markdown',
+              ),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      }
+    }
+  }
+
+  /// 导出为 Excel 工作簿（.xlsx，四张表）：任务 / 专注记录 / 习惯 / 打卡记录。
+  /// 落盘到 App 私有文档目录（二进制走 [DataIo.saveBytesToAppDocs]），
+  /// 再经系统分享面板交出去；严格离线，不联网。
+  static Future<void> _doExportExcel(
+    TaskProvider provider,
+    FocusProvider focusProvider,
+    HabitProvider habitProvider,
+    BuildContext context,
+    bool includeTrash,
+  ) async {
+    try {
+      final bytes = ReportExporter.buildDatasetExcel(
+        task: provider,
+        focus: focusProvider,
+        habit: habitProvider,
+        includeTrash: includeTrash,
+      );
+      final name = '有条-tasks-${_ts()}.xlsx';
+      final file = await DataIo.saveBytesToAppDocs(name, bytes);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('已生成 Excel 工作簿（App 文档目录）'),
+            action: SnackBarAction(
+              label: '分享',
+              onPressed: () => DataIo.shareFile(
+                file,
+                mimeType:
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
               ),
             ),
           ),

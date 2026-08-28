@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/services/local_database.dart';
+import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/models/task.dart';
@@ -201,6 +202,8 @@ class TaskProvider extends ChangeNotifier {
       // 纳入 App 级偏好（外观/锁/专注/免打扰/通用开关），换机后体验更完整。
       // 排除系统生物特征、更新检查状态、运行中的计时器（见 prefs_backup.dart）。
       'prefs': await collectAppPrefs(),
+      // P0-1：附件二进制（base64 内联）一并纳入滚动快照，保证本地快照可完整还原。
+      'attachments': await collectAttachmentBlobs(true),
     };
     final json =
         const JsonEncoder.withIndent('  ').convert(payload);
@@ -376,27 +379,36 @@ class TaskProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     // 确保数据库已打开（首次启动会建表）。内存测试后端无需真实 SQLite，跳过打开。
     final db = LocalDatabase.instance;
-    if (!LocalDatabase.testUseMemory) {
-      await db.db;
-    }
-    // —— 从旧版 SharedPreferences JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
-    if (await db.tasksEmpty && prefs.getString(_kTasks) != null) {
-      await db.migrateTasksFromPrefs(prefs);
-    }
-    final loadedTasks = await db.loadTasks();
-    final loadedTrash = await db.loadTrash();
-    final seeded = prefs.getBool(_kSeeded) ?? false;
-    if (loadedTasks.isEmpty && loadedTrash.isEmpty && !seeded) {
-      // 全新安装：保留内置 7 条 mock 并落库；置位标志，避免「从零开始」后重启又被塞回。
-      await _persist();
-      await prefs.setBool(_kSeeded, true);
-    } else {
+    try {
+      if (!LocalDatabase.testUseMemory) {
+        await db.db;
+      }
+      // —— 从旧版 SharedPreferences JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
+      if (await db.tasksEmpty && prefs.getString(_kTasks) != null) {
+        await db.migrateTasksFromPrefs(prefs);
+      }
+      final loadedTasks = await db.loadTasks();
+      final loadedTrash = await db.loadTrash();
       _tasks
         ..clear()
         ..addAll(loadedTasks);
       _trash
         ..clear()
         ..addAll(loadedTrash);
+    } catch (e, s) {
+      // S13 修复：数据库加载/读取失败 → 进入只读安全模式，禁止后续 [_persist]
+      // 用内存态（可能为空）覆盖尚可抢救的坏库。标记后 rethrow，由 main._safeLoad
+      // 捕获并允许 App 继续启动（UI 显示安全模式横幅引导导出/修复）。
+      _dbLoadFailed = true;
+      debugPrint('[TaskProvider] 数据库加载失败，进入只读安全模式：$e\n$s');
+      rethrow;
+    }
+    final seeded = prefs.getBool(_kSeeded) ?? false;
+    if (_tasks.isEmpty && _trash.isEmpty && !seeded) {
+      // 全新安装：保留内置 7 条 mock 并落库；置位标志，避免「从零开始」后重启又被塞回。
+      await _persist();
+      await prefs.setBool(_kSeeded, true);
+    } else {
       // 兜底清理：App 启动时按保留期移除过期回收站条目（原生 MidnightResetReceiver
       // 负责「App 已关闭」的每日 00:00 清理，这里覆盖 App 已开、长期未跨午夜边界的情况）。
       _cleanupTrashIfNeeded(persist: true);
@@ -491,6 +503,17 @@ class TaskProvider extends ChangeNotifier {
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
   /// 捕获写盘异常并输出，避免「变更仅存于内存、重启即回退」被静默吞掉。
   Future<void> _persist() async {
+    if (_dbLoadFailed) {
+      // S13 修复：安全模式下禁止向可疑数据库落盘，避免用内存态覆盖尚可抢救的坏库。
+      // 仅持久化偏好到 SharedPreferences（与任务库解耦、风险低）；任务变更仅存内存、
+      // 重启不保留。用户应前往「设置 → 备份与恢复」导出/修复后再正常加载。
+      try {
+        await _persistSettings();
+      } catch (_) {
+        // 偏好落盘失败也无妨，安全模式下本就不依赖持久化。
+      }
+      return;
+    }
     try {
       await _persistSettings();
       await LocalDatabase.instance.replaceTasks(_tasks, _trash);
@@ -585,6 +608,12 @@ class TaskProvider extends ChangeNotifier {
   ];
 
   List<Task> get tasks => List.unmodifiable(_tasks);
+
+  /// S13 修复：数据库加载是否失败（只读安全模式标志）。
+  /// 一旦置位，[_persist] 不会向可疑数据库落盘，避免用内存态（可能是空/示例）
+  /// 覆盖掉尚可抢救的坏库；UI 据此展示安全模式横幅引导用户导出/修复。
+  bool _dbLoadFailed = false;
+  bool get dbLoadFailed => _dbLoadFailed;
 
   /// 回收站（已删除但可恢复的任务，按删除时间倒序）
   final List<Task> _trash = [];
@@ -1139,7 +1168,9 @@ class TaskProvider extends ChangeNotifier {
 
   int _idSeq = 8;
   /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间或每日提醒则调度。
-  void addTask(Task task) {
+  /// 返回创建后的 [Task]（含已分配 id），便于调用方把暂存附件目录提升为正式目录
+  /// （见 [new_task_sheet] 的附件保存流程）。
+  Task addTask(Task task) {
     var newTask = task.copyWith(
       id: (_idSeq++).toString(),
       // A1：落库时统一计算拼音首字母，保证所有新建入口（NL 快速录入等）都自动覆盖。
@@ -1156,6 +1187,7 @@ class TaskProvider extends ChangeNotifier {
     _scheduleRemindersFor(newTask);
     notifyListeners();
     _persist();
+    return newTask;
   }
 
   /// 更新已有任务：以调用方传入的 [updated]（已携带全部可编辑字段）为基础落库，
@@ -1264,6 +1296,8 @@ class TaskProvider extends ChangeNotifier {
   void permanentDelete(String id) {
     _trash.removeWhere((t) => t.id == id);
     _cancelRemindersFor(id);
+    // P0-1：彻底删除时一并清理其附件目录，避免孤立文件长期占用空间。
+    AttachmentService.removeDir(id);
     notifyListeners();
     _persist();
   }
@@ -1273,6 +1307,8 @@ class TaskProvider extends ChangeNotifier {
     if (_trash.isEmpty) return;
     for (final t in _trash) {
       _cancelRemindersFor(t.id);
+      // P0-1：清理附件目录。
+      AttachmentService.removeDir(t.id);
     }
     _trash.clear();
     notifyListeners();
@@ -1340,6 +1376,17 @@ class TaskProvider extends ChangeNotifier {
     _recomputeIdSeq();
     notifyListeners();
     await _persist();
+    // P0-1：还原附件二进制。备份里随任务 JSON 携带 base64 内联文件（key=attachments），
+    // 在此统一写回 `attachments/<taskId>/`，保证手动恢复与自动备份还原都覆盖附件。
+    await AttachmentService.restoreBlobs(data['attachments'] as Map<String, dynamic>?);
+  }
+
+  /// P0-1：收集备份所需的附件二进制（base64 内联），随任务一起加密打包。
+  /// [includeTrash] 为 true 时一并纳入回收站任务的附件。
+  Future<Map<String, dynamic>> collectAttachmentBlobs(bool includeTrash) async {
+    final tasks = <Task>[..._tasks];
+    if (includeTrash) tasks.addAll(_trash);
+    return AttachmentService.collectBlobs(tasks);
   }
 
   /// 导出可读 CSV（标题,优先级,分类,截止时间,状态,完成时间,是否已删除）。

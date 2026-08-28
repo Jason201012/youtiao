@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:todolist/models/task.dart';
+
 /// 备份文件结构校验（S3：防恢复废档）。
 ///
 /// 设计要点：
@@ -47,40 +49,50 @@ class BackupValidator {
       return const BackupValidationResult(false, '备份版本号非法（应为 ≥1 的整数）');
     }
 
-    // 4) 抽样反序列化：至少能成功解析列表中的任务字段；空列表也允许（用户可能清空了全部任务）。
+    // 4) 全量反序列化体检（S6/S7 修复）：复用与恢复**完全相同**的 [Task.fromJson]
+    //    口径，对**每一条**任务做真实解析，而非仅抽样前 20 条或仅查字段形态。
+    //    这样第 21 条之后带非法值的备份也能在校验阶段被拦下，不再"校验通过却恢复失败"。
+    //    空列表也允许（用户可能清空了全部任务，但需配合 S7 的二次确认）。
     final list = (tasksRaw as List?) ?? [];
-    if (list.isNotEmpty) {
-      // 抽前 20 条做轻量结构校验：每条应为对象，且含最基本的 id/title（缺省也兼容）。
-      // 这里不强制全量反序列化为 Task（真正的 fromJson 干跑在 restoreFromJson 内完成），
-      // 仅做「字段形态」体检，避免恢复一个字段全错的废档。
-      for (var i = 0; i < list.length && i < 20; i++) {
-        final e = list[i];
-        if (e is! Map) {
-          return BackupValidationResult(false, '第 ${i + 1} 条任务不是对象，备份可能已损坏');
-        }
-        // 关键字段形态体检：priority / category 若存在应为字符串（否则 fromJson 会抛）。
-        final prio = e['priority'];
-        final cat = e['category'];
-        if (prio != null && prio is! String) {
-          return BackupValidationResult(false, '第 ${i + 1} 条任务 priority 非法');
-        }
-        if (cat != null && cat is! String) {
-          return BackupValidationResult(false, '第 ${i + 1} 条任务 category 非法');
-        }
+    for (var i = 0; i < list.length; i++) {
+      final e = list[i];
+      if (e is! Map) {
+        return BackupValidationResult(false, '第 ${i + 1} 条任务不是对象，备份可能已损坏');
+      }
+      try {
+        Task.fromJson(Map<String, dynamic>.from(e as Map));
+      } catch (err) {
+        return BackupValidationResult(false, '第 ${i + 1} 条任务解析失败（字段非法）：$err');
       }
     }
 
-    // 5) 回收站字段若存，也应是列表形态。
+    // 5) 回收站字段若存，也应是列表形态，且逐条可解析。
     final trashRaw = data['trash'];
-    if (trashRaw != null && trashRaw is! List) {
-      return const BackupValidationResult(false, '回收站字段形态非法');
+    if (trashRaw != null) {
+      if (trashRaw is! List) {
+        return const BackupValidationResult(false, '回收站字段形态非法');
+      }
+      for (var i = 0; i < (trashRaw).length; i++) {
+        final e = (trashRaw)[i];
+        if (e is! Map) {
+          return BackupValidationResult(false, '回收站第 ${i + 1} 条不是对象，备份可能已损坏');
+        }
+        try {
+          Task.fromJson(Map<String, dynamic>.from(e as Map));
+        } catch (err) {
+          return BackupValidationResult(false, '回收站第 ${i + 1} 条解析失败（字段非法）：$err');
+        }
+      }
     }
 
     // 全部通过。
     final count = list.length;
     final hasTrash = trashRaw is List && (trashRaw).isNotEmpty;
+    // S7：标记是否为"空备份"（0 个任务且无回收站）。空备份恢复会清空现有任务，
+    // 调用方须据此对"现有有数据"的情况强提示二次确认，默认不允许直接覆盖。
+    final isEmpty = count == 0 && !hasTrash;
     return BackupValidationResult(true, '校验通过：含 $count 个任务${hasTrash ? '（含回收站）' : ''}',
-        taskCount: count, hasTrash: hasTrash);
+        taskCount: count, hasTrash: hasTrash, isEmpty: isEmpty);
   }
 }
 
@@ -90,9 +102,11 @@ class BackupValidationResult {
   final String message;
   final int taskCount;
   final bool hasTrash;
+  /// S7：是否为空备份（任务数与回收站均为 0）。空备份恢复会清空现有全部数据。
+  final bool isEmpty;
   const BackupValidationResult(this.ok, this.message,
-      {this.taskCount = 0, this.hasTrash = false});
+      {this.taskCount = 0, this.hasTrash = false, this.isEmpty = false});
 
   @override
-  String toString() => 'BackupValidationResult(ok=$ok, message=$message)';
+  String toString() => 'BackupValidationResult(ok=$ok, message=$message, isEmpty=$isEmpty)';
 }

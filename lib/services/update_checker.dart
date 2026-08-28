@@ -46,15 +46,15 @@ class UpdateResult {
 /// 返回 >0 表示 [b] 比 [a] 新（即 [a] 旧），<0 表示 [a] 更新，0 相等。
 /// 支持 "2.1.2" 与 "v2.2.0" 混用（自动去 v 前缀），段数不足补 0。
 ///
-/// 🟡 修复 Bug6：此前 `int.tryParse("7-beta")` 返回 null → 按 0 计，
-/// 导致 "2.5.7-beta" 与 "2.5.7" 被判为相等。现对每一段先截断非数字预发布
-/// 后缀（如 `-beta`、`-rc1`）再做数值比较，正规式三段式不受影响。
+/// S8 修复：按 semver 正确处理预发布版本。此前对每一段先截断非数字后缀再比，
+/// 导致 "2.5.7-beta" 与 "2.5.7" 数值部分相同被判相等，装了 beta 的用户收不到
+/// 同号正式版推送。现规则：数值段相同且一方带预发布后缀、另一方为正式版时，
+/// **正式版更高**（预发布 < 正式版），符合 semver 2.0.0 规范。
 int compareVersion(String a, String b) {
   List<int> parseVer(String v) => v
       .replaceAll(RegExp(r'^v'), '')
       .split('.')
       .map((s) {
-        // 截断首个非数字字符之后的预发布后缀（"7-beta" → "7"、"0" → "0"）。
         final digits = s.split(RegExp(r'[^0-9]')).first;
         return int.tryParse(digits.isEmpty ? '0' : digits) ?? 0;
       })
@@ -66,6 +66,47 @@ int compareVersion(String a, String b) {
     final la = i < pa.length ? pa[i] : 0;
     final lb = i < pb.length ? pb[i] : 0;
     if (la != lb) return lb.compareTo(la); // b 大则 >0
+  }
+  // 数值段完全相同：比较预发布后缀。semver 规定「带预发布的版本低于同号正式版」。
+  final preA = _prerelease(a);
+  final preB = _prerelease(b);
+  if (preA == null && preB == null) return 0; // 均为正式版且数值相等
+  if (preA == null) return -1; // a 是正式版（更高），b 是预发布 → a 更新 → <0
+  if (preB == null) return 1; // b 是正式版（更高）→ b 更新 → >0
+  return _comparePrerelease(preA, preB);
+}
+
+/// 提取版本串中的预发布后缀（不含前导 '-'），如 "2.5.7-beta" → "beta"；
+/// 无预发布则返回 null（正式版）。
+String? _prerelease(String v) {
+  final cleaned = v.replaceAll(RegExp(r'^v'), '');
+  final idx = cleaned.indexOf('-');
+  if (idx < 0) return null;
+  final p = cleaned.substring(idx + 1);
+  return p.isEmpty ? null : p;
+}
+
+/// 按 semver 比较两段预发布标识符（点分、数字优先于字母、缺段者更低）。
+int _comparePrerelease(String a, String b) {
+  final aa = a.split('.');
+  final bb = b.split('.');
+  final n = aa.length > bb.length ? aa.length : bb.length;
+  for (var i = 0; i < n; i++) {
+    if (i >= aa.length) return -1; // a 较短 → a 更低
+    if (i >= bb.length) return 1; // b 较短 → b 更低
+    final x = aa[i];
+    final y = bb[i];
+    final xn = int.tryParse(x);
+    final yn = int.tryParse(y);
+    if (xn != null && yn != null) {
+      if (xn != yn) return xn.compareTo(yn);
+    } else if (xn != null) {
+      return -1; // 数字标识符 < 字母标识符（semver）
+    } else if (yn != null) {
+      return 1;
+    } else {
+      if (x != y) return x.compareTo(y);
+    }
   }
   return 0;
 }
