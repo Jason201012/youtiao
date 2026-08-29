@@ -463,17 +463,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
-                    // P2-5 桌面小组件标题隐私：开启后在桌面仅显示占位，避免任务标题被旁人看见。
-                    Consumer<TaskProvider>(
-                      builder: (context, provider, _) => SettingsRow(
-                        icon: Symbols.visibility_off,
-                        label: '桌面小组件隐藏标题',
-                        subtitle: '开启后桌面仅显示占位，避免任务标题被旁人看见',
-                        switchValue: provider.widgetHideTitles,
-                        onSwitchChanged: (v) => provider.setWidgetHideTitles(v),
-                      ),
-                    ),
-                    const SizedBox(height: AppColors.contentGap),
                     // P0-3 日历农历：默认开启，与「农历重复」录入形成展示闭环。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(

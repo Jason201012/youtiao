@@ -173,8 +173,6 @@ class TaskProvider extends ChangeNotifier {
   /// 是否启用「本地自动备份」：跨日首启自动生成当日滚动快照，默认开启。
   /// 纯本地文件（App 私有文档目录 backup/auto/），不上传任何服务器。
   static const String _kAutoBackup = 'auto_backup_enabled';
-  /// 桌面小组件是否隐藏任务标题（仅显示占位，保护桌面隐私）。P2-5。
-  static const String _kWidgetHideTitles = 'widget_hide_titles';
   /// P1-13：已归档标签名集合（JSON 数组），归档后首页筛选不可见但数据保留。
   static const String _kArchivedTags = 'archived_tags';
   /// P0-3：日历月视图是否显示农历 / 节气 / 传统节日（纯离线计算，默认开启）。
@@ -203,20 +201,6 @@ class TaskProvider extends ChangeNotifier {
         // 错误已在内部记录，不阻断 UI。
       }
     }
-  }
-
-  // ===== 桌面小组件标题隐私（P2-5）=====
-  /// 是否在桌面小组件中隐藏任务标题（他人经桌面可见性）。默认 false（显示标题）。
-  /// 开启后小组件仅展示占位文案，兼顾「应用锁防 App 内、防不了桌面」的隐私张力。
-  bool _widgetHideTitles = false;
-  bool get widgetHideTitles => _widgetHideTitles;
-  Future<void> setWidgetHideTitles(bool v) async {
-    if (v == _widgetHideTitles) return;
-    _widgetHideTitles = v;
-    notifyListeners();
-    await _persistSettings();
-    // 设置变化后立即刷新桌面小组件，使其即时应用新的显隐策略。
-    requestWidgetRefresh();
   }
 
   // ===== P0-3：日历农历 / 节气展示 =====
@@ -674,7 +658,6 @@ class TaskProvider extends ChangeNotifier {
     _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
     _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
     _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
-    _widgetHideTitles = prefs.getBool(_kWidgetHideTitles) ?? false;
     _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet(); // P1-13
     _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true; // P0-3
     _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
@@ -754,7 +737,6 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kFocusGoal, _focusGoalMinutes);
     await prefs.setInt(_kWeeklyGoal, _weeklyGoalCount);
     await prefs.setBool(_kAutoBackup, _autoBackupEnabled);
-    await prefs.setBool(_kWidgetHideTitles, _widgetHideTitles);
     await prefs.setBool(_kCalendarLunar, _calendarLunar); // P0-3
     await prefs.setBool(_kBriefEveningOn, _briefingEveningEnabled);
     await prefs.setInt(_kBriefEveningH, _briefingEveningHour);

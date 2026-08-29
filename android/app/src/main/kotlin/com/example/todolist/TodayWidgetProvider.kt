@@ -33,9 +33,6 @@ class TodayWidgetProvider : AppWidgetProvider() {
         private const val TAG = "TodayWidget"
         private const val kDbName = "youtiao.db"
         private const val MAX_ITEMS = 8
-        /// 桌面小组件设置（与 App 侧 SharedPreferences 同文件、同 key）。P2-5。
-        private const val PREFS_NAME = "FlutterSharedPreferences"
-        private const val KEY_HIDE_TITLES = "flutter.widget_hide_titles"
 
         /** 主动刷新所有已添加部件：Dart _persist 后 / 午夜重置后调用。 */
         fun refreshAll(context: Context) {
@@ -47,17 +44,6 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 for (id in ids) mgr.updateAppWidget(id, views)
             } catch (_: Exception) {
                 // 刷新失败不应影响主流程
-            }
-        }
-
-        /// P2-5：读取「桌面小组件隐藏标题」开关。该开关由 App 侧 via SharedPreferences
-        /// 写入 FlutterSharedPreferences（key 带 `flutter.` 前缀），与 App 同 UID 故可跨进程读取。
-        private fun hideWidgetTitles(context: Context): Boolean {
-            return try {
-                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                prefs.getBoolean(KEY_HIDE_TITLES, false)
-            } catch (_: Exception) {
-                false
             }
         }
 
@@ -74,9 +60,6 @@ class TodayWidgetProvider : AppWidgetProvider() {
         private fun buildRemoteViewsInternal(context: Context): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.widget_today)
             views.setTextViewText(R.id.date, todayDisplay())
-            // P2-5：是否隐藏任务标题（用户可在「设置 → 桌面小组件隐藏标题」开启）。
-            // 开启后桌面仅显示占位，避免任务标题被旁人经桌面看见。
-            val hideTitles = hideWidgetTitles(context)
 
             // 头部点击 → 打开 App（不带 task id，仅唤起首页）。
             val openApp = PendingIntent.getActivity(
@@ -100,8 +83,7 @@ class TodayWidgetProvider : AppWidgetProvider() {
 
             for (t in tasks) {
                 val item = RemoteViews(context.packageName, R.layout.widget_today_item)
-                // P2-5：隐藏标题时显示占位（标题内容不落桌面），meta（截止/逾期）仍保留。
-                item.setTextViewText(R.id.item_title, if (hideTitles) "••••••" else t.title)
+                item.setTextViewText(R.id.item_title, t.title)
                 item.setTextViewText(R.id.item_meta, t.meta)
                 // requestCode 用任务 id hashCode，配合 data URI 确保每个任务项 PendingIntent 唯一。
                 val pi = PendingIntent.getActivity(
