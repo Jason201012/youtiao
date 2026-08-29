@@ -955,6 +955,21 @@ class NotificationService {
     return _plugin.cancelAll();
   }
 
+  /// 计算下一次简报触发时刻：今日 [hour]:[minute] 若尚未过去则用今日，否则顺延到明日。
+  ///
+  /// P1-8 关键点：简报文案在**排程时**烘焙，所以调用方必须按**投递日**（即本方法的返回值）
+  /// 而非「排程当下」来聚合数据，否则会出现「周一晚上排的周二晨报，说的是周一的口径」。
+  /// 抽成公共方法是为了让 [scheduleBriefing] 与排程方（daily_briefing）共用同一口径，
+  /// 避免两边各算一套、日后其中一处改动导致日期漂移。
+  tz.TZDateTime nextBriefingTime(int hour, int minute) {
+    final loc = _loc ?? tz.UTC;
+    final hh = hour.clamp(0, 23);
+    final mm = minute.clamp(0, 59);
+    final now = tz.TZDateTime.now(loc);
+    final when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+    return when.isAfter(now) ? when : when.add(const Duration(days: 1));
+  }
+
   /// P0-1 早晚简报调度：每日在 [hour]:[minute] 重复触发一条本地通知（setAlarmClock，
   /// 不被 ColorOS 等国产 ROM 拦截）。[evening]=true 为晚间「今日小结」，
   /// false 为晨间「今日待办」。文案由调用方在排程时烘焙进 [title]/[body]。
@@ -972,15 +987,8 @@ class NotificationService {
       return false;
     }
     try {
-      final loc = _loc ?? tz.UTC;
-      final hh = hour.clamp(0, 23);
-      final mm = minute.clamp(0, 59);
       final id = evening ? briefingEveningNotifyId : briefingMorningNotifyId;
-      final now = tz.TZDateTime.now(loc);
-      var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-      when = when.isAfter(now)
-          ? when
-          : when.add(const Duration(days: 1));
+      final when = nextBriefingTime(hour, minute);
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(

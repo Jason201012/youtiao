@@ -73,9 +73,13 @@ DailyBrief buildMorningBrief({
 }
 
 /// 从三大 Provider 实时聚合「今日小结」所需数据（口径与首页 / 周报一致，统一本地日期比较）。
+///
+/// [forDay]：按哪一天的口径聚合。P1-8 —— 文案在**排程时**烘焙，而简报是投递到未来某刻的，
+/// 必须按投递日聚合，否则「周一晚排的周二晨报」会算成周一的口径。缺省为当下。
 DailyBrief buildEveningBriefFromState(
-    TaskProvider task, FocusProvider focus, HabitProvider habit) {
-  final now = DateTime.now();
+    TaskProvider task, FocusProvider focus, HabitProvider habit,
+    {DateTime? forDay}) {
+  final now = forDay ?? DateTime.now();
   var completedToday = 0;
   for (final t in task.tasks) {
     if (t.done &&
@@ -102,9 +106,14 @@ DailyBrief buildEveningBriefFromState(
 }
 
 /// 从三大 Provider 实时聚合「今日待办」所需数据。
+///
+/// [forDay]：按哪一天的口径聚合（P1-8，同 [buildEveningBriefFromState]）。
+/// 晨报几乎总是在「前一天」就排好，因此这里**必须**传入投递日，
+/// 否则「今日到期 / 逾期积压 / 昨日未完成」三项会全部算成排程当天的口径。
 DailyBrief buildMorningBriefFromState(
-    TaskProvider task, FocusProvider focus, HabitProvider habit) {
-  final now = DateTime.now();
+    TaskProvider task, FocusProvider focus, HabitProvider habit,
+    {DateTime? forDay}) {
+  final now = forDay ?? DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
   final dueToday = <String>[];
   for (final t in task.tasks) {
@@ -141,10 +150,17 @@ DailyBrief buildMorningBriefFromState(
   );
 }
 
-/// P0-1 重新排程早晚简报：读取设置开关，按当日聚合数据烘焙通知文案并每日重复调度。
+/// P0-1 重新排程早晚简报：读取设置开关，按**投递日**聚合数据烘焙通知文案并每日重复调度。
 /// 调用方（main 启动 / 设置页切换）在通知总开关开启时调用；关闭则取消两条简报。
-/// 简报内容在调度时烘焙（系统闹钟到点弹出时 App 未必在内存），App 每次启动 / 午夜重置
-/// 都会重排，故绝大多数情况下内容反映当日最新口径。
+///
+/// P1-8 时效性：简报文案在排程时烘焙（系统闹钟到点弹出时 App 未必在内存），
+/// 故按 [NotificationService.nextBriefingTime] 算出的**投递时刻**聚合，
+/// 保证「周二 07:30 送达的晨报」用的是周二的口径，而非排程当下（周一）的口径。
+///
+/// 已知残留限制：通知以 `matchDateTimeComponents=time` 每日重复，同一份文案会按天重发；
+/// 若用户连续多日不打开 App（不触发启动 / 回到前台重排），第二日起内容仍会滞后。
+/// 彻底解决需在原生侧每日重烘焙（同 TodayWidgetProvider 直读 youtiao.db 的套路），
+/// 改动较大且会让简报口径在 Kotlin / Dart 两边各存一份，暂不实施。
 Future<void> rescheduleBriefings(
     TaskProvider task, FocusProvider focus, HabitProvider habit) async {
   final svc = NotificationService.instance;
@@ -154,7 +170,11 @@ Future<void> rescheduleBriefings(
     return;
   }
   if (task.briefingEveningEnabled) {
-    final b = buildEveningBriefFromState(task, focus, habit);
+    // P1-8：先算投递时刻，再按投递日聚合。晚简报若排的是今天，口径即今天；
+    // 若今天这刻已过（排到明天），口径也相应顺延，不会串到别的一天。
+    final when = svc.nextBriefingTime(
+        task.briefingEveningHour, task.briefingEveningMinute);
+    final b = buildEveningBriefFromState(task, focus, habit, forDay: when);
     await svc.scheduleBriefing(true, task.briefingEveningHour,
         task.briefingEveningMinute,
         title: b.title, body: b.lines.join('\n'));
@@ -162,7 +182,11 @@ Future<void> rescheduleBriefings(
     await svc.cancelBriefing(true);
   }
   if (task.briefingMorningEnabled) {
-    final b = buildMorningBriefFromState(task, focus, habit);
+    // P1-8：晨报几乎总在「前一天」排好（如周一 21:00 排周二 07:30），
+    // 必须按投递日聚合，否则会把周一的待办当成周二的今日待办推给用户。
+    final when = svc.nextBriefingTime(
+        task.briefingMorningHour, task.briefingMorningMinute);
+    final b = buildMorningBriefFromState(task, focus, habit, forDay: when);
     await svc.scheduleBriefing(false, task.briefingMorningHour,
         task.briefingMorningMinute,
         title: b.title, body: b.lines.join('\n'));
