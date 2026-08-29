@@ -9,6 +9,7 @@ import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
 import android.net.Uri
+import android.util.Log
 import android.view.View
 import android.widget.RemoteViews
 import org.json.JSONObject
@@ -29,6 +30,7 @@ class TodayWidgetProvider : AppWidgetProvider() {
     companion object {
         /** 小组件任务项点击时，原生侧带此 extra 启动 MainActivity，再由 Dart 直达任务详情页。 */
         const val EXTRA_TASK_ID = "com.example.todolist.EXTRA_TASK_ID"
+        private const val TAG = "TodayWidget"
         private const val kDbName = "youtiao.db"
         private const val MAX_ITEMS = 8
         /// 桌面小组件设置（与 App 侧 SharedPreferences 同文件、同 key）。P2-5。
@@ -60,6 +62,16 @@ class TodayWidgetProvider : AppWidgetProvider() {
         }
 
         private fun buildRemoteViews(context: Context): RemoteViews {
+            return try {
+                buildRemoteViewsInternal(context)
+            } catch (e: Exception) {
+                // 任何构建异常都不应导致系统小组件宿主直接失败（MIUI 等会报「载入窗口小部件时出现问题」）。
+                Log.e(TAG, "buildRemoteViews failed, using fallback", e)
+                fallbackRemoteViews(context)
+            }
+        }
+
+        private fun buildRemoteViewsInternal(context: Context): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.widget_today)
             views.setTextViewText(R.id.date, todayDisplay())
             // P2-5：是否隐藏任务标题（用户可在「设置 → 桌面小组件隐藏标题」开启）。
@@ -91,9 +103,9 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 // P2-5：隐藏标题时显示占位（标题内容不落桌面），meta（截止/逾期）仍保留。
                 item.setTextViewText(R.id.item_title, if (hideTitles) "••••••" else t.title)
                 item.setTextViewText(R.id.item_meta, t.meta)
-                // data URI 保证每个任务项的 PendingIntent 唯一（避免 requestCode 碰撞）。
+                // requestCode 用任务 id hashCode，配合 data URI 确保每个任务项 PendingIntent 唯一。
                 val pi = PendingIntent.getActivity(
-                    context, 0,
+                    context, t.id.hashCode(),
                     Intent(context, MainActivity::class.java).apply {
                         putExtra(EXTRA_TASK_ID, t.id)
                         data = Uri.parse("widget://task/${t.id}")
@@ -104,6 +116,25 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 item.setOnClickPendingIntent(R.id.item_root, pi)
                 views.addView(R.id.list, item)
             }
+            return views
+        }
+
+        /** 构建失败时的兜底视图：只显示头部和空状态，避免系统小组件宿主报错。 */
+        private fun fallbackRemoteViews(context: Context): RemoteViews {
+            val views = RemoteViews(context.packageName, R.layout.widget_today)
+            views.setTextViewText(R.id.date, todayDisplay())
+            views.setTextViewText(R.id.empty, "今天没有任务 🎉")
+            views.setViewVisibility(R.id.empty, View.VISIBLE)
+            views.setViewVisibility(R.id.list, View.GONE)
+            val openApp = PendingIntent.getActivity(
+                context, 0,
+                Intent(context, MainActivity::class.java).apply {
+                    action = Intent.ACTION_MAIN
+                    addCategory(Intent.CATEGORY_LAUNCHER)
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            views.setOnClickPendingIntent(R.id.header, openApp)
             return views
         }
 
@@ -357,9 +388,15 @@ class TodayWidgetProvider : AppWidgetProvider() {
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray,
     ) {
-        for (appWidgetId in appWidgetIds) {
+        try {
+            // 多个 widget 复用同一 RemoteViews 即可。
             val views = Companion.buildRemoteViews(context)
-            appWidgetManager.updateAppWidget(appWidgetId, views)
+            for (appWidgetId in appWidgetIds) {
+                appWidgetManager.updateAppWidget(appWidgetId, views)
+            }
+        } catch (e: Exception) {
+            // 最后一道防线：onUpdate 绝不能把异常抛给系统小组件宿主。
+            Log.e(TAG, "onUpdate failed", e)
         }
     }
 }
