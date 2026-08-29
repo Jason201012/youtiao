@@ -274,4 +274,139 @@ void main() {
       expect(t.repeatWeekdays, isNotEmpty);
     });
   });
+
+  group('P1-5 日期区间', () {
+    test('周X~周X：起点落 startDate，终点落截止日', () {
+      // 基准 2026-08-09 是周日：裸写「周日」= 今天，裸写「周五」= 最近的周五 = 08-14
+      final r = _p('周五~周日 出差');
+      expect(r.startDate, DateTime(2026, 8, 9));
+      expect(r.dueDate, DateTime(2026, 8, 14, 9, 0));
+      expect(r.title, '出差');
+    });
+
+    test('明天到后天：「到」作为区间连接词，且顺序颠倒时自动归位', () {
+      final r = _p('后天到明天 出差');
+      expect(r.startDate, DateTime(2026, 8, 10));
+      expect(r.dueDate, DateTime(2026, 8, 11, 9, 0));
+    });
+
+    test('绝对日期区间：3月1日-3月5日（今年已过则顺延到明年）', () {
+      final r = _p('3月1日-3月5日 出差');
+      expect(r.startDate, DateTime(2027, 3, 1));
+      expect(r.dueDate, DateTime(2027, 3, 5, 9, 0));
+    });
+
+    test('任一端无法解析时整体放弃，回退为普通单日期', () {
+      final r = _p('周五~出差');
+      expect(r.startDate, isNull);
+      expect(r.dueDate, DateTime(2026, 8, 14, 9, 0)); // 退化为「周五」
+    });
+  });
+
+  group('P1-5 预估时长', () {
+    test('N分钟 / N小时 / N小时N分 / N min', () {
+      expect(_p('看书 45分钟').estimateMinutes, 45);
+      expect(_p('写方案 2小时').estimateMinutes, 120);
+      expect(_p('开会 1小时30分').estimateMinutes, 90);
+      expect(_p('跑步 30min').estimateMinutes, 30);
+    });
+
+    test('时长不误伤时间：下午3点30分 只认时间不认时长', () {
+      final r = _p('下午3点30分 开会');
+      expect(r.estimateMinutes, isNull);
+      expect(r.dueDate, DateTime(2026, 8, 9, 15, 30));
+    });
+
+    test('裸写「N分」不解析（与时间点高度混淆，宁漏勿错）', () {
+      expect(_p('看书 45分').estimateMinutes, isNull);
+    });
+
+    test('兜底：0 与超出 30 天的数值被丢弃', () {
+      expect(_p('看书 0分钟').estimateMinutes, isNull);
+      expect(_p('写书 9999小时').estimateMinutes, isNull);
+    });
+
+    test('时长被识别后从标题中剔除', () {
+      expect(_p('看书 45分钟').title, '看书');
+    });
+  });
+
+  group('P1-5 地点', () {
+    test('@公司 解析为地点并从标题剔除', () {
+      final r = _p('面试 @公司');
+      expect(r.location, '公司');
+      expect(r.title, '面试');
+    });
+
+    test('全角＠同样生效', () {
+      expect(_p('面试 ＠公司').location, '公司');
+    });
+
+    test('地点与标签互不干扰', () {
+      // 注意：「#工作」是预置分类词，会被识别为分类而非标签，故此处用非分类词
+      final r = _p('面试 @公司 #紧急');
+      expect(r.location, '公司');
+      expect(r.tags, ['紧急']);
+    });
+  });
+
+  group('P1-5 备注合成', () {
+    test('仅地点', () {
+      expect(_p('面试 @公司').toTask().note, '@公司');
+    });
+
+    test('仅时长', () {
+      expect(_p('看书 45分钟').toTask().note, '预计45分钟');
+    });
+
+    test('两者兼有以「 · 」连接', () {
+      expect(_p('面试 @公司 45分钟').toTask().note, '@公司 · 预计45分钟');
+    });
+
+    test('无地点无时长时备注为空串（不污染既有数据）', () {
+      expect(_p('买牛奶').toTask().note, '');
+    });
+  });
+
+  group('P1-9 每月最后一天 / 倒数第 N 天', () {
+    test('每月最后一天', () {
+      final r = _p('每月最后一天 交房租');
+      expect(r.repeat, RepeatType.monthly);
+      expect(r.monthlyFromEnd, 1);
+      expect(r.title, '交房租');
+    });
+
+    test('每月月底（同义写法）', () {
+      expect(_p('每月月底 结算').monthlyFromEnd, 1);
+    });
+
+    test('倒数第 2 天：阿拉伯数字与中文数字均可', () {
+      expect(_p('每月倒数第2天 盘点').monthlyFromEnd, 2);
+      expect(_p('每月倒数第二天 盘点').monthlyFromEnd, 2);
+    });
+
+    test('倒数第 3 天', () {
+      expect(_p('每月倒数第3天 对账').monthlyFromEnd, 3);
+    });
+
+    test('不误伤「每月最后一个周日」', () {
+      final r = _p('每月最后一个周日 复盘');
+      expect(r.monthlyFromEnd, 0);
+      expect(r.monthlyWeekIndex, 5);
+      expect(r.monthlyWeekday, 7);
+    });
+
+    test('不误伤「每月15号」', () {
+      final r = _p('每月15号 交房租');
+      expect(r.monthlyFromEnd, 0);
+      expect(r.monthlyDay, 15);
+    });
+
+    test('落地到 Task 后 repeatsOn 生效', () {
+      final t = _p('每月最后一天 交房租').toTask();
+      expect(t.monthlyFromEnd, 1);
+      expect(t.repeatsOn(DateTime(2026, 1, 31)), isTrue);
+      expect(t.repeatsOn(DateTime(2026, 1, 30)), isFalse);
+    });
+  });
 }

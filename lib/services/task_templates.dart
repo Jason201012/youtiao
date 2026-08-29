@@ -288,15 +288,39 @@ class UserTemplate {
             .map((e) => TemplateItem.fromJson(Map<String, dynamic>.from(e)))
             .toList()
         : const <TemplateItem>[];
+    // 安全（P1-A）：id 直接用作文件名（`<documents>/templates/user/<id>.json`），
+    // 外部 JSON 携带的 id 必须过白名单，非法则重新分配——杜绝 `../../backup/auto/...`
+    // 这类路径穿越覆盖 App 私有文档目录内的任意 .json（含自动备份快照）。
     return UserTemplate(
-      id: (j['id'] as String?) ?? _uid(),
+      id: sanitizeTemplateId(j['id'] as String?),
       name: (j['name'] as String?) ?? '未命名模板',
       description: (j['description'] as String?) ?? '',
       iconName: (j['icon'] as String?) ?? 'checklist',
-      items: items,
+      items: items.length > UserTemplateStore.maxItems
+          ? items.sublist(0, UserTemplateStore.maxItems)
+          : items,
     );
   }
+
+  /// 导入专用：无条件丢弃外部 id 并重新分配（id 只作本地文件名标识，用户既不
+  /// 可见也不应控制）。这是 P1-A 的「更强」一档，与 [fromJson] 的净化互为双保险。
+  factory UserTemplate.fromImportedJson(Map<String, dynamic> j) =>
+      UserTemplate.fromJson({...j, 'id': _uid()});
 }
+
+/// 模板 id 安全白名单（与 `AttachmentService._isSafeSegment` 同口径）：
+/// 仅允许字母数字、点、下划线、连字符；禁空串、`.`、`..` 及任何含 `/` `\` `..` 的串。
+/// 任何 id 落盘前必须先过此关，否则一律重新分配。
+bool isSafeTemplateId(String s) {
+  if (s.isEmpty || s.length > 128) return false;
+  if (s == '.' || s == '..') return false;
+  if (s.contains('..') || s.contains('/') || s.contains('\\')) return false;
+  return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(s);
+}
+
+/// 把任意来源的 id 收敛为安全值：不合法则重新分配一个本地 id（永不抛错，便于兜底）。
+String sanitizeTemplateId(String? raw) =>
+    (raw != null && isSafeTemplateId(raw)) ? raw : _uid();
 
 /// 用户模板的本地存储（私有目录 JSON，每模板一个文件）。
 /// 严格离线：仅文件读写，不联网；「导出分享」是把 JSON 交给系统分享面板。
@@ -311,7 +335,34 @@ class UserTemplateStore {
     return d;
   }
 
+  /// 把经白名单校验的文件名拼到目录内，并在拼装后断言结果确实落在 [dir] 之内
+  /// （双重防护，与 `AttachmentService._safeFileFor` 同思路）。不安全则抛 [ArgumentError]。
+  static File _safeFileFor(Directory dir, String fileName) {
+    if (fileName.isEmpty || fileName.length > 140) {
+      throw ArgumentError('非法模板文件名');
+    }
+    if (fileName == '.' ||
+        fileName == '..' ||
+        fileName.contains('..') ||
+        fileName.contains('/') ||
+        fileName.contains('\\') ||
+        !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(fileName)) {
+      throw ArgumentError('非法模板文件名：$fileName');
+    }
+    final absDir = dir.absolute.path;
+    final sep = Platform.pathSeparator;
+    final file = File('$absDir$sep$fileName');
+    if (!file.absolute.path.startsWith('$absDir$sep')) {
+      throw ArgumentError('模板路径越过目录边界：$fileName');
+    }
+    return file;
+  }
+
   /// 读取全部用户模板（按名称排序；损坏文件跳过）。
+  ///
+  /// 安全（P1-A）：以**文件名为 id 的权威来源**——即便 JSON 内容里躺着
+  /// `../../backup/auto/2026-08-28` 这样的恶意 id，也永远不会进入内存模型，
+  /// 后续的编辑 / 删除 / 覆盖都只会作用于该文件自身。
   static Future<List<UserTemplate>> loadAll() async {
     try {
       final d = await _dir();
@@ -323,9 +374,12 @@ class UserTemplateStore {
       final out = <UserTemplate>[];
       for (final f in files) {
         try {
+          final name = f.path.split(Platform.pathSeparator).last;
+          final id = name.substring(0, name.length - '.json'.length);
+          if (!isSafeTemplateId(id)) continue; // 非法文件名跳过
           final m =
               jsonDecode(await f.readAsString()) as Map<String, dynamic>;
-          out.add(UserTemplate.fromJson(m));
+          out.add(UserTemplate.fromJson({...m, 'id': id}));
         } catch (_) {
           // 损坏的模板文件跳过，不阻断其余模板加载。
         }
@@ -338,16 +392,20 @@ class UserTemplateStore {
   }
 
   /// 保存（新增或覆盖，按 [UserTemplate.id] 同名文件）。
+  /// 安全（P1-A）：id 先经 [sanitizeTemplateId] 净化，路径再经 [_safeFileFor] 断言。
   static Future<void> save(UserTemplate t) async {
     final d = await _dir();
-    final file = File('${d.path}/${t.id}.json');
-    await file.writeAsString(jsonEncode(t.toJson()));
+    final id = sanitizeTemplateId(t.id);
+    final file = _safeFileFor(d, '$id.json');
+    await file.writeAsString(jsonEncode(t.toJson()..['id'] = id));
   }
 
-  /// 删除指定 id 的模板文件。
+  /// 删除指定 id 的模板文件。安全（P1-A）：与 [save] 同款净化 + 路径断言，
+  /// 防止历史遗留的恶意 id 模板在删除时越界删文件。
   static Future<void> delete(String id) async {
     final d = await _dir();
-    final file = File('${d.path}/$id.json');
+    if (!isSafeTemplateId(id)) return; // 非法 id 直接忽略，绝不拼进路径
+    final file = _safeFileFor(d, '$id.json');
     if (await file.exists()) await file.delete();
   }
 

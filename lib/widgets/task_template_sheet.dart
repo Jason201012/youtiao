@@ -63,7 +63,8 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
     if (raw == null) return;
     try {
       final m = jsonDecode(raw) as Map<String, dynamic>;
-      final t = UserTemplate.fromJson(m);
+      // 安全（P1-A）：导入时无条件丢弃外部 id 重新分配，杜绝 id 携带路径穿越段。
+      final t = UserTemplate.fromImportedJson(m);
       if (t.items.isEmpty) {
         if (ctx.mounted) {
           ScaffoldMessenger.of(ctx)

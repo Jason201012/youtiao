@@ -43,6 +43,9 @@ class MainActivity : FlutterFragmentActivity() {
     /// P1-11：分享附件单次导入的体积上限（字节），与 AttachmentService.maxImportFileBytes 对齐（200 MB）。
     /// 超过则直接拒绝落盘，防止本地超大文件被当作附件滥用。
     private val MAX_SHARE_BYTES = 200L * 1024 * 1024
+    /// P2-D：`share_inbox` 会话目录的最大存活时长（与 AttachmentService.staleStagingMaxAge 对齐）。
+    /// 超过则启动时兜底清理，避免异常路径残留让私有缓存无限增长。
+    private val SHARE_INBOX_MAX_AGE_MS = 24L * 60 * 60 * 1000
     /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity，再经此通道让 Dart 直达详情页。
     private val CHANNEL_WIDGET_NAV = "com.example.todolist/widget_nav"
     private var widgetNavHandler: MethodChannel? = null
@@ -360,9 +363,29 @@ class MainActivity : FlutterFragmentActivity() {
     /// 缓存文本，待 configureFlutterEngine 注册通道后补发；引擎已就绪则直接发送。
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // P2-D：先把上次异常退出残留的 share_inbox 旧目录清掉，再处理本次 intent。
+        cleanupStaleShareInbox()
         dispatchShareText(intent)
         dispatchShareStream(intent)
         dispatchWidgetTask(intent)
+    }
+
+    /// P2-D：`share_inbox` 启动兜底清理。正常路径下 Dart 侧消费完附件后会删除缓存目录，
+    /// 但「引擎被系统杀死 / pendingShareUriMeta 从未被消费 / 导入前 return」等异常路径会
+    /// 留下 `<cache>/share_inbox/<sessionId>/`。这里清掉超过 24h 的旧会话目录。
+    private fun cleanupStaleShareInbox() {
+        try {
+            val root = File(cacheDir, "share_inbox")
+            if (!root.exists()) return
+            val cutoff = System.currentTimeMillis() - SHARE_INBOX_MAX_AGE_MS
+            root.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && dir.lastModified() < cutoff) {
+                    dir.deleteRecursively()
+                }
+            }
+        } catch (_: Exception) {
+            // 清理失败不阻断启动。
+        }
     }
 
     /// 热分享（App 已在前台，launchMode=singleTop）：新分享 intent 走 onNewIntent 而非重建 Activity，
@@ -439,7 +462,8 @@ class MainActivity : FlutterFragmentActivity() {
         }
         // 复制到应用私有缓存目录（getCacheDir == Flutter getTemporaryDirectory），离线、不联网。
         val sessionId = "${System.currentTimeMillis()}_${(Math.random() * 100000).toInt()}"
-        val safeName = sanitizeSharedName(displayName ?: "shared_$sessionId")
+        val fallbackName = "shared_$sessionId"
+        val safeName = sanitizeSharedName(displayName ?: fallbackName, fallbackName)
         val outDir = File(getCacheDir(), "share_inbox/$sessionId")
         if (!outDir.mkdirs() && !outDir.exists()) return
         val outFile = File(outDir, safeName)
@@ -485,9 +509,13 @@ class MainActivity : FlutterFragmentActivity() {
 
     /// P1-11：把来源提供的显示名净化为安全文件名（仅保留字母数字、点、下划线、连字符与中文，
     /// 其余替换为下划线），杜绝 content URI 显示名携带路径穿越字符写入私有缓存目录。
-    private fun sanitizeSharedName(raw: String): String {
+    private fun sanitizeSharedName(raw: String, fallback: String): String {
         val cleaned = raw.replace(Regex("[^\\w.\\-一-龥]"), "_")
-        return if (cleaned.isEmpty()) "shared" else cleaned
+        // 安全（P2-B）：正则白名单保留了点号，来源显示名恰为 "." / ".." 时结果仍是危险的
+        // 相对路径段（File(outDir, "..") 指向父目录）。这里显式拒绝并回退，而不是依赖
+        // 「OS 写目录会失败」兜底。
+        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return fallback
+        return cleaned
     }
 
     /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity 后，把任务 id

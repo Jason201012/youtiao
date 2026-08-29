@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/habit_nudge.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -166,5 +168,51 @@ Future<void> rescheduleBriefings(
         title: b.title, body: b.lines.join('\n'));
   } else {
     await svc.cancelBriefing(false);
+  }
+}
+
+/// P1-7 重排「习惯漏卡挽留」通知：每天 23:00 提醒一次「今天该打卡却还没打卡」的习惯。
+///
+/// 与简报同一套路——文案在**调度时**烘焙（系统闹钟到点时 App 未必在内存），
+/// 因此需要在启动、回到前台、习惯或打卡变动时重排，让内容跟上最新口径。
+///
+/// 兜底策略：
+/// - 通知总开关关闭 → 直接取消，不排；
+/// - 今天没有漏卡（含「已全部打卡」和「今天本就不该打卡」）→ 取消而非排一条空的；
+/// - 多个习惯漏卡 → 聚合成**一条**通知，避免 23:00 连弹 N 条变成骚扰；
+/// - 全程包 try/catch——挽留是锦上添花，任何失败都不该影响主流程。
+///
+/// 调用点：`main.dart` 启动后、`AppLifecycleState.resumed` 时（与简报并排）。
+Future<void> rescheduleHabitNudge(HabitProvider habit) async {
+  final svc = NotificationService.instance;
+  try {
+    if (!svc.enabled) {
+      await svc.cancelHabitNudge();
+      return;
+    }
+    final now = DateTime.now();
+    // 先算已打卡集合：只遍历一次 habits，避免 missedOn 内部反复调用 isCheckedToday。
+    final checkedIds = habit.habits
+        .where(habit.isCheckedToday)
+        .map((h) => h.id)
+        .toSet();
+    final missed = HabitNudge.missedOn(habit.habits, now, checkedIds);
+    if (missed.isEmpty) {
+      await svc.cancelHabitNudge();
+      return;
+    }
+    final t = HabitNudge.text(
+      missed,
+      // currentStreak 用 allowTodayGap：今天没打卡时是从昨天往回数，
+      // 补上今天才等于它 + 1，故这里 +1 才是「补卡后的连续天数」。
+      streakAfterCheckIn: (h) => habit.currentStreak(h) + 1,
+    );
+    // 单个漏卡时带上具体 id，点击直达该习惯；多个则落习惯页由用户自己挑。
+    final payload = missed.length == 1
+        ? '${NotificationService.payloadHabitPrefix}${missed.first.id}'
+        : NotificationService.payloadHabitPrefix;
+    await svc.scheduleHabitNudge(title: t.title, body: t.body, payload: payload);
+  } catch (e) {
+    debugPrint('[HabitNudge] 重排失败：$e');
   }
 }

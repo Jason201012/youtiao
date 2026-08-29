@@ -71,6 +71,13 @@ class FocusSession {
   /// 本次会话所属阶段：专注 / 短休 / 长休。统计时仅 [focus] 计入"今日专注"与"番茄数"。
   final FocusPhase phase;
 
+  /// P0-4：本次专注被「切出 App」打断的次数（仅 [phase]==[FocusPhase.focus] 统计）。
+  ///
+  /// 判定口径：专注进行中 App 进入后台，且离开超过 [FocusProvider.interruptThresholdSec]
+  /// 才算一次打断——短暂切出去回消息、接电话不计入，避免噪声。
+  /// 旧数据无此字段时反序列化为 0（向后兼容，零迁移）。
+  final int interruptCount;
+
   final DateTime startedAt;
   final DateTime endedAt;
 
@@ -82,6 +89,7 @@ class FocusSession {
     required this.durationSec,
     required this.completed,
     this.phase = FocusPhase.focus,
+    this.interruptCount = 0,
     required this.startedAt,
     required this.endedAt,
   });
@@ -94,6 +102,7 @@ class FocusSession {
         'durationSec': durationSec,
         'completed': completed,
         'phase': phase.name,
+        'interruptCount': interruptCount,
         'startedAt': startedAt.toIso8601String(),
         'endedAt': endedAt.toIso8601String(),
       };
@@ -106,6 +115,7 @@ class FocusSession {
         durationSec: j['durationSec'] as int? ?? 0,
         completed: j['completed'] as bool? ?? false,
         phase: FocusPhase.values.byName(j['phase'] as String? ?? 'focus'),
+        interruptCount: j['interruptCount'] as int? ?? 0,
         startedAt: DateTime.parse(j['startedAt'] as String),
         endedAt: DateTime.parse(j['endedAt'] as String),
       );

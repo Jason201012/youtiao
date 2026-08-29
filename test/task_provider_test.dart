@@ -639,4 +639,59 @@ void main() {
       expect(p.weeklyCompletedCount, 0);
     });
   });
+
+  group('P1-6 批量完成的语义前提（快捷键依赖的行为契约）', () {
+    test('batchUpdate 不能改完成态：返回条数照常，但 status 被静默丢弃', () async {
+      final p = await buildWith([mk('a'), mk('b')]);
+      final n = p.batchUpdate(
+        ['a', 'b'],
+        (t) => t.copyWith(status: TaskStatus.done),
+      );
+      // 这正是 HomeScreenState.completeSelected 必须逐条走 toggleDone、
+      // 而不能图省事用 batchUpdate 的原因——否则「看似成功，实则无效」。
+      expect(n, 2, reason: '条数照常返回，容易误判为成功');
+      expect(p.byId('a')!.done, isFalse);
+      expect(p.byId('b')!.done, isFalse);
+    });
+
+    test('toggleDone 能改完成态并写入 completedAt', () async {
+      final p = await buildWith([mk('a')]);
+      p.toggleDone('a');
+      expect(p.byId('a')!.done, isTrue);
+      expect(p.byId('a')!.completedAt, isNotNull);
+    });
+
+    test('混合选区：只完成未完成的，已完成的不会被切回未完成', () async {
+      final p = await buildWith([
+        mk('a'),
+        mk('b', status: TaskStatus.done),
+        mk('c'),
+      ]);
+      // 复刻 HomeScreenState.completeSelected 的过滤 + 切换逻辑
+      final ids = ['a', 'b', 'c'].where((id) {
+        final t = p.byId(id);
+        return t != null && !t.done;
+      }).toList();
+      for (final id in ids) {
+        p.toggleDone(id);
+      }
+      expect(ids, ['a', 'c']);
+      expect(p.byId('a')!.done, isTrue);
+      expect(p.byId('c')!.done, isTrue);
+      expect(p.byId('b')!.done, isTrue, reason: '已完成项必须保持完成');
+    });
+
+    test('空选区不触发任何写入', () async {
+      final p = await buildWith([mk('a')]);
+      final ids = <String>[].where((id) {
+        final t = p.byId(id);
+        return t != null && !t.done;
+      }).toList();
+      for (final id in ids) {
+        p.toggleDone(id);
+      }
+      expect(ids, isEmpty);
+      expect(p.byId('a')!.done, isFalse);
+    });
+  });
 }

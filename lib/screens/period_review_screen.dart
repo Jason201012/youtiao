@@ -166,6 +166,12 @@ class _PeriodReviewScreenState extends State<PeriodReviewScreen> {
                   PeriodHabitBlock(r),
                   const SizedBox(height: 12),
                   PeriodCategoryBlock(r),
+                  const SizedBox(height: 12),
+                  ParetoBlock(r),
+                  if (r.period == ReviewPeriod.year) ...[
+                    const SizedBox(height: 12),
+                    YearTimelineBlock(r),
+                  ],
                 ],
               ),
             ),

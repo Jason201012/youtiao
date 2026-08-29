@@ -435,7 +435,11 @@ class AttachmentService {
   static Future<_OrphanPlan> _planOrphans(List<Task> tasks) async {
     final known = <String, Set<String>>{};
     for (final t in tasks) {
-      known[t.id] = {...t.attachments.map((a) => a.fileName)};
+      // 安全（P2-A）：同 id 时取**并集**而非覆盖。早期写法 `known[t.id] = {...}` 会让
+      // 后一条任务顶掉前一条的附件集合，使较早任务的附件被误判为无主文件——用户执行
+      // 一次「清理无主文件」就会误删真实附件。
+      known.putIfAbsent(t.id, () => <String>{})
+          .addAll(t.attachments.map((a) => a.fileName));
     }
     final plan = _OrphanPlan();
     final base = await _base();

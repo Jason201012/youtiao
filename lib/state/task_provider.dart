@@ -177,6 +177,8 @@ class TaskProvider extends ChangeNotifier {
   static const String _kWidgetHideTitles = 'widget_hide_titles';
   /// P1-13：已归档标签名集合（JSON 数组），归档后首页筛选不可见但数据保留。
   static const String _kArchivedTags = 'archived_tags';
+  /// P0-3：日历月视图是否显示农历 / 节气 / 传统节日（纯离线计算，默认开启）。
+  static const String _kCalendarLunar = 'calendar_lunar';
   bool _autoBackupEnabled = true;
   bool get autoBackupEnabled => _autoBackupEnabled;
   /// 最近一次自动备份成功的本地日期（YYYY-MM-DD），null 表示从未成功过。
@@ -215,6 +217,19 @@ class TaskProvider extends ChangeNotifier {
     await _persistSettings();
     // 设置变化后立即刷新桌面小组件，使其即时应用新的显隐策略。
     requestWidgetRefresh();
+  }
+
+  // ===== P0-3：日历农历 / 节气展示 =====
+  /// 日历月视图每格是否显示农历日与节气 / 传统节日。默认 true——v2.7.0 已支持
+  /// 「农历重复」录入，但日历页不显示农历会形成认知断层（设了农历任务却找不到
+  /// 对应阳历位置）。转换由 `package:lunar` 纯 Dart 离线完成，零联网。
+  bool _calendarLunar = true;
+  bool get calendarLunar => _calendarLunar;
+  Future<void> setCalendarLunar(bool v) async {
+    if (v == _calendarLunar) return;
+    _calendarLunar = v;
+    notifyListeners();
+    await _persistSettings();
   }
 
   // ===== P1-13：全局标签管理 =====
@@ -655,6 +670,7 @@ class TaskProvider extends ChangeNotifier {
     _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
     _widgetHideTitles = prefs.getBool(_kWidgetHideTitles) ?? false;
     _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet(); // P1-13
+    _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true; // P0-3
     _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
     _briefingEveningHour = prefs.getInt(_kBriefEveningH) ?? 22;
     _briefingEveningMinute = prefs.getInt(_kBriefEveningM) ?? 0;
@@ -733,6 +749,7 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kWeeklyGoal, _weeklyGoalCount);
     await prefs.setBool(_kAutoBackup, _autoBackupEnabled);
     await prefs.setBool(_kWidgetHideTitles, _widgetHideTitles);
+    await prefs.setBool(_kCalendarLunar, _calendarLunar); // P0-3
     await prefs.setBool(_kBriefEveningOn, _briefingEveningEnabled);
     await prefs.setInt(_kBriefEveningH, _briefingEveningHour);
     await prefs.setInt(_kBriefEveningM, _briefingEveningMinute);
@@ -1397,15 +1414,29 @@ class TaskProvider extends ChangeNotifier {
   }
 
   int _idSeq = 8;
+
+  /// 外部来源的 id（如 iCal UID 里的 `<数字>@youtiao`）能否安全复用。
+  ///
+  /// 安全（P2-A）：早期实现是「非空且不冲突就照单全收」，带来两个隐患——
+  /// ① 外部 .ics 传入超大 id 时不推进 `_idSeq`，后续新建任务会再次拿到同一 id；
+  /// ② 传入与既有任务相同的 id 会把真实任务内容整体改写。
+  /// 这里收紧为：纯数字 + 数值落在当前自增序列已覆盖区间（`< _idSeq`）+ 无同 id 任务。
+  bool _canReuseExternalId(String id) {
+    if (id.isEmpty) return false;
+    final n = int.tryParse(id);
+    if (n == null || n <= 0 || n >= _idSeq) return false;
+    return byId(id) == null;
+  }
+
   /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间或每日提醒则调度。
   /// 返回创建后的 [Task]（含已分配 id），便于调用方把暂存附件目录提升为正式目录
   /// （见 [new_task_sheet] 的附件保存流程）。
   Task addTask(Task task) {
-    // P0-3：若调用方传入了非空且不与现有任务冲突的 id（如 iCal 导入的 youtiao UID），
+    // P0-3：若调用方传入了可安全复用的 id（如 iCal 导入的 youtiao UID），
     // 则保留该 id，使「从有条导出再导回」能稳定去重；否则用自增序列分配新 id。
-    final useId = task.id.isNotEmpty && byId(task.id) == null
-        ? task.id
-        : (_idSeq++).toString();
+    // 安全（P2-A）：见 [_canReuseExternalId]——不再无条件信任外部 id。
+    final useId =
+        _canReuseExternalId(task.id) ? task.id : (_idSeq++).toString();
     var newTask = task.copyWith(
       id: useId,
       // A1：落库时统一计算拼音首字母，保证所有新建入口（NL 快速录入等）都自动覆盖。
@@ -1447,7 +1478,21 @@ class TaskProvider extends ChangeNotifier {
       //  1) youtiao UID（task.id 非空即解析层写入的数字 id）→ byId 直查；
       //  2) 指纹去重开启且非 youtiao 来源 → 标题 + 截止日期匹配。
       Task? existing;
-      if (task.id.isNotEmpty) existing = byId(task.id);
+      if (task.id.isNotEmpty) {
+        final byUid = byId(task.id);
+        if (byUid == null) {
+          // 无同 id 任务 → 走新增分支（addTask 内部还会再校验 id 是否可复用）。
+        } else if (_fingerprintKey(byUid) == _fingerprintKey(task)) {
+          existing = byUid; // id + 指纹双一致 → 确实是从「有条」导出过的同一条任务
+        } else {
+          // 安全（P2-A）：id 撞上了用户已有的**另一条**真实任务（第三方 .ics 可枚举出
+          // 小整数 id），但内容指纹不一致。此时绝不能按「覆盖」把真实任务改写掉——
+          // 丢弃可疑 id，作为一条全新任务导入。
+          addTask(task.copyWith(id: ''));
+          added++;
+          continue;
+        }
+      }
       if (existing == null &&
           fingerprint &&
           (uid == null || !uid.endsWith('@youtiao'))) {
@@ -1463,6 +1508,8 @@ class TaskProvider extends ChangeNotifier {
         skipped++;
       }
     }
+    // 安全（P2-A）：导入可能带入外部 id，重算自增起点，杜绝后续新建任务 id 碰撞。
+    _recomputeIdSeq();
     return (added: added, skipped: skipped, overwritten: overwritten);
   }
 
@@ -1515,6 +1562,40 @@ class TaskProvider extends ChangeNotifier {
     }
     notifyListeners();
     _persist();
+  }
+
+  /// P0-1：批量编辑。对 [ids] 命中的任务逐一应用 [transform] 后落库。
+  /// 复用 [updateTask] 而非直接改内存，确保提醒重排 / 拼音重算 / 持久化等既有
+  /// 逻辑一致生效（避免走捷径导致「改了期但提醒没重挂」这类经典回归）。
+  /// 返回实际更新的条数；未命中的 id 静默跳过。
+  /// P0-1：对 [ids] 批量施加 [transform]，返回实际更新条数。
+  ///
+  /// ⚠️ **不能用于修改完成态**。`updateTask` 会强制保留任务原有的 `status`、
+  /// `completedAt`、`focusSecTotal`、`order`，因此 transform 里传 `status: done`
+  /// 会被**静默丢弃**（返回条数照常，看起来成功实则无效）。
+  /// 要改完成态请逐条调用 [toggleDone] / [setStatus]——它们还会顺带重排重复提醒。
+  int batchUpdate(List<String> ids, Task Function(Task) transform) {
+    if (ids.isEmpty) return 0;
+    // 先快照再逐条更新：[updateTask] 会改动 _tasks，边遍历边改不安全。
+    final targets = ids.map(byId).whereType<Task>().toList();
+    for (final t in targets) {
+      updateTask(transform(t));
+    }
+    return targets.length;
+  }
+
+  /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。
+  /// 语义是「改期」而非「加天数」——过期多久都拉到同一天，重复任务的重锚点不受影响，
+  /// 提醒由 [updateTask] 统一重排。无截止日期的任务原样保留。返回实际更新条数。
+  int postponeTo(List<String> ids, DateTime targetDay) {
+    return batchUpdate(ids, (t) {
+      final d = t.dueDate;
+      if (d == null) return t;
+      return t.copyWith(
+        dueDate: DateTime(
+            targetDay.year, targetDay.month, targetDay.day, d.hour, d.minute),
+      );
+    });
   }
 
   // ===== 删除（移入回收站，带撤销）=====

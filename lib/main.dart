@@ -160,28 +160,91 @@ class _EscapeIntent extends Intent {
   const _EscapeIntent();
 }
 
+/// P1-6：切换到第 [index] 个底部 Tab（0=首页 … 5=设置）。
+class _SwitchTabIntent extends Intent {
+  const _SwitchTabIntent(this.index);
+
+  /// 目标 Tab 下标；越界由 Action 兜底忽略，不抛异常。
+  final int index;
+}
+
+/// P1-6：`Cmd/Ctrl+Enter` 完成首页当前选中的任务。
+class _CompleteSelectedIntent extends Intent {
+  const _CompleteSelectedIntent();
+}
+
+/// 底部 Tab 数量（首页/看板/日历/专注/习惯/设置），同时是数字键的上限。
+const int _tabCount = 6;
+
+/// 数字键 1..6 的 key 常量，顺序与 Tab 下标严格一致。
+const List<LogicalKeyboardKey> _digitKeys = [
+  LogicalKeyboardKey.digit1,
+  LogicalKeyboardKey.digit2,
+  LogicalKeyboardKey.digit3,
+  LogicalKeyboardKey.digit4,
+  LogicalKeyboardKey.digit5,
+  LogicalKeyboardKey.digit6,
+];
+
 /// P1-9：Ctrl/Cmd 组合键映射（同时照顾 Windows/Linux 的 Ctrl 与 macOS 的 Cmd）。
 /// Esc 单独成组，用于关闭最上层模态路由 / 退出首页搜索。
+/// P1-6 追加数字键切 Tab 与 `Cmd/Ctrl+Enter` 完成选中项。
 /// 注意：`LogicalKeySet` 构造非 const，故整个映射不可声明为 const（保持顶层 final）。
-final Map<ShortcutActivator, Intent> _appShortcuts = {
-  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyK):
-      const _OpenQuickEntryIntent(),
-  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyK):
-      const _OpenQuickEntryIntent(),
-  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyN):
-      const _NewTaskIntent(),
-  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyN):
-      const _NewTaskIntent(),
-  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyF):
-      const _FocusSearchIntent(),
-  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyF):
-      const _FocusSearchIntent(),
-  LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyP):
-      const _OpenCommandPaletteIntent(),
-  LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyP):
-      const _OpenCommandPaletteIntent(),
-  LogicalKeySet(LogicalKeyboardKey.escape): const _EscapeIntent(),
-};
+final Map<ShortcutActivator, Intent> _appShortcuts = _buildAppShortcuts();
+
+/// 构造全局快捷键表。拆成函数是为了用循环批量登记数字键，避免 18 行手写重复。
+Map<ShortcutActivator, Intent> _buildAppShortcuts() {
+  final m = <ShortcutActivator, Intent>{
+    LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyK):
+        const _OpenQuickEntryIntent(),
+    LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyK):
+        const _OpenQuickEntryIntent(),
+    LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyN):
+        const _NewTaskIntent(),
+    LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyN):
+        const _NewTaskIntent(),
+    LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyF):
+        const _FocusSearchIntent(),
+    LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyF):
+        const _FocusSearchIntent(),
+    LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.keyP):
+        const _OpenCommandPaletteIntent(),
+    LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.keyP):
+        const _OpenCommandPaletteIntent(),
+    LogicalKeySet(LogicalKeyboardKey.escape): const _EscapeIntent(),
+  };
+
+  // P1-6：数字键切 Tab。成对登记三种形态：
+  // - `Cmd/Ctrl+数字`：零冲突主入口（同浏览器切标签页惯例），任何场景都生效；
+  // - 裸数字键：更快的入口，但会与文本输入抢字符，故由 Action 内的焦点判定兜底放行。
+  for (var i = 0; i < _tabCount && i < _digitKeys.length; i++) {
+    final key = _digitKeys[i];
+    m[LogicalKeySet(LogicalKeyboardKey.control, key)] = _SwitchTabIntent(i);
+    m[LogicalKeySet(LogicalKeyboardKey.meta, key)] = _SwitchTabIntent(i);
+    m[LogicalKeySet(key)] = _SwitchTabIntent(i);
+  }
+
+  // P1-6：完成首页选中项。只绑组合键——裸 Enter 要留给确认/换行等默认行为。
+  m[LogicalKeySet(LogicalKeyboardKey.control, LogicalKeyboardKey.enter)] =
+      const _CompleteSelectedIntent();
+  m[LogicalKeySet(LogicalKeyboardKey.meta, LogicalKeyboardKey.enter)] =
+      const _CompleteSelectedIntent();
+  return m;
+}
+
+/// P1-6 兜底：当前焦点是否落在文本输入框内。
+///
+/// 裸数字键是全局快捷键，若用户在搜索框、备注框里打字时被截获，会吞掉字符输入。
+/// 因此先判焦：命中输入框就放行，让事件继续走系统默认行为（字符照常录入）。
+/// 判定方式是从焦点节点的 context 向上找最近的 [EditableText]——`Focus` 由
+/// `EditableText` 内部构建、是它的后代，故能命中。无焦点、未挂载或找不到一律
+/// 按「非输入」处理，宁可切 Tab 也不吞掉功能键。
+bool _isEditingText() {
+  final node = FocusManager.instance.primaryFocus;
+  final ctx = node?.context;
+  if (ctx == null || !ctx.mounted) return false;
+  return ctx.findAncestorWidgetOfExactType<EditableText>() != null;
+}
 
 /// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
 void _handleNotificationTap(String? payload) {
@@ -344,6 +407,12 @@ void main() async {
     await rescheduleBriefings(task, focus, habit);
   } catch (e) {
     debugPrint('[DailyBriefing] 调度简报失败：$e');
+  }
+  // P1-7：启动后重排「习惯漏卡挽留」（内部已包 try/catch，这里再兜一层）。
+  try {
+    await rescheduleHabitNudge(habit);
+  } catch (e) {
+    debugPrint('[HabitNudge] 调度挽留失败：$e');
   }
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
@@ -596,6 +665,32 @@ class _MainScaffoldState extends State<MainScaffold>
       try {
         Provider.of<AppLockProvider>(context, listen: false).onResumed();
       } catch (_) {}
+      // P0-4：切回前台时结算「专注被打断」次数（离开超阈值才计数，并弹挽留通知）。
+      try {
+        Provider.of<FocusProvider>(context, listen: false).noteAppResumed();
+      } catch (_) {}
+      // P1-8（部分修复）：简报正文是「调度时烘焙」的，若当天一直没打开 App，
+      // 到点弹出的会是启动那刻的旧数据。这里在每次回到前台时用最新 Provider
+      // 状态重烘焙并重排，使简报反映「最后一次打开 App 时」的真实数据。
+      // 局限：完全不开 App 的整天仍无法刷新——那需要在触发前用后台闹钟重烘焙，
+      // 属更大改动，留待后续。scheduleBriefing 内部会把时刻推到下一次未来出现，
+      // 故重排绝不会导致简报立即弹出。
+      try {
+        final task = Provider.of<TaskProvider>(context, listen: false);
+        if (task.notificationsEnabled) {
+          rescheduleBriefings(
+            task,
+            Provider.of<FocusProvider>(context, listen: false),
+            Provider.of<HabitProvider>(context, listen: false),
+          );
+          // P1-7：挽留正文同样是「调度时烘焙」，回到前台时用最新打卡状态重排，
+          // 否则白天打完卡后 23:00 仍会误报「还没打卡」。cancel/schedule 由函数
+          // 内部按当前漏卡情况自行决定，无漏卡时会撤掉已排的通知。
+          rescheduleHabitNudge(
+            Provider.of<HabitProvider>(context, listen: false),
+          );
+        }
+      } catch (_) {}
     }
     // 进程即将转入后台/被杀：把主题首选项重新落盘，规避 shared_preferences.apply()
     // 在激进 ROM 上杀进程时丢写（纯黑背景等唯一非默认项最易暴露）。
@@ -605,6 +700,10 @@ class _MainScaffoldState extends State<MainScaffold>
       // 规避 shared_preferences.apply() 在激进 ROM（ColorOS 等）上杀进程时丢写。
       try {
         Provider.of<ThemeProvider>(context, listen: false).persist();
+      } catch (_) {}
+      // P0-4：先记下切出时刻（供切回时判定是否构成一次打断），再落盘。
+      try {
+        Provider.of<FocusProvider>(context, listen: false).noteAppPaused();
       } catch (_) {}
       try {
         Provider.of<FocusProvider>(context, listen: false).persist();
@@ -638,6 +737,30 @@ class _MainScaffoldState extends State<MainScaffold>
     if (_homeSearching) {
       _homeKey.currentState?.exitSearch();
     }
+  }
+
+  /// P1-6：`Cmd/Ctrl+Enter` 与命令面板 `/done` **共用**的落地逻辑。
+  /// 返回实际完成条数。
+  ///
+  /// 兜底：选中态只存在于首页，在其它 Tab 上触发时给出明确提示而非静默失败；
+  /// 一条都没选中时也提示，避免用户以为命令执行了。
+  int _completeSelectedAndNotify(BuildContext context) {
+    if (_index != 0) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先回到首页勾选任务')),
+        );
+      }
+      return 0;
+    }
+    final n = _homeKey.currentState?.completeSelected() ?? 0;
+    if (!context.mounted) return n;
+    ScaffoldMessenger.of(context).showSnackBar(
+      n > 0
+          ? SnackBar(content: Text('已完成 $n 条任务'))
+          : const SnackBar(content: Text('还没有勾选任何任务')),
+    );
+    return n;
   }
 
   @override
@@ -718,6 +841,9 @@ class _MainScaffoldState extends State<MainScaffold>
                       context,
                       currentIndex: _index,
                       onPick: (i) => setState(() => _index = i),
+                      // P1-6：面板内 `/done` 命令落地到同一套逻辑。
+                      onCompleteSelected: () =>
+                          _completeSelectedAndNotify(context),
                     );
                     return null;
                   },
@@ -725,6 +851,33 @@ class _MainScaffoldState extends State<MainScaffold>
                 _EscapeIntent: CallbackAction<_EscapeIntent>(
                   onInvoke: (_) {
                     _handleEscape();
+                    return null;
+                  },
+                ),
+                _SwitchTabIntent: CallbackAction<_SwitchTabIntent>(
+                  onInvoke: (intent) {
+                    // 兜底 1：越界下标直接忽略，Tab 数量变动时不会崩。
+                    if (intent.index < 0 || intent.index >= _tabCount) {
+                      return null;
+                    }
+                    // 兜底 2：搜索态下底部导航是隐藏的，切 Tab 会让界面失去
+                    // 退出搜索的入口，故一律忽略，由 Esc 退出。
+                    if (_homeSearching) return null;
+                    // 兜底 3：裸数字键在输入框聚焦时放行，避免吞掉字符。
+                    // （Cmd/Ctrl+数字 不受此限，见 _buildAppShortcuts 说明。）
+                    if (_isEditingText()) return null;
+                    if (_index != intent.index) {
+                      setState(() => _index = intent.index);
+                    }
+                    return null;
+                  },
+                ),
+                _CompleteSelectedIntent:
+                    CallbackAction<_CompleteSelectedIntent>(
+                  onInvoke: (_) {
+                    // 输入框聚焦时不拦截，保留 Enter 的换行语义。
+                    if (_isEditingText()) return null;
+                    _completeSelectedAndNotify(context);
                     return null;
                   },
                 ),

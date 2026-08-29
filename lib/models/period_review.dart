@@ -100,6 +100,13 @@ class PeriodReview {
   /// 区间内专注去向 Top（按累计秒数降序，最多 3 条，仅含带任务名的会话）。
   final List<TaskFocusStat> focusTop;
 
+  /// 区间内按分类聚合的专注秒数（仅带任务且任务仍存在的专注阶段计入对应分类）。
+  /// 用于「80/20 投入分析」：哪些分类吃掉了大部分专注时间。
+  final Map<Category, int> focusByCategory;
+
+  /// 区间内未关联到任何任务的专注秒数（自由专注 / 任务已删除）。
+  final int focusUntrackedSec;
+
   /// 每个活动习惯在区间内的达成情况（按达成率降序）。
   final List<HabitPeriodStat> habits;
 
@@ -123,6 +130,8 @@ class PeriodReview {
     required this.bestBucketCount,
     required this.categoryCount,
     required this.focusTop,
+    required this.focusByCategory,
+    required this.focusUntrackedSec,
     required this.habits,
   });
 
@@ -244,11 +253,20 @@ class PeriodReview {
       }
     }
 
-    // —— 专注 ——
+    // —— 专注（含分类聚合）——
     int focusSec = 0;
     int prevFocusSec = 0;
     int pomodoroCount = 0;
     final focusMap = <String, TaskFocusStat>{};
+    // 任务 id → 分类 速查表，用于把专注秒数归到分类（任务删除后归为「未关联」）。
+    final catById = <String, Category>{};
+    for (final t in task.tasks) {
+      catById[t.id] = t.category;
+    }
+    final focusByCategory = <Category, int>{
+      for (final c in Category.values) c: 0
+    };
+    int focusUntrackedSec = 0;
     for (final s in focus.sessions) {
       final d = _dateOnly(s.endedAt);
       if (s.phase == FocusPhase.focus &&
@@ -259,6 +277,13 @@ class PeriodReview {
       if (s.phase == FocusPhase.focus) {
         focusSec += s.durationSec;
         if (s.completed) pomodoroCount++;
+        // 分类聚合：自由专注（无任务）或任务已删除 → 计入「未关联」。
+        final cat = s.taskId != null ? catById[s.taskId!] : null;
+        if (cat != null) {
+          focusByCategory[cat] = focusByCategory[cat]! + s.durationSec;
+        } else {
+          focusUntrackedSec += s.durationSec;
+        }
       }
       if (s.taskId == null) continue;
       final ex = focusMap[s.taskId!];
@@ -330,6 +355,8 @@ class PeriodReview {
       bestBucketCount: bestBucketCount,
       categoryCount: categoryCount,
       focusTop: focusTop,
+      focusByCategory: focusByCategory,
+      focusUntrackedSec: focusUntrackedSec,
       habits: habits,
     );
   }

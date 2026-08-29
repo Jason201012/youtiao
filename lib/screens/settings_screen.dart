@@ -474,6 +474,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // P0-3 日历农历：默认开启，与「农历重复」录入形成展示闭环。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.brightness_4,
+                        label: '日历显示农历',
+                        subtitle: '月视图每格显示农历日与节气 / 传统节日（离线计算）',
+                        switchValue: provider.calendarLunar,
+                        onSwitchChanged: (v) => provider.setCalendarLunar(v),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     // A4 应用锁：基于系统生物识别；设备不支持时禁用并提示。
                     // v2.6.4+：验证失败/不可用时系统弹窗允许降级用手机锁屏密码。
                     Consumer<AppLockProvider>(

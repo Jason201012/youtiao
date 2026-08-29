@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
+import 'package:todolist/services/lunar_calendar.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -271,6 +272,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final strong = level >= 3;
     final textColor =
         strong ? Colors.white : (isFuture ? ext.meta.withAlpha(150) : onBg);
+    // P0-3：农历 / 节气 / 传统节日标注（纯离线换算；设置项关闭时留空不渲染）。
+    final lunar = provider.calendarLunar ? lunarLabelOf(date) : LunarLabel.empty;
 
     return DragTarget<Task>(
       onWillAcceptWithDetails: (details) => !details.data.done,
@@ -295,11 +298,34 @@ class _CalendarScreenState extends State<CalendarScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('$dayNum',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: isToday ? FontWeight.bold : FontWeight.w500,
-                      color: textColor)),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Text('$dayNum',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight:
+                              isToday ? FontWeight.bold : FontWeight.w500,
+                          color: textColor)),
+                  const SizedBox(width: 2),
+                  // P0-3：农历小字靠右对齐，格子窄时自动省略，不挤压日期数字。
+                  if (lunar.text.isNotEmpty)
+                    Expanded(
+                      child: Text(
+                        lunar.text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.end,
+                        style: TextStyle(
+                          fontSize: 9,
+                          color: lunar.isFestival
+                              ? (strong ? Colors.white : ext.accent)
+                              : textColor.withAlpha(170),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
               const SizedBox(height: 2),
               if (dueTasks.isNotEmpty)
                 ...[

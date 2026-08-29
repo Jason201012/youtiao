@@ -55,20 +55,11 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- 接收「分享」文本：从微信/QQ 等把一段文字转发给「有条」直接建任务 -->
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
-            <!-- P1-11：接收「分享」图片：从相册/文件管理器等把单张图片发给「有条」建任务并挂附件 -->
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
-            </intent-filter>
-            <!-- P1-11：接收「分享」任意文件：从文件管理器等把单个文件发给「有条」建任务并挂附件
-                 （*/* 同时覆盖 image/* 与 audio/* 等；文本分享由上方 text/plain 精确匹配，不会重复出现） -->
+            <!-- 接收「分享」：文本（微信/QQ 转发一段文字）、图片、任意文件统一在此入口接收。
+                 P2-C：早期并列声明了 text/plain、image/*、*/* 三个过滤器，而 */* 本身就能匹配
+                 前两者，导致系统分享面板里「有条」重复出现、且同一 intent 被重复分发。
+                 现合并为单一 */* 过滤器，原生侧按「有无 EXTRA_STREAM」分流：
+                 有 → dispatchShareStream（附件建任务），无 → dispatchShareText（文本建任务）。 -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

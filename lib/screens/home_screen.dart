@@ -20,6 +20,7 @@ import 'package:todolist/screens/period_review_screen.dart';
 import 'package:todolist/screens/today_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
+import 'package:todolist/widgets/batch_edit_sheet.dart';
 import 'package:todolist/services/update_checker.dart';
 import 'package:todolist/services/search_index.dart';
 import 'package:todolist/widgets/update_dialog.dart';
@@ -189,6 +190,18 @@ class HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  /// P0-1：批量编辑已选项（改日期 / 优先级 / 分类 / 追加标签 / 置顶）。
+  void _editSelected(BuildContext context) async {
+    final ids = _selected.toList();
+    if (ids.isEmpty) return;
+    final n = await BatchEditSheet.show(context, ids);
+    if (n == null || n == 0 || !context.mounted) return;
+    _exitSelect();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已更新 $n 条任务')),
+    );
+  }
+
   /// 批量删除已选项，并弹出带撤销的提示
   void _deleteSelected(BuildContext context) {
     final ids = _selected.toList();
@@ -198,6 +211,32 @@ class HomeScreenState extends State<HomeScreen> {
     provider.deleteTasks(ids);
     _exitSelect();
     _showBatchUndoSnackBar(context, provider, count);
+  }
+
+  /// P1-6：供桌面端 `Cmd/Ctrl+Enter` 调用，批量完成当前选中项，返回实际完成条数。
+  ///
+  /// **必须**走 [TaskProvider.toggleDone] 而不是 [TaskProvider.batchUpdate]：
+  /// `updateTask` 会强制保留旧的 `status` 与 `completedAt`，经 batchUpdate 提交的
+  /// 完成态会被静默丢弃（看似成功实则无效）。toggleDone 同时负责重排重复提醒，
+  /// 与点击勾选框的行为完全一致。
+  ///
+  /// 已完成的项会被跳过——快捷键语义是「完成」而非「反选」，
+  /// 否则对混合选区按一次会把已完成的任务又切回未完成。
+  int completeSelected() {
+    if (_selected.isEmpty) return 0;
+    final provider = context.read<TaskProvider>();
+    // 先快照成列表再逐条切换：toggleDone 会改动 _tasks，边遍历边改不安全。
+    final ids = _selected
+        .where((id) {
+          final t = provider.byId(id);
+          return t != null && !t.done;
+        })
+        .toList();
+    for (final id in ids) {
+      provider.toggleDone(id);
+    }
+    if (ids.isNotEmpty) _exitSelect();
+    return ids.length;
   }
 
   /// 单个任务行（含滑动/多选/编辑），两个分区与筛选列表共用。
@@ -261,6 +300,7 @@ class HomeScreenState extends State<HomeScreen> {
     Color? countColor,
     bool alwaysShow = false,
     bool reorderable = false,
+    Widget? headerAction,
   }) {
     // 标签筛选：仅保留含该标签的任务（reorderable 时 _tagFilter 必为 null）。
     final shown = _tagFilter == null
@@ -273,6 +313,7 @@ class HomeScreenState extends State<HomeScreen> {
       count: shown.length,
       chipColor: ext.chip,
       metaColor: countColor ?? ext.meta,
+      action: headerAction,
     );
     final tiles = shown
         .map((t) => _tile(
@@ -526,6 +567,13 @@ class HomeScreenState extends State<HomeScreen> {
                               style: TextStyle(fontSize: 15, color: primary),
                             ),
                           ),
+                          // P0-1：批量编辑（改日期 / 优先级 / 分类 / 标签 / 置顶）
+                          IconButton(
+                            onPressed: () => _editSelected(context),
+                            icon: Icon(Symbols.edit, size: 24, color: primary),
+                            splashRadius: 20,
+                            tooltip: '批量编辑所选',
+                          ),
                           const SizedBox(width: 4),
                           IconButton(
                             onPressed: () => _deleteSelected(context),
@@ -653,8 +701,16 @@ class HomeScreenState extends State<HomeScreen> {
                           if (filter == TaskFilter.all) ...[
                             // 拖拽重排仅在默认全量视图、无标签筛选时启用
                             // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
+                            // P0-2：逾期区头部「顺延」入口——一键把全部逾期任务改到
+                            // 今天 / 明天 / +N 天，省去逐条改期。
                             ..._section(context, '逾期', 'overdue', overdue, ext,
-                                countColor: error, reorderable: canReorder),
+                                countColor: error,
+                                reorderable: canReorder,
+                                headerAction: overdue.isEmpty
+                                    ? null
+                                    : _PostponeButton(
+                                        ids: overdue.map((t) => t.id).toList(),
+                                      )),
                             // 今天：今天到期（唯一常驻分区，为空也保留标题）
                             ..._section(context, '今天', 'today', today, ext,
                                 alwaysShow: canReorder, reorderable: canReorder),
@@ -792,11 +848,15 @@ class _SectionHeader extends StatelessWidget {
   final int count;
   final Color chipColor;
   final Color metaColor;
+
+  /// P0-2：标题右侧的分区级操作（目前仅「逾期」区使用，放「一键顺延」入口）。
+  final Widget? action;
   const _SectionHeader({
     required this.title,
     required this.count,
     required this.chipColor,
     required this.metaColor,
+    this.action,
   });
 
   @override
@@ -807,12 +867,21 @@ class _SectionHeader extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // 字号统一走 _sectionTitleFontSize，保证各分区标题一样大
-          Text(title,
-              style: TextStyle(
-                  fontSize: _sectionTitleFontSize,
-                  fontWeight: FontWeight.bold,
-                  color: onBg)),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 字号统一走 _sectionTitleFontSize，保证各分区标题一样大
+              Text(title,
+                  style: TextStyle(
+                      fontSize: _sectionTitleFontSize,
+                      fontWeight: FontWeight.bold,
+                      color: onBg)),
+              if (action != null) ...[
+                const SizedBox(width: 10),
+                action!,
+              ],
+            ],
+          ),
           Container(
             height: 19,
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -826,6 +895,107 @@ class _SectionHeader extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// P0-2：逾期区头部的「顺延」入口——把该区全部任务整体改期到今天 / 明天 / +N 天，
+/// 省去「逾期堆积后逐条改期」的机械劳动。改期走 [TaskProvider.postponeTo]，
+/// 提醒由既有链路统一重排。
+class _PostponeButton extends StatelessWidget {
+  final List<String> ids;
+  const _PostponeButton({required this.ids});
+
+  Future<void> _postpone(BuildContext context, DateTime day) async {
+    final n = context.read<TaskProvider>().postponeTo(ids, day);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('已顺延 $n 条任务')));
+  }
+
+  /// 自定义天数：弹窗输入后按「今天 + N 天」改期。
+  Future<void> _custom(BuildContext context) async {
+    final ctl = TextEditingController(text: '3');
+    final days = await showDialog<int>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('顺延天数'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(hintText: '输入天数，如 3'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(d), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(d, int.tryParse(ctl.text.trim())),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    ctl.dispose();
+    if (days == null || days <= 0 || !context.mounted) return;
+    final now = DateTime.now();
+    await _postpone(
+        context, DateTime(now.year, now.month, now.day).add(Duration(days: days)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return PopupMenuButton<String>(
+      padding: EdgeInsets.zero,
+      tooltip: '一键顺延',
+      child: Container(
+        height: 26,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: primary.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(AppColors.chipRadius),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Symbols.schedule, size: 15, color: primary),
+            const SizedBox(width: 4),
+            Text('顺延',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: primary,
+                    fontWeight: FontWeight.w500)),
+          ],
+        ),
+      ),
+      onSelected: (v) async {
+        switch (v) {
+          case 'today':
+            await _postpone(context, today);
+            break;
+          case 'tomorrow':
+            await _postpone(context, today.add(const Duration(days: 1)));
+            break;
+          case 'custom':
+            await _custom(context);
+            break;
+          default:
+            final d = int.tryParse(v);
+            if (d != null) {
+              await _postpone(context, today.add(Duration(days: d)));
+            }
+        }
+      },
+      itemBuilder: (_) => const [
+        PopupMenuItem(value: 'today', child: Text('顺延到今天')),
+        PopupMenuItem(value: 'tomorrow', child: Text('顺延到明天')),
+        PopupMenuItem(value: '3', child: Text('顺延 3 天')),
+        PopupMenuItem(value: '7', child: Text('顺延 7 天')),
+        PopupMenuItem(value: 'custom', child: Text('自定义天数…')),
+      ],
     );
   }
 }

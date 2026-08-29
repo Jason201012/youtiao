@@ -13,7 +13,10 @@ import 'package:todolist/models/task.dart';
 import 'package:lunar/lunar.dart';
 
 /// 被识别出来的片段类型（供 UI 渲染 chip / 高亮）。
-enum TokenKind { date, time, priority, category, tag, repeat, reminder }
+///
+/// [duration] / [location] 为 P1-5 新增：注意 `quick_entry_sheet.dart` 里
+/// 对 [TokenKind] 的 switch **没有 default**，新增枚举值必须同步补 case。
+enum TokenKind { date, time, priority, category, tag, repeat, reminder, duration, location }
 
 /// 一个被识别的片段：记录它在原串中的位置与语义。
 class ParseSegment {
@@ -77,8 +80,22 @@ class ParsedTask {
   final int? monthlyWeekday;
   final int? monthlyWeekIndex;
 
+  /// 每月倒数第 N 天（P1-9）：0 = 未启用，1 = 最后一天，2/3 = 倒数第 2/3 天。
+  final int monthlyFromEnd;
+
   /// 提醒提前量（分钟）：一次性截止提醒在到期前该分钟数触发。null=未识别。
   final int? reminderOffsetMin;
+
+  /// 区间起点（如「周五~周日」中的周五）。仅识别到区间时有意义（P1-5）。
+  ///
+  /// 复用 [Task.startDate] 承载，不新增模型字段。
+  final DateTime? startDate;
+
+  /// 地点（`@公司`）。P1-5 新增，当前落到备注，不新增模型字段。
+  final String? location;
+
+  /// 预估时长（分钟，如「45分钟」）。P1-5 新增，当前落到备注，不新增模型字段。
+  final int? estimateMinutes;
 
   /// 全部识别片段，按在原串中的位置升序
   final List<ParseSegment> segments;
@@ -99,7 +116,11 @@ class ParsedTask {
     this.monthlyDay = 1,
     this.monthlyWeekday,
     this.monthlyWeekIndex,
+    this.monthlyFromEnd = 0,
     this.reminderOffsetMin,
+    this.startDate,
+    this.location,
+    this.estimateMinutes,
     this.segments = const [],
     this.anchorBase,
   });
@@ -110,6 +131,19 @@ class ParsedTask {
   /// 标题是否可用（空标题不允许创建任务）
   bool get isValid => title.isNotEmpty;
 
+  /// 由「地点 + 预估时长」合成的备注正文（P1-5）。
+  ///
+  /// 刻意不新增模型字段——避免动到备份 JSON schema 与迁移逻辑，
+  /// 待未来与专注预设打通时再提升为结构化字段。
+  String get composedNote {
+    final parts = <String>[];
+    if (location != null && location!.isNotEmpty) parts.add('@$location');
+    if (estimateMinutes != null && estimateMinutes! > 0) {
+      parts.add('预计${TaskParser.formatDuration(estimateMinutes!)}');
+    }
+    return parts.join(' · ');
+  }
+
   /// 转成可入库的任务。[id] 留空由 TaskProvider 生成。
   Task toTask() {
     final anchor = anchorBase ?? DateTime.now();
@@ -119,6 +153,8 @@ class ParsedTask {
       priority: priority ?? Priority.medium,
       category: category ?? Category.work,
       dueDate: dueDate,
+      startDate: startDate,
+      note: composedNote,
       repeat: repeat,
       repeatWeekdays: repeat == RepeatType.weekly
           ? (repeatWeekdays.isNotEmpty ? repeatWeekdays : [DateTime.monday])
@@ -128,6 +164,7 @@ class ParsedTask {
       monthlyDay: monthlyDay,
       monthlyWeekday: monthlyWeekday,
       monthlyWeekIndex: monthlyWeekIndex,
+      monthlyFromEnd: monthlyFromEnd,
       reminderOffsetMin: reminderOffsetMin ?? 0,
       repeatAnchor:
           repeat == RepeatType.interval ? DateTime(anchor.year, anchor.month, anchor.day) : null,
@@ -142,8 +179,26 @@ const Map<String, int> _weekdayMap = {
   '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7,
 };
 
+/// 小写中文数字 → 数值（供「倒数第N天」的中文写法使用，P1-9）
+const Map<String, int> _cnSmallNum = {'一': 1, '二': 2, '三': 3};
+
 /// 无显式时间时，截止时刻默认落在早上 9 点
 const int _defaultHour = 9;
+
+/// 单个日期词的正则片段。
+///
+/// 提取为常量是为了让「区间」匹配能复用同一套日期词（P1-5）：
+/// 内部捕获组序号 1..6 被 [_resolveDate] 依赖，用 `(?:...)` 包裹做整体匹配时
+/// 序号保持不变，因此原函数无需改动。
+const String _dateWord = r'大后天|后天|明天|明日|今天|今日'
+    r'|下下(?:周|星期|礼拜)[一二三四五六日天]'
+    r'|下(?:周|星期|礼拜)[一二三四五六日天]'
+    r'|(?:本|这)(?:周|星期|礼拜)[一二三四五六日天]'
+    r'|(?:周|星期|礼拜)[一二三四五六日天]'
+    r'|(\d{1,2})月(\d{1,2})[日号]'
+    r'|(\d{1,2})[/](\d{1,2})'
+    r'|(\d+)天后'
+    r'|(\d+)周后';
 
 class TaskParser {
   /// 解析入口。[now] 用于注入「当前时间」，便于单元测试；生产环境留空即可。
@@ -167,8 +222,12 @@ class TaskParser {
     var monthlyDay = 1;
     int? monthlyWeekday;
     int? monthlyWeekIndex;
+    var monthlyFromEnd = 0;
     int? reminderOffsetMin;
     DateTime? datePart;
+    DateTime? startDatePart;
+    String? location;
+    int? estimateMinutes;
     int? hour;
     int? minute;
 
@@ -206,6 +265,17 @@ class TaskParser {
         if (!tags.contains(word)) tags.add(word);
         mark(m.start, m.end, TokenKind.tag, '#$word');
       }
+    }
+
+    // ── 1.5 地点：`@公司`（P1-5）—— 落到备注，不新增模型字段 ────────
+    // 与 `#标签` 同属显式前缀，紧随标签之后处理。
+    for (final m in RegExp(r'[@＠]([^\s@＠#＃!！]+)').allMatches(src)) {
+      if (location != null) break;
+      if (!free(m.start, m.end)) continue;
+      final word = m.group(1)!;
+      if (word.isEmpty) continue;
+      location = word;
+      mark(m.start, m.end, TokenKind.location, '地点·$word');
     }
 
     // ── 2. 优先级：只认「!+明确词」或多个感叹号，单个裸 `!` 不解析 ────
@@ -255,54 +325,80 @@ class TaskParser {
 
     // ── 3.5 每月重复（必须在日期前解析，避免与「N月N日」冲突）──
     if (repeat == RepeatType.none) {
-      // 每月最后一个周日 / 每月第2个周一
-      final mNth = RegExp(r'每月(最后一个|最后|第([1-5])个)(?:周|星期|礼拜)([一二三四五六日天])');
-      final mn = mNth.firstMatch(src);
-      if (mn != null && free(mn.start, mn.end)) {
-        final wd = _weekdayMap[mn.group(3)!]!;
-        final idxRaw = mn.group(2);
-        final idx = idxRaw != null ? int.parse(idxRaw) : 5; // 「最后」→ 5
+      // 3.5.0 每月最后一天 / 月底 / 倒数第 N 天（P1-9）——语义最明确，最先判定。
+      // 与「每月最后一个周日」不冲突：后者后面必跟周几，本分支要求「一天 / 月底 / 倒数第N天」。
+      final mEnd = RegExp(r'每月(?:最后一天|月底|倒数第([1-3一二三])[天日])');
+      final me = mEnd.firstMatch(src);
+      if (me != null && free(me.start, me.end)) {
+        final raw = me.group(1);
+        final n = raw == null
+            ? 1
+            : (int.tryParse(raw) ?? _cnSmallNum[raw] ?? 1).clamp(1, 3);
         repeat = RepeatType.monthly;
-        monthlyWeekday = wd;
-        monthlyWeekIndex = idx;
-        const names = ['一', '二', '三', '四', '五', '六', '日'];
-        final w = names[(wd - 1).clamp(0, 6)];
-        final idxLabel = idx == 5 ? '最后' : '第$idx个';
-        mark(mn.start, mn.end, TokenKind.repeat, '每月$idxLabel周$w');
+        monthlyFromEnd = n;
+        mark(me.start, me.end, TokenKind.repeat,
+            n == 1 ? '每月最后一天' : '每月倒数第$n天');
       } else {
-        // 每月15号 / 每月15 / 每月（裸写默认 1 号）
-        final mDay = RegExp(r'每月(\d{1,2})[日号]?');
-        final md = mDay.firstMatch(src);
-        if (md != null && free(md.start, md.end)) {
-          final d = int.parse(md.group(1)!).clamp(1, 31);
+        // 每月最后一个周日 / 每月第2个周一
+        final mNth = RegExp(r'每月(最后一个|最后|第([1-5])个)(?:周|星期|礼拜)([一二三四五六日天])');
+        final mn = mNth.firstMatch(src);
+        if (mn != null && free(mn.start, mn.end)) {
+          final wd = _weekdayMap[mn.group(3)!]!;
+          final idxRaw = mn.group(2);
+          final idx = idxRaw != null ? int.parse(idxRaw) : 5; // 「最后」→ 5
           repeat = RepeatType.monthly;
-          monthlyDay = d;
-          mark(md.start, md.end, TokenKind.repeat, '每月${d}号');
+          monthlyWeekday = wd;
+          monthlyWeekIndex = idx;
+          const names = ['一', '二', '三', '四', '五', '六', '日'];
+          final w = names[(wd - 1).clamp(0, 6)];
+          final idxLabel = idx == 5 ? '最后' : '第$idx个';
+          mark(mn.start, mn.end, TokenKind.repeat, '每月$idxLabel周$w');
         } else {
-          final mBare = RegExp(r'每月');
-          final mb = mBare.firstMatch(src);
-          if (mb != null && free(mb.start, mb.end)) {
+          // 每月15号 / 每月15 / 每月（裸写默认 1 号）
+          final mDay = RegExp(r'每月(\d{1,2})[日号]?');
+          final md = mDay.firstMatch(src);
+          if (md != null && free(md.start, md.end)) {
+            final d = int.parse(md.group(1)!).clamp(1, 31);
             repeat = RepeatType.monthly;
-            monthlyDay = 1;
-            mark(mb.start, mb.end, TokenKind.repeat, '每月1号');
+            monthlyDay = d;
+            mark(md.start, md.end, TokenKind.repeat, '每月${d}号');
+          } else {
+            final mBare = RegExp(r'每月');
+            final mb = mBare.firstMatch(src);
+            if (mb != null && free(mb.start, mb.end)) {
+              repeat = RepeatType.monthly;
+              monthlyDay = 1;
+              mark(mb.start, mb.end, TokenKind.repeat, '每月1号');
+            }
           }
         }
       }
     }
 
+    // ── 3.9 日期区间：`周五~周日` / `明天到后天` / `3月1日-3月5日`（P1-5）──
+    // 必须排在单日期之前，否则「周五」会先被日期规则吃掉。
+    // 兜底：任一端解析不出就整体放弃，自动回退到普通日期解析。
+    // 命中后 datePart 即被占用，步骤 4 的单日期规则会自动跳过（`datePart != null` 即 break）。
+    // 必须用命名组：_dateWord 内部自带 6 个捕获组，会挤占后续编号，
+    // 按位置取 group(2) 取到的是内层「月」而非第二个日期词。
+    final rangeRe =
+        RegExp('(?<from>$_dateWord)\\s*[~～\\-—至到]\\s*(?<to>$_dateWord)');
+    final rm = rangeRe.firstMatch(src);
+    if (rm != null && free(rm.start, rm.end)) {
+      final a = _resolveDateWord(rm.namedGroup('from')!, base);
+      final b = _resolveDateWord(rm.namedGroup('to')!, base);
+      if (a != null && b != null) {
+        final s = a.isBefore(b) ? a : b;
+        final e = a.isBefore(b) ? b : a;
+        startDatePart = s;
+        datePart = e;
+        mark(rm.start, rm.end, TokenKind.date,
+            '${_dateLabel(s, base)} → ${_dateLabel(e, base)}');
+      }
+    }
+
     // ── 4. 日期 ────────────────────────────────────────────────
-    final dateRe = RegExp(
-      r'大后天|后天|明天|明日|今天|今日'
-      r'|下下(?:周|星期|礼拜)[一二三四五六日天]'
-      r'|下(?:周|星期|礼拜)[一二三四五六日天]'
-      r'|(?:本|这)(?:周|星期|礼拜)[一二三四五六日天]'
-      r'|(?:周|星期|礼拜)[一二三四五六日天]'
-      r'|(\d{1,2})月(\d{1,2})[日号]'
-      r'|(\d{1,2})[/](\d{1,2})'
-      r'|(\d+)天后'
-      r'|(\d+)周后',
-    );
-    for (final m in dateRe.allMatches(src)) {
+    for (final m in RegExp(_dateWord).allMatches(src)) {
       if (datePart != null) break;
       if (!free(m.start, m.end)) continue;
       final d = _resolveDate(m, base);
@@ -384,6 +480,28 @@ class TaskParser {
       mark(om.start, om.end, TokenKind.reminder, label);
     }
 
+    // ── 5.6 预估时长：`45分钟` / `2小时30分` / `90min`（P1-5）────────
+    // 排在时间规则之后：`3点30分` 已被时间吃掉，这里不会重复占用。
+    // 刻意不认裸「N分」（与「3点30分」高度混淆），遵循宁漏勿错。
+    final durRe = RegExp(
+      r'(\d{1,4})\s*(?:小时|时)(?:\s*(\d{1,2})\s*分)?|(\d{1,4})\s*分钟|(\d{1,4})\s*min',
+    );
+    for (final m in durRe.allMatches(src)) {
+      if (estimateMinutes != null) break;
+      if (!free(m.start, m.end)) continue;
+      final h = m.group(1);
+      int mins;
+      if (h != null) {
+        mins = int.parse(h) * 60 + (int.tryParse(m.group(2) ?? '') ?? 0);
+      } else {
+        mins = int.tryParse(m.group(3) ?? m.group(4) ?? '') ?? 0;
+      }
+      // 兜底：超出 0 < n <= 30 天 视为误判，不占用字符
+      if (mins <= 0 || mins > 30 * 24 * 60) continue;
+      estimateMinutes = mins;
+      mark(m.start, m.end, TokenKind.duration, '预计${formatDuration(mins)}');
+    }
+
     // ── 6. 合并日期与时间 ──────────────────────────────────────
     DateTime? due;
     if (datePart != null || hour != null) {
@@ -424,10 +542,22 @@ class TaskParser {
       monthlyDay: monthlyDay,
       monthlyWeekday: monthlyWeekday,
       monthlyWeekIndex: monthlyWeekIndex,
+      monthlyFromEnd: monthlyFromEnd,
       reminderOffsetMin: reminderOffsetMin,
+      startDate: startDatePart,
+      location: location,
+      estimateMinutes: estimateMinutes,
       segments: segments,
       anchorBase: base,
     );
+  }
+
+  /// 分钟数 → 人类可读时长（`45分钟` / `2小时` / `2小时30分`）。
+  static String formatDuration(int mins) {
+    if (mins < 60) return '$mins分钟';
+    final h = mins ~/ 60;
+    final m = mins % 60;
+    return m == 0 ? '$h小时' : '$h小时$m分';
   }
 
   // ── 私有工具 ────────────────────────────────────────────────
@@ -514,6 +644,17 @@ class TaskParser {
   }
 
   /// 把日期正则的一次命中转换为具体日期（date-only）
+  /// 把单个日期词（如「周五」「明天」「3月5日」）解析为日期。
+  ///
+  /// 复用 [_resolveDate]：用仅含该词的正则造一次匹配，因其内部捕获组序号
+  /// 与 [_dateWord] 完全一致，原函数无需任何改动。
+  /// 注意 `(?:...)` 非捕获组是必须的——否则 `^A|B$` 的交替会击穿首尾锚点。
+  static DateTime? _resolveDateWord(String raw, DateTime base) {
+    final m = RegExp('^(?:$_dateWord)\$').firstMatch(raw);
+    if (m == null) return null;
+    return _resolveDate(m, base);
+  }
+
   static DateTime? _resolveDate(RegExpMatch m, DateTime base) {
     final raw = m.group(0)!;
     final today = DateTime(base.year, base.month, base.day);

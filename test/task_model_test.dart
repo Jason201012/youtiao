@@ -478,4 +478,78 @@ void main() {
       expect(t2.id, '3');
     });
   });
+
+  group('P1-9 每月倒数第 N 天（monthlyFromEnd）', () {
+    Task mk({int fromEnd = 0, int day = 1, int? wd, int? wi}) => Task(
+          id: 'm1',
+          title: '房租',
+          priority: Priority.medium,
+          category: Category.work,
+          repeat: RepeatType.monthly,
+          monthlyFromEnd: fromEnd,
+          monthlyDay: day,
+          monthlyWeekday: wd,
+          monthlyWeekIndex: wi,
+        );
+
+    test('最后一天：大小月与闰年自动适配', () {
+      final t = mk(fromEnd: 1);
+      expect(t.repeatsOn(DateTime(2026, 1, 31)), isTrue); // 1 月 31 天
+      expect(t.repeatsOn(DateTime(2026, 1, 30)), isFalse);
+      expect(t.repeatsOn(DateTime(2026, 2, 28)), isTrue); // 2026 平年
+      expect(t.repeatsOn(DateTime(2026, 2, 27)), isFalse);
+      expect(t.repeatsOn(DateTime(2026, 4, 30)), isTrue); // 4 月 30 天
+      expect(t.repeatsOn(DateTime(2026, 4, 29)), isFalse);
+      expect(t.repeatsOn(DateTime(2024, 2, 29)), isTrue); // 2024 闰年
+    });
+
+    test('倒数第 2 / 3 天', () {
+      final t2 = mk(fromEnd: 2);
+      expect(t2.repeatsOn(DateTime(2026, 1, 30)), isTrue);
+      expect(t2.repeatsOn(DateTime(2026, 1, 31)), isFalse);
+      expect(t2.repeatsOn(DateTime(2026, 2, 27)), isTrue);
+
+      final t3 = mk(fromEnd: 3);
+      expect(t3.repeatsOn(DateTime(2026, 1, 29)), isTrue);
+      expect(t3.repeatsOn(DateTime(2026, 2, 26)), isTrue);
+    });
+
+    test('优先级高于 monthlyDay 与「第 N 个周几」', () {
+      final t = mk(fromEnd: 1, day: 15, wd: 7, wi: 5);
+      expect(t.repeatsOn(DateTime(2026, 1, 31)), isTrue);
+      expect(t.repeatsOn(DateTime(2026, 1, 15)), isFalse);
+    });
+
+    test('repeatSummary 文案', () {
+      expect(mk(fromEnd: 1).repeatSummary, '每月最后一天');
+      expect(mk(fromEnd: 2).repeatSummary, '每月倒数第2天');
+      expect(mk(fromEnd: 3).repeatSummary, '每月倒数第3天');
+    });
+
+    test('JSON 往返保持字段', () {
+      final back = Task.fromJson(mk(fromEnd: 2).toJson());
+      expect(back.monthlyFromEnd, 2);
+    });
+
+    test('旧数据无该字段时缺省为 0（向后兼容，零迁移）', () {
+      final old =
+          Task.fromJson({'id': 'm1', 'title': '房租', 'repeat': 'monthly'});
+      expect(old.monthlyFromEnd, 0);
+      expect(old.repeatsOn(DateTime(2026, 1, 1)), isTrue); // 回落为「每月 1 号」
+    });
+
+    test('copyWith 可更新且缺省保持原值', () {
+      final t = mk(fromEnd: 1);
+      expect(t.copyWith(monthlyFromEnd: 3).monthlyFromEnd, 3);
+      expect(t.copyWith().monthlyFromEnd, 1);
+    });
+
+    test('预览 occurrencesBetween 自动联动（occurrence_sheet 无需改）', () {
+      final occ =
+          mk(fromEnd: 1).occurrencesBetween(DateTime(2026, 1, 1), days: 90);
+      expect(occ, contains(DateTime(2026, 1, 31)));
+      expect(occ, contains(DateTime(2026, 2, 28)));
+      expect(occ, contains(DateTime(2026, 3, 31)));
+    });
+  });
 }

@@ -477,6 +477,32 @@ class _FocusScreenState extends State<FocusScreen> {
                               ),
                             ),
                           ],
+                          // P0-4：本段落的打断次数——让「实际专注质量」在计时页就能看见。
+                          if (hasActive && focus.activeInterruptCount > 0) ...[
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: ext.accent.withOpacity(0.14),
+                                borderRadius:
+                                    BorderRadius.circular(AppColors.chipRadius),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Symbols.phone_iphone,
+                                      size: 13, color: ext.accent),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '已切出 ${focus.activeInterruptCount} 次',
+                                    style: TextStyle(
+                                        fontSize: 12, color: ext.accent),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ],

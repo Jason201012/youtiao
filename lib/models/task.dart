@@ -212,6 +212,13 @@ class Task {
   /// 每月第几个周几的「第几」(1..5，5=最后一个)。与 [monthlyWeekday] 配套使用。
   final int? monthlyWeekIndex;
 
+  /// 每月「倒数第 N 天」(P1-9)：0 = 未启用；1 = 每月最后一天，2 = 倒数第二天，3 = 倒数第三天。
+  ///
+  /// 用于覆盖「月底」这类日期不固定的场景（如「每月最后一天 交房租」），
+  /// 这是按月首计数的 [monthlyDay] 无法表达的语义。
+  /// 三者同时存在时优先级最高（语义最明确）。旧 JSON 无此字段时缺省为 0（向后兼容，零迁移）。
+  final int monthlyFromEnd;
+
   /// 任务备注 / 解释：对任务的补充说明（链接、思路、细节等），可选，默认空串。
   final String note;
 
@@ -273,6 +280,7 @@ class Task {
     this.monthlyDay = 1,
     this.monthlyWeekday,
     this.monthlyWeekIndex,
+    this.monthlyFromEnd = 0,
     this.note = '',
     this.tags = const [],
     this.focusSecTotal = 0,
@@ -310,6 +318,7 @@ class Task {
     int? monthlyDay,
     int? monthlyWeekday,
     int? monthlyWeekIndex,
+    int? monthlyFromEnd,
     String? note,
     List<String>? tags,
     int? focusSecTotal,
@@ -346,6 +355,7 @@ class Task {
         monthlyDay: monthlyDay ?? this.monthlyDay,
         monthlyWeekday: monthlyWeekday ?? this.monthlyWeekday,
         monthlyWeekIndex: monthlyWeekIndex ?? this.monthlyWeekIndex,
+        monthlyFromEnd: monthlyFromEnd ?? this.monthlyFromEnd,
         note: note ?? this.note,
         tags: tags ?? this.tags,
         focusSecTotal: focusSecTotal ?? this.focusSecTotal,
@@ -380,6 +390,7 @@ class Task {
         'monthlyDay': monthlyDay,
         'monthlyWeekday': monthlyWeekday,
         'monthlyWeekIndex': monthlyWeekIndex,
+        'monthlyFromEnd': monthlyFromEnd,
         'note': note,
         'tags': tags,
         'focusSecTotal': focusSecTotal,
@@ -449,6 +460,7 @@ class Task {
       monthlyDay: j['monthlyDay'] as int? ?? 1,
       monthlyWeekday: j['monthlyWeekday'] as int?,
       monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
+      monthlyFromEnd: j['monthlyFromEnd'] as int? ?? 0,
       note: j['note'] as String? ?? '',
       tags: tags,
       focusSecTotal: j['focusSecTotal'] as int? ?? 0,
@@ -546,6 +558,10 @@ class Task {
         final n = repeatInterval < 1 ? 1 : repeatInterval;
         return diff % n == 0;
       case RepeatType.monthly:
+        // 「倒数第 N 天」语义最明确，优先级最高（P1-9）
+        if (monthlyFromEnd > 0) {
+          return day.day == _monthlyFromEndTarget(day.year, day.month, monthlyFromEnd);
+        }
         if (monthlyWeekday != null && monthlyWeekIndex != null) {
           return _monthlyNthWeekday(day, monthlyWeekday!, monthlyWeekIndex!);
         }
@@ -569,6 +585,13 @@ class Task {
   static int _monthlyDayTarget(int y, int m, int day) {
     final dim = DateTime(y, m + 1, 0).day;
     return day.clamp(1, dim);
+  }
+
+  /// 每月倒数第 [n] 天对应的「日」；[n] 为 1 即当月最后一天（P1-9）。
+  /// 小月会自动前移（如倒数第 3 天在 2 月 = 26/27 号），n 超出月长时夹到 1 号。
+  static int _monthlyFromEndTarget(int y, int m, int n) {
+    final dim = DateTime(y, m + 1, 0).day;
+    return (dim - n + 1).clamp(1, dim);
   }
 
   /// yyyy-MM-dd 形式的日期串（date-only，与时区无关，便于 skipDates 精确匹配）。
@@ -630,6 +653,9 @@ class Task {
       case RepeatType.interval:
         return '每${repeatInterval < 1 ? 1 : repeatInterval}天';
       case RepeatType.monthly:
+        if (monthlyFromEnd > 0) {
+          return monthlyFromEnd == 1 ? '每月最后一天' : '每月倒数第$monthlyFromEnd天';
+        }
         if (monthlyWeekday != null && monthlyWeekIndex != null) {
           const names = ['一', '二', '三', '四', '五', '六', '日'];
           final w = names[(monthlyWeekday! - 1).clamp(0, 6)];

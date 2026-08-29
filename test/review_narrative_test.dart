@@ -24,6 +24,8 @@ PeriodReview _period({
   int bestBucketIndex = -1,
   int bestBucketCount = 0,
   Map<Category, int> categoryCount = const {},
+  Map<Category, int> focusByCategory = const {},
+  int focusUntrackedSec = 0,
   List<TaskFocusStat> focusTop = const [],
   List<HabitPeriodStat> habits = const [],
 }) =>
@@ -49,6 +51,8 @@ PeriodReview _period({
       bestBucketCount: bestBucketCount,
       categoryCount: categoryCount,
       focusTop: focusTop,
+      focusByCategory: focusByCategory,
+      focusUntrackedSec: focusUntrackedSec,
       habits: habits,
     );
 

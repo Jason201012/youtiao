@@ -8,6 +8,7 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/models/task.dart' hide Priority;
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
+import 'package:todolist/services/habit_nudge.dart';
 
 /// 本地通知服务（flutter_local_notifications）。
 /// 按任务 dueDate 在本地调度一次性提醒；受 enabled 开关控制。
@@ -47,6 +48,9 @@ class NotificationService {
   /// 专注进行中常驻进度通知固定 id（与完成提醒 [focusDoneNotifyId] 区分，
   /// 避免互相取消）。锁屏可见剩余时间，暂停/停止/完成时取消。
   static const int focusProgressNotifyId = 777778;
+
+  /// P0-4：专注「被切出」挽留通知固定 id（与进度通知区分，避免互相覆盖）。
+  static const int focusInterruptNotifyId = 777779;
 
   /// 专注完成通知的 Android 样式（复用有声渠道，确保完成时能引起注意）。
   AndroidNotificationDetails get _focusDoneAndroid => const AndroidNotificationDetails(
@@ -88,6 +92,12 @@ class NotificationService {
   /// 采用**单个固定 id**（1400000）每天覆盖式更新，把「将于明天被永久删除」的任务
   /// 聚合进同一条通知，避免每任务一条导致通知泛滥。见 [scheduleTrashExpireNotice]。
   static const int trashExpireNotifyId = 1400000;
+
+  /// P1-7 习惯漏卡挽留固定通知 id（1500000）：避开任务/重复/习惯提醒/专注/测试/
+  /// 简报/回收站预告全部段位。与简报同模式——单个固定 id，每次重排覆盖式更新，
+  /// 把当天所有漏卡习惯聚合进同一条通知，避免 23:00 连弹多条。
+  /// 见 [scheduleHabitNudge] 与 `HabitNudge`。
+  static const int habitNudgeNotifyId = 1500000;
 
   /// 通知 payload 前缀：携带任务 id，点击通知时据此跳转到对应任务详情页。
   static const String payloadTaskPrefix = 'task:';
@@ -631,7 +641,8 @@ class NotificationService {
   /// 计算 monthly 任务下一次 occurrence 的「日期+时刻」。
   /// 优先本月目标日；若已过（或 skipToday 且恰为今天）则顺延到下一月。
   /// 「每月 N 号」模式用 [Task.monthlyDay]（溢出夹到当月最后一天）；
-  /// 「第 N 个周几 / 最后一个周几」模式用 [Task.monthlyWeekday]+[Task.monthlyWeekIndex]。
+  /// 「第 N 个周几 / 最后一个周几」模式用 [Task.monthlyWeekday]+[Task.monthlyWeekIndex]；
+  /// 「每月最后一天 / 倒数第 N 天」用 [Task.monthlyFromEnd]（P1-9，优先级最高）。
   tz.TZDateTime? _nextMonthlyOccurrence(Task task, {bool skipToday = false}) {
     if (task.repeatMinute == null) return null;
     final loc = _loc ?? tz.UTC;
@@ -641,6 +652,11 @@ class NotificationService {
     final now = tz.TZDateTime.now(loc);
 
     int targetDay(int y, int mo) {
+      // 倒数第 N 天（P1-9）语义最明确，优先于其余两种模式
+      if (task.monthlyFromEnd > 0) {
+        final dim = DateTime(y, mo + 1, 0).day;
+        return (dim - task.monthlyFromEnd + 1).clamp(1, dim);
+      }
       if (task.monthlyWeekday != null && task.monthlyWeekIndex != null) {
         var d = 1;
         while (DateTime(y, mo, d).weekday != task.monthlyWeekday) {
@@ -1001,6 +1017,71 @@ class NotificationService {
   Future<void> cancelBriefing(bool evening) =>
       _plugin.cancel(evening ? briefingEveningNotifyId : briefingMorningNotifyId);
 
+  /// P1-7：调度「习惯漏卡挽留」通知——每天 [HabitNudge.nudgeMinute]（23:00）
+  /// 重复触发一条本地通知（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
+  ///
+  /// 文案由调用方在**排程时**烘焙（[HabitNudge.text]），因为系统闹钟到点时 App
+  /// 未必在内存、没有机会重算；因此 App 每次启动 / 习惯或打卡变动时都要重排。
+  /// [payload] 默认指向习惯页，单个习惯漏卡时调用方会带上具体 id 以直达补卡。
+  ///
+  /// 用固定 id [habitNudgeNotifyId]，重复调用即覆盖旧通知（与简报同模式）。
+  Future<bool> scheduleHabitNudge({
+    required String title,
+    required String body,
+    String? payload,
+  }) async {
+    if (!enabled) {
+      debugPrint('[通知] 未调度习惯挽留：通知总开关关闭');
+      return false;
+    }
+    if (title.isEmpty) {
+      debugPrint('[通知] 未调度习惯挽留：文案为空（今天没有漏卡）');
+      return false;
+    }
+    try {
+      final loc = _loc ?? tz.UTC;
+      // nudgeMinute 是 const，派生出的时/分同样是编译期常量，故用 const。
+      const hh = HabitNudge.nudgeMinute ~/ 60;
+      const mm = HabitNudge.nudgeMinute % 60;
+      final now = tz.TZDateTime.now(loc);
+      // 今天这个时刻已过就顺延到明天——与简报同一套路，避免排一个过去的时间点。
+      var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
+      when = when.isAfter(now) ? when : when.add(const Duration(days: 1));
+      final mode = await _scheduleMode;
+      const detail = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _chSound,
+          '习惯提醒',
+          channelDescription: '每日习惯打卡提醒',
+          importance: Importance.defaultImportance,
+          priority: Priority.defaultPriority,
+          playSound: true,
+        ),
+      );
+      await _plugin.zonedSchedule(
+        habitNudgeNotifyId,
+        title,
+        body,
+        when,
+        detail,
+        payload: payload ?? payloadHabitPrefix,
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+      debugPrint('[通知] 已调度习惯挽留 -> $when (id=$habitNudgeNotifyId)');
+      return true;
+    } catch (e, s) {
+      debugPrint('[通知] 习惯挽留调度失败: $e');
+      debugPrint('$s');
+      return false;
+    }
+  }
+
+  /// 取消习惯漏卡挽留通知（通知总开关关闭，或今天已无漏卡时调用）。
+  Future<void> cancelHabitNudge() => _plugin.cancel(habitNudgeNotifyId);
+
   /// P1-12：调度「回收站过期预告」通知——把将于明天 00:00 被永久删除的任务
   /// 聚合成一条通知，调度到「明天 00:00」触发。用固定 id [trashExpireNotifyId]
   /// 覆盖式更新：每天重排时旧通知自动被替换，不会堆积多条。
@@ -1180,6 +1261,20 @@ class NotificationService {
 
   /// 取消专注进行中的常驻进度通知（暂停 / 停止 / 自然完成 / 启动时清理残留）。
   Future<void> cancelFocusProgress() => _plugin.cancel(focusProgressNotifyId);
+
+  /// P0-4：专注「被切出」挽留通知——切回 App 时告知本次专注已中断过几次，
+  /// 让「实际专注质量」可感知（L1 只做次数统计，不识别来源 App，无需任何权限）。
+  /// 固定 id，多次打断互相覆盖，不会堆成一排。
+  Future<void> showFocusInterruptNotice(int count) => _plugin.show(
+        focusInterruptNotifyId,
+        '专注被中断过',
+        '本次专注已切出 $count 次，回来继续吧',
+        NotificationDetails(android: _focusDoneAndroid),
+      );
+
+  /// 取消「专注被切出」挽留通知（专注停止 / 完成时清理）。
+  Future<void> cancelFocusInterruptNotice() =>
+      _plugin.cancel(focusInterruptNotifyId);
 
   /// 挂上「每日任务当天 00:00 自动重置」的午夜闹钟（setAlarmClock，ColorOS 可靠，
   /// 不依赖 App 是否打开）。由原生 MidnightResetReceiver 在午夜触发并自循环调度。

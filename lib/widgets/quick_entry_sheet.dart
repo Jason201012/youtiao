@@ -491,6 +491,14 @@ class _SegmentChip extends StatelessWidget {
         bg = scheme.errorContainer;
         fg = scheme.onErrorContainer;
         icon = Symbols.alarm;
+      case TokenKind.duration:
+        bg = scheme.tertiaryContainer;
+        fg = scheme.onTertiaryContainer;
+        icon = Symbols.timer;
+      case TokenKind.location:
+        bg = scheme.secondaryContainer;
+        fg = scheme.onSecondaryContainer;
+        icon = Symbols.location_on;
     }
 
     final chip = Container(

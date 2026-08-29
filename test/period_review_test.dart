@@ -355,6 +355,31 @@ void main() {
       expect(r.focusTop[1].title, 'B');
       expect(r.focusTop[2].title, 'C');
     });
+
+    test('专注按分类聚合：tracked 进入对应分类，无任务/已删除进入未关联', () async {
+      final tasks = await buildTasks([
+        mkDone('a', DateTime(2026, 8, 3), category: Category.work),
+        mkDone('b', DateTime(2026, 8, 4), category: Category.study),
+      ]);
+      final focus = await buildFocus([
+        mkSession('1', DateTime(2026, 8, 3, 10), sec: 600, taskId: 'a'),
+        mkSession('2', DateTime(2026, 8, 4, 10), sec: 900, taskId: 'b'),
+        mkSession('3', DateTime(2026, 8, 5, 10), sec: 300), // 无任务 → 未关联
+        mkSession('4', DateTime(2026, 8, 6, 10), sec: 120,
+            taskId: 'ghost'), // 任务已删除 → 未关联
+      ]);
+      final r = PeriodReview.fromProviders(
+        tasks,
+        focus,
+        await buildHabits([]),
+        anchor: DateTime(2026, 8, 9),
+      );
+      expect(r.focusByCategory[Category.work], 600);
+      expect(r.focusByCategory[Category.study], 900);
+      expect(r.focusByCategory[Category.life], 0);
+      expect(r.focusUntrackedSec, 420); // 300 + 120
+      expect(r.focusSec, 1920); // 600 + 900 + 300 + 120
+    });
   });
 
   // ===== 习惯统计 =====

@@ -57,6 +57,17 @@ class FocusProvider extends ChangeNotifier {
   String? activeTaskId;
   String? activeTaskTitle;
 
+  // ===== P0-4：专注「中断感知」L1（纯生命周期判定，零权限、零联网）=====
+  /// 判定为「一次打断」的最小离开时长。低于此值视为正常切屏（回个消息、接个电话），
+  /// 不计入——避免把每次锁屏都算成打断而污染数据。
+  static const int interruptThresholdSec = 60;
+
+  /// 当前进行中段落已记录的打断次数（完成 / 停止时写入 [FocusSession.interruptCount]）。
+  int activeInterruptCount = 0;
+
+  /// 最近一次切出 App 的时刻（墙钟）；null 表示当前在前台。
+  DateTime? _leftAt;
+
   /// 由任务行「专注」按钮设置的「待选任务」：跳到专注页后预选到 [_TaskPicker]。
   /// 不持久化，仅在本次跨页面跳转期间临时携带。
   String? pendingTaskId;
@@ -170,6 +181,8 @@ class FocusProvider extends ChangeNotifier {
             (m['phase'] as String?) ?? 'focus');
         focusDoneInCycle = m['focusDoneInCycle'] as int? ?? 0;
         cycleNo = m['cycleNo'] as int? ?? 1;
+        // P0-4：恢复打断计数（旧存档无此字段 → 0，向后兼容）。
+        activeInterruptCount = m['interruptCount'] as int? ?? 0;
         if (activeTotalSec > 0 &&
             activeRunning &&
             activeSegmentStartEpochMs != null) {
@@ -273,6 +286,7 @@ class FocusProvider extends ChangeNotifier {
         'phase': activePhase.name,
         'focusDoneInCycle': focusDoneInCycle,
         'cycleNo': cycleNo,
+        'interruptCount': activeInterruptCount, // P0-4
       }),
     );
   }
@@ -384,6 +398,9 @@ class FocusProvider extends ChangeNotifier {
     activePhase = phase;
     activeTaskId = taskId;
     activeTaskTitle = taskTitle;
+    // P0-4：新段落从零开始统计打断（覆盖 startTimer 与番茄循环的每次阶段切换）。
+    activeInterruptCount = 0;
+    _leftAt = null;
     _startTick();
     await _persistActive();
     await _scheduleCompletion();
@@ -442,15 +459,21 @@ class FocusProvider extends ChangeNotifier {
         durationSec: elapsed,
         completed: false,
         phase: activePhase,
+        interruptCount: activeInterruptCount, // P0-4
         startedAt: now.subtract(Duration(seconds: elapsed)),
         endedAt: now,
       );
       addSession(s);
       _maybeExportToCalendar(s);
     }
+    final hadInterrupt = activeInterruptCount > 0;
     _resetActive();
     await _cancelCompletion();
     await NotificationService.instance.cancelFocusProgress();
+    // P0-4：专注结束，清掉可能残留的「被切出」挽留通知。
+    if (hadInterrupt) {
+      await NotificationService.instance.cancelFocusInterruptNotice();
+    }
     await _persistActive();
     notifyListeners();
   }
@@ -465,6 +488,40 @@ class FocusProvider extends ChangeNotifier {
     activePhase = FocusPhase.focus;
     focusDoneInCycle = 0;
     cycleNo = 1;
+    // P0-4：段落结束即清零打断计数与切出时刻。
+    activeInterruptCount = 0;
+    _leftAt = null;
+  }
+
+  // ===== P0-4：专注「中断感知」L1 =====
+  // 口径：专注**阶段**进行中切出 App，且离开超过 [interruptThresholdSec] 才计一次。
+  // 休息阶段不统计（休息本来就该离开），暂停 / 无进行中计时也不统计。
+
+  /// App 切到后台（[AppLifecycleState.paused]/[hidden]）时调用：记下切出时刻。
+  /// 由 main.dart 的生命周期观察器接线。
+  void noteAppPaused() {
+    if (!activeRunning || activePhase != FocusPhase.focus) return;
+    _leftAt = DateTime.now();
+  }
+
+  /// App 切回前台（[AppLifecycleState.resumed]）时调用：按离开时长判定是否构成
+  /// 一次打断，是则累加计数并弹一条挽留通知。由 main.dart 的生命周期观察器接线。
+  Future<void> noteAppResumed() async {
+    final left = _leftAt;
+    _leftAt = null;
+    if (left == null) return;
+    if (!activeRunning || activePhase != FocusPhase.focus) return;
+    final awaySec = DateTime.now().difference(left).inSeconds;
+    if (awaySec < interruptThresholdSec) return; // 短暂切屏，不算打断
+    activeInterruptCount += 1;
+    await _persistActive();
+    notifyListeners();
+    try {
+      await NotificationService.instance
+          .showFocusInterruptNotice(activeInterruptCount);
+    } catch (_) {
+      // 通知失败不影响计时本身。
+    }
   }
 
   void _startTick() {
@@ -534,11 +591,19 @@ class FocusProvider extends ChangeNotifier {
       durationSec: total,
       completed: true,
       phase: phase,
+      interruptCount: activeInterruptCount, // P0-4
       startedAt: start,
       endedAt: ended,
     );
     addSession(s);
     _maybeExportToCalendar(s);
+
+    // P0-4：本阶段收尾，清掉挽留通知；进入下一阶段前先把计数归零。
+    if (activeInterruptCount > 0) {
+      await NotificationService.instance.cancelFocusInterruptNotice();
+    }
+    activeInterruptCount = 0;
+    _leftAt = null;
 
     if (_pomodoroEnabled) {
       FocusPhase next;
