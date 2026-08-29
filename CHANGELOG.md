@@ -1,5 +1,11 @@
 # 更新日志（Changelog）
 
+## v2.7.2（2026-08-29）
+
+### 修复
+- 桌面小组件（`TodayWidgetProvider`）`onUpdate` 异常兜底：构建视图任何异常回落空状态视图，修复 MIUI 等国产 ROM「载入窗口小部件时出现问题」的崩溃；
+- 任务项点击 `PendingIntent` 改用 `task.id.hashCode()` 作为 `requestCode`，配合 data URI 保证每项唯一，避免 `FLAG_UPDATE_CURRENT` 互相覆盖导致点击错位。
+
 ## v2.7.1（2026-08-29）
 
 ### 安全修复
