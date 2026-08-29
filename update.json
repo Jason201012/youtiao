@@ -1,6 +1,6 @@
 {
-  "version": "2.7.4",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.4/app-release-2.7.4-arm64.apk",
-  "apkSha256": "14A0F34D108DAAA3C28C01875E10A0CCE3B60705FCBE93DA827E16E4736684B5",
-  "releaseNotes": "v2.7.4（早晚简报日期口径修复，固定 release keystore 签名，arm64-v8a 单架构）：\n【修复】\n① 早晚简报按「投递日」聚合，修复日期口径串天：简报文案在排程时烘焙，而晨报总在前一天排好（周一 21:00 排周二 07:30），原实现按排程当下聚合，导致周二早上推送的是周一的「今日待办 / 逾期积压 / 昨日未完成」——不只是内容陈旧，是日期整个串了。现已按投递日聚合，并新增 nextBriefingTime() 作为下次触发时刻的唯一口径。\n② 含 v2.7.3 的桌面小组件修复（RemoteViews 白名单：裸 View → ImageView），解决 MIUI 等 ROM 报「载入窗口小部件时出现问题」。\n【已知残留】通知仍每日重复重发同一份文案，用户连续多日不打开 App 时第二日起内容会滞后；彻底解决需原生侧每日重烘焙，暂不实施。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.5",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.5/app-release-2.7.5-arm64.apk",
+  "apkSha256": "E0F816B440314A6A8BE506875E04E01D66857A64B740829E7070FA75AA183EA2",
+  "releaseNotes": "v2.7.5（移除桌面小组件「隐藏标题」功能，固定 release keystore 签名，arm64-v8a 单架构）：\n【改动】\n① 移除桌面小组件「隐藏标题」开关（P2-5）：此前开启后任务标题在桌面显示为 •••••• 作隐私保护；经评估该开关使用频率低、与「单条任务私密性」需求错位（真要保护应走归档 / 加密，而非桌面打码），且增加 Kotlin / Dart 两侧维护成本，故整体移除；原生侧 TodayWidgetProvider 不再读取对应偏好，设置页开关入口一并删除。\n② 注意：分享卡片 / 分享长图的「隐藏标题」是另一个独立功能（隐藏分享图中的标题），本次未动。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }
