@@ -1,6 +1,6 @@
 {
-  "version": "2.7.2",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.2/app-release-2.7.2-arm64.apk",
-  "apkSha256": "FB2CAE21FF0834EA555B59B1E0FCF84BD3E35D70C701B381EABAAC1C57B52384",
-  "releaseNotes": "v2.7.2（桌面小组件稳定性修复，固定 release keystore 签名，arm64-v8a 单架构）：\n【修复】\n① 桌面小组件（TodayWidgetProvider）onUpdate 异常兜底：构建视图任何异常回落空状态视图，修复 MIUI 等国产 ROM「载入窗口小部件时出现问题」的崩溃；\n② 任务项点击 PendingIntent 改用 task.id.hashCode() 作为 requestCode，配合 data URI 保证每项唯一，避免 FLAG_UPDATE_CURRENT 互相覆盖导致点击错位。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.3",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.3/app-release-2.7.3-arm64.apk",
+  "apkSha256": "03C1E217CD34092CB50FBF00E88D1B24C93F9603B445FC5B0278F52E6D54D23D",
+  "releaseNotes": "v2.7.3（真正修复桌面小组件加载失败，固定 release keystore 签名，arm64-v8a 单架构）：\n【修复】\n① 修复桌面小组件在 MIUI 等 ROM 上报「载入窗口小部件时出现问题」：任务项布局用裸 <View> 作圆点，而 RemoteViews（AppWidget）只允许白名单控件，裸 View 不在其中，桌面宿主 inflate 时抛 InflateException；该异常发生在启动器进程而非本 App 进程，v2.7.2 的异常兜底无法拦截。已改用白名单内的 ImageView，视觉与交互不变。\n② 附带保留 v2.7.2 的健壮性改动：onUpdate / buildRemoteViews 异常兜底回落空状态；任务项 PendingIntent 用 task.id.hashCode() 作 requestCode，避免 FLAG_UPDATE_CURRENT 互相覆盖。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }
