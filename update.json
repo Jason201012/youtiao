@@ -1,6 +1,6 @@
 {
-  "version": "2.7.0",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.0/app-release-2.7.0-arm64.apk",
-  "apkSha256": "A4CCBC744FBDAD58A4B2B707648496C291A10B97583F9B0167A534C81791561F",
-  "releaseNotes": "v2.7.0（13 项新功能，全程本地 / 严格离线）：\n① 早晚简报：每日晨/晚本地推送，含今日完成/专注/习惯汇总\n② 附件管理页：查看附件占用、清理无主文件\n③ iCal/CSV 导入幂等去重：去重/覆盖/模糊去重可选\n④ 用户模板可视化编辑：内置模板库 + 自定义常用任务模板\n⑤ 重复「未来 30 天预览」：逐次标记完成/跳过/顺延\n⑥ 农历重复：支持按农历日期设置重复（离线转换）\n⑦ 专注时段面板：周视图按日展示当天专注时段条\n⑧ 命令面板：全局快捷命令入口（Ctrl/Cmd+F 聚焦搜索等）\n⑨ 导出增强：回顾/任务导出可选「包含附件清单」列\n⑩ 系统分享建任务：其它 App 分享图片/文件直接建任务并带附件\n⑪ 回收站过期预告：即将永久删除的任务本地通知提醒\n⑫ 全局标签管理：重命名/合并/归档/删除、批量绑定任务\n⑬ 通知稍后提醒（snooze）：到期提醒一键延后、按时长顺延\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.1",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.1/app-release-2.7.1-arm64.apk",
+  "apkSha256": "742B3CB71C75258A2A1F324F2533DA3975856C4A55CAE9AF6A6319F1A34C24F3",
+  "releaseNotes": "v2.7.1（4 项安全修复 + 9 项功能增强 + 2 项缺陷修复，全程本地 / 严格离线）：\n【安全】\n① 用户模板路径穿越防护（白名单 + 拼接后 startsWith 双重断言）\n② iCal / 外部 id 治理：避免导入覆盖本地既有任务\n③ 附件孤儿清理修复：known 集合按 id 合并，不再相互覆盖\n④ 系统分享加固：清理陈旧收件箱、拒绝 ./.. 、合并 SEND intent-filter\n【功能】\n① 批量编辑 ② 逾期一键顺延 ③ 农历展示 ④ 专注中断感知\n⑤ 快速录入语法扩展（日期区间 / @地点 / 预计时长）\n⑥ 桌面快捷键（Ctrl/⌘+1~6 切 Tab、Ctrl/⌘+Enter 完成选中）+ 命令面板 /done /goto\n⑦ 习惯漏卡挽留提醒（23:00 聚合为一条）\n⑧ 每月重复「月末最后几天」 ⑨ 帕累托分析（80/20）+ 年度时间线\n【修复】\n① 全新安装首启示例任务丢失（此前新用户首启看到空白列表）\n② 备份校验放过非法 priority / category 字段\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }
