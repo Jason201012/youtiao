@@ -21,6 +21,21 @@ bool _isSafeSegment(String s) {
 ///   不负责实际覆盖数据；通过返回 [BackupValidationResult] 让调用方决定
 ///   是否继续恢复、并给出可读的错误原因。
 class BackupValidator {
+  /// 单条任务的关键字段类型体检。返回 null 表示通过，否则返回错误原因。
+  ///
+  /// 注意：不能依赖 [Task.fromJson] 抛错来发现这类损坏 —— 它对 priority /
+  /// category 的非法值是**静默降级**（分别回退 medium / life，见 S6 容错设计，
+  /// 目的是避免非法备份导致恢复整体崩溃）。因此「类型级损坏」必须在校验层
+  /// 显式拦截，否则会出现「校验通过、恢复后数据悄悄变形」。
+  /// 字段为 null（老备份缺字段）视为合法，交由模型层按默认值兜底。
+  static String? _checkTaskFieldTypes(Map e) {
+    final pr = e['priority'];
+    if (pr != null && pr is! String) return 'priority 字段非法（应为字符串）';
+    final ca = e['category'];
+    if (ca != null && ca is! String) return 'category 字段非法（应为字符串）';
+    return null;
+  }
+
   /// 校验备份原始字符串。返回 [BackupValidationResult]，含 [ok] 与 [error]。
   ///
   /// 入参 [raw] 为文件全文（UTF-8 文本）。任何异常（非 JSON / 结构非法）都转化为
@@ -69,6 +84,10 @@ class BackupValidator {
       if (e is! Map) {
         return BackupValidationResult(false, '第 ${i + 1} 条任务不是对象，备份可能已损坏');
       }
+      final badTask = _checkTaskFieldTypes(e);
+      if (badTask != null) {
+        return BackupValidationResult(false, '第 ${i + 1} 条任务$badTask');
+      }
       try {
         Task.fromJson(Map<String, dynamic>.from(e as Map));
       } catch (err) {
@@ -86,6 +105,10 @@ class BackupValidator {
         final e = (trashRaw)[i];
         if (e is! Map) {
           return BackupValidationResult(false, '回收站第 ${i + 1} 条不是对象，备份可能已损坏');
+        }
+        final badTrash = _checkTaskFieldTypes(e);
+        if (badTrash != null) {
+          return BackupValidationResult(false, '回收站第 ${i + 1} 条$badTrash');
         }
         try {
           Task.fromJson(Map<String, dynamic>.from(e as Map));

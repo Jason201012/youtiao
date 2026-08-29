@@ -619,6 +619,10 @@ class TaskProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     // 确保数据库已打开（首次启动会建表）。内存测试后端无需真实 SQLite，跳过打开。
     final db = LocalDatabase.instance;
+    // 快照内置首启示例：下面的 DB 载入会用库内容覆盖 _tasks（clear + addAll），
+    // 全新安装（库为空）时必须靠这份快照把 7 条示例预置回去。
+    // 历史缺陷：此前没有快照，新用户首启实际看到 0 条示例而非设计的 7 条。
+    final builtInSamples = List<Task>.from(_tasks);
     try {
       if (!LocalDatabase.testUseMemory) {
         await db.db;
@@ -645,7 +649,9 @@ class TaskProvider extends ChangeNotifier {
     }
     final seeded = prefs.getBool(_kSeeded) ?? false;
     if (_tasks.isEmpty && _trash.isEmpty && !seeded) {
-      // 全新安装：保留内置 7 条 mock 并落库；置位标志，避免「从零开始」后重启又被塞回。
+      // 全新安装：DB 为空 → 回填内置 7 条示例并落库；置位标志，
+      // 避免「从零开始」后重启又被塞回。
+      _tasks.addAll(builtInSamples);
       await _persist();
       await prefs.setBool(_kSeeded, true);
     } else {

@@ -206,6 +206,9 @@ void main() {
         maxTasksInDay: 30,
         earlyTasks: 50,
         nightTasks: 50,
+        // 「周目标达人」(habit_goal_4w) 依赖 maxGoalWeeks：此前漏填该字段，
+        // 导致所谓「满配」上下文实际只解锁 19/20。
+        maxGoalWeeks: 4,
       );
       expect(unlockedAchievementCount(full), allAchievements.length);
     });
