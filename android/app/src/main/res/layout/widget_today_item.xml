@@ -8,7 +8,11 @@
     android:paddingVertical="6dp"
     android:paddingHorizontal="4dp">
 
-    <View
+    <!-- 注意：RemoteViews（AppWidget）只允许白名单内的控件，裸 <View> 不在白名单，
+         桌面宿主 inflate 时会抛 "Class not allowed to be inflated android.view.View"，
+         且该异常发生在启动器进程（非本 App 进程），AppWidgetProvider 里的 try-catch 拦不住，
+         表现为 MIUI 提示「载入窗口小部件时出现问题」。故此处用 ImageView + background 渲染圆点。 -->
+    <ImageView
         android:id="@+id/dot"
         android:layout_width="8dp"
         android:layout_height="8dp"
