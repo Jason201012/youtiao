@@ -1,6 +1,6 @@
 {
-  "version": "2.7.3",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.3/app-release-2.7.3-arm64.apk",
-  "apkSha256": "03C1E217CD34092CB50FBF00E88D1B24C93F9603B445FC5B0278F52E6D54D23D",
-  "releaseNotes": "v2.7.3（真正修复桌面小组件加载失败，固定 release keystore 签名，arm64-v8a 单架构）：\n【修复】\n① 修复桌面小组件在 MIUI 等 ROM 上报「载入窗口小部件时出现问题」：任务项布局用裸 <View> 作圆点，而 RemoteViews（AppWidget）只允许白名单控件，裸 View 不在其中，桌面宿主 inflate 时抛 InflateException；该异常发生在启动器进程而非本 App 进程，v2.7.2 的异常兜底无法拦截。已改用白名单内的 ImageView，视觉与交互不变。\n② 附带保留 v2.7.2 的健壮性改动：onUpdate / buildRemoteViews 异常兜底回落空状态；任务项 PendingIntent 用 task.id.hashCode() 作 requestCode，避免 FLAG_UPDATE_CURRENT 互相覆盖。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.4",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.4/app-release-2.7.4-arm64.apk",
+  "apkSha256": "14A0F34D108DAAA3C28C01875E10A0CCE3B60705FCBE93DA827E16E4736684B5",
+  "releaseNotes": "v2.7.4（早晚简报日期口径修复，固定 release keystore 签名，arm64-v8a 单架构）：\n【修复】\n① 早晚简报按「投递日」聚合，修复日期口径串天：简报文案在排程时烘焙，而晨报总在前一天排好（周一 21:00 排周二 07:30），原实现按排程当下聚合，导致周二早上推送的是周一的「今日待办 / 逾期积压 / 昨日未完成」——不只是内容陈旧，是日期整个串了。现已按投递日聚合，并新增 nextBriefingTime() 作为下次触发时刻的唯一口径。\n② 含 v2.7.3 的桌面小组件修复（RemoteViews 白名单：裸 View → ImageView），解决 MIUI 等 ROM 报「载入窗口小部件时出现问题」。\n【已知残留】通知仍每日重复重发同一份文案，用户连续多日不打开 App 时第二日起内容会滞后；彻底解决需原生侧每日重烘焙，暂不实施。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }
