@@ -1,6 +1,6 @@
 {
-  "version": "2.7.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.1/app-release-2.7.1-arm64.apk",
-  "apkSha256": "742B3CB71C75258A2A1F324F2533DA3975856C4A55CAE9AF6A6319F1A34C24F3",
-  "releaseNotes": "v2.7.1（4 项安全修复 + 9 项功能增强 + 2 项缺陷修复，全程本地 / 严格离线）：\n【安全】\n① 用户模板路径穿越防护（白名单 + 拼接后 startsWith 双重断言）\n② iCal / 外部 id 治理：避免导入覆盖本地既有任务\n③ 附件孤儿清理修复：known 集合按 id 合并，不再相互覆盖\n④ 系统分享加固：清理陈旧收件箱、拒绝 ./.. 、合并 SEND intent-filter\n【功能】\n① 批量编辑 ② 逾期一键顺延 ③ 农历展示 ④ 专注中断感知\n⑤ 快速录入语法扩展（日期区间 / @地点 / 预计时长）\n⑥ 桌面快捷键（Ctrl/⌘+1~6 切 Tab、Ctrl/⌘+Enter 完成选中）+ 命令面板 /done /goto\n⑦ 习惯漏卡挽留提醒（23:00 聚合为一条）\n⑧ 每月重复「月末最后几天」 ⑨ 帕累托分析（80/20）+ 年度时间线\n【修复】\n① 全新安装首启示例任务丢失（此前新用户首启看到空白列表）\n② 备份校验放过非法 priority / category 字段\n固定 release keystore 签名，arm64-v8a 单架构，双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.2",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.2/app-release-2.7.2-arm64.apk",
+  "apkSha256": "FB2CAE21FF0834EA555B59B1E0FCF84BD3E35D70C701B381EABAAC1C57B52384",
+  "releaseNotes": "v2.7.2（桌面小组件稳定性修复，固定 release keystore 签名，arm64-v8a 单架构）：\n【修复】\n① 桌面小组件（TodayWidgetProvider）onUpdate 异常兜底：构建视图任何异常回落空状态视图，修复 MIUI 等国产 ROM「载入窗口小部件时出现问题」的崩溃；\n② 任务项点击 PendingIntent 改用 task.id.hashCode() 作为 requestCode，配合 data URI 保证每项唯一，避免 FLAG_UPDATE_CURRENT 互相覆盖导致点击错位。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
 }
