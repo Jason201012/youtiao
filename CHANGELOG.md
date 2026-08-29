@@ -1,5 +1,19 @@
 # 更新日志（Changelog）
 
+## v2.7.3（2026-08-29）
+
+### 修复
+- **真正修复桌面小组件在 MIUI 等 ROM 上报「载入窗口小部件时出现问题」**（v2.7.2 的异常兜底对本题无效）：
+  - 根因：任务项布局 `widget_today_item.xml` 用裸 `<View>` 作圆点，而 RemoteViews（AppWidget）
+    **只允许白名单控件**（FrameLayout / LinearLayout / RelativeLayout / GridLayout、TextView、
+    ImageView、ProgressBar 等），裸 `View` 不在其中，桌面宿主 inflate 时抛
+    `InflateException: Class not allowed to be inflated android.view.View`；
+  - 该异常发生在**启动器进程**而非本 App 进程，`AppWidgetProvider` 中的 try-catch 无法拦截，
+    故 v2.7.2 的兜底修复对本题完全无效；
+  - 因只在 `addView` 填充任务列表时才 inflate item 布局，故障表现为「今天有任务才崩、
+    无任务走空状态正常」；
+  - 修法：圆点改用白名单内的 `ImageView`，保留 `android:background` 渲染，视觉与交互不变。
+
 ## v2.7.2（2026-08-29）
 
 ### 修复
