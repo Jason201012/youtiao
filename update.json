@@ -1,6 +1,6 @@
 {
-  "version": "2.7.7",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.7/app-release-2.7.7-arm64.apk",
-  "apkSha256": "720b7e6ac633e398b886ca27a4b3df543f4af2d72d35440f831f642e210dabdf",
-  "releaseNotes": "v2.7.7（安全修复：批量编辑撤销一致性）：\n【安全修复·P1】① 批量编辑撤销不重排提醒（P1-1）——撤销「+N 天顺延」后，截止日期回滚但残留提醒仍指向顺延后的新日期，通知与任务错位；现撤销逐条走 updateTask，复用提醒重排/拼音重算/持久化既有逻辑。② 批量编辑撤销按索引定位错位覆盖（P1-2）——撤销前若有新增/删除/排序，按旧索引写回会覆盖无辜任务；现改按 id 定位，任务已删除时跳过不复活。\n【修复·P2】③ 设置页「习惯挽留提醒」重复渲染两份（v2.7.6 复制粘贴遗留），已去重。④ 命令面板 /week 名不符实（实际仅回首页，与 /home、/today 重复），已移除。\n固定 release keystore 签名，arm64-v8a 单架构。"
+  "version": "2.7.8",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.8/app-release-2.7.8-arm64.apk",
+  "apkSha256": "8e592eaa97c2c8cdd0762fcafdd434aeca26bdc795419004cbe415fd67473e17",
+  "releaseNotes": "v2.7.8（安全修复：提醒调度链路 + 备份/录入健壮性）：\n【修复·P1】① updateTask 的 remindersChanged 漏判提醒相关字段（reminderOffsetMin / monthly* / repeatUntil / skipDates）——只改提醒提前量、月重复规则或结束日期时提醒不重排，旧提醒继续按旧配置触发；现判定补全并自动重排。② interval（每隔 N 天）重复提醒断链——不设截止日期时从不提醒、设了截止日期时首轮后永久丢失；interval 重挂门槛改按 repeatUntil 判定，三处重挂入口统一收口。\n【修复·P2】③ 批量编辑「+N 天」改为各自 dueDate + N 天（原实现统一平移到今天+N，对未来截止的任务实为提前）。④ 恢复链路拒绝 tasks 非 List 的空档备份（含带「有条」标记的损坏文件），清空恢复仅允许显式 tasks: []。⑤ 快速录入「提前 N 天」数字无上限可致崩溃或提醒静默失效，改为 tryParse + 按单位收口上限（天≤365/小时≤8760/分钟≤525600）。⑥ 批量编辑与撤销逐条全量落库导致写放大，循环后统一持久化一次。\n固定 release keystore 签名。"
 }
