@@ -1,6 +1,6 @@
 {
-  "version": "2.7.6",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.6/app-release-2.7.6-arm64.apk",
-  "apkSha256": "28809b6c2b332339d5a7db973cb322fbe613caed0d69c9fd54630ab094e7479a",
-  "releaseNotes": "v2.7.6（安全修复 + 功能增强 + 健壮性）：\n【安全修复·P0】加密备份「勾选加密仍写明文」已修复——口令在清空输入框前锁定为局部变量，新增 buildBackupPayload 守卫，加密意图与空口令冲突时显式中止备份（不写任何文件、不谎报已加密）；新增回归单测。\n【功能】命令面板动作命令扩充（/新建 /回收站 /标签 /导出 /备份 /本周）；专注「打断」数据展示闭环（分享卡/晚简报/月报显示打断次数）；习惯漏卡挽留可配置化（设置页独立开关+时刻，打卡/增删习惯后触发重排，排程感知勿扰）。\n【修复】晚简报专注/习惯口径按投递日聚合（修复跨天混合口径）；批量编辑「+N 天」clamp(0,3650)；重复任务「每隔 N 天」上界≤365。\n三站同步发布（Gitee youtiao-releases-2 + 内网 Forgejo rootnas/youtiao + 8567 站 rootnas/youtiao），固定 release keystore 签名。"
+  "version": "2.7.7",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.7/app-release-2.7.7-arm64.apk",
+  "apkSha256": "720b7e6ac633e398b886ca27a4b3df543f4af2d72d35440f831f642e210dabdf",
+  "releaseNotes": "v2.7.7（安全修复：批量编辑撤销一致性）：\n【安全修复·P1】① 批量编辑撤销不重排提醒（P1-1）——撤销「+N 天顺延」后，截止日期回滚但残留提醒仍指向顺延后的新日期，通知与任务错位；现撤销逐条走 updateTask，复用提醒重排/拼音重算/持久化既有逻辑。② 批量编辑撤销按索引定位错位覆盖（P1-2）——撤销前若有新增/删除/排序，按旧索引写回会覆盖无辜任务；现改按 id 定位，任务已删除时跳过不复活。\n【修复·P2】③ 设置页「习惯挽留提醒」重复渲染两份（v2.7.6 复制粘贴遗留），已去重。④ 命令面板 /week 名不符实（实际仅回首页，与 /home、/today 重复），已移除。\n固定 release keystore 签名，arm64-v8a 单架构。"
 }

@@ -1585,10 +1585,9 @@ class TaskProvider extends ChangeNotifier {
     // 先快照再逐条更新：[updateTask] 会改动 _tasks，边遍历边改不安全。
     final targets = ids.map(byId).whereType<Task>().toList();
     // F1：批量编辑一次性改写 N 条且无快照，历史上「+N 天数输错 / 分类选错」不可逆。
-    // 这里外套一份「改前快照」（按原始索引），供 [undoBatchEdit] 一键还原。
+    // 这里外套一份「改前快照」，供 [undoBatchEdit] 一键还原。
+    // 撤销按 id 定位（见 [undoBatchEdit]），无需记录索引——中间有插删时索引会错位。
     _lastEditBatch = targets.map((t) => t.copyWith()).toList();
-    _lastEditIndices =
-        targets.map((t) => _tasks.indexWhere((x) => x.id == t.id)).toList();
     for (final t in targets) {
       updateTask(transform(t));
     }
@@ -1598,23 +1597,28 @@ class TaskProvider extends ChangeNotifier {
   // ===== 批量编辑（改前快照 + 撤销）=====
   // 与删除撤销 [_lastBatch] / [_lastBatchIndices] 相互独立，互不覆盖。
   List<Task> _lastEditBatch = [];
-  List<int> _lastEditIndices = [];
 
-  /// 撤销上一次批量编辑：把改前快照按原始索引放回，覆盖被改写的内容。
+  /// 撤销上一次批量编辑：把改前快照逐条写回被改写的任务。
   /// 仅可撤销最近一次批量编辑（覆盖式缓冲）；与 [undoDelete] 互不影响。
+  ///
+  /// P1-1：必须逐条走 [updateTask] 而非直接改内存——批量顺延「+N 天」后撤销时，
+  /// 截止日期会回滚，唯有 updateTask 会触发 `_cancelRemindersFor/_scheduleRemindersFor`
+  /// 重排提醒，否则系统里残留的提醒仍指向顺延后的新日期（截止日期与通知错位）。
+  ///
+  /// P1-2：按 id 定位而非索引——快照记录的是 batchUpdate 执行时的列表位置，
+  /// 之后若用户新增/删除/排序过任务，按旧索引写回会覆盖到无辜任务（数据错乱）。
+  /// 这里用 `indexWhere(id)` 找当前位置；找不到说明任务已被删除，跳过（不复活）。
   void undoBatchEdit() {
     if (_lastEditBatch.isEmpty) return;
-    for (var k = 0; k < _lastEditBatch.length; k++) {
-      final orig = _lastEditBatch[k];
-      final idx = _lastEditIndices[k];
-      if (idx >= 0 && idx < _tasks.length) {
-        _tasks[idx] = orig;
-      }
+    for (final orig in _lastEditBatch) {
+      final cur = byId(orig.id);
+      if (cur == null) continue; // 任务已不在列表（被删除），不允许复活
+      // updateTask 会强制保留 status/completedAt/focusSecTotal/order（批量编辑
+      // 本就不改这些字段），并复用提醒重排 / 拼音重算 / 持久化等既有逻辑。
+      updateTask(orig);
     }
     _lastEditBatch = [];
-    _lastEditIndices = [];
     notifyListeners();
-    _persist();
   }
 
   /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。

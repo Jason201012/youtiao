@@ -114,7 +114,7 @@ class _CommandPaletteState extends State<CommandPalette> {
       Navigator.pop(context);
       return true;
     }
-    // F7：动作类命令（/new /trash /tags /export /backup /week 等）。
+    // F7：动作类命令（/new /trash /tags /export /backup 等）。
     // 命中且宿主注入了回调 → 执行；否则安全禁用（不弹死链）。
     if (c.isAction) {
       final cb = widget.actions?[c.name];
@@ -155,7 +155,7 @@ class _CommandPaletteState extends State<CommandPalette> {
                 ? (actionAvailable
                     ? '执行：${c.label}'
                     : '当前不可用')
-                : '可用：/done /new /trash /tags /export /backup /week /today /board /calendar /focus /habit /settings'));
+                : '可用：/done /new /trash /tags /export /backup /today /board /calendar /focus /habit /settings /home'));
     return ListTile(
       leading: Icon(icon,
           color: known ? scheme.primary : ext.meta, size: 22),

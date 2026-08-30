@@ -881,8 +881,8 @@ class _MainScaffoldState extends State<MainScaffold>
                         'export': () => ExportSheet.show(context),
                         // /backup：打开备份与恢复面板。
                         'backup': () => BackupSheet.show(context),
-                        // /week：回到首页（首页默认视图含本周回顾卡），无独立周视图页避免新增死链。
-                        'week': () => setState(() => _index = 0),
+                        // P2-7：曾提供 /week（回首页），但命令名与行为不符且与导航类
+                        // /home、/today 重复，已移除——避免用户误解为「周视图」。
                       },
                     );
                     return null;

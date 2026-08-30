@@ -446,36 +446,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         },
                       ),
                     ),
-                    // F4：习惯漏卡「挽留」通知独立配置（开关 + 时刻）。
-                    const SizedBox(height: AppColors.contentGap),
-                    Consumer<TaskProvider>(
-                      builder: (context, provider, _) => SettingsRow(
-                        icon: Symbols.notifications_active,
-                        label: '习惯挽留提醒',
-                        subtitle: '当天该打卡却还没打卡时，定时提醒一次',
-                        value:
-                            '${provider.habitNudgeMinute ~/ 60}:${(provider.habitNudgeMinute % 60).toString().padLeft(2, '0')}',
-                        switchValue: provider.habitNudgeEnabled,
-                        onSwitchChanged: (v) async {
-                          provider.setHabitNudge(enabled: v);
-                          await _rescheduleNudge(provider);
-                        },
-                        onTap: () async {
-                          final picked = await showTimePicker(
-                            context: context,
-                            initialTime: TimeOfDay(
-                                hour: provider.habitNudgeMinute ~/ 60,
-                                minute: provider.habitNudgeMinute % 60),
-                          );
-                          if (picked != null) {
-                            provider.setHabitNudge(
-                                enabled: provider.habitNudgeEnabled,
-                                minute: picked.hour * 60 + picked.minute);
-                            await _rescheduleNudge(provider);
-                          }
-                        },
-                      ),
-                    ),
                     const SizedBox(height: 24),
                     _GroupTitle('数据'),
                     // P1-12：回收站行 + 过期预告统计
