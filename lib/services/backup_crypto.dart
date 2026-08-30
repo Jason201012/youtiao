@@ -62,6 +62,13 @@ const int _saltBytes = 16;
 const int _ivBytes = 12;
 const int _tagBytes = 16;
 
+/// L-09：密文 base64 字符数上限（48 MiB 字符 ≈ 36 MiB 二进制）。
+///
+/// 与导入侧的整体上限（[DataIo.maxImportTextBytes] = 32 MB）对齐并留出 base64
+/// 膨胀余量：32 MB 二进制编码后约 44.7 M 字符。没有这道闸时，攻击者只需构造
+/// 一个 `ct` 超长的信封就能让 `base64.decode` 一次性吃掉数百 MB 内存（OOM）。
+const int maxCipherTextChars = 48 * 1024 * 1024;
+
 /// 加密一个明文备份 JSON，返回信封结构 JSON 字符串。
 ///
 /// [json] 为现有备份 JSON 原文字符串；[pass] 为用户口令（丢失即不可恢复，由调用方在 UI 明确告知）。
@@ -159,6 +166,10 @@ String decryptEnvelope(String raw, String pass) {
     final salt = _decodeFixedBytes(kdf['salt'], _saltBytes, 'salt');
     final iv = _decodeFixedBytes(aead['iv'], _ivBytes, 'iv');
     final tag = _decodeFixedBytes(aead['tag'], _tagBytes, 'tag');
+    // L-09：解码前先卡密文长度，避免恶意信封用超长 ct 触发 OOM。
+    if (ctB64.length > maxCipherTextChars) {
+      throw const BackupDecryptException('密文过大（疑似恶意备份），已拒绝解密');
+    }
     final ct = base64.decode(ctB64);
     final key = _deriveKey(pass, salt, iterations);
     final cipher = GCMBlockCipher(AESEngine());

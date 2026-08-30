@@ -229,8 +229,17 @@ class BackupSheet {
     BuildContext context,
     bool includeTrash,
   ) async {
-    final raw = await DataIo.pickJsonFile();
-    if (raw == null) return;
+    // L-09：先做大小预检再读入，超限直接提示，避免超大文件把 App 读到 OOM。
+    final picked = await DataIo.pickJsonFile();
+    if (picked.cancelled) return;
+    if (picked.error != null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(picked.error!)));
+      }
+      return;
+    }
+    final raw = picked.content!;
     // 加密备份：先识别信封，弹出口令框解密成明文，再走与普通备份一致的校验/恢复流程。
     String plaintext = raw;
     if (isEncryptedEnvelope(raw)) {
@@ -464,8 +473,43 @@ class BackupSheet {
     );
     if (confirmed != true) return;
     try {
+      // L-09：快照虽是本地文件，仍按统一上限预检（异常膨胀 / 被外部改写时兜底）。
+      final size = await entry.file.length();
+      if (size > DataIo.maxImportTextBytes) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('快照文件异常（${(size / 1048576).toStringAsFixed(1)} MB），已拒绝还原'),
+            ),
+          );
+        }
+        return;
+      }
       final raw = await entry.file.readAsString();
-      final validation = BackupValidator.validate(raw);
+      // L-08：加密快照（.enc.json）需先解密成明文，再走与明文快照一致的校验流程。
+      String plaintext = raw;
+      if (isEncryptedEnvelope(raw)) {
+        final pass = await _requestPassword(context);
+        if (pass == null) return; // 用户取消
+        try {
+          plaintext = decryptEnvelope(raw, pass);
+        } on BackupDecryptException catch (e) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('还原失败：${e.message}')),
+            );
+          }
+          return;
+        } catch (e) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('解密失败：$e')),
+            );
+          }
+          return;
+        }
+      }
+      final validation = BackupValidator.validate(plaintext);
       if (!validation.ok) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -504,7 +548,8 @@ class BackupSheet {
           if (wipe != true) return;
         }
       }
-      final data = jsonDecode(raw) as Map<String, dynamic>;
+      // L-08：加密快照已解密为 plaintext，未加密则 plaintext == raw。
+      final data = jsonDecode(plaintext) as Map<String, dynamic>;
       // 干跑解析专注/习惯/打卡（与 _doRestore 一致）。
       if (data['focus_sessions'] is List) {
         (data['focus_sessions'] as List)
@@ -522,7 +567,7 @@ class BackupSheet {
             .toList();
       }
       final failures = <String>[];
-      await provider.restoreFromJson(raw, includeTrash: includeTrash);
+      await provider.restoreFromJson(plaintext, includeTrash: includeTrash);
       final focusList = data['focus_sessions'];
       if (focusList is List) {
         try {

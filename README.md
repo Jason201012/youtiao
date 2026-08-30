@@ -55,7 +55,44 @@ flutter run                   # 调试运行
 flutter build apk --release   # 构建 Android release 包
 ```
 
-> 当前 release 使用 debug 密钥签名，可直接侧载安装。若上架应用商店，请在 `android/app/build.gradle.kts` 配置正式的签名 keystore。
+### 🔐 Release 签名（必读）
+
+自 v2.6.0 起，release 构建**强制使用固定 keystore 签名**，不再使用 debug 密钥：
+
+- `android/app/build.gradle.kts` 在 `buildTypes.release` 里检查四个环境变量：
+  `YOUTIAO_KEYSTORE` / `YOUTIAO_KEY_ALIAS` / `YOUTIAO_KEYSTORE_PASSWORD` / `YOUTIAO_KEY_PASSWORD`；
+- **缺任一变量时构建直接失败**，绝不静默回退到公开 debug keystore
+  （v2.5.9 曾误发 debug 签名包，debug 密钥是公开的，任何人都能用它伪造「同名安装包」诱导覆盖安装）；
+- keystore 与口令**不入库**（`.gitignore` 已忽略），仅保存在本机与构建脚本使用的环境变量中。
+
+构建 release 前先导出变量（PowerShell 示例）：
+
+```powershell
+$env:YOUTIAO_KEYSTORE = "E:\path\to\youtiao-release.jks"
+$env:YOUTIAO_KEY_ALIAS = "youtiao"
+$env:YOUTIAO_KEYSTORE_PASSWORD = "<store password>"
+$env:YOUTIAO_KEY_PASSWORD = "<key password>"
+flutter build apk --release --target-platform android-arm64
+```
+
+用户侧校验：安装后若签名不一致，Android 会直接拒绝覆盖安装并提示「未安装」。
+
+#### 用户如何核验安装包真伪
+
+侧载场景下，建议在下完 APK 后核一次哈希再安装：
+
+```powershell
+# PowerShell：比对 sha256 与发布说明中给出的值
+Get-FileHash .\app-release-x.y.z-arm64.apk -Algorithm SHA256
+```
+
+App 内的更新流程已内置同一道校验（下载后比对 `update.json` 的 `apkSha256`，
+不一致即拒绝安装）；手动下载时请自行比对发布说明里的哈希值。
+
+> 关于信任链：目前能防到「传输被篡改 / 下载不完整」，**尚不能防「作者 Gitee 账号
+> 被盗后伪造清单」**——那种情况下 `apkUrl` 与 `apkSha256` 会被同时改掉。
+> 根治方案是给 `update.json` 做离线 Ed25519 签名、App 内置公钥验签（已在路线图中，
+> 属远期项）。在此之前，请以发布页说明与哈希为准。
 
 ### 关于 Gradle（本机 Windows 提示）
 

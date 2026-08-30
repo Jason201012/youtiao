@@ -3,6 +3,8 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:todolist/services/update_policy.dart';
+
 /// Gitee 仓库信息。
 /// 注意：Gitee 自 2026-08 起对匿名 api/v5 访问统一返回 403，
 /// 因此「检查更新」不再调用发行版 API，改为读取仓库内的静态清单文件
@@ -153,28 +155,47 @@ class UpdateChecker {
   /// 解析失败（缺 version）返回 null。
   static UpdateInfo? parseManifest(Map<String, dynamic> data) {
     final version = (data['version'] as String? ?? '').toString().trim();
-    if (version.isEmpty) return null;
-    final tag = (data['tag'] as String? ?? 'v$version').toString().trim();
+    // L-01：version 会被拼进下载文件名（`updates/app-release-v<version>.apk`），
+    // 未做格式白名单时，取值为 `../../../files/x` 一类即可在应用沙箱内任意落文件。
+    // 这里强制「数字.数字.数字」开头的 semver 形态，非法版本号一律拒绝整份清单。
+    if (!UpdatePolicy.isValidVersion(version)) return null;
+    // L-13：tag 会拼进兜底的 releaseUrl，先净化字符集再截断（防跳到非预期页面）。
+    final tag = UpdatePolicy.sanitizeTag(
+        (data['tag'] as String? ?? 'v$version').toString());
     // P2-7 加固：apkUrl 仅信任 https（明文 http 视为被篡改/不安全，拒绝直链）。
     final rawUrl = data['apkUrl'] as String?;
-    final apkUrl =
-        (rawUrl != null && rawUrl.startsWith('https://')) ? rawUrl : null;
+    final apkUrl = (rawUrl != null &&
+            rawUrl.length <= UpdatePolicy.maxUrlChars &&
+            rawUrl.startsWith('https://'))
+        ? rawUrl
+        : null;
     // P2-7 加固：apkSha256 仅接受 64 位小写十六进制；形态非法则丢弃（不信任），
     // 避免拼接/误用畸形哈希。真正的「独立签名信任锚」为远期项——需在 App 内预置
     // 公钥、并由发版脚本对 update.json 做签名，届时把签名校验接在这里。
     final rawSha = data['apkSha256'] as String?;
     final apkSha256 = (rawSha != null && _isSha256Hex(rawSha)) ? rawSha : null;
+    // L-04：releaseUrl 会直接外跳浏览器，必须过白名单（作者发布仓的 releases 页），
+    // 否则投毒清单可把用户引到钓鱼页。非法值直接丢弃，UI 侧按「无下载页」处理。
+    final rawReleaseUrl = data['releaseUrl'] as String?;
+    final releaseUrl = (rawReleaseUrl != null &&
+            UpdatePolicy.isAllowedReleaseUrl(rawReleaseUrl))
+        ? rawReleaseUrl
+        : null;
     return UpdateInfo(
       tagName: tag,
       version: version,
-      releaseName: data['name'] as String?,
+      releaseName: UpdatePolicy.clampShort(data['name'] as String?),
       // S4 修复：以现网 update.json 的 releaseNotes 为准（不再读旧的 notes 键）。
-      releaseNotes: data['releaseNotes'] as String?,
+      // L-13：截断到 8000 字，防投毒清单塞入数 MB 文本拖垮更新弹窗。
+      // L-13：非空才截断；清单缺省 releaseNotes 时保持 null（消费方据此隐藏该区）。
+      releaseNotes: data['releaseNotes'] == null
+          ? null
+          : UpdatePolicy.clampReleaseNotes(data['releaseNotes'] as String?),
       apkUrl: apkUrl,
       // v2.7.8：APK 仓切到 youtiao-releases-3（releases-2 附件配额已满）。
       // 优先取清单里的 releaseUrl（服务端可随时换仓而无需改 App），兜底值仅用于
       // 旧版清单缺少该键时——换仓时必须同步更新这里，否则「查看更新详情」会 404。
-      releaseUrl: data['releaseUrl'] as String? ??
+      releaseUrl: releaseUrl ??
           'https://gitee.com/jason1012/youtiao-releases-3/releases/tag/$tag',
       apkSha256: apkSha256,
     );

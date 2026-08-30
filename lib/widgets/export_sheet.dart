@@ -262,8 +262,17 @@ class ExportSheet {
     TaskProvider provider,
     BuildContext context,
   ) async {
-    final raw = await DataIo.pickIcsFile();
-    if (raw == null) return;
+    // L-09：选择阶段已做 32MB 大小预检（读入前），这里保留原有的 2MB 业务上限。
+    final picked = await DataIo.pickIcsFile();
+    if (picked.cancelled) return;
+    if (picked.error != null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(picked.error!)));
+      }
+      return;
+    }
+    final raw = picked.content!;
     // P2-4：限制 .ics 文件体积（≤2MB），避免超大文件拖垮解析 / 一次性灌注海量任务。
     if (utf8.encode(raw).length > 2 * 1024 * 1024) {
       if (context.mounted) {

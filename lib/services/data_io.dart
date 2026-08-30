@@ -141,30 +141,81 @@ class DataIo {
     });
   }
 
-  /// 选择 .json 备份文件并返回其文本内容；用户取消选择返回 null。
-  static Future<String?> pickJsonFile() async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['json'],
-    );
+  /// 导入文本文件的大小上限（32 MB）。
+  ///
+  /// L-09：备份 / iCal 此前一律 `readAsString()` 全量读入，没有大小预检，
+  /// 选中一个几百 MB 的文件会直接 OOM。加密备份更糟——base64 解码后内存再翻
+  /// 1.3 倍。这里在**读取前**先 stat，超限直接拒绝并给出可读原因。
+  /// 32 MB 对一份待办备份而言已是数量级上的余量。
+  static const int maxImportTextBytes = 32 * 1024 * 1024;
+
+  /// 选择 .json 备份文件并返回其文本内容。
+  /// 返回 [PickedText]：区分「用户取消」与「文件过大 / 读取失败」。
+  static Future<PickedText> pickJsonFile() =>
+      _pickTextFile(['json'], '备份文件');
+
+  /// 选择 .ics 日历文件并返回其文本内容。
+  /// 用于 iCal 标准格式导入（与系统日历 / 其它待办应用互通）。
+  static Future<PickedText> pickIcsFile() =>
+      _pickTextFile(['ics'], '日历文件');
+
+  /// 选择指定扩展名的文本文件并做大小预检后读入（L-09）。
+  static Future<PickedText> _pickTextFile(
+      List<String> extensions, String label) async {
+    List<PlatformFile> picked;
+    try {
+      picked = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: extensions,
+      );
+    } catch (e) {
+      return PickedText.error('无法打开文件选择器：$e');
+    }
     // file_picker v12 起 pickFiles() 直接返回 List<PlatformFile>，
     // 取消选择时返回空列表（不再返回 null），故按空列表判定取消。
-    if (result.isEmpty) return null;
-    final path = result.single.path;
-    if (path == null) return null;
-    return File(path).readAsString();
+    if (picked.isEmpty) return const PickedText.cancelled();
+    final path = picked.single.path;
+    if (path == null) return const PickedText.cancelled();
+    final file = File(path);
+    try {
+      final size = await file.length();
+      if (size > maxImportTextBytes) {
+        return PickedText.error(
+            '${label}过大（${(size / 1048576).toStringAsFixed(1)} MB，上限 '
+            '${(maxImportTextBytes / 1048576).round()} MB），可能不是有效文件');
+      }
+      return PickedText.ok(await file.readAsString());
+    } catch (e) {
+      return PickedText.error('读取${label}失败：$e');
+    }
   }
+}
 
-  /// 选择 .ics 日历文件并返回其文本内容；用户取消选择返回 null。
-  /// 用于 iCal 标准格式导入（与系统日历 / 其它待办应用互通）。
-  static Future<String?> pickIcsFile() async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['ics'],
-    );
-    if (result.isEmpty) return null;
-    final path = result.single.path;
-    if (path == null) return null;
-    return File(path).readAsString();
-  }
+/// 文件选择结果（L-09）。
+///
+/// 需要把「用户取消」与「文件过大 / 读取失败」区分开：前者静默返回即可，
+/// 后者必须给用户明确提示，否则用户只会以为「点了没反应」。
+class PickedText {
+  /// 文件内容；失败或取消时为 null。
+  final String? content;
+
+  /// 失败原因（可直接展示的中文提示）；成功或取消时为 null。
+  final String? error;
+
+  const PickedText._(this.content, this.error);
+
+  /// 读取成功。
+  const PickedText.ok(String text) : this._(text, null);
+
+  /// 用户取消了选择（非错误，调用方静默返回）。
+  const PickedText.cancelled() : this._(null, null);
+
+  /// 读取失败（文件过大 / IO 异常），[message] 可直接展示给用户。
+  const PickedText.error(String message) : this._(null, message);
+
+  /// 是否成功读到内容。
+  bool get ok => content != null;
+
+  /// 是否为用户取消。
+  bool get cancelled => content == null && error == null;
 }

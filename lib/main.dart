@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,8 @@ import 'package:dynamic_color/dynamic_color.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/background_service.dart';
+import 'package:todolist/services/app_log.dart';
+import 'package:todolist/services/secure_window.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/models/attachment.dart';
@@ -70,19 +73,37 @@ String? _pendingWidgetTaskId;
 /// 分享建任务：原生侧经 com.example.todolist/share_intent 通道推送文本，在此弹出预填录入层。
 /// 导航器未就绪（冷启动）时暂存，待 MainScaffold 首帧后消费。
 ///
-/// P2-8：对「短时间多次相同分享」做节流（500ms 内忽略重复文本），避免恶意 App 反复弹窗骚扰。
+/// I-05：对「短时间多次分享」做双层节流。
+/// - 同一**来源包名** 1 秒内最多接收 1 次（恶意 App 换个文本就能绕开「相同文本」判定，
+///   因此节流键必须是来源而不是内容）；
+/// - 保留原「500ms 内相同文本」判据，覆盖同一来源连发同文本的抖动。
 /// [sourcePackage] 为分享来源包名（原生侧经 getCallingActivity 取得），用于预填层展示来源。
 String? _lastShareText;
 int _lastShareAtMs = 0;
+/// 来源包名 → 上次接收时刻（毫秒）。条目数设上限，防长期运行后无界增长。
+final Map<String, int> _lastShareAtBySource = <String, int>{};
+/// 同一来源两次分享的最小间隔（I-05）。
+const int _shareThrottleMs = 1000;
+
 void _openQuickEntry(String text, {String? sourcePackage}) {
   final now = DateTime.now().millisecondsSinceEpoch;
+  // 第一层：按来源包名节流（主要防线）。
+  final key = sourcePackage ?? '';
+  final lastBySource = _lastShareAtBySource[key];
+  if (lastBySource != null && now - lastBySource < _shareThrottleMs) {
+    return;
+  }
+  _lastShareAtBySource[key] = now;
+  if (_lastShareAtBySource.length > 64) _lastShareAtBySource.clear();
+  // 第二层：相同文本 500ms 内去重。
   if (text == _lastShareText && now - _lastShareAtMs < 500) {
-    return; // 500ms 内的重复分享直接忽略
+    return;
   }
   _lastShareText = text;
   _lastShareAtMs = now;
   final state = _navigatorKey.currentState;
-  if (state == null) {
+  // M-01：锁定期间同样只暂存，解锁后再弹（录入层同样盖在解锁页之上）。
+  if (state == null || _isAppLocked) {
     _pendingShareText = text;
     _pendingShareSource = sourcePackage;
     return;
@@ -119,8 +140,8 @@ Future<void> _openQuickEntryUri(Map<String, dynamic> meta) async {
       mimeType: mimeType,
     );
     final state = _navigatorKey.currentState;
-    if (state == null) {
-      // 导航器未就绪（极端冷启动）：暂存，待 MainScaffold 首帧后消费。
+    // M-01：导航器未就绪或应用锁锁定期间只暂存，解锁后再弹。
+    if (state == null || _isAppLocked) {
       _pendingSharedAttachment = ref;
       _pendingSharedSession = sessionId;
       return;
@@ -132,7 +153,7 @@ Future<void> _openQuickEntryUri(Map<String, dynamic> meta) async {
     );
   } catch (e) {
     // 导入失败（超大/非法）：静默忽略，不打扰用户；临时缓存文件由 importSharedFile 清理。
-    debugPrint('分享附件导入失败：$e');
+    AppLog.d('分享附件导入失败：$e');
   }
 }
 
@@ -250,6 +271,23 @@ bool _isEditingText() {
   return ctx.findAncestorWidgetOfExactType<EditableText>() != null;
 }
 
+/// M-01：当前是否处于「应用锁已上锁」状态。
+///
+/// 应用锁的实现是「home（MainScaffold）内部 locked 时渲染 AppLockGate」，
+/// 而通知 / 小组件 / 分享的跳转走的是 MaterialApp 的**根 Navigator**，
+/// push 上去的路由会整屏盖在解锁页之上——即完全绕过应用锁。
+/// 因此所有外部意图在消费前都必须先过这道判定；判定失败（Provider 未注入 /
+/// context 未挂载）时按「未锁定」处理，宁可放行也不吞掉正常跳转。
+bool get _isAppLocked {
+  final ctx = _navigatorKey.currentContext;
+  if (ctx == null) return false;
+  try {
+    return ctx.read<AppLockProvider>().locked;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// 通知点击回调：解析 task:/habit: 前缀并跳转；导航器未就绪时暂存。
 void _handleNotificationTap(String? payload) {
   if (payload == null || payload.isEmpty) return;
@@ -262,7 +300,19 @@ void _handleNotificationTap(String? payload) {
 }
 
 /// 按前缀跳转：task: → 任务详情；habit: → 习惯页；brief: → 简报汇总页。其它忽略。
+///
+/// M-01：锁定期间只把意图塞回 [_pendingNotificationPayload]，不 push；
+/// 解锁成功后由 MainScaffold 的 AppLockProvider 监听回调统一消费。
 void _navigateFromPayload(String payload, NavigatorState nav) {
+  if (_isAppLocked) {
+    _pendingNotificationPayload = payload;
+    return;
+  }
+  _doNavigate(payload, nav);
+}
+
+/// 实际执行跳转（M-01 改造后由 [_navigateFromPayload] 与解锁回调共同调用）。
+void _doNavigate(String payload, NavigatorState nav) {
   if (payload.startsWith(NotificationService.payloadTaskPrefix)) {
     final id = payload.substring(NotificationService.payloadTaskPrefix.length);
     nav.push(MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: id)));
@@ -281,12 +331,15 @@ void _navigateFromPayload(String payload, NavigatorState nav) {
 
 /// 通知 action 按钮点击回调：处理「稍后提醒」与「完成」两类 action。
 /// 导航器未就绪（冷启动）时暂存 id，待 MainScaffold 首帧后消费。
+///
+/// M-01：锁定期间同样只暂存不执行——「完成」会改动数据并弹一条带任务标题的
+/// 确认通知，「稍后提醒」会重排提醒；两者都会泄露/改变锁定状态下的数据。
 void _handleNotificationAction(String? actionId, String? payload) {
   if (actionId == NotificationService.snoozeActionId) {
     final taskId = NotificationService.parseTaskId(payload);
     final habitId = NotificationService.parseHabitId(payload);
     final state = _navigatorKey.currentState;
-    if (state != null) {
+    if (state != null && !_isAppLocked) {
       _doSnooze(state, taskId, habitId);
     } else if (taskId != null) {
       _pendingSnoozeTaskId = taskId;
@@ -299,7 +352,7 @@ void _handleNotificationAction(String? actionId, String? payload) {
     final taskId = NotificationService.parseTaskId(payload);
     if (taskId == null) return;
     final state = _navigatorKey.currentState;
-    if (state != null) {
+    if (state != null && !_isAppLocked) {
       _doComplete(state, taskId);
     } else {
       _pendingCompleteTaskId = taskId;
@@ -341,6 +394,10 @@ void _doComplete(NavigatorState nav, String? taskId) {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // L-11：release 包一律不再向 logcat 输出业务内容。Flutter 不会自动剥离
+  // debugPrint/print，这里把 debugPrint 整体置空，覆盖存量 70 余处调用；
+  // 新增代码统一走 [AppLog]（内部以 kReleaseMode 守卫）。
+  _silenceDebugPrintInRelease();
   // 在 init() 前挂上点击回调（init 内部 initialize() 会在冷启动时直接触发）。
   NotificationService.onNotificationTap = _handleNotificationTap;
   NotificationService.onNotificationAction = _handleNotificationAction;
@@ -380,6 +437,7 @@ void main() async {
       if (id is String && id.isNotEmpty) {
         final state = _navigatorKey.currentState;
         if (state != null) {
+          // M-01：内部已判定锁定态，锁定期间自动转为暂存。
           _navigateFromPayload('task:$id', state);
         } else {
           _pendingWidgetTaskId = id;
@@ -400,24 +458,30 @@ void main() async {
   await _safeLoad(onboarding, 'OnboardingProvider');
   final appLock = AppLockProvider();
   await _safeLoad(appLock, 'AppLockProvider');
+  // L-06：锁屏是否隐藏通知内容（默认隐藏）。必须在首次调度通知前写入，
+  // 否则本轮调度出来的通知仍会按 public 展示任务标题。
+  NotificationService.lockScreenPrivate = task.lockScreenPrivate;
+  // L-07：防截屏 / 防录屏。原生 onCreate 已按持久化值应用过一次，
+  // 这里再同步一次，覆盖「偏好由备份恢复」等运行时变更。
+  unawaited(SecureWindow.setFlagSecure(task.screenSecurityEnabled));
   // 启动后调度全部已设提醒的习惯（失败单个静默，不影响其它功能）。
   try {
     await habit.scheduleAllReminders();
   } catch (e) {
-    debugPrint('[HabitProvider] 调度习惯提醒失败：$e');
+    AppLog.d('[HabitProvider] 调度习惯提醒失败：$e');
   }
   // P0-1：启动后按设置重排早晚简报（失败单个静默，不影响其它功能）。
   try {
     await rescheduleBriefings(task, focus, habit);
   } catch (e) {
-    debugPrint('[DailyBriefing] 调度简报失败：$e');
+    AppLog.d('[DailyBriefing] 调度简报失败：$e');
   }
   // P1-7：启动后重排「习惯漏卡挽留」（内部已包 try/catch，这里再兜一层）。
   try {
     await rescheduleHabitNudge(habit,
         enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
   } catch (e) {
-    debugPrint('[HabitNudge] 调度挽留失败：$e');
+    AppLog.d('[HabitNudge] 调度挽留失败：$e');
   }
   // P2-2：打卡 / 增删习惯变动后自动重排挽留，避免「已补卡却收到陈旧挽留」。
   // F4：变动重排沿用当前可配置时刻与开关。
@@ -452,15 +516,23 @@ void main() async {
   try {
     await task.triggerAutoBackup();
   } catch (e, s) {
-    debugPrint('自动备份触发失败（忽略）：$e\n$s');
+    AppLog.e('自动备份触发失败（忽略）', e, s);
   }
   // P2-9：启动兜底清理——删除超过 24h 的附件暂存残留（编辑弹层中途被杀会留下）。
   try {
     await AttachmentService.cleanupStaleStaging();
   } catch (e, s) {
-    debugPrint('附件暂存清理失败（忽略）：$e\n$s');
+    AppLog.e('附件暂存清理失败（忽略）', e, s);
   }
   runApp(MyApp(task: task, focus: focus, theme: theme, habit: habit, onboarding: onboarding, appLock: appLock));
+}
+
+/// L-11：release 构建下把 debugPrint 置空，避免任务标题 / 提醒调度细节等
+/// 业务内容继续写进 logcat。
+void _silenceDebugPrintInRelease() {
+  if (kReleaseMode) {
+    debugPrint = (String? message, {int? wrapWidth}) {};
+  }
 }
 
 /// 安全加载 Provider：捕获所有异常避免 [runApp()] 永远不被调用（卡在 splash）。
@@ -480,7 +552,7 @@ Future<void> _safeLoad(ChangeNotifier provider, String name) async {
       await provider.load();
     }
   } catch (e, stack) {
-    debugPrint('[$name] 启动加载失败（已降级跳过）：$e\n$stack');
+    AppLog.e('[$name] 启动加载失败（已降级跳过）', e, stack);
     // 不 rethrow ——允许 app 继续启动，该功能暂时不可用但 UI 正常渲染。
   }
 }
@@ -541,7 +613,7 @@ class MyApp extends StatelessWidget {
               );
               } catch (e) {
                 // buildThemes 或 DynamicColorBuilder 异常时降级为默认主题。
-                debugPrint('主题构建异常，降级为默认：$e');
+                AppLog.d('主题构建异常，降级为默认：$e');
                 final fallback = theme.buildThemes(null, null);
                 return MaterialApp(
                   title: '有条',
@@ -584,6 +656,9 @@ class _MainScaffoldState extends State<MainScaffold>
   /// P1-9：首页 State 句柄，供 Ctrl/Cmd+F 快捷键从宿主 Scaffold 聚焦首页搜索。
   final GlobalKey<HomeScreenState> _homeKey = GlobalKey<HomeScreenState>();
 
+  /// M-01：应用锁 Provider 引用。锁定期间外部意图只暂存，解锁后由监听回调消费。
+  late final AppLockProvider _appLock;
+
   @override
   void initState() {
     super.initState();
@@ -593,80 +668,88 @@ class _MainScaffoldState extends State<MainScaffold>
         () => setState(() => _index = 0);
     // 任务行「专注」按钮请求跳到专注 Tab（index=3）；FocusProvider 静态回调。
     FocusProvider.jumpToFocusTab = () => setState(() => _index = 3);
-    // 消费冷启动期间因点通知而暂存的 payload（导航器此时已就绪）。
-    if (_pendingNotificationPayload != null) {
-      final p = _pendingNotificationPayload!;
-      _pendingNotificationPayload = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final state = _navigatorKey.currentState;
-        if (mounted && state != null) _navigateFromPayload(p, state);
-      });
+    // M-01：监听解锁事件——locked 由 true 变 false 时，把锁定期间暂存的
+    // 通知跳转 / 通知 action / 分享 / 小组件意图一次性消费掉。
+    _appLock = Provider.of<AppLockProvider>(context, listen: false);
+    _appLock.addListener(_onAppLockChanged);
+    // 消费冷启动期间暂存的全部外部意图（此时导航器已就绪）。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingIntents());
+  }
+
+  /// M-01：解锁成功后补消费锁定期间暂存的意图。
+  /// 用 postFrame 包一层，避免在 notifyListeners（可能处于 build 阶段）里直接 push 路由。
+  void _onAppLockChanged() {
+    if (!_appLock.locked) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingIntents());
     }
-    // 消费冷启动期间因点通知「稍后提醒」而暂存的 id（导航器此时已就绪）。
-    if (_pendingSnoozeTaskId != null || _pendingSnoozeHabitId != null) {
-      final tId = _pendingSnoozeTaskId;
-      final hId = _pendingSnoozeHabitId;
+  }
+
+  /// 消费所有暂存的外部意图：通知点击 / 通知 action（稍后提醒、完成）/
+  /// 分享文本 / 分享附件 / 桌面小组件。
+  ///
+  /// M-01：**锁定期间一律不消费**——这些动作都会经根 Navigator push 路由或改动数据，
+  /// 会整屏盖在 AppLockGate 之上，使应用锁形同虚设。仍锁定时保持暂存，
+  /// 待解锁后由 [_onAppLockChanged] 再次调用。
+  Future<void> _flushPendingIntents() async {
+    final state = _navigatorKey.currentState;
+    if (!mounted || state == null) return;
+    if (_isAppLocked) return;
+
+    // 通知点击（含冷启动时由 initialize 回调暂存的 payload）。
+    final p = _pendingNotificationPayload;
+    if (p != null) {
+      _pendingNotificationPayload = null;
+      _doNavigate(p, state);
+    }
+    // 桌面小组件点击任务项。
+    final wId = _pendingWidgetTaskId;
+    if (wId != null) {
+      _pendingWidgetTaskId = null;
+      _doNavigate('task:$wId', state);
+    }
+    // 通知「稍后提醒」action。
+    final tId = _pendingSnoozeTaskId;
+    final hId = _pendingSnoozeHabitId;
+    if (tId != null || hId != null) {
       _pendingSnoozeTaskId = null;
       _pendingSnoozeHabitId = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final state = _navigatorKey.currentState;
-        if (mounted && state != null) _doSnooze(state, tId, hId);
-      });
+      _doSnooze(state, tId, hId);
     }
-    // 消费冷启动期间因点通知「完成」而暂存的 id（导航器此时已就绪）。
-    if (_pendingCompleteTaskId != null) {
-      final cId = _pendingCompleteTaskId;
+    // 通知「完成」action。
+    final cId = _pendingCompleteTaskId;
+    if (cId != null) {
       _pendingCompleteTaskId = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final state = _navigatorKey.currentState;
-        if (mounted && state != null) _doComplete(state, cId);
-      });
+      _doComplete(state, cId);
     }
-    // 消费冷启动期间由「分享」入口转发、暂存的文本：首帧后弹出预填录入层。
-    if (_pendingShareText != null) {
-      final s = _pendingShareText;
-      final src = _pendingShareSource;
+    // 系统分享文本。
+    final s = _pendingShareText;
+    final src = _pendingShareSource;
+    if (s != null) {
       _pendingShareText = null;
       _pendingShareSource = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final state = _navigatorKey.currentState;
-        if (mounted && state != null && s != null) {
-          QuickEntrySheet.show(state.context, initialText: s, sourcePackage: src);
-        }
-      });
+      QuickEntrySheet.show(state.context, initialText: s, sourcePackage: src);
     }
-    // 消费冷启动期间由「系统分享接收附件」入口、暂存的附件：首帧后弹出带附件的预填录入层（P1-11）。
-    if (_pendingSharedAttachment != null) {
-      final a = _pendingSharedAttachment;
-      final sess = _pendingSharedSession;
+    // 系统分享附件（P1-11）。
+    final a = _pendingSharedAttachment;
+    final sess = _pendingSharedSession;
+    if (a != null) {
       _pendingSharedAttachment = null;
       _pendingSharedSession = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final state = _navigatorKey.currentState;
-        if (mounted && state != null && a != null) {
-          QuickEntrySheet.show(
-            state.context,
-            initialAttachment: a,
-            attachmentSession: sess,
-          );
-        }
-      });
-    }
-    // 消费冷启动期间由桌面小组件点击任务项、经原生拉起并暂存的 id：首帧后直达详情页。
-    if (_pendingWidgetTaskId != null) {
-      final wId = _pendingWidgetTaskId;
-      _pendingWidgetTaskId = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final state = _navigatorKey.currentState;
-        if (mounted && state != null && wId != null) {
-          _navigateFromPayload('task:$wId', state);
-        }
-      });
+      await QuickEntrySheet.show(
+        state.context,
+        initialAttachment: a,
+        attachmentSession: sess,
+      );
     }
   }
 
   @override
   void dispose() {
+    try {
+      _appLock.removeListener(_onAppLockChanged);
+    } catch (_) {
+      // Provider 可能已被销毁（极端路径），忽略。
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

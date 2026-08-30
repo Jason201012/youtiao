@@ -11,6 +11,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -46,6 +47,12 @@ class MainActivity : FlutterFragmentActivity() {
     /// P2-D：`share_inbox` 会话目录的最大存活时长（与 AttachmentService.staleStagingMaxAge 对齐）。
     /// 超过则启动时兜底清理，避免异常路径残留让私有缓存无限增长。
     private val SHARE_INBOX_MAX_AGE_MS = 24L * 60 * 60 * 1000
+    /// I-05：分享节流窗口（毫秒）。同一来源在该窗口内的连续分享只受理第一次。
+    /// 1.2s 足以挡住「恶意 App 循环调起分享页骚扰」，又不影响用户手动连续分享。
+    private val SHARE_THROTTLE_WINDOW_MS = 1200L
+    /// I-05：上次受理分享的时间戳 / 来源包名（见 [isShareThrottled]）。
+    private var lastShareAcceptedAtMs = 0L
+    private var lastShareAcceptedSource: String? = null
     /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity，再经此通道让 Dart 直达详情页。
     private val CHANNEL_WIDGET_NAV = "com.example.todolist/widget_nav"
     private var widgetNavHandler: MethodChannel? = null
@@ -53,6 +60,12 @@ class MainActivity : FlutterFragmentActivity() {
     private var pendingWidgetTaskId: String? = null
     /// 小组件刷新通道：Dart 侧每次 _persist 后调用，主动刷新桌面部件（今日任务列表）。
     private val CHANNEL_WIDGET_REFRESH = "com.example.todolist/widget_refresh"
+    /// L-07：窗口标志通道——运行时开关 `FLAG_SECURE`（防最近任务缩略图 + 防截屏/录屏）。
+    private val CHANNEL_WINDOW_FLAGS = "com.example.todolist/window_flags"
+    /// L-07：FLAG_SECURE 的持久化键。写在原生侧而非 Dart 侧，是为了让 onCreate 在
+    /// Flutter 引擎就绪前就能应用（首帧之前就已经生效，不留裸露窗口期）。
+    private val PREF_WINDOW_FLAGS = "youtiao_window_flags"
+    private val PREF_KEY_FLAG_SECURE = "flag_secure"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -328,24 +341,78 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // L-07：窗口标志通道——Dart 侧设置页开关直接调这里，写入持久化后立刻应用到当前窗口。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_WINDOW_FLAGS)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setFlagSecure" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        try {
+                            setFlagSecure(enabled)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("FLAG_FAILED", e.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /// L-07：应用 / 取消 `FLAG_SECURE`，并持久化。
+    ///
+    /// 未设置时，最近任务列表会定格完整任务内容、任意录屏软件可录制界面；
+    /// 设置后系统在最近任务里显示空白缩略图，并阻止截屏与录屏。
+    /// 切换必须在 UI 线程执行（Window 不是线程安全的），通道回调本身已在主线程，
+    /// 兜底再包一层 runOnUiThread 以防将来从后台线程调用。
+    private fun setFlagSecure(enabled: Boolean) {
+        runOnUiThread {
+            if (enabled) {
+                window.setFlags(
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                )
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+        // 同步持久化，供下次冷启动 onCreate 阶段应用。
+        try {
+            getSharedPreferences(PREF_WINDOW_FLAGS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_KEY_FLAG_SECURE, enabled)
+                .apply()
+        } catch (_: Exception) {
+            // 持久化失败只影响下次冷启动，当前会话仍已生效。
+        }
     }
 
     private fun installApk(apk: File) {
-        // 路径归属校验：仅允许安装应用自身外部缓存目录（file_paths.xml 限定的
-        // external-cache/updates/）下的 APK，杜绝传入任意路径导致安装外部文件。
+        // 路径归属校验：仅允许安装 `<外部缓存目录>/updates/` 下的 APK。
         //
-        // 🔒 安全加固：此前用 `apk.absolutePath.startsWith(cacheDir.absolutePath)`
-        // 前缀匹配，理论上 `"…/cache/../files/x.apk"` 可绕过前缀检查。改为比较
-        // canonicalPath（解析 `..` 与符号链接后的真实路径），确保 APK 确实落在
-        // 应用外部缓存目录内。FileProvider 的 paths 白名单仍作为二次兜底。
+        // 🔒 安全加固（审计 L-05），此前实现存在两处缺陷：
+        //   1. 用 `absolutePath.startsWith(cacheDir.absolutePath)` 前缀匹配，
+        //      `"…/cache/../files/x.apk"` 这类含 `..` 的路径可绕过；
+        //   2. 即便改用 canonicalPath，裸前缀匹配仍存在「兄弟目录」绕过——
+        //      `…/cache/updates_evil/x.apk` 以 `…/cache/updates` 为前缀，
+        //      却完全不在受控目录内。
+        // 这里同时补上两处：解析 canonicalPath + 末尾补分隔符 + 收敛到 updates/ 子目录，
+        // 与 file_paths.xml 的 `<external-cache-path path="updates/" />` 白名单严格对齐。
         val cacheDir = externalCacheDir
         if (cacheDir == null) {
             throw SecurityException("无法获取应用缓存目录")
         }
+        val allowedDir = File(cacheDir, "updates")
+        // 目录不存在时按 canonicalPath 比较会误判，这里先建目录（与 Dart 侧下载器行为一致）。
+        if (!allowedDir.exists() && !allowedDir.mkdirs()) {
+            throw SecurityException("无法准备更新目录：${allowedDir.absolutePath}")
+        }
         val canonicalApk = apk.canonicalPath
-        val canonicalCache = cacheDir.canonicalPath
-        if (!canonicalApk.startsWith(canonicalCache)) {
-            throw SecurityException("APK 路径不在应用缓存目录内：$canonicalApk")
+        // 末尾补分隔符，杜绝 `updates_evil/` 这类「同前缀不同目录」绕过。
+        val canonicalAllowed = allowedDir.canonicalPath.trimEnd(File.separatorChar) + File.separator
+        if (!canonicalApk.startsWith(canonicalAllowed)) {
+            throw SecurityException("APK 路径不在受控更新目录内：$canonicalApk")
         }
         val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
@@ -363,6 +430,20 @@ class MainActivity : FlutterFragmentActivity() {
     /// 缓存文本，待 configureFlutterEngine 注册通道后补发；引擎已就绪则直接发送。
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // L-07：在首帧渲染之前就应用 FLAG_SECURE（读原生存的值，不等 Flutter 引擎就绪），
+        // 避免「冷启动 → 引擎就绪 → Dart 下发开关」这段窗口期内界面被截屏/录屏。
+        val flagSecure = try {
+            getSharedPreferences(PREF_WINDOW_FLAGS, Context.MODE_PRIVATE)
+                .getBoolean(PREF_KEY_FLAG_SECURE, false)
+        } catch (_: Exception) {
+            false
+        }
+        if (flagSecure) {
+            window.setFlags(
+                WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE,
+            )
+        }
         // P2-D：先把上次异常退出残留的 share_inbox 旧目录清掉，再处理本次 intent。
         cleanupStaleShareInbox()
         dispatchShareText(intent)
@@ -397,6 +478,28 @@ class MainActivity : FlutterFragmentActivity() {
         dispatchWidgetTask(intent)
     }
 
+    /// I-05：分享节流判定——键为「来源包名 + 时窗」，而非此前的「文本内容相等」。
+    ///
+    /// 原实现在 Dart 侧以「文本完全相同且 500ms 内」为条件去重，攻击者只要让每次分享的
+    /// 文本带上一个随机后缀即可绕过，反复拉起录入弹层骚扰用户。这里改为以来源为键：
+    /// 同一来源在 [SHARE_THROTTLE_WINDOW_MS] 内的连续分享只受理第一次，与内容无关。
+    /// `callingActivity` 取不到包名时（部分 ROM / 直接 adb 调起）退化为「来源未知」单桶，
+    /// 仍比文本相等更严格。
+    ///
+    /// 有副作用：命中放行时会更新「上次受理」记录，因此每个 intent 只能调用一次。
+    private fun isShareThrottled(source: String?): Boolean {
+        val now = System.currentTimeMillis()
+        val lastAt = lastShareAcceptedAtMs
+        val lastSrc = lastShareAcceptedSource
+        val sameSource = lastSrc == source
+        if (sameSource && now - lastAt < SHARE_THROTTLE_WINDOW_MS) {
+            return true
+        }
+        lastShareAcceptedAtMs = now
+        lastShareAcceptedSource = source
+        return false
+    }
+
     /// 从 SEND intent 取出 EXTRA_TEXT（纯文本），缓存并在引擎就绪后发给 Dart。
     /// 末尾独立的分享页 URL（如 \nhttps://...）会被截掉，仅保留正文，交给 TaskParser 解析。
     private fun dispatchShareText(i: Intent?) {
@@ -410,6 +513,8 @@ class MainActivity : FlutterFragmentActivity() {
         if (body.isEmpty()) return
         // P2-8：记录分享来源包名（来自 getCallingActivity），用于预填录入层展示「来自 XX」。
         val source = callingActivity?.packageName
+        // I-05：节流判定放在真正受理之前，被挡下的分享不落缓存、不调 Dart。
+        if (isShareThrottled(source)) return
         // 引擎未就绪（冷启动）时 invokeMethod 会失败 → 缓存，configureFlutterEngine 末尾补发。
         pendingShareText = body
         pendingShareSource = source
@@ -425,6 +530,9 @@ class MainActivity : FlutterFragmentActivity() {
     private fun dispatchShareStream(i: Intent?) {
         val uri = i?.takeIf { it.action == Intent.ACTION_SEND }
             ?.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
+        // I-05：与 [dispatchShareText] 同源的节流（键 = 来源包名 + 时窗）。
+        // 放在解析/复制字节流之前，被挡下的分享不做任何磁盘 IO。
+        if (isShareThrottled(callingActivity?.packageName)) return
         // 读 content URI 的显示名 / 大小 / MIME（部分来源不返回大小，记为 -1，复制后二次校验）。
         val cr = contentResolver
         var mimeType: String? = i.type

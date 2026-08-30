@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -22,13 +23,45 @@ import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
 
 /// 识别备注中的 http(s) 链接并渲染为可点击文本（其余部分保持普通文本）。
-/// 正则匹配 http:// 或 https:// 起头的连续非空白字符。点击用 url_launcher 打开。
+///
+/// 安全审计 L-12，两处收口：
+///
+/// 1. **正则收紧**：只认 `http://` / `https://`，域名段限定为常规域名字符，
+///    并把中英文句末标点（`.,;:!?)]}"'。，；：！？）】》"` 等）从尾部剥离，
+///    避免「参见 https://a.com。」把句号一起吞进 URL；
+/// 2. **默认不外跳**：本 App 定位为「除检查更新外不联网」，点击链接会离开本地
+///    并由浏览器发起网络请求。默认行为改为**只复制链接并提示**；用户在设置里
+///    显式打开「允许打开备注中的链接」后才真正唤起外部浏览器。
 class _NoteText extends StatelessWidget {
   final String text;
   final Color color;
-  const _NoteText({required this.text, required this.color});
 
-  static final RegExp _urlRe = RegExp(r'https?://[^\s]+');
+  /// 是否允许点击后唤起外部浏览器（跟随设置项 [TaskProvider.allowExternalLinks]）。
+  final bool allowExternal;
+  const _NoteText({
+    required this.text,
+    required this.color,
+    required this.allowExternal,
+  });
+
+  /// 收紧后的 URL 正则：
+  /// - `https?://` 开头，不接受其它 scheme（file / javascript / data 等一律不入链）；
+  /// - 主体为「非空白且非成对括号/引号」的字符，长度上限 2048，防病态长串卡住布局；
+  /// - 末尾不允许落在标点上（由 [_trimTrailingPunct] 二次剥离，正则先行排除）。
+  static final RegExp _urlRe = RegExp(
+    r'https?://[^\s<>"\x27\\^`{|}]{1,2048}'
+    r'(?<![.,;:!?)\]\}。，、；：！？）】》」』”’])',
+  );
+
+  /// 剥离 URL 尾部的句末标点（正则的否定环视只挡一次，连续标点需循环剥离）。
+  static String _trimTrailingPunct(String s) {
+    const tail = '.,;:!?)].,;:!?)]。，、；：！？）】》」』”’"\'';
+    var end = s.length;
+    while (end > 0 && tail.contains(s[end - 1])) {
+      end--;
+    }
+    return s.substring(0, end);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -46,17 +79,12 @@ class _NoteText extends StatelessWidget {
           style: TextStyle(fontSize: 14, color: color),
         ));
       }
-      final url = text.substring(m.start, m.end);
+      final url = _trimTrailingPunct(text.substring(m.start, m.end));
       spans.add(TextSpan(
         text: url,
         style: TextStyle(fontSize: 14, color: linkColor, decoration: TextDecoration.underline),
         recognizer: TapGestureRecognizer()
-          ..onTap = () async {
-            final uri = Uri.tryParse(url);
-            if (uri != null && await canLaunchUrl(uri)) {
-              await launchUrl(uri, mode: LaunchMode.externalApplication);
-            }
-          },
+          ..onTap = () => _onTapLink(context, url),
       ));
       cursor = m.end;
     }
@@ -67,6 +95,38 @@ class _NoteText extends StatelessWidget {
       ));
     }
     return RichText(text: TextSpan(children: spans));
+  }
+
+  /// 点击链接：未授权外跳时只复制 + 提示，授权后走外部浏览器。
+  Future<void> _onTapLink(BuildContext context, String url) async {
+    final uri = Uri.tryParse(url);
+    // 二次校验 scheme：正则已锚定 http(s)，这里再兜一层，杜绝构造出其它 scheme。
+    if (uri == null ||
+        (uri.scheme != 'http' && uri.scheme != 'https') ||
+        uri.host.isEmpty) {
+      _tip(context, '链接无法识别');
+      return;
+    }
+    if (!allowExternal) {
+      await Clipboard.setData(ClipboardData(text: url));
+      if (context.mounted) {
+        _tip(context, '已复制链接（可在设置中允许打开外链）');
+      }
+      return;
+    }
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        if (context.mounted) _tip(context, '没有可打开链接的应用');
+      }
+    } catch (_) {
+      if (context.mounted) _tip(context, '打开链接失败');
+    }
+  }
+
+  static void _tip(BuildContext context, String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 }
 
@@ -172,7 +232,12 @@ class TaskDetailScreen extends StatelessWidget {
                 children: [
                   const _Label('备注'),
                   const SizedBox(height: 6),
-                  _NoteText(text: task.note, color: onBg),
+                  // L-12：外链默认不外跳，跟随设置项「允许打开备注中的链接」。
+                  _NoteText(
+                    text: task.note,
+                    color: onBg,
+                    allowExternal: provider.allowExternalLinks,
+                  ),
                 ],
               ),
             ),

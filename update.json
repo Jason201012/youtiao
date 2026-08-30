@@ -1,7 +1,7 @@
 {
-  "version": "2.7.8",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.7.8/app-release-2.7.8-arm64.apk",
-  "apkSha256": "8e592eaa97c2c8cdd0762fcafdd434aeca26bdc795419004cbe415fd67473e17",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.7.8",
-  "releaseNotes": "v2.7.8（安全修复：提醒调度链路 + 备份/录入健壮性）：\n【修复·P1】① updateTask 的 remindersChanged 漏判提醒相关字段（reminderOffsetMin / monthly* / repeatUntil / skipDates）——只改提醒提前量、月重复规则或结束日期时提醒不重排，旧提醒继续按旧配置触发；现判定补全并自动重排。② interval（每隔 N 天）重复提醒断链——不设截止日期时从不提醒、设了截止日期时首轮后永久丢失；interval 重挂门槛改按 repeatUntil 判定，三处重挂入口统一收口。\n【修复·P2】③ 批量编辑「+N 天」改为各自 dueDate + N 天（原实现统一平移到今天+N，对未来截止的任务实为提前）。④ 恢复链路拒绝 tasks 非 List 的空档备份（含带「有条」标记的损坏文件），清空恢复仅允许显式 tasks: []。⑤ 快速录入「提前 N 天」数字无上限可致崩溃或提醒静默失效，改为 tryParse + 按单位收口上限（天≤365/小时≤8760/分钟≤525600）。⑥ 批量编辑与撤销逐条全量落库导致写放大，循环后统一持久化一次。\n固定 release keystore 签名。"
+  "version": "2.7.9",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.7.9/app-release-2.7.9-arm64.apk",
+  "apkSha256": "8f4a2f8c43b581aa720167739bd5debe30e4af44ef453d22a7914e44c332dfa9",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.7.9",
+  "releaseNotes": "v2.7.9（安全审计修复）：\n【中危 M-01】应用锁可被通知 / 桌面小组件点击绕过——锁定时外部跳转意图只暂存、解锁后再消费，杜绝锁屏直达任务详情。\n【更新链路 L-01~L-04/L-10/L-13】version 做 semver 白名单且下载落盘固定名；APK 直链叠加作者发布仓 releases/download/ 路径前缀、重定向逐跳校验主机；下载 200MB 熔断 + 失败清理半成品；releaseUrl 走白名单；releaseNotes 截断 8000 字。\n【隐私 L-05/L-06/L-07/L-08/L-12】installApk 加 updates/ 分隔符边界校验；通知默认锁屏隐藏；新增 FLAG_SECURE 开关；自动备份可选 AES-GCM 加密；备注链接默认复制不外跳。\n【健壮性 L-09/L-11】导入 32MB 预检 + 附件流式复制；release 模式日志静默。\n【加固 I-02】新增 network_security_config 禁明文 + 仅系统 CA。固定 release keystore 签名。"
 }

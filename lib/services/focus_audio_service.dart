@@ -1,8 +1,8 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:todolist/services/app_log.dart';
 
 /// 专注环境音类型。
 enum FocusSoundType {
@@ -228,7 +228,7 @@ class FocusAudioService {
       if (fade) _ramp(player, 0.0, _volume, _fade);
     }).catchError((e, st) {
       // 便于真机排查：若仍无声，可在 logcat 看到具体错误。
-      debugPrint('[FocusAudio] 环境音播放失败: $e\n$st');
+      AppLog.d('[FocusAudio] 环境音播放失败: $e\n$st');
     });
   }
 

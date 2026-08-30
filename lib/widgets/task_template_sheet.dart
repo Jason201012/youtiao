@@ -59,8 +59,17 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
   }
 
   Future<void> _import(BuildContext ctx) async {
-    final raw = await DataIo.pickJsonFile();
-    if (raw == null) return;
+    // L-09：模板 JSON 同样先过大小预检（读入前 stat），超限给出明确提示。
+    final picked = await DataIo.pickJsonFile();
+    if (picked.cancelled) return;
+    if (picked.error != null) {
+      if (ctx.mounted) {
+        ScaffoldMessenger.of(ctx)
+            .showSnackBar(SnackBar(content: Text(picked.error!)));
+      }
+      return;
+    }
+    final raw = picked.content!;
     try {
       final m = jsonDecode(raw) as Map<String, dynamic>;
       // 安全（P1-A）：导入时无条件丢弃外部 id 重新分配，杜绝 id 携带路径穿越段。

@@ -80,6 +80,64 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// L-08：请求设置「自动备份口令」。返回 null 表示用户取消。
+  ///
+  /// 与手动加密备份共用同一套 AES-GCM 信封，口令仅存本机、不随备份导出。
+  /// 如实告知能力边界：防的是「快照文件被单独拷出后可读」，不防 root / 物理接触。
+  Future<String?> _requestAutoBackupPassphrase(BuildContext ctx) async {
+    final controller = TextEditingController();
+    String? errorText;
+    final result = await showDialog<String>(
+      context: ctx,
+      builder: (dctx) => StatefulBuilder(
+        builder: (dctx, setLocal) => AlertDialog(
+          title: const Text('设置自动备份口令'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '开启后，每日自动快照会以 AES-256-GCM 加密后落盘。\n'
+                '口令仅保存在本机，不会随备份文件导出——换机恢复后需重新设置。',
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                obscureText: true,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: '口令（至少 6 位）',
+                  errorText: errorText,
+                ),
+                onSubmitted: (v) {
+                  if (v.length >= 6) Navigator.of(dctx).pop(v);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dctx).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final v = controller.text;
+                if (v.length < 6) {
+                  setLocal(() => errorText = '口令至少 6 位');
+                  return;
+                }
+                Navigator.of(dctx).pop(v);
+              },
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -534,6 +592,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 }
                               }
                             : null,
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // L-06：锁屏隐藏通知正文（默认隐藏）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.lock,
+                        label: '锁屏隐藏通知内容',
+                        subtitle: provider.lockScreenPrivate
+                            ? '锁屏只显示「有 N 条待办提醒」，解锁后才显示任务标题'
+                            : '锁屏会完整显示任务标题（关闭应用锁时不建议）',
+                        switchValue: provider.lockScreenPrivate,
+                        onSwitchChanged: (v) => provider.setLockScreenPrivate(v),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // L-07：FLAG_SECURE 防截屏 / 录屏（默认开启）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.screenshot,
+                        label: '禁止截屏与录屏',
+                        subtitle: provider.screenSecurityEnabled
+                            ? '最近任务缩略图为空白，系统截图 / 录屏被拦截'
+                            : '最近任务会定格任务内容，且可被任意录屏软件录制',
+                        switchValue: provider.screenSecurityEnabled,
+                        onSwitchChanged: (v) =>
+                            provider.setScreenSecurityEnabled(v),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // L-08：本地自动备份加密（默认关闭，需先设口令）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.enhanced_encryption,
+                        label: '加密本地自动备份',
+                        subtitle: provider.autoBackupEncrypt
+                            ? '每日快照以 AES-256-GCM 加密后落盘（.enc.json）'
+                            : '每日快照为明文 JSON；仅防误删，不防文件被拷出',
+                        switchValue: provider.autoBackupEncrypt,
+                        onSwitchChanged: (v) async {
+                          if (v && !provider.hasAutoBackupPassphrase) {
+                            final pass =
+                                await _requestAutoBackupPassphrase(context);
+                            if (pass == null) return; // 用户取消
+                            await provider.setAutoBackupPassphrase(pass);
+                          }
+                          final ok = await provider.setAutoBackupEncrypt(v);
+                          if (!ok && mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('开启加密前需要先设置备份口令'),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // L-12：备注外链点击（默认关闭——本 App 除检查更新外不联网）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.link,
+                        label: '允许打开备注中的链接',
+                        subtitle: provider.allowExternalLinks
+                            ? '点击备注里的 http(s) 链接会唤起外部浏览器'
+                            : '点击链接只复制到剪贴板，不静默外跳（推荐）',
+                        switchValue: provider.allowExternalLinks,
+                        onSwitchChanged: (v) => provider.setAllowExternalLinks(v),
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),

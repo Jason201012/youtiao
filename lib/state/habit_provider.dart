@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:todolist/services/app_log.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/checkin.dart';
 import 'package:todolist/services/local_database.dart';
@@ -56,7 +57,7 @@ class HabitProvider extends ChangeNotifier {
         ..clear()
         ..addAll(await db.loadCheckIns());
     } catch (e, stack) {
-      debugPrint('HabitProvider 加载失败（习惯/打卡暂不可用）：$e\n$stack');
+      AppLog.d('HabitProvider 加载失败（习惯/打卡暂不可用）：$e\n$stack');
       _habits.clear();
       _checkIns.clear();
     }
@@ -154,7 +155,7 @@ class HabitProvider extends ChangeNotifier {
     try {
       cb(this);
     } catch (e) {
-      debugPrint('[HabitNudge] 变动重排回调失败（已忽略）：$e');
+      AppLog.d('[HabitNudge] 变动重排回调失败（已忽略）：$e');
     }
   }
 
@@ -471,14 +472,14 @@ class HabitProvider extends ChangeNotifier {
     try {
       await LocalDatabase.instance.replaceHabits(_habits);
     } catch (e) {
-      debugPrint('HabitProvider 持久化 habits 失败：$e');
+      AppLog.d('HabitProvider 持久化 habits 失败：$e');
     }
   }
   Future<void> _persistCheckIns() async {
     try {
       await LocalDatabase.instance.replaceCheckIns(_checkIns);
     } catch (e) {
-      debugPrint('HabitProvider 持久化 checkIns 失败：$e');
+      AppLog.d('HabitProvider 持久化 checkIns 失败：$e');
     }
   }
 }

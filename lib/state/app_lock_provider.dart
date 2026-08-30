@@ -3,6 +3,7 @@ import 'package:local_auth/local_auth.dart';
 import 'package:local_auth_android/local_auth_android.dart';
 import 'package:local_auth_darwin/local_auth_darwin.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:todolist/services/app_log.dart';
 
 /// 应用锁（A4）：基于系统生物识别（指纹 / 面容）的启动 / 回前台解锁门禁。
 ///
@@ -52,7 +53,7 @@ class AppLockProvider extends ChangeNotifier {
         _biometricAvailable = await _auth.isDeviceSupported();
       }
     } catch (e) {
-      debugPrint('[AppLock] 探测生物识别失败，降级为不可用：$e');
+      AppLog.d('[AppLock] 探测生物识别失败，降级为不可用：$e');
       _biometricAvailable = false;
     }
     notifyListeners();
@@ -158,7 +159,7 @@ class AppLockProvider extends ChangeNotifier {
       notifyListeners();
       return ok;
     } catch (e) {
-      debugPrint('[AppLock] 验证异常：$e');
+      AppLog.d('[AppLock] 验证异常：$e');
       // 异常时不自动解锁（安全优先），返回 false 让 UI 维持锁定页。
       return false;
     } finally {

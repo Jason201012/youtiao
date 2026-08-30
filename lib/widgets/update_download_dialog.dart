@@ -1,19 +1,24 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:todolist/services/apk_installer.dart';
 import 'package:todolist/services/update_checker.dart';
+import 'package:todolist/services/update_downloader.dart';
+import 'package:todolist/services/update_policy.dart';
 
 /// 应用内下载并安装更新包：流式下载 APK 到外部缓存目录（updates/），
 /// 实时显示进度，下载完成后流式计算 sha256 校验完整性，再经系统安装器安装。
 /// 失败时提供「浏览器下载」兜底。
+///
+/// 安全审计相关（L-01 / L-02 / L-03 / L-04 / L-10）：
+/// - 落盘文件名固定为 `updates/update.apk`，**不使用清单里的 version 拼接**（防路径穿越）；
+/// - 下载全程由 [UpdateDownloader] 负责：URL 首跳前缀白名单 + 逐跳重定向主机校验
+///   + 200MB 体积熔断 + 失败即清理半成品；
+/// - 底部「浏览器下载」外跳前，releaseUrl 必须过 [UpdatePolicy.isAllowedReleaseUrl]。
 class UpdateDownloadDialog {
   static Future<void> show(BuildContext context, UpdateInfo info) async {
     if (!context.mounted) return;
@@ -39,8 +44,7 @@ class _DownloadBodyState extends State<_DownloadBody> {
   bool _done = false;
   bool _cancelled = false;
   String? _error;
-  http.Client? _client;
-  IOSink? _sink;
+  UpdateDownloader? _downloader;
   File? _apkFile;
 
   @override
@@ -51,79 +55,51 @@ class _DownloadBodyState extends State<_DownloadBody> {
 
   @override
   void dispose() {
-    _client?.close();
+    _downloader?.cancel();
     super.dispose();
   }
 
-  /// 取消下载：关闭连接并退出下载循环（循环会在 catch 中统一清理不完整文件）。
+  /// 取消下载：中断连接并退出下载循环（半成品由 [UpdateDownloader] 的 finally 删除）。
   Future<void> _cancel() async {
     if (_done || _error != null || _cancelled) return;
     _cancelled = true;
-    _client?.close(); // 终止下载流，循环会捕获异常后退出
+    _downloader?.cancel();
     if (mounted) Navigator.pop(context);
   }
 
-  /// S3 修复②：APK 下载地址域名白名单。仅允许官方托管域名，降低清单被投毒后
-  /// 指向任意 https 地址下发恶意 APK 的风险。如需放开到自有域，在此列表追加 host。
-  static bool _isAllowedApkHost(String url) {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return false;
-    const allowed = {
-      'gitee.com',
-      'github.com',
-      'raw.githubusercontent.com',
-    };
-    final host = uri.host.toLowerCase();
-    return host.isNotEmpty && allowed.contains(host);
+  /// 删除已下载的 APK（用户选择「稍后」时避免长期占用缓存）。
+  Future<void> _deleteApkQuietly() async {
+    final f = _apkFile;
+    if (f == null) return;
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
   }
 
   Future<void> _start() async {
-    final url = widget.info.apkUrl ?? widget.info.releaseUrl;
+    final url = widget.info.apkUrl;
     if (url == null) {
-      setState(() => _error = '未找到可用的下载地址');
-      return;
-    }
-    // 仅允许 https 直链，避免明文 http 被中间人劫持后下载恶意 APK。
-    if (!url.startsWith('https://')) {
-      setState(() => _error = '更新地址不安全（需 https）');
-      return;
-    }
-    // S3 修复②：下载地址域名白名单，仅允许官方托管域名，防止清单被投毒
-    // （Gitee 账号被盗 / 协作仓库被改）后指向任意 https 地址下发恶意 APK。
-    if (!_isAllowedApkHost(url)) {
-      setState(() => _error = '下载地址域名不在允许列表（仅限 gitee.com / github.com），已拒绝安装');
+      setState(() => _error = '更新清单未提供可用的下载地址');
       return;
     }
     try {
       final cacheDirs = await getExternalCacheDirectories();
       final cacheDir = cacheDirs?.first;
       if (cacheDir == null) throw Exception('无法获取外部缓存目录');
-      final apkFile =
-          File('${cacheDir.path}/updates/app-release-v${widget.info.version}.apk');
-      await apkFile.parent.create(recursive: true);
+      // L-01：文件名固定，不掺入清单里的任何外部输入。
+      // 旧实现拼 `app-release-v${version}.apk`，而 version 未做格式校验，
+      // 取 `../../../files/x` 即可在应用沙箱目录树内任意落文件。
+      final apkFile = File('${cacheDir.path}/updates/update.apk');
       _apkFile = apkFile;
 
-      final client = http.Client();
-      _client = client;
-      final response = await client.send(http.Request('GET', Uri.parse(url)));
-      if (response.statusCode != 200) {
-        throw Exception('下载失败（HTTP ${response.statusCode}）');
-      }
-      final total = response.contentLength ?? 0;
-      var received = 0;
-      final sink = apkFile.openWrite();
-      _sink = sink;
-      // S8 修复②：流式分块计算 sha256，避免把约 85MB 的 APK 整体读入内存（低内存机型 OOM 风险）。
-      Digest? digest;
-      final hashSink = sha256.startChunkedConversion(
-        ChunkedConversionSink<Digest>.withCallback((d) => digest = d.single),
-      );
-      await for (final chunk in response.stream) {
-        if (_cancelled) return; // 取消分支在 catch 中统一清理
-        sink.add(chunk);
-        hashSink.add(chunk);
-        received += chunk.length;
-        if (mounted) {
+      final downloader = UpdateDownloader();
+      _downloader = downloader;
+      // 下载器内部完成：URL 白名单 → 逐跳重定向校验 → 200MB 熔断 → 流式 sha256。
+      final actual = await downloader.download(
+        url: url,
+        target: apkFile,
+        onProgress: (received, total) {
+          if (!mounted) return;
           setState(() {
             _progress = total > 0 ? received / total : 0;
             _status = total > 0
@@ -131,12 +107,9 @@ class _DownloadBodyState extends State<_DownloadBody> {
                     '${(total / 1048576).toStringAsFixed(1)} MB'
                 : '下载中 ${(received / 1048576).toStringAsFixed(1)} MB';
           });
-        }
-      }
-      hashSink.close();
-      await sink.close();
-      _client = null;
-      _sink = null;
+        },
+      );
+      _downloader = null;
 
       // S3 修复①：完整性校验强制化。
       // - 清单提供了 apkSha256：比对下载文件，不一致（篡改/下载不完整）直接拒绝安装；
@@ -147,8 +120,9 @@ class _DownloadBodyState extends State<_DownloadBody> {
       final String verifyTitle;
       final String verifyBody;
       if (expected != null && expected.isNotEmpty) {
-        final actual = (digest ?? sha256.convert(const <int>[])).toString();
         if (actual.toLowerCase() != expected.toLowerCase()) {
+          // 校验不通过的半成品必须立即删除，避免被其它途径利用（L-10）。
+          await _deleteApkQuietly();
           if (!mounted) return;
           setState(() => _error = 'APK 校验失败：文件可能被篡改或下载不完整');
           return;
@@ -185,26 +159,38 @@ class _DownloadBodyState extends State<_DownloadBody> {
         ),
       );
       if (proceed != true) {
+        // 用户选择稍后：不留残片，下次重新下载（L-10）。
+        await _deleteApkQuietly();
         if (mounted) Navigator.pop(context);
         return;
       }
 
       await ApkInstaller.install(apkFile.path);
       if (mounted) setState(() => _done = true);
+    } on ApkDownloadCancelledException {
+      // 用户取消：半成品已由下载器清理，直接退出，不展示错误。
+      return;
+    } on ApkDownloadException catch (e) {
+      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (_cancelled) {
-        // S8 修复③：取消时清理不完整文件后退出，不报错。
-        try {
-          await _sink?.close();
-        } catch (_) {}
-        try {
-          if (_apkFile != null && await _apkFile!.exists()) {
-            await _apkFile!.delete();
-          }
-        } catch (_) {}
-        return;
-      }
       if (mounted) setState(() => _error = e.toString());
+    }
+  }
+
+  /// L-04：外跳前校验下载地址。清单里的 releaseUrl 属于不可信输入，
+  /// 不校验就可能把用户引到钓鱼页（更新弹窗是高信任场景，用户不会怀疑其中链接）。
+  Future<void> _openReleasePage() async {
+    final url = widget.info.releaseUrl;
+    if (url == null || !UpdatePolicy.isAllowedReleaseUrl(url)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('下载页地址异常，已阻止跳转')),
+      );
+      return;
+    }
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
   }
 
@@ -247,13 +233,7 @@ class _DownloadBodyState extends State<_DownloadBody> {
           ),
           FilledButton(
             onPressed: () async {
-              final url = widget.info.releaseUrl ?? widget.info.apkUrl;
-              if (url != null) {
-                final uri = Uri.parse(url);
-                if (await canLaunchUrl(uri)) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              }
+              await _openReleasePage();
               if (mounted) Navigator.pop(context);
             },
             child: const Text('浏览器下载'),

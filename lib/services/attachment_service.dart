@@ -151,7 +151,33 @@ class AttachmentService {
     }
     final target = File('${parentDir.path}/$name');
     final tmp = File('${target.path}.tmp');
-    await tmp.writeAsBytes(await src.readAsBytes(), flush: true);
+    // L-09：改为**流式复制**，内存占用降为单个 chunk。
+    // 原实现 `writeAsBytes(await src.readAsBytes())` 会把上限内（200 MB）的附件
+    // 一次性读进内存，低内存机型上足以 OOM。复制过程中再累计一次熔断，
+    // 防止 stat 拿到的大小与实际字节流不一致（如来源是个管道 / 伪文件）。
+    var copied = 0;
+    IOSink? sink;
+    try {
+      sink = tmp.openWrite();
+      await for (final chunk in src.openRead()) {
+        copied += chunk.length;
+        if (copied > maxImportFileBytes) {
+          throw ArgumentError(
+              '附件过大（上限 ${(maxImportFileBytes / (1024 * 1024)).round()} MB）');
+        }
+        sink.add(chunk);
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+    } catch (e) {
+      // 复制中断：关掉 sink 并清掉半截 .tmp，避免残留长期占用私有目录。
+      try {
+        await sink?.close();
+      } catch (_) {}
+      await _deleteQuietly(tmp);
+      rethrow;
+    }
     await tmp.rename(target.path); // 同文件系统内原子覆盖
     final size = await target.length();
     return AttachmentRef(
@@ -520,6 +546,15 @@ class AttachmentService {
     if (mime.startsWith('audio/')) return '.m4a';
     if (mime.startsWith('video/')) return '.mp4';
     return '';
+  }
+
+  /// 静默删除：清理半截 .tmp / 失效缓存时用，失败不影响主流程。
+  static Future<void> _deleteQuietly(FileSystemEntity e) async {
+    try {
+      if (await e.exists()) await e.delete(recursive: true);
+    } catch (_) {
+      // 忽略：清理失败不是致命错误
+    }
   }
 
   static int _randomInt(int min, int max) =>

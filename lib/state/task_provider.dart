@@ -1,11 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:todolist/services/app_log.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/backup_crypto.dart';
+import 'package:todolist/services/secure_window.dart';
 import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/notification_service.dart';
@@ -217,6 +221,95 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  // ===== 隐私加固（安全审计 L-06 / L-07 / L-12）=====
+  /// L-06：锁屏是否隐藏通知正文（默认 **隐藏**）。
+  ///
+  /// Android 通知默认 `PUBLIC`，锁屏会完整显示任务标题；而用户开了应用锁却管不到
+  /// 锁屏，隐私承诺存在缺口。默认隐藏后，锁屏只提示「有 N 条待办提醒」。
+  static const String _kLockScreenPrivate = 'lock_screen_private';
+  bool _lockScreenPrivate = true;
+  bool get lockScreenPrivate => _lockScreenPrivate;
+  Future<void> setLockScreenPrivate(bool v) async {
+    if (v == _lockScreenPrivate) return;
+    _lockScreenPrivate = v;
+    // 立即同步给通知服务，后续新建的通知即按新可见性投递。
+    NotificationService.lockScreenPrivate = v;
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  /// L-07：是否禁止截屏 / 录屏（FLAG_SECURE，默认 **开启**）。
+  ///
+  /// 未开启时最近任务缩略图会完整定格任务内容，任意录屏 / 投屏软件也能录制界面。
+  static const String _kScreenSecurity = 'flag_secure';
+  bool _screenSecurityEnabled = true;
+  bool get screenSecurityEnabled => _screenSecurityEnabled;
+  Future<void> setScreenSecurityEnabled(bool v) async {
+    if (v == _screenSecurityEnabled) return;
+    _screenSecurityEnabled = v;
+    notifyListeners();
+    await _persistSettings();
+    // 运行时切换窗口标志（失败静默，不影响设置项本身）。
+    unawaited(SecureWindow.setFlagSecure(v));
+  }
+
+  /// L-12：是否允许点击备注里的 http(s) 链接唤起外部浏览器。
+  ///
+  /// 默认 **关闭**——本 App 定位为「除检查更新外不联网」，点击链接会离开本地
+  /// 并由浏览器发起联网。关闭时点击链接只复制链接并提示，不静默外跳。
+  static const String _kAllowExternalLinks = 'allow_external_links';
+  bool _allowExternalLinks = false;
+  bool get allowExternalLinks => _allowExternalLinks;
+  Future<void> setAllowExternalLinks(bool v) async {
+    if (v == _allowExternalLinks) return;
+    _allowExternalLinks = v;
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  // ===== L-08：本地自动备份加密 =====
+  /// 是否加密每日自动快照（默认关闭）。开启后快照写为 `YYYY-MM-DD.enc.json`，
+  /// 复用手动备份的 AES-256-GCM + PBKDF2 信封。
+  static const String _kAutoBackupEncrypt = 'auto_backup_encrypt';
+  bool _autoBackupEncrypt = false;
+  bool get autoBackupEncrypt => _autoBackupEncrypt;
+
+  /// 自动备份口令。仅保存在本机 SharedPreferences，**不纳入备份白名单**
+  /// （见 prefs_backup.dart）——换机恢复后不会带走它，届时若开关仍处于开启态，
+  /// 自动备份会以「口令缺失」显式失败并提示重设，绝不静默降级为明文。
+  ///
+  /// 能力边界：它防的是「快照文件被单独拷出后可读」（文件管理器、ADB pull、
+  /// 误分享等），**不**防已取得 root / 物理接触并能读取 App 私有目录的攻击者
+  /// （那种场景下口令本身也可被读出）。设置页文案需如实说明这一点。
+  static const String _kAutoBackupPass = 'auto_backup_pass';
+  String? _autoBackupPass;
+  bool get hasAutoBackupPassphrase =>
+      _autoBackupPass != null && _autoBackupPass!.isNotEmpty;
+
+  /// 设置 / 更新自动备份口令（不为空即可，长度下限 6 由 UI 侧校验）。
+  Future<void> setAutoBackupPassphrase(String pass) async {
+    _autoBackupPass = pass;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kAutoBackupPass, pass);
+    notifyListeners();
+  }
+
+  /// 开关自动备份加密。开启时若尚无口令则拒绝（返回 false），由 UI 引导先设口令。
+  Future<bool> setAutoBackupEncrypt(bool v) async {
+    if (v && !hasAutoBackupPassphrase) return false;
+    _autoBackupEncrypt = v;
+    notifyListeners();
+    await _persistSettings();
+    if (v) {
+      // 开启后立刻按新策略重试一次（今天已生成过明文快照也不会重写，
+      // 加密从下一次跨日快照开始生效，避免同一天出现两种形态）。
+      try {
+        await _autoBackupIfNeeded();
+      } catch (_) {}
+    }
+    return true;
+  }
+
   // ===== P0-3：日历农历 / 节气展示 =====
   /// 日历月视图每格是否显示农历日与节气 / 传统节日。默认 true——v2.7.0 已支持
   /// 「农历重复」录入，但日历页不显示农历会形成认知断层（设了农历任务却找不到
@@ -379,7 +472,7 @@ class TaskProvider extends ChangeNotifier {
       _lastAutoBackupError = null;
     } catch (e, s) {
       _lastAutoBackupError = '自动备份失败：$e';
-      debugPrint('$_lastAutoBackupError\n$s');
+      AppLog.d('$_lastAutoBackupError\n$s');
     }
     notifyListeners();
   }
@@ -390,8 +483,14 @@ class TaskProvider extends ChangeNotifier {
   Future<void> triggerAutoBackup() => _autoBackupIfNeeded();
 
   /// 把当前全部数据（任务 + 回收站 + 偏好 + 专注 + 习惯 + 打卡）写入当日滚动快照。
-  /// 文件名 backup/auto/YYYY-MM-DD.json，复用 [backupData] + 其余 Provider 的导出；
-  /// 用 DataIo 原子写（.tmp + rename）避免写入中途打断导致快照损坏。
+  /// 文件名 backup/auto/YYYY-MM-DD.json（开启加密时为 .enc.json），复用
+  /// [backupData] + 其余 Provider 的导出；用 DataIo 原子写（.tmp + rename）
+  /// 避免写入中途打断导致快照损坏。
+  ///
+  /// L-08：手动备份可以选口令加密，而自动快照此前**恒为明文**，与产品「加密备份」
+  /// 的口径不一致（root / 取证 / MDM 场景可直接还原全部隐私数据，用户却无从感知）。
+  /// 现在按 [autoBackupEncrypt] 走同一套 AES-GCM 信封。口令缺失时**显式失败**并
+  /// 把原因展示在设置页，绝不静默降级为明文（沿用 P0-1 的「不降级」原则）。
   Future<void> _writeAutoBackup(DateTime now) async {
     final focus = FocusProvider.instanceOrNull;
     final habit = HabitProvider.instanceOrNull;
@@ -409,14 +508,20 @@ class TaskProvider extends ChangeNotifier {
       // P0-1：附件二进制（base64 内联）一并纳入滚动快照，保证本地快照可完整还原。
       'attachments': await collectAttachmentBlobs(true),
     };
-    final json =
-        const JsonEncoder.withIndent('  ').convert(payload);
-    await DataIo.saveToAppDocs('backup/auto/${_dateKey(now)}.json', json);
+    final plain = const JsonEncoder.withIndent('  ').convert(payload);
+    // L-08：按开关决定是否加密。buildBackupPayload 在「要求加密但无口令」时抛
+    // BackupEncryptException，此处不捕获，交由 _autoBackupIfNeeded 记入错误提示。
+    final body =
+        buildBackupPayload(plain, encryptOn: _autoBackupEncrypt, pass: _autoBackupPass);
+    final suffix = _autoBackupEncrypt ? '.enc.json' : '.json';
+    await DataIo.saveToAppDocs('backup/auto/${_dateKey(now)}$suffix', body);
     _rotateAutoBackups();
   }
 
   /// 滚动保留：仅保留最近 7 份当日快照（backup/auto/ 目录），删除更早的。
-  /// 用日期字符串排序即可（YYYY-MM-DD 字典序=时间序）。失败静默，不阻断主流程。
+  /// 明文（YYYY-MM-DD.json）与加密（YYYY-MM-DD.enc.json）快照一并计入，
+  /// 排序用文件名前缀的日期串（YYYY-MM-DD 字典序=时间序），与扩展名无关。
+  /// 失败静默，不阻断主流程。
   Future<void> _rotateAutoBackups() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -427,7 +532,8 @@ class TaskProvider extends ChangeNotifier {
           .whereType<File>()
           .where((f) => f.path.endsWith('.json'))
           .toList();
-      files.sort((a, b) => a.path.compareTo(b.path)); // 旧→新
+      // 旧→新：按文件名（含日期）比较，'.' < '-'，故 .enc.json 与 .json 同日排序稳定。
+      files.sort((a, b) => _autoBackupName(a).compareTo(_autoBackupName(b)));
       // 保留最新 7 份，其余删除
       final excess = files.length - 7;
       if (excess > 0) {
@@ -440,12 +546,16 @@ class TaskProvider extends ChangeNotifier {
         }
       }
     } catch (e) {
-      debugPrint('滚动快照清理失败（忽略）：$e');
+      AppLog.d('滚动快照清理失败（忽略）：$e');
     }
   }
 
+  /// 取快照文件名（不含目录），用于排序。
+  static String _autoBackupName(File f) =>
+      f.path.split(RegExp(r'[\\/]')).last;
+
   /// 列出本地自动备份快照（新→旧），供「备份与恢复」面板还原。
-  /// 每项含 date(DateTime) 与 file(File)。
+  /// 每项含 date(DateTime)、file(File) 与 encrypted 标记（L-08）。
   Future<List<AutoBackupEntry>> listAutoBackups() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -456,12 +566,15 @@ class TaskProvider extends ChangeNotifier {
           .whereType<File>()
           .where((f) => f.path.endsWith('.json'))
           .toList();
-      files.sort((a, b) => b.path.compareTo(a.path)); // 新→旧
+      files.sort((a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
       final out = <AutoBackupEntry>[];
       for (final f in files) {
-        final name = f.path.split(RegExp(r'[\\/]')).last;
-        // 文件名形如 YYYY-MM-DD.json
-        final key = name.replaceAll('.json', '');
+        final name = _autoBackupName(f);
+        // 文件名形如 YYYY-MM-DD.json 或 YYYY-MM-DD.enc.json（加密快照）
+        final encrypted = name.endsWith('.enc.json');
+        final key = encrypted
+            ? name.substring(0, name.length - '.enc.json'.length)
+            : name.substring(0, name.length - '.json'.length);
         final parts = key.split('-');
         if (parts.length == 3) {
           final y = int.tryParse(parts[0]);
@@ -471,13 +584,14 @@ class TaskProvider extends ChangeNotifier {
             out.add(AutoBackupEntry(
               date: DateTime(y, m, d),
               file: f,
+              encrypted: encrypted,
             ));
           }
         }
       }
       return out;
     } catch (e) {
-      debugPrint('列出自动备份失败：$e');
+      AppLog.d('列出自动备份失败：$e');
       return const [];
     }
   }
@@ -642,7 +756,7 @@ class TaskProvider extends ChangeNotifier {
       // 用内存态（可能为空）覆盖尚可抢救的坏库。标记后 rethrow，由 main._safeLoad
       // 捕获并允许 App 继续启动（UI 显示安全模式横幅引导导出/修复）。
       _dbLoadFailed = true;
-      debugPrint('[TaskProvider] 数据库加载失败，进入只读安全模式：$e\n$s');
+      AppLog.d('[TaskProvider] 数据库加载失败，进入只读安全模式：$e\n$s');
       rethrow;
     }
     final seeded = prefs.getBool(_kSeeded) ?? false;
@@ -674,6 +788,13 @@ class TaskProvider extends ChangeNotifier {
     _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
     _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet(); // P1-13
     _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true; // P0-3
+    // L-06 / L-07 / L-12：隐私相关开关（默认值见各字段注释）。
+    _lockScreenPrivate = prefs.getBool(_kLockScreenPrivate) ?? true;
+    NotificationService.lockScreenPrivate = _lockScreenPrivate;
+    _screenSecurityEnabled = prefs.getBool(_kScreenSecurity) ?? true;
+    _allowExternalLinks = prefs.getBool(_kAllowExternalLinks) ?? false;
+    _autoBackupEncrypt = prefs.getBool(_kAutoBackupEncrypt) ?? false;
+    _autoBackupPass = prefs.getString(_kAutoBackupPass);
     _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
     _briefingEveningHour = prefs.getInt(_kBriefEveningH) ?? 22;
     _briefingEveningMinute = prefs.getInt(_kBriefEveningM) ?? 0;
@@ -754,6 +875,11 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kWeeklyGoal, _weeklyGoalCount);
     await prefs.setBool(_kAutoBackup, _autoBackupEnabled);
     await prefs.setBool(_kCalendarLunar, _calendarLunar); // P0-3
+    // L-06 / L-07 / L-12：隐私开关。口令单独存（不进 prefs 备份白名单）。
+    await prefs.setBool(_kLockScreenPrivate, _lockScreenPrivate);
+    await prefs.setBool(_kScreenSecurity, _screenSecurityEnabled);
+    await prefs.setBool(_kAllowExternalLinks, _allowExternalLinks);
+    await prefs.setBool(_kAutoBackupEncrypt, _autoBackupEncrypt);
     await prefs.setBool(_kBriefEveningOn, _briefingEveningEnabled);
     await prefs.setInt(_kBriefEveningH, _briefingEveningHour);
     await prefs.setInt(_kBriefEveningM, _briefingEveningMinute);
@@ -784,7 +910,7 @@ class TaskProvider extends ChangeNotifier {
       // 任务变更后主动刷新桌面小组件（今日任务列表），不必等系统定时刷新兜底。
       requestWidgetRefresh();
     } catch (e, s) {
-      debugPrint('TaskProvider 持久化失败（变更仅存于内存，重启将回退）：$e\n$s');
+      AppLog.d('TaskProvider 持久化失败（变更仅存于内存，重启将回退）：$e\n$s');
     }
   }
 
@@ -2051,10 +2177,19 @@ class TaskProvider extends ChangeNotifier {
 class AutoBackupEntry {
   final DateTime date; // 快照对应的本地日期（YYYY-MM-DD）
   final File file; // 快照文件（App 私有文档目录 backup/auto/ 下）
-  const AutoBackupEntry({required this.date, required this.file});
+  /// L-08：该快照是否为加密信封（.enc.json）。还原时需先解密。
+  final bool encrypted;
+  const AutoBackupEntry({
+    required this.date,
+    required this.file,
+    this.encrypted = false,
+  });
 
   /// 友好展示：M月D日。
   String get label => '${date.month}月${date.day}日';
+
+  /// 副标题：明确标注加密状态（L-08 的知情权部分）。
+  String get statusLabel => encrypted ? '已加密' : '明文';
 }
 
 /// 监听 App 生命周期：回到前台（resumed）时补一次每日重置检查，

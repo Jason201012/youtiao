@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:todolist/services/app_log.dart';
 import 'package:todolist/models/task.dart' hide Priority;
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
@@ -25,6 +25,21 @@ class NotificationService {
 
   /// 总开关（设置页控制）。关闭时不再调度，且清空已调度项。
   bool enabled = true;
+
+  /// L-06：锁屏上是否隐藏通知正文（默认 **隐藏**）。
+  ///
+  /// Android 默认 `PUBLIC`，锁屏会完整展示通知正文，而本 App 的正文就是任务
+  /// 标题（可能含「复诊」「面试」等敏感语义）。用户开了应用锁却管不到锁屏，
+  /// 与「别人看不到我的事」的预期不符，故默认取 [NotificationVisibility.private]：
+  /// 锁屏只显示「有 N 条待办提醒」，解锁后才显示全文。
+  ///
+  /// 由 main() 在 Provider 加载后注入（跟 [dndDefer] 同模式，避免 service 反向依赖 UI）。
+  static bool lockScreenPrivate = true;
+
+  /// 统一的锁屏可见性取值（供全部 [AndroidNotificationDetails] 复用）。
+  static NotificationVisibility get visibility => lockScreenPrivate
+      ? NotificationVisibility.private
+      : NotificationVisibility.public;
 
   /// 是否已初始化（避免重复初始化）
   bool _initialized = false;
@@ -53,13 +68,15 @@ class NotificationService {
   static const int focusInterruptNotifyId = 777779;
 
   /// 专注完成通知的 Android 样式（复用有声渠道，确保完成时能引起注意）。
-  AndroidNotificationDetails get _focusDoneAndroid => const AndroidNotificationDetails(
+  AndroidNotificationDetails get _focusDoneAndroid => AndroidNotificationDetails(
         _chSound,
         '任务提醒',
         channelDescription: '任务截止时间提醒',
         importance: Importance.high,
         priority: Priority.high,
         playSound: true,
+        // L-06：锁屏隐藏任务标题（默认），解锁后才显示全文。
+        visibility: visibility,
       );
 
   /// 定时测试用固定 id（不与任务 id 冲突）。
@@ -176,7 +193,7 @@ class NotificationService {
     } catch (e) {
       // 极端情况下拿不到时区数据也不应让 App 崩溃，回退 UTC 并打日志。
       _loc = tz.UTC;
-      debugPrint('[通知] 时区初始化失败，回退 UTC: $e');
+      AppLog.d('[通知] 时区初始化失败，回退 UTC: $e');
     }
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     const settings = InitializationSettings(android: android);
@@ -210,7 +227,7 @@ class NotificationService {
         await prefs.setInt(_kNotifIdSchemePref, _kNotifIdScheme);
       }
     } catch (e) {
-      debugPrint('[通知] 旧通知清理跳过：$e');
+      AppLog.d('[通知] 旧通知清理跳过：$e');
     }
   }
 
@@ -290,7 +307,7 @@ class NotificationService {
     try {
       await _exactAlarmChannel.invokeMethod<void>('openExactAlarmSettings');
     } catch (e) {
-      debugPrint('[通知] 打开精确闹钟设置失败: $e');
+      AppLog.d('[通知] 打开精确闹钟设置失败: $e');
     }
   }
 
@@ -312,6 +329,8 @@ class NotificationService {
       importance: Importance.high,
       priority: Priority.high,
       playSound: true,
+      // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+      visibility: visibility,
     );
     final detail = NotificationDetails(android: androidDetail);
 
@@ -379,18 +398,18 @@ class NotificationService {
   /// 返回 true 表示已成功提交 zonedSchedule（不代表系统一定触发）。
   Future<bool> scheduleForTask(Task task, {bool playSound = true}) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度 id=${task.id}：通知总开关关闭');
+      AppLog.d('[通知] 未调度 id=${task.id}：通知总开关关闭');
       return false;
     }
     if (task.dueDate == null) {
-      debugPrint('[通知] 未调度 id=${task.id}：无截止时间');
+      AppLog.d('[通知] 未调度 id=${task.id}：无截止时间');
       return false;
     }
     if (task.done) {
       // 已完成（含提前完成）的任务不再挂一次性「截止时间提醒」，避免完成后仍弹。
       // 作废在途兜底定时器（若有），使其触发时判定为过期一代而静默退出。
       _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
-      debugPrint('[通知] 未调度 id=${task.id}：任务已完成（不挂截止提醒）');
+      AppLog.d('[通知] 未调度 id=${task.id}：任务已完成（不挂截止提醒）');
       return false;
     }
     // S4 修复：进入调度即让该任务代号 +1（作废任何在途兜底定时器）。
@@ -405,21 +424,21 @@ class NotificationService {
       var base = due.subtract(Duration(minutes: task.reminderOffsetMin));
       // 提醒时刻已过去（任务逾期）：不再补弹「迟到提醒」，避免从回收站恢复/重排逾期任务时立即骚扰。
       if (base.isBefore(DateTime.now())) {
-        debugPrint('[通知] 未调度 id=${task.id}：提醒时刻已过期（逾期任务不补弹）');
+        AppLog.d('[通知] 未调度 id=${task.id}：提醒时刻已过期（逾期任务不补弹）');
         return false;
       }
       // 勿扰时段顺延：一次性提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹。
       if (dndDefer != null) {
         final deferred = dndDefer!(base);
         if (deferred != null) {
-          debugPrint('[通知] id=${task.id} 提醒落在勿扰时段，顺延到 $deferred');
+          AppLog.d('[通知] id=${task.id} 提醒落在勿扰时段，顺延到 $deferred');
           base = deferred;
         }
       }
       final tz.TZDateTime when = tz.TZDateTime(
           loc, base.year, base.month, base.day, base.hour, base.minute);
       // 打印实际调度时刻（含时区），便于在 debug 控制台核对是否准时。
-      debugPrint(
+      AppLog.d(
           '[通知] 调度 id=${task.id} "${task.title}" -> $when (playSound=$playSound, offset=${task.reminderOffsetMin}min)');
       final chId = playSound ? _chSound : _chSilent;
       final androidDetail = AndroidNotificationDetails(
@@ -432,6 +451,8 @@ class NotificationService {
         // 任务提醒：稍后提醒 + 完成（直接标记完成，无需进 App）。
         // 两个 action 各带 actionId，点击后由 main.dart 的 onNotificationAction 路由区分。
         actions: _taskActions,
+        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+        visibility: visibility,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -447,7 +468,7 @@ class NotificationService {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      debugPrint('[通知] 已提交 zonedSchedule id=${task.id} (mode=${mode.name})');
+      AppLog.d('[通知] 已提交 zonedSchedule id=${task.id} (mode=${mode.name})');
       // 应用内兜底：若 App 在到期时仍存活（前台/后台未杀），即使系统闹钟被
       // ColorOS 等 ROM 拦截，也能保证提醒弹出。使用同一通知 id，避免重复。
       // 仅对较短延时（≤1 天）启用，长期任务依赖上面的 setAlarmClock 即可。
@@ -464,8 +485,8 @@ class NotificationService {
       return true;
     } catch (e, s) {
       // 调度失败不应导致 App 崩溃，仅打印便于排查
-      debugPrint('[通知] 调度失败 id=${task.id}: $e');
-      debugPrint('$s');
+      AppLog.d('[通知] 调度失败 id=${task.id}: $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -494,11 +515,11 @@ class NotificationService {
   /// 用同一 notifyId 重新 zonedSchedule 会覆盖掉今天尚未触发的闹钟。
   Future<bool> scheduleRepeatReminder(Task task, {bool playSound = true}) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度重复提醒 id=${task.id}：通知总开关关闭');
+      AppLog.d('[通知] 未调度重复提醒 id=${task.id}：通知总开关关闭');
       return false;
     }
     if (!task.isRepeating || task.repeatMinute == null) {
-      debugPrint('[通知] 未调度重复提醒 id=${task.id}：非重复任务或无提醒时间');
+      AppLog.d('[通知] 未调度重复提醒 id=${task.id}：非重复任务或无提醒时间');
       return false;
     }
     try {
@@ -519,6 +540,8 @@ class NotificationService {
         priority: Priority.high,
         playSound: playSound,
         actions: _taskActions,
+        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+        visibility: visibility,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -551,7 +574,7 @@ class NotificationService {
                 UILocalNotificationDateInterpretation.absoluteTime,
             matchDateTimeComponents: DateTimeComponents.time,
           );
-          debugPrint('[通知] 已调度重复提醒 id=${task.id} 每天 '
+          AppLog.d('[通知] 已调度重复提醒 id=${task.id} 每天 '
               '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
               '(skipToday=$skipToday, 首次=$when)');
           return true;
@@ -577,7 +600,7 @@ class NotificationService {
               matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
             );
           }
-          debugPrint('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
+          AppLog.d('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
               '每周 $weeklyDays @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
               '(skipToday=$skipToday)');
           return true;
@@ -585,7 +608,7 @@ class NotificationService {
         case RepeatType.interval:
           final next = _nextIntervalOccurrence(task, skipToday: skipToday);
           if (next == null) {
-            debugPrint('[通知] 未调度 interval 提醒 id=${task.id}：缺锚点');
+            AppLog.d('[通知] 未调度 interval 提醒 id=${task.id}：缺锚点');
             return false;
           }
           final when = next.isAfter(now) ? next : next.add(const Duration(days: 1));
@@ -600,7 +623,7 @@ class NotificationService {
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
           );
-          debugPrint('[通知] 已调度重复提醒(interval) id=${task.id} 下次 '
+          AppLog.d('[通知] 已调度重复提醒(interval) id=${task.id} 下次 '
               '${when.year}-${when.month}-${when.day} ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
               '(skipToday=$skipToday)');
           return true;
@@ -608,7 +631,7 @@ class NotificationService {
         case RepeatType.monthly:
           final when = _nextMonthlyOccurrence(task, skipToday: skipToday);
           if (when == null) {
-            debugPrint('[通知] 未调度 monthly 提醒 id=${task.id}：缺提醒时间');
+            AppLog.d('[通知] 未调度 monthly 提醒 id=${task.id}：缺提醒时间');
             return false;
           }
           await _plugin.zonedSchedule(
@@ -623,7 +646,7 @@ class NotificationService {
                 UILocalNotificationDateInterpretation.absoluteTime,
             matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
           );
-          debugPrint('[通知] 已调度重复提醒(monthly) id=${task.id} '
+          AppLog.d('[通知] 已调度重复提醒(monthly) id=${task.id} '
               '${task.repeatSummary} @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
               '(skipToday=$skipToday)');
           return true;
@@ -632,8 +655,8 @@ class NotificationService {
           return false;
       }
     } catch (e, s) {
-      debugPrint('[通知] 重复提醒调度失败 id=${task.id}: $e');
-      debugPrint('$s');
+      AppLog.d('[通知] 重复提醒调度失败 id=${task.id}: $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -768,11 +791,11 @@ class NotificationService {
   /// - [weekdays] 非空：按所选星期逐个挂 [DateTimeComponents.dayOfWeekAndTime]。
   Future<bool> scheduleHabitReminder(Habit habit, {bool checkedToday = false}) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度习惯提醒 id=${habit.id}：通知总开关关闭');
+      AppLog.d('[通知] 未调度习惯提醒 id=${habit.id}：通知总开关关闭');
       return false;
     }
     if (habit.reminderMinute == null) {
-      debugPrint('[通知] 未调度习惯提醒 id=${habit.id}：未设提醒时间');
+      AppLog.d('[通知] 未调度习惯提醒 id=${habit.id}：未设提醒时间');
       return false;
     }
     try {
@@ -790,6 +813,8 @@ class NotificationService {
         priority: Priority.high,
         playSound: true,
         actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
+        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+        visibility: visibility,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -813,7 +838,7 @@ class NotificationService {
               UILocalNotificationDateInterpretation.absoluteTime,
           matchDateTimeComponents: DateTimeComponents.time,
         );
-        debugPrint('[通知] 已调度习惯提醒 id=${habit.id} 每天 '
+        AppLog.d('[通知] 已调度习惯提醒 id=${habit.id} 每天 '
             '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
             '(skipToday=$skipToday, 首次=$when)');
         return true;
@@ -841,13 +866,13 @@ class NotificationService {
           matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
         );
       }
-      debugPrint('[通知] 已调度习惯提醒 id=${habit.id} 每周 ${habit.weekdays} '
+      AppLog.d('[通知] 已调度习惯提醒 id=${habit.id} 每周 ${habit.weekdays} '
           '@ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
           '(skipToday=$skipToday)');
       return true;
     } catch (e, s) {
-      debugPrint('[通知] 习惯提醒调度失败 id=${habit.id}: $e');
-      debugPrint('$s');
+      AppLog.d('[通知] 习惯提醒调度失败 id=${habit.id}: $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -860,7 +885,7 @@ class NotificationService {
         await _plugin.cancel(_habitNotifyIdOf(id, d));
       }
     } catch (e) {
-      debugPrint('[通知] 取消习惯提醒失败 id=$id: $e');
+      AppLog.d('[通知] 取消习惯提醒失败 id=$id: $e');
     }
   }
 
@@ -870,7 +895,7 @@ class NotificationService {
   Future<bool> snoozeTaskReminder(Task task,
       {Duration delay = const Duration(minutes: 10), bool playSound = true}) async {
     if (!enabled) {
-      debugPrint('[通知] 未 snooze id=${task.id}：通知总开关关闭');
+      AppLog.d('[通知] 未 snooze id=${task.id}：通知总开关关闭');
       return false;
     }
     final loc = _loc ?? tz.UTC;
@@ -886,6 +911,8 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
+        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+        visibility: visibility,
       ),
     );
     try {
@@ -900,11 +927,11 @@ class NotificationService {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      debugPrint('[通知] snooze id=${task.id} -> $when (${delay.inMinutes}min)');
+      AppLog.d('[通知] snooze id=${task.id} -> $when (${delay.inMinutes}min)');
       return true;
     } catch (e, s) {
-      debugPrint('[通知] snooze 失败 id=${task.id}: $e');
-      debugPrint('$s');
+      AppLog.d('[通知] snooze 失败 id=${task.id}: $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -913,7 +940,7 @@ class NotificationService {
   Future<bool> snoozeHabitReminder(Habit habit,
       {Duration delay = const Duration(minutes: 10)}) async {
     if (!enabled) {
-      debugPrint('[通知] 未 snooze 习惯 id=${habit.id}：通知总开关关闭');
+      AppLog.d('[通知] 未 snooze 习惯 id=${habit.id}：通知总开关关闭');
       return false;
     }
     final loc = _loc ?? tz.UTC;
@@ -926,6 +953,8 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: true,
+        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+        visibility: visibility,
       ),
     );
     try {
@@ -940,11 +969,11 @@ class NotificationService {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      debugPrint('[通知] snooze 习惯 id=${habit.id} -> $when (${delay.inMinutes}min)');
+      AppLog.d('[通知] snooze 习惯 id=${habit.id} -> $when (${delay.inMinutes}min)');
       return true;
     } catch (e, s) {
-      debugPrint('[通知] snooze 习惯失败 id=${habit.id}: $e');
-      debugPrint('$s');
+      AppLog.d('[通知] snooze 习惯失败 id=${habit.id}: $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -983,7 +1012,7 @@ class NotificationService {
     required String body,
   }) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度简报：通知总开关关闭');
+      AppLog.d('[通知] 未调度简报：通知总开关关闭');
       return false;
     }
     try {
@@ -998,6 +1027,8 @@ class NotificationService {
           importance: Importance.high,
           priority: Priority.high,
           playSound: true,
+          // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+          visibility: visibility,
         ),
       );
       await _plugin.zonedSchedule(
@@ -1012,11 +1043,11 @@ class NotificationService {
             UILocalNotificationDateInterpretation.absoluteTime,
         matchDateTimeComponents: DateTimeComponents.time,
       );
-      debugPrint('[通知] 已调度${evening ? "晚间" : "晨间"}简报 -> $when (id=$id)');
+      AppLog.d('[通知] 已调度${evening ? "晚间" : "晨间"}简报 -> $when (id=$id)');
       return true;
     } catch (e, s) {
-      debugPrint('[通知] 简报调度失败(evening=$evening): $e');
-      debugPrint('$s');
+      AppLog.d('[通知] 简报调度失败(evening=$evening): $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -1040,11 +1071,11 @@ class NotificationService {
     int nudgeMinute = 23 * 60,
   }) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度习惯挽留：通知总开关关闭');
+      AppLog.d('[通知] 未调度习惯挽留：通知总开关关闭');
       return false;
     }
     if (title.isEmpty) {
-      debugPrint('[通知] 未调度习惯挽留：文案为空（今天没有漏卡）');
+      AppLog.d('[通知] 未调度习惯挽留：文案为空（今天没有漏卡）');
       return false;
     }
     try {
@@ -1067,7 +1098,7 @@ class NotificationService {
         }
       }
       final mode = await _scheduleMode;
-      const detail = NotificationDetails(
+      final detail = NotificationDetails(
         android: AndroidNotificationDetails(
           _chSound,
           '习惯提醒',
@@ -1075,6 +1106,8 @@ class NotificationService {
           importance: Importance.defaultImportance,
           priority: Priority.defaultPriority,
           playSound: true,
+          // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+          visibility: visibility,
         ),
       );
       await _plugin.zonedSchedule(
@@ -1089,11 +1122,11 @@ class NotificationService {
             UILocalNotificationDateInterpretation.absoluteTime,
         matchDateTimeComponents: DateTimeComponents.time,
       );
-      debugPrint('[通知] 已调度习惯挽留 -> $when (id=$habitNudgeNotifyId)');
+      AppLog.d('[通知] 已调度习惯挽留 -> $when (id=$habitNudgeNotifyId)');
       return true;
     } catch (e, s) {
-      debugPrint('[通知] 习惯挽留调度失败: $e');
-      debugPrint('$s');
+      AppLog.d('[通知] 习惯挽留调度失败: $e');
+      AppLog.d('$s');
       return false;
     }
   }
@@ -1138,6 +1171,8 @@ class NotificationService {
           priority: Priority.high,
           playSound: true,
           autoCancel: true,
+          // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+          visibility: visibility,
         ),
       );
       await _plugin.zonedSchedule(
@@ -1151,9 +1186,9 @@ class NotificationService {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      debugPrint('[通知] 回收站过期预告已调度 -> $when（${expiringTomorrow.length} 条）');
+      AppLog.d('[通知] 回收站过期预告已调度 -> $when（${expiringTomorrow.length} 条）');
     } catch (e, s) {
-      debugPrint('[通知] 回收站过期预告调度失败: $e\n$s');
+      AppLog.d('[通知] 回收站过期预告调度失败: $e\n$s');
     }
   }
 
@@ -1173,6 +1208,8 @@ class NotificationService {
         priority: Priority.low,
         playSound: false,
         autoCancel: true,
+        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+        visibility: visibility,
       ),
     );
     try {
@@ -1183,7 +1220,7 @@ class NotificationService {
         detail,
       );
     } catch (e) {
-      debugPrint('[通知] 完成确认通知失败 id=$taskId: $e');
+      AppLog.d('[通知] 完成确认通知失败 id=$taskId: $e');
     }
   }
 
@@ -1194,7 +1231,7 @@ class NotificationService {
   /// [body] 可自定义文案（番茄循环用于提示"该休息 / 开始下一个番茄"）。
   Future<void> scheduleFocusDone(DateTime completeAt, {String? body}) async {
     if (!enabled) {
-      debugPrint('[通知] 未调度专注完成提醒：通知总开关关闭');
+      AppLog.d('[通知] 未调度专注完成提醒：通知总开关关闭');
       return;
     }
     final loc = _loc ?? tz.UTC;
@@ -1211,9 +1248,9 @@ class NotificationService {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      debugPrint('[通知] 已调度专注完成提醒 -> $when (mode=${mode.name})');
+      AppLog.d('[通知] 已调度专注完成提醒 -> $when (mode=${mode.name})');
     } catch (e) {
-      debugPrint('[通知] 专注完成定时失败: $e');
+      AppLog.d('[通知] 专注完成定时失败: $e');
     }
   }
 
@@ -1265,6 +1302,8 @@ class NotificationService {
       progress: percent,
       playSound: false,
       channelShowBadge: false,
+      // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+      visibility: visibility,
     );
     try {
       await _plugin.show(
@@ -1274,7 +1313,7 @@ class NotificationService {
         NotificationDetails(android: android),
       );
     } catch (e) {
-      debugPrint('[通知] 专注进度通知失败: $e');
+      AppLog.d('[通知] 专注进度通知失败: $e');
     }
   }
 

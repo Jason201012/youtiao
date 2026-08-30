@@ -1,5 +1,20 @@
 # 更新日志（Changelog）
 
+## v2.7.9（2026-08-30）
+
+### 安全修复（依据 v2.7.8 审计报告）
+
+- **应用锁可被通知 / 桌面小组件点击绕过（M-01，中危）**：根 Navigator 跳转此前盖在解锁页之上。现所有外部意图（通知点击、小组件、分享）消费前先判锁状态，锁定时只暂存意图、解锁后由监听回调统一消费，不再泄露详情。
+- **更新链路供应链纵深（L-01~L-04、L-10、L-13）**：清单 `version` 做 semver 白名单且下载落盘固定名 `updates/update.apk`（防沙箱内路径穿越）；APK 直链在主机白名单之上叠加作者发布仓 `releases/download/` 路径前缀，重定向逐跳校验主机；APK 下载 200MB 硬上限熔断；`releaseUrl` 走发布仓前缀白名单不再直跳钓鱼页；下载失败/取消统一清理半成品 APK；`releaseNotes` 截断到 8000 字。
+- **隐私一致性（L-05、L-06、L-07、L-08、L-12）**：原生 `installApk` 增加 `updates/` 分隔符边界校验（防兄弟目录前缀绕过）；通知渠道默认 `visibility:private` 且设置可「锁屏隐藏通知内容」；新增 FLAG_SECURE 开关（设置「禁止截屏与录屏」）；自动备份可选 AES-GCM 加密 `.enc.json`（口令存本机不随备份出）；备注链接默认复制到剪贴板、不外跳浏览器，正则收紧尾部标点。
+- **健壮性（L-09、L-11）**：导入/备份读取增加 32MB 大小预检、附件改为流式复制避免 OOM；`debugPrint` 统一封装 `AppLog`，release 模式静默不输出业务内容。
+- **网络纵深（I-02）**：新增 `network_security_config.xml` 显式禁明文 + 仅系统 CA，Manifest 接入。
+- **文档（I-04）**：README 重写 release keystore 签名与用户哈希校验指引。
+
+### 说明
+- I-01（包名占位符 `com.example.todolist`）按报告路线图留作远期评估；I-03（更新清单离线 Ed25519 签名）为远期项，本轮未动。
+- 测试：新增 `update_policy_test` 13 条、`update_checker_schema_test` 回归用例，全量 439 通过 / 0 失败。固定 release keystore 签名。
+
 ## v2.7.7（2026-08-30）
 
 ### 安全修复（P1，依据 v2.7.6 审计报告）

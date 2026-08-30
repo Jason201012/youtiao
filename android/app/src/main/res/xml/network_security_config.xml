@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置（安全审计 I-02）。
+
+  本 App 只在「检查更新 / 下载 APK」时使用网络，且一律走 HTTPS；这里把该事实
+  在平台层显式声明，做到「代码不写 HTTP，系统也不允许 HTTP」：
+
+  - cleartextTrafficPermitted="false"：全局禁止明文 HTTP。即使将来某处误用
+    http:// 直连（或某三方 SDK 偷偷发起明文请求），也会被系统在建立连接前拦截，
+    而不是在代码评审时被漏掉。
+  - trust-anchors 只列 system：不接受用户自行安装的 CA 证书。已 root / 被诱导
+    装了恶意根证书的设备上，攻击者无法再用它给「假 Gitee」签发证书来做中间人。
+
+  注意：这里**不做证书固定（pinning）**。Gitee 的附件下载会 302 到
+  foruda.gitee.com 等 CDN 域，其证书存在轮换，pin 死公钥会导致某天更新功能
+  全线不可用。完整性改用 update.json 里的 apkSha256 校验来保证（见 S3）。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart';
+import 'package:todolist/services/app_log.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/habit_nudge.dart';
 import 'package:todolist/services/notification_service.dart';
@@ -263,6 +263,6 @@ Future<void> rescheduleHabitNudge(
       nudgeMinute: nudgeMinute, // F4：可配置时刻
     );
   } catch (e) {
-    debugPrint('[HabitNudge] 重排失败：$e');
+    AppLog.d('[HabitNudge] 重排失败：$e');
   }
 }
