@@ -311,6 +311,9 @@ class TaskParser {
         repeat = RepeatType.interval;
         repeatInterval = int.tryParse(m.group(1)!) ?? 2;
         if (repeatInterval < 1) repeatInterval = 1;
+        // P2-5：上界兜底——异常大的间隔（如 999999 天）会把重复预警期推到极远、行为怪异。
+        // 设合理上界（≤365，即最多「每 365 天」），配合下界 1 形成 [1,365] 安全区间。
+        if (repeatInterval > 365) repeatInterval = 365;
         mark(m.start, m.end, TokenKind.repeat, '每隔$repeatInterval天');
       } else {
         // 「每周一三五」/「每周」

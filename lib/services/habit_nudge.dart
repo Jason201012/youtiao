@@ -13,7 +13,10 @@ import 'package:todolist/models/habit.dart';
 class HabitNudge {
   HabitNudge._();
 
-  /// 每日挽留时刻：23:00（自 00:00 起的分钟数）。
+  /// 每日挽留默认时刻：23:00（自 00:00 起的分钟数）。
+  /// F4：已改为「可配置」——由 [TaskProvider.habitNudgeMinute] + 设置页驱动，
+  /// 调度层 [NotificationService.scheduleHabitNudge] 与 [rescheduleHabitNudge]
+  /// 均接收该值，此处仅作兜底默认值。
   static const int nudgeMinute = 23 * 60;
 
   /// 纯函数：[habit] 在 [day] 是否需要打卡。

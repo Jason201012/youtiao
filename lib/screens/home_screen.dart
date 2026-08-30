@@ -197,8 +197,16 @@ class HomeScreenState extends State<HomeScreen> {
     final n = await BatchEditSheet.show(context, ids);
     if (n == null || n == 0 || !context.mounted) return;
     _exitSelect();
+    // F1：批量编辑后提供一键撤销（改前快照已由 TaskProvider 保存）。
+    final provider = context.read<TaskProvider>();
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已更新 $n 条任务')),
+      SnackBar(
+        content: Text('已更新 $n 条任务'),
+        action: SnackBarAction(
+          label: '撤销',
+          onPressed: () => provider.undoBatchEdit(),
+        ),
+      ),
     );
   }
 

@@ -15,6 +15,8 @@ PeriodReview _period({
   int focusSec = 0,
   int prevFocusSec = 0,
   int pomodoroCount = 0,
+  int focusInterruptCount = 0,
+  int focusSessionCount = 0,
   int habitExpected = 0,
   int habitDone = 0,
   List<int> buckets = const [],
@@ -38,6 +40,8 @@ PeriodReview _period({
       focusSec: focusSec,
       prevFocusSec: prevFocusSec,
       pomodoroCount: pomodoroCount,
+      focusInterruptCount: focusInterruptCount,
+      focusSessionCount: focusSessionCount,
       habitRate: habitExpected == 0
           ? 0.0
           : (habitDone / habitExpected).clamp(0.0, 1.0),

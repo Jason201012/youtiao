@@ -1,6 +1,6 @@
 {
-  "version": "2.7.5",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.5/app-release-2.7.5-arm64.apk",
-  "apkSha256": "E0F816B440314A6A8BE506875E04E01D66857A64B740829E7070FA75AA183EA2",
-  "releaseNotes": "v2.7.5（移除桌面小组件「隐藏标题」功能，固定 release keystore 签名，arm64-v8a 单架构）：\n【改动】\n① 移除桌面小组件「隐藏标题」开关（P2-5）：此前开启后任务标题在桌面显示为 •••••• 作隐私保护；经评估该开关使用频率低、与「单条任务私密性」需求错位（真要保护应走归档 / 加密，而非桌面打码），且增加 Kotlin / Dart 两侧维护成本，故整体移除；原生侧 TodayWidgetProvider 不再读取对应偏好，设置页开关入口一并删除。\n② 注意：分享卡片 / 分享长图的「隐藏标题」是另一个独立功能（隐藏分享图中的标题），本次未动。\n双站（Gitee youtiao-releases-2 + 内网 Forgejo）发布。"
+  "version": "2.7.6",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.6/app-release-2.7.6-arm64.apk",
+  "apkSha256": "28809b6c2b332339d5a7db973cb322fbe613caed0d69c9fd54630ab094e7479a",
+  "releaseNotes": "v2.7.6（安全修复 + 功能增强 + 健壮性）：\n【安全修复·P0】加密备份「勾选加密仍写明文」已修复——口令在清空输入框前锁定为局部变量，新增 buildBackupPayload 守卫，加密意图与空口令冲突时显式中止备份（不写任何文件、不谎报已加密）；新增回归单测。\n【功能】命令面板动作命令扩充（/新建 /回收站 /标签 /导出 /备份 /本周）；专注「打断」数据展示闭环（分享卡/晚简报/月报显示打断次数）；习惯漏卡挽留可配置化（设置页独立开关+时刻，打卡/增删习惯后触发重排，排程感知勿扰）。\n【修复】晚简报专注/习惯口径按投递日聚合（修复跨天混合口径）；批量编辑「+N 天」clamp(0,3650)；重复任务「每隔 N 天」上界≤365。\n三站同步发布（Gitee youtiao-releases-2 + 内网 Forgejo rootnas/youtiao + 8567 站 rootnas/youtiao），固定 release keystore 签名。"
 }

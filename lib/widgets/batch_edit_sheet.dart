@@ -67,11 +67,39 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     );
   }
 
-  void _apply() {
+  Future<void> _apply() async {
     final provider = context.read<TaskProvider>();
+    // F1：二次确认 + 影响前瞻——批量编辑一次性改写 N 条且无快照，先让用户确认。
+    final count = widget.ids.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('确认批量编辑？'),
+        content: Text(
+          '将更新 $count 项任务'
+          '${_due == _DueMode.plusDays ? '（按「+N 天」顺延截止日期）' : ''}。'
+          '此操作可被撤销。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('应用'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final days = int.tryParse(_daysCtl.text.trim());
+    final rawDays = int.tryParse(_daysCtl.text.trim());
+    // P2-4 / F1：边界校验——「顺延」语义下负数会把截止日期提前（与意图相反），
+    // 超大值（如 999999 天）会让日期计算溢出到怪异的远古/远期；用 clamp 兜底。
+    final days = rawDays == null ? null : rawDays.clamp(0, 3650);
     // 追加标签：支持逗号 / 空格分隔，去重、去空，不覆盖已有标签。
     final tags = _tagCtl.text
         .split(RegExp(r'[,，\s]+'))

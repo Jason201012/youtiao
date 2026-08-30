@@ -88,6 +88,12 @@ String buildPeriodNarrative(PeriodReview r) {
       focusSent.write('（较$prev少 ${-r.focusMinutesDelta} 分钟）');
     }
     focusSent.write('，跑满 ${r.pomodoroCount} 个番茄');
+    // F2：打断数据展示闭环——月报补充「平均每次专注被打断次数」。
+    // 仅当区间内有专注会话时才给出，避免「0 次」「÷0」的怪异表述。
+    if (r.focusSessionCount > 0) {
+      final avg = (r.focusInterruptCount / r.focusSessionCount);
+      focusSent.write('，平均每次专注被打断 ${avg.toStringAsFixed(1)} 次');
+    }
     parts.add(focusSent.toString());
   }
 

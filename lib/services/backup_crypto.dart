@@ -33,6 +33,18 @@ class BackupDecryptException implements Exception {
   String toString() => 'BackupDecryptException: $message';
 }
 
+/// 加密备份「静默降级明文」防护（P0-1）。
+///
+/// 历史缺陷：勾选加密后 UI 先清空口令输入框、再把 `controller.text`（已是空串）
+/// 传给备份流程，导致落盘的是**明文**，而 UI 仍提示「已加密保存」。
+/// 现统一由此异常中止流程：加密意图与空口令冲突时**显式失败**，绝不降级。
+class BackupEncryptException implements Exception {
+  final String message;
+  const BackupEncryptException(this.message);
+  @override
+  String toString() => 'BackupEncryptException: $message';
+}
+
 /// 口令加密备份的版本号（v3 = 带加密信封的备份）。
 const int kEncryptedBackupVersion = 3;
 
@@ -82,6 +94,22 @@ String encrypt(String json, String pass) {
     'ct': base64.encode(ct),
   };
   return const JsonEncoder.withIndent('  ').convert(envelope);
+}
+
+/// 按「是否加密」产出最终落盘载荷（P0-1 守卫）。
+///
+/// 所有备份落盘路径都必须经由此函数，杜绝「勾选加密却写明文」的静默降级：
+/// - [encryptOn] 为 false：原样返回明文（用户明确未勾选加密，预期行为）；
+/// - [encryptOn] 为 true 且口令缺失/为空：**抛 [BackupEncryptException] 中止**，
+///   不会写出任何文件，也不会谎报已加密。
+String buildBackupPayload(String plainJson,
+    {required bool encryptOn, String? pass}) {
+  if (!encryptOn) return plainJson;
+  if (pass == null || pass.isEmpty) {
+    throw const BackupEncryptException(
+        '已勾选加密备份，但未获取到有效口令，已中止（未写入任何文件）');
+  }
+  return encrypt(plainJson, pass);
 }
 
 /// 判断一段原始文本是否为本 App 的加密信封（用于导入时分流处理）。

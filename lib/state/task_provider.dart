@@ -49,6 +49,20 @@ class TaskProvider extends ChangeNotifier {
   static const String _kBriefMorningOn = 'brief_morning_on';
   static const String _kBriefMorningH = 'brief_morning_h';
   static const String _kBriefMorningM = 'brief_morning_m';
+  static const String _kHabitNudgeOn = 'habit_nudge_on';
+  static const String _kHabitNudgeMin = 'habit_nudge_min';
+  // F4：习惯漏卡「挽留」通知独立配置——开关 + 固定时刻（自 00:00 起的分钟数）。
+  // 硬编码 23:00 迁移为「可配置入参」，并感知勿扰区间（见 notification_service）。
+  bool _habitNudgeEnabled = true;
+  int _habitNudgeMinute = 23 * 60;
+  bool get habitNudgeEnabled => _habitNudgeEnabled;
+  int get habitNudgeMinute => _habitNudgeMinute;
+  Future<void> setHabitNudge({required bool enabled, int? minute}) async {
+    _habitNudgeEnabled = enabled;
+    if (minute != null) _habitNudgeMinute = minute.clamp(0, 24 * 60 - 1);
+    notifyListeners();
+    await _persistSettings();
+  }
   bool _briefingEveningEnabled = true;
   int _briefingEveningHour = 22;
   int _briefingEveningMinute = 0;
@@ -666,6 +680,8 @@ class TaskProvider extends ChangeNotifier {
     _briefingMorningEnabled = prefs.getBool(_kBriefMorningOn) ?? true;
     _briefingMorningHour = prefs.getInt(_kBriefMorningH) ?? 7;
     _briefingMorningMinute = prefs.getInt(_kBriefMorningM) ?? 30;
+    _habitNudgeEnabled = prefs.getBool(_kHabitNudgeOn) ?? true;
+    _habitNudgeMinute = prefs.getInt(_kHabitNudgeMin) ?? 23 * 60;
     NotificationService.instance.enabled = _notificationsEnabled;
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
@@ -744,6 +760,8 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setBool(_kBriefMorningOn, _briefingMorningEnabled);
     await prefs.setInt(_kBriefMorningH, _briefingMorningHour);
     await prefs.setInt(_kBriefMorningM, _briefingMorningMinute);
+    await prefs.setBool(_kHabitNudgeOn, _habitNudgeEnabled);
+    await prefs.setInt(_kHabitNudgeMin, _habitNudgeMinute);
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
@@ -1566,10 +1584,37 @@ class TaskProvider extends ChangeNotifier {
     if (ids.isEmpty) return 0;
     // 先快照再逐条更新：[updateTask] 会改动 _tasks，边遍历边改不安全。
     final targets = ids.map(byId).whereType<Task>().toList();
+    // F1：批量编辑一次性改写 N 条且无快照，历史上「+N 天数输错 / 分类选错」不可逆。
+    // 这里外套一份「改前快照」（按原始索引），供 [undoBatchEdit] 一键还原。
+    _lastEditBatch = targets.map((t) => t.copyWith()).toList();
+    _lastEditIndices =
+        targets.map((t) => _tasks.indexWhere((x) => x.id == t.id)).toList();
     for (final t in targets) {
       updateTask(transform(t));
     }
     return targets.length;
+  }
+
+  // ===== 批量编辑（改前快照 + 撤销）=====
+  // 与删除撤销 [_lastBatch] / [_lastBatchIndices] 相互独立，互不覆盖。
+  List<Task> _lastEditBatch = [];
+  List<int> _lastEditIndices = [];
+
+  /// 撤销上一次批量编辑：把改前快照按原始索引放回，覆盖被改写的内容。
+  /// 仅可撤销最近一次批量编辑（覆盖式缓冲）；与 [undoDelete] 互不影响。
+  void undoBatchEdit() {
+    if (_lastEditBatch.isEmpty) return;
+    for (var k = 0; k < _lastEditBatch.length; k++) {
+      final orig = _lastEditBatch[k];
+      final idx = _lastEditIndices[k];
+      if (idx >= 0 && idx < _tasks.length) {
+        _tasks[idx] = orig;
+      }
+    }
+    _lastEditBatch = [];
+    _lastEditIndices = [];
+    notifyListeners();
+    _persist();
   }
 
   /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。

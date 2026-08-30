@@ -57,11 +57,17 @@ class FocusShareCard extends StatelessWidget {
 
     final totalSec = sessions.fold(0, (s, e) => s + e.durationSec);
     final completed = sessions.where((e) => e.completed).length;
+    // F2：专注打断数据展示闭环——分享卡汇总当日被打断次数（仅统计专注阶段会话）。
+    final interrupts =
+        sessions.where((e) => e.phase == FocusPhase.focus).fold(
+              0,
+              (s, e) => s + e.interruptCount,
+            );
 
     final blocks = <Widget>[
       _Header(date: DateTime.now(), accent: accent),
       const SizedBox(height: 14),
-      // 统计：今日专注总时长 + 完成番茄数
+      // 统计：今日专注总时长 + 完成番茄数 + 被打断次数（F2 新增）
       Container(
         width: double.infinity,
         padding: const EdgeInsets.all(16),
@@ -86,6 +92,16 @@ class FocusShareCard extends StatelessWidget {
                 valueColor: accent,
               ),
             ),
+            if (interrupts > 0) ...[
+              Container(width: 1, height: 36, color: ext.track),
+              Expanded(
+                child: _Stat(
+                  value: '$interrupts',
+                  label: '被打断',
+                  valueColor: onBg,
+                ),
+              ),
+            ],
           ],
         ),
       ),

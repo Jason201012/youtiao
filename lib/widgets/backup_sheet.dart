@@ -94,6 +94,9 @@ class BackupSheet {
                       ? '加密导出完整数据（凭口令恢复）'
                       : '导出完整数据（任务、习惯、专注记录与设置），可分享保存'),
                   onTap: () {
+                    // P0-1 修复：口令必须在「清空输入框之前」取成局部变量并传出。
+                    // 原实现先 clear() 再读 passCtrl.text，读到空串导致勾选加密仍写明文。
+                    String? confirmedPass;
                     if (encrypt) {
                       final p = passCtrl.text;
                       if (p.length < 8) {
@@ -113,13 +116,15 @@ class BackupSheet {
                             content: Text('两次输入的口令不一致')));
                         return;
                       }
+                      // 校验全部通过后才锁定口令到局部变量，随后再清空输入框。
+                      confirmedPass = p;
                       passCtrl.clear();
                       passConfirmCtrl.clear();
                     }
                     Navigator.pop(ctx);
                     _doBackup(taskProvider, focusProvider, habitProvider,
                         context, includeTrash,
-                        encryptOn: encrypt, pass: passCtrl.text);
+                        encryptOn: encrypt, pass: confirmedPass);
                   },
                 ),
                 ListTile(
@@ -168,8 +173,11 @@ class BackupSheet {
       final plain = const JsonEncoder.withIndent('  ').convert(map);
 
       // 口令加密导出：明文经 AES-256-GCM 信封化，落盘 / 分享的都是密文。
-      final isEnc = encryptOn && pass != null && pass.isNotEmpty;
-      final payload = isEnc ? encrypt(plain, pass!) : plain;
+      // P0-1 守卫：encryptOn 为真而口令缺失时 buildBackupPayload 会抛
+      // BackupEncryptException，整个备份中止（不写任何文件），绝不静默降级明文。
+      final isEnc = encryptOn;
+      final payload =
+          buildBackupPayload(plain, encryptOn: encryptOn, pass: pass);
       final name =
           isEnc ? '有条-backup-${_ts()}.enc.json' : '有条-backup-${_ts()}.json';
       // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
@@ -199,6 +207,12 @@ class BackupSheet {
             ),
           ),
         );
+      }
+    } on BackupEncryptException catch (e) {
+      // 加密意图无法满足：直接透出原因，不包装成「备份失败：BackupEncryptException: …」。
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.message)));
       }
     } catch (e) {
       if (context.mounted) {

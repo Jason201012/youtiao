@@ -29,10 +29,15 @@ DailyBrief buildEveningBrief({
   required int pomodoros,
   required int habitDone,
   required int habitDue,
+  int interrupts = 0,
 }) {
   final lines = <String>[];
   lines.add('今日完成任务：$completedTasks 个');
   lines.add('专注时长：$focusMinutes 分钟 · 完成番茄 $pomodoros 个');
+  // F2：专注打断次数展示闭环——只显示「有打断」时才加这一行，避免日常无打断时噪音。
+  if (interrupts > 0) {
+    lines.add('专注被打断：$interrupts 次');
+  }
   final rate = habitDue == 0
       ? '—'
       : '${((habitDone / habitDue) * 100).round()}%';
@@ -88,20 +93,26 @@ DailyBrief buildEveningBriefFromState(
       completedToday++;
     }
   }
-  final focusMin = focus.todayFocusSec ~/ 60;
-  final pomodoros = focus.todayCompleted;
+  // P2-1：专注 / 习惯三项同样按 [now]（投递日）聚合，与上方任务口径对齐。
+  // 此前取的是「本机当前日」，晚简报被重排到次日投递时会出现
+  // 「今日完成任务 0，专注 X 分钟」的混合口径。
+  final focusMin = focus.focusSecOn(now) ~/ 60;
+  final pomodoros = focus.completedOn(now);
   final active = habit.activeHabits;
   final habitDue = active.length;
   var habitDone = 0;
   for (final h in active) {
-    if (habit.isCheckedToday(h)) habitDone++;
+    if (habit.isCheckedOn(h, now)) habitDone++;
   }
+  // F2：打断数据展示闭环——晚简报补一行「专注被打断 X 次」，按同一投递日聚合。
+  final interrupts = focus.interruptCountOn(now);
   return buildEveningBrief(
     completedTasks: completedToday,
     focusMinutes: focusMin,
     pomodoros: pomodoros,
     habitDone: habitDone,
     habitDue: habitDue,
+    interrupts: interrupts,
   );
 }
 
@@ -195,22 +206,32 @@ Future<void> rescheduleBriefings(
   }
 }
 
-/// P1-7 重排「习惯漏卡挽留」通知：每天 23:00 提醒一次「今天该打卡却还没打卡」的习惯。
+/// P1-7 重排「习惯漏卡挽留」通知：每天固定时刻提醒一次「今天该打卡却还没打卡」的习惯。
 ///
 /// 与简报同一套路——文案在**调度时**烘焙（系统闹钟到点时 App 未必在内存），
 /// 因此需要在启动、回到前台、习惯或打卡变动时重排，让内容跟上最新口径。
 ///
+/// F4 增强：时刻 [nudgeMinute]（自 00:00 起的分钟数，默认 23:00）可配置；
+/// [enabled]=false（或通知总开关关闭）时直接取消、不再排；排程时由
+/// [NotificationService.scheduleHabitNudge] 统一感知勿扰区间。
+///
 /// 兜底策略：
-/// - 通知总开关关闭 → 直接取消，不排；
+/// - 通知总开关关闭 / [enabled]=false → 直接取消，不排；
 /// - 今天没有漏卡（含「已全部打卡」和「今天本就不该打卡」）→ 取消而非排一条空的；
 /// - 多个习惯漏卡 → 聚合成**一条**通知，避免 23:00 连弹 N 条变成骚扰；
 /// - 全程包 try/catch——挽留是锦上添花，任何失败都不该影响主流程。
 ///
-/// 调用点：`main.dart` 启动后、`AppLifecycleState.resumed` 时（与简报并排）。
-Future<void> rescheduleHabitNudge(HabitProvider habit) async {
+/// 调用点：`main.dart` 启动后、`AppLifecycleState.resumed` 时（与简报并排）、
+/// 以及 `HabitProvider.onHabitsChanged` 打卡/增删变动回调。
+Future<void> rescheduleHabitNudge(
+  HabitProvider habit, {
+  bool enabled = true,
+  int nudgeMinute = 23 * 60,
+}) async {
   final svc = NotificationService.instance;
   try {
-    if (!svc.enabled) {
+    // F4：独立开关 + 通知总开关任一关闭即取消（不排）。
+    if (!svc.enabled || !enabled) {
       await svc.cancelHabitNudge();
       return;
     }
@@ -235,7 +256,12 @@ Future<void> rescheduleHabitNudge(HabitProvider habit) async {
     final payload = missed.length == 1
         ? '${NotificationService.payloadHabitPrefix}${missed.first.id}'
         : NotificationService.payloadHabitPrefix;
-    await svc.scheduleHabitNudge(title: t.title, body: t.body, payload: payload);
+    await svc.scheduleHabitNudge(
+      title: t.title,
+      body: t.body,
+      payload: payload,
+      nudgeMinute: nudgeMinute, // F4：可配置时刻
+    );
   } catch (e) {
     debugPrint('[HabitNudge] 重排失败：$e');
   }

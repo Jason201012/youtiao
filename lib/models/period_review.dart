@@ -71,6 +71,12 @@ class PeriodReview {
   /// 区间内完成的番茄数（跑满预设时长的专注阶段）。
   final int pomodoroCount;
 
+  /// 区间内全部专注阶段会话的累计被打断次数（F2：打断数据展示闭环，月报叙事用）。
+  final int focusInterruptCount;
+
+  /// 区间内专注阶段会话数（用于折算「平均每次专注被打断次数」）。
+  final int focusSessionCount;
+
   /// 区间内整体习惯达成率 0..1。
   final double habitRate;
   final int habitExpected;
@@ -119,6 +125,8 @@ class PeriodReview {
     required this.focusSec,
     required this.prevFocusSec,
     required this.pomodoroCount,
+    required this.focusInterruptCount,
+    required this.focusSessionCount,
     required this.habitRate,
     required this.habitExpected,
     required this.habitDone,
@@ -257,6 +265,8 @@ class PeriodReview {
     int focusSec = 0;
     int prevFocusSec = 0;
     int pomodoroCount = 0;
+    int focusInterruptCount = 0;
+    int focusSessionCount = 0;
     final focusMap = <String, TaskFocusStat>{};
     // 任务 id → 分类 速查表，用于把专注秒数归到分类（任务删除后归为「未关联」）。
     final catById = <String, Category>{};
@@ -277,6 +287,9 @@ class PeriodReview {
       if (s.phase == FocusPhase.focus) {
         focusSec += s.durationSec;
         if (s.completed) pomodoroCount++;
+        // F2：打断数据展示闭环——聚合区间内专注阶段的打断次数与会话数（月报叙事用）。
+        focusSessionCount++;
+        focusInterruptCount += s.interruptCount;
         // 分类聚合：自由专注（无任务）或任务已删除 → 计入「未关联」。
         final cat = s.taskId != null ? catById[s.taskId!] : null;
         if (cat != null) {
@@ -344,6 +357,8 @@ class PeriodReview {
       focusSec: focusSec,
       prevFocusSec: prevFocusSec,
       pomodoroCount: pomodoroCount,
+      focusInterruptCount: focusInterruptCount,
+      focusSessionCount: focusSessionCount,
       habitRate: habitRate,
       habitExpected: habitExpected,
       habitDone: habitDone,

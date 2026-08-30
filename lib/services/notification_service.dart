@@ -1037,6 +1037,7 @@ class NotificationService {
     required String title,
     required String body,
     String? payload,
+    int nudgeMinute = 23 * 60,
   }) async {
     if (!enabled) {
       debugPrint('[通知] 未调度习惯挽留：通知总开关关闭');
@@ -1048,13 +1049,23 @@ class NotificationService {
     }
     try {
       final loc = _loc ?? tz.UTC;
-      // nudgeMinute 是 const，派生出的时/分同样是编译期常量，故用 const。
-      const hh = HabitNudge.nudgeMinute ~/ 60;
-      const mm = HabitNudge.nudgeMinute % 60;
+      // F4：时刻可配置（自 00:00 起的分钟数，默认 23:00），不再硬编码。
+      final hh = nudgeMinute ~/ 60;
+      final mm = nudgeMinute % 60;
       final now = tz.TZDateTime.now(loc);
       // 今天这个时刻已过就顺延到明天——与简报同一套路，避免排一个过去的时间点。
       var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
       when = when.isAfter(now) ? when : when.add(const Duration(days: 1));
+      // F4：排程前感知勿扰区间——若落点恰在勿扰时段内，按既有 dndDefer 顺延，
+      // 避免挽留撞进勿扰被静默吞掉。
+      if (dndDefer != null) {
+        final deferred = dndDefer!(when);
+        if (deferred != null) {
+          // dndDefer 返回普通 DateTime，需按当前时区换算回 TZDateTime 才能用于 zonedSchedule。
+          when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
+              deferred.hour, deferred.minute);
+        }
+      }
       final mode = await _scheduleMode;
       const detail = NotificationDetails(
         android: AndroidNotificationDetails(

@@ -5,7 +5,9 @@
 /// 两类命令：
 /// - **导航类**：`/today` `/board` `/calendar` `/focus` `/habit` `/settings`
 ///   （中英文皆可），等效于点底部 Tab，无副作用；
-/// - **动作类**：`/done`，完成首页当前选中的任务。
+/// - **动作类**：`/done` 完成首页选中项；F7 扩充 `/new`（新建任务）/`/trash`（回收站）
+///   `/tags`（标签管理）/`/export`（导出）/`/backup`（备份）/`/week`（本周）等，
+///   各自携带回调，无回调时安全回落提示。
 ///
 /// ⚠️ 兜底原则（与报告原文的差异）：
 /// 报告举例是 `/done 全部`，但命令面板拿不到列表上下文，若把「全部」解释成
@@ -40,6 +42,29 @@ class PaletteCommand {
     '设置': 5,
   };
 
+  /// 动作类命令名集合（F7：在 /done 基础上扩充）。
+  /// 每个动作需由宿主注入对应回调；未注入时面板安全提示「当前不可用」。
+  static const Set<String> actionCommands = {
+    'done', // 完成首页选中项
+    'new', // 唤起快速录入
+    'trash', // 回收站
+    'tags', // 标签管理
+    'export', // 导出（CSV/Markdown）
+    'backup', // 备份与恢复
+    'week', // 本周视图
+  };
+
+  /// 动作命令 → 展示名（面板提示用）。
+  static const Map<String, String> actionLabels = {
+    'done': '完成选中项',
+    'new': '新建任务',
+    'trash': '回收站',
+    'tags': '标签管理',
+    'export': '导出数据',
+    'backup': '备份与恢复',
+    'week': '本周视图',
+  };
+
   /// 动作类命令名。
   static const String cmdDone = 'done';
 
@@ -68,12 +93,17 @@ class PaletteCommand {
   /// 是否为「完成选中项」命令。
   bool get isDone => name == cmdDone;
 
+  /// 是否为动作类命令（F7）。
+  bool get isAction => actionCommands.contains(name);
+
   /// 是否为已知命令（导航类或动作类）。未知命令交由 UI 提示。
-  bool get isKnown => gotoIndex != null || isDone;
+  bool get isKnown => gotoIndex != null || isAction;
 
   /// 命令的展示名（用于面板标题）。
   String get label {
     if (isDone) return '完成选中项';
+    final act = actionLabels[name];
+    if (act != null) return act;
     final i = gotoIndex;
     if (i == null) return name;
     return const ['首页', '看板', '日历', '专注', '习惯', '设置'][i];

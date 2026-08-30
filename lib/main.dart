@@ -33,7 +33,11 @@ import 'package:todolist/screens/habit_screen.dart';
 import 'package:todolist/screens/settings_screen.dart';
 import 'package:todolist/screens/today_review_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
+import 'package:todolist/screens/trash_screen.dart';
+import 'package:todolist/screens/tag_manage_screen.dart';
 import 'package:todolist/widgets/command_palette.dart';
+import 'package:todolist/widgets/export_sheet.dart';
+import 'package:todolist/widgets/backup_sheet.dart';
 
 /// 全局根导航键：供通知点击回调在脱离 widget context 时仍能 push 路由。
 final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
@@ -410,10 +414,19 @@ void main() async {
   }
   // P1-7：启动后重排「习惯漏卡挽留」（内部已包 try/catch，这里再兜一层）。
   try {
-    await rescheduleHabitNudge(habit);
+    await rescheduleHabitNudge(habit,
+        enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
   } catch (e) {
     debugPrint('[HabitNudge] 调度挽留失败：$e');
   }
+  // P2-2：打卡 / 增删习惯变动后自动重排挽留，避免「已补卡却收到陈旧挽留」。
+  // F4：变动重排沿用当前可配置时刻与开关。
+  // 注意：onHabitsChanged 是 HabitProvider 的静态回调（避免反向 import daily_briefing），
+  // 必须用类访问，不能经实例访问。
+  HabitProvider.onHabitsChanged = (h) {
+    rescheduleHabitNudge(h,
+        enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
+  };
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);
@@ -688,6 +701,8 @@ class _MainScaffoldState extends State<MainScaffold>
           // 内部按当前漏卡情况自行决定，无漏卡时会撤掉已排的通知。
           rescheduleHabitNudge(
             Provider.of<HabitProvider>(context, listen: false),
+            enabled: task.habitNudgeEnabled,
+            nudgeMinute: task.habitNudgeMinute,
           );
         }
       } catch (_) {}
@@ -844,6 +859,31 @@ class _MainScaffoldState extends State<MainScaffold>
                       // P1-6：面板内 `/done` 命令落地到同一套逻辑。
                       onCompleteSelected: () =>
                           _completeSelectedAndNotify(context),
+                      // F7：动作命令 → 落地回调。未注入的键会被面板标记为
+                      // 「当前不可用」并安全禁用，不会成为死链。
+                      // 每条都落在宿主已存在的入口，不新增任何 UI/网络代码。
+                      actions: {
+                        // /new：唤起快速录入（与 FAB 同源，符合报告「唤起快速录入」语义）。
+                        'new': () => QuickEntrySheet.show(context),
+                        // /trash：跳转回收站。
+                        'trash': () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => const TrashScreen()),
+                            ),
+                        // /tags：跳转标签管理。
+                        'tags': () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => const TagManageScreen()),
+                            ),
+                        // /export：打开导出面板（本地 Excel/PDF，零联网）。
+                        'export': () => ExportSheet.show(context),
+                        // /backup：打开备份与恢复面板。
+                        'backup': () => BackupSheet.show(context),
+                        // /week：回到首页（首页默认视图含本周回顾卡），无独立周视图页避免新增死链。
+                        'week': () => setState(() => _index = 0),
+                      },
                     );
                     return null;
                   },

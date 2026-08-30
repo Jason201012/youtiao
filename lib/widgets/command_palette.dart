@@ -18,11 +18,16 @@ class CommandPalette extends StatefulWidget {
   /// 故由宿主注入；返回实际完成条数，提示文案也由宿主负责弹出。
   final int Function()? onCompleteSelected;
 
+  /// F7：动作命令 → 落地回调。键为命令名（见 [PaletteCommand.actionCommands]），
+  /// 未注入的命令在面板里显示「当前不可用」并安全禁用，不会成为死链。
+  final Map<String, VoidCallback>? actions;
+
   const CommandPalette({
     super.key,
     required this.currentIndex,
     required this.onPick,
     this.onCompleteSelected,
+    this.actions,
   });
 
   /// 弹出命令面板（模态底部抽屉）。
@@ -31,6 +36,7 @@ class CommandPalette extends StatefulWidget {
     required int currentIndex,
     required void Function(int) onPick,
     int Function()? onCompleteSelected,
+    Map<String, VoidCallback>? actions,
   }) {
     return showModalBottomSheet(
       context: context,
@@ -40,6 +46,7 @@ class CommandPalette extends StatefulWidget {
         currentIndex: currentIndex,
         onPick: onPick,
         onCompleteSelected: onCompleteSelected,
+        actions: actions,
       ),
     );
   }
@@ -107,6 +114,16 @@ class _CommandPaletteState extends State<CommandPalette> {
       Navigator.pop(context);
       return true;
     }
+    // F7：动作类命令（/new /trash /tags /export /backup /week 等）。
+    // 命中且宿主注入了回调 → 执行；否则安全禁用（不弹死链）。
+    if (c.isAction) {
+      final cb = widget.actions?[c.name];
+      if (cb != null) {
+        cb();
+        Navigator.pop(context);
+        return true;
+      }
+    }
     return false;
   }
 
@@ -120,9 +137,13 @@ class _CommandPaletteState extends State<CommandPalette> {
       icon = Symbols.check_circle;
     } else if (c.gotoIndex != null) {
       icon = Symbols.arrow_forward;
+    } else if (c.isAction) {
+      icon = Symbols.flash_on;
     } else {
       icon = Symbols.help;
     }
+    // F7：动作命令若宿主未注入回调，标记「当前不可用」并禁用点击。
+    final actionAvailable = !c.isAction || (widget.actions?[c.name] != null);
     final title = known ? c.label : '未知命令 /${c.name}';
     final hint = c.isDone
         ? (widget.onCompleteSelected == null
@@ -130,7 +151,11 @@ class _CommandPaletteState extends State<CommandPalette> {
             : '把首页已勾选的任务标记为完成')
         : (c.gotoIndex != null
             ? '跳转到「${c.label}」'
-            : '可用：/done /today /board /calendar /focus /habit /settings');
+            : (c.isAction
+                ? (actionAvailable
+                    ? '执行：${c.label}'
+                    : '当前不可用')
+                : '可用：/done /new /trash /tags /export /backup /week /today /board /calendar /focus /habit /settings'));
     return ListTile(
       leading: Icon(icon,
           color: known ? scheme.primary : ext.meta, size: 22),
@@ -139,7 +164,7 @@ class _CommandPaletteState extends State<CommandPalette> {
         style: TextStyle(fontWeight: FontWeight.w600, color: onSurface),
       ),
       subtitle: Text(hint, style: TextStyle(color: ext.meta, fontSize: 12)),
-      onTap: known ? _runCommand : null,
+      onTap: (known && actionAvailable) ? _runCommand : null,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppColors.cardRadius),
       ),

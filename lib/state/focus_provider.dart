@@ -735,14 +735,32 @@ class FocusProvider extends ChangeNotifier {
   int get totalSec => _sessions.fold(0, (sum, s) => sum + s.durationSec);
 
   /// 今日完成的番茄数（跑满预设时长的**专注**阶段；休息不计入）。
-  int get todayCompleted =>
-      _sessions.where((s) {
-        final d = DateTime.now();
-        final today = DateTime(d.year, d.month, d.day);
-        return s.completed &&
+  int get todayCompleted => completedOn(DateTime.now());
+
+  /// 指定日完成的番茄数（date-only）。
+  /// P2-1：晚简报按**投递日**聚合，不能取「本机当前日」，
+  /// 否则 22:00 后重排到次日投递时会出现「任务 0 个 / 专注 X 分钟」的混合口径。
+  int completedOn(DateTime day) {
+    final d = DateTime(day.year, day.month, day.day);
+    return _sessions.where((s) {
+      return s.completed &&
+          s.phase == FocusPhase.focus &&
+          DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d;
+    }).length;
+  }
+
+  /// 指定日专注被打断的总次数（F2：仅统计**专注**阶段会话的 interruptCount）。
+  int interruptCountOn(DateTime day) {
+    final d = DateTime(day.year, day.month, day.day);
+    return _sessions
+        .where((s) =>
             s.phase == FocusPhase.focus &&
-            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == today;
-      }).length;
+            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d)
+        .fold(0, (sum, s) => sum + s.interruptCount);
+  }
+
+  /// 今日专注被打断次数（F2 展示闭环的今日入口）。
+  int get todayInterruptCount => interruptCountOn(DateTime.now());
 
   void clear() {
     _sessions.clear();

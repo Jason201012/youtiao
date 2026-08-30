@@ -58,6 +58,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         Provider.of<HabitProvider>(context, listen: false),
       );
 
+  /// F4：挽留设置变更后，立即按新时刻/开关重排（沿用同 id 覆盖机制）。
+  Future<void> _rescheduleNudge(TaskProvider p) =>
+      rescheduleHabitNudge(
+        Provider.of<HabitProvider>(context, listen: false),
+        enabled: p.habitNudgeEnabled,
+        nudgeMinute: p.habitNudgeMinute,
+      );
+
   /// 手动检查更新：有新版弹窗，无新版提示「已是最新」。
   Future<void> _checkUpdateManually(BuildContext context) async {    final res = await UpdateChecker.check();
     if (!mounted) return;
@@ -404,6 +412,66 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 enabled: provider.briefingMorningEnabled,
                                 hour: picked.hour, minute: picked.minute);
                             await _rescheduleBrief(provider);
+                          }
+                        },
+                      ),
+                    ),
+                    // F4：习惯漏卡「挽留」通知独立配置（开关 + 时刻）。
+                    const SizedBox(height: AppColors.contentGap),
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.notifications_active,
+                        label: '习惯挽留提醒',
+                        subtitle: '当天该打卡却还没打卡时，定时提醒一次',
+                        value:
+                            '${provider.habitNudgeMinute ~/ 60}:${(provider.habitNudgeMinute % 60).toString().padLeft(2, '0')}',
+                        switchValue: provider.habitNudgeEnabled,
+                        onSwitchChanged: (v) async {
+                          provider.setHabitNudge(enabled: v);
+                          await _rescheduleNudge(provider);
+                        },
+                        onTap: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: TimeOfDay(
+                                hour: provider.habitNudgeMinute ~/ 60,
+                                minute: provider.habitNudgeMinute % 60),
+                          );
+                          if (picked != null) {
+                            provider.setHabitNudge(
+                                enabled: provider.habitNudgeEnabled,
+                                minute: picked.hour * 60 + picked.minute);
+                            await _rescheduleNudge(provider);
+                          }
+                        },
+                      ),
+                    ),
+                    // F4：习惯漏卡「挽留」通知独立配置（开关 + 时刻）。
+                    const SizedBox(height: AppColors.contentGap),
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.notifications_active,
+                        label: '习惯挽留提醒',
+                        subtitle: '当天该打卡却还没打卡时，定时提醒一次',
+                        value:
+                            '${provider.habitNudgeMinute ~/ 60}:${(provider.habitNudgeMinute % 60).toString().padLeft(2, '0')}',
+                        switchValue: provider.habitNudgeEnabled,
+                        onSwitchChanged: (v) async {
+                          provider.setHabitNudge(enabled: v);
+                          await _rescheduleNudge(provider);
+                        },
+                        onTap: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: TimeOfDay(
+                                hour: provider.habitNudgeMinute ~/ 60,
+                                minute: provider.habitNudgeMinute % 60),
+                          );
+                          if (picked != null) {
+                            provider.setHabitNudge(
+                                enabled: provider.habitNudgeEnabled,
+                                minute: picked.hour * 60 + picked.minute);
+                            await _rescheduleNudge(provider);
                           }
                         },
                       ),

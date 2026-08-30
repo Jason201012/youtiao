@@ -129,10 +129,33 @@ class HabitProvider extends ChangeNotifier {
   }
 
   /// 今天是否已打卡（按 date-only 判定）。
-  bool isCheckedToday(Habit habit) {
-    final k = CheckIn.dateKey(DateTime.now());
+  bool isCheckedToday(Habit habit) => isCheckedOn(habit, DateTime.now());
+
+  /// 指定日是否已打卡（date-only 判定）。
+  /// P2-1：晚简报按**投递日**聚合，不能取「本机当前日」，否则跨天投递时口径会串。
+  bool isCheckedOn(Habit habit, DateTime day) {
+    final k = CheckIn.dateKey(day);
     return _checkIns.any(
         (c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
+  }
+
+  /// P2-2：「习惯/打卡发生变动」时的重排回调，由 `main.dart` 注入。
+  ///
+  /// 之所以用回调而非直接 import `daily_briefing.dart`：后者反向依赖本文件
+  /// （`buildEveningBriefFromState` 需要 `HabitProvider`），直接 import 会形成
+  /// 循环依赖。注入式回调是最小改动且**未注入时静默跳过**的兜底方案——
+  /// 挽留通知属锦上添花，绝不因回调缺失影响打卡主流程。
+  static void Function(HabitProvider provider)? onHabitsChanged;
+
+  /// 统一触发 [onHabitsChanged]；回调本身抛错一律吞掉（不阻断业务、不弹错）。
+  void _notifyHabitsChanged() {
+    final cb = onHabitsChanged;
+    if (cb == null) return;
+    try {
+      cb(this);
+    } catch (e) {
+      debugPrint('[HabitNudge] 变动重排回调失败（已忽略）：$e');
+    }
   }
 
   /// 本周（周一~周日）某习惯的打卡天数（date-only 去重），用于「每周目标」进度。
@@ -191,6 +214,8 @@ class HabitProvider extends ChangeNotifier {
     }
     await _persistCheckIns();
     notifyListeners();
+    // P2-2：打卡变动后重排挽留，避免「已补卡却在 23:00 收到陈旧挽留」。
+    _notifyHabitsChanged();
   }
 
   /// 在指定日期打卡（用于补打卡 / 历史回溯），已存在则忽略。
@@ -203,6 +228,8 @@ class HabitProvider extends ChangeNotifier {
     _checkIns.add(CheckIn.forDay(habit.id, day));
     await _persistCheckIns();
     notifyListeners();
+    // P2-2：补卡同样算「打卡变动」，需重排挽留。
+    _notifyHabitsChanged();
   }
 
   /// 某习惯累计打卡次数。
