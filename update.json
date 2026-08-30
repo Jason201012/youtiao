@@ -1,6 +1,6 @@
 {
   "version": "2.7.8",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.7.8/app-release-2.7.8-arm64.apk",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.7.8/app-release-2.7.8-arm64.apk",
   "apkSha256": "8e592eaa97c2c8cdd0762fcafdd434aeca26bdc795419004cbe415fd67473e17",
   "releaseNotes": "v2.7.8（安全修复：提醒调度链路 + 备份/录入健壮性）：\n【修复·P1】① updateTask 的 remindersChanged 漏判提醒相关字段（reminderOffsetMin / monthly* / repeatUntil / skipDates）——只改提醒提前量、月重复规则或结束日期时提醒不重排，旧提醒继续按旧配置触发；现判定补全并自动重排。② interval（每隔 N 天）重复提醒断链——不设截止日期时从不提醒、设了截止日期时首轮后永久丢失；interval 重挂门槛改按 repeatUntil 判定，三处重挂入口统一收口。\n【修复·P2】③ 批量编辑「+N 天」改为各自 dueDate + N 天（原实现统一平移到今天+N，对未来截止的任务实为提前）。④ 恢复链路拒绝 tasks 非 List 的空档备份（含带「有条」标记的损坏文件），清空恢复仅允许显式 tasks: []。⑤ 快速录入「提前 N 天」数字无上限可致崩溃或提醒静默失效，改为 tryParse + 按单位收口上限（天≤365/小时≤8760/分钟≤525600）。⑥ 批量编辑与撤销逐条全量落库导致写放大，循环后统一持久化一次。\n固定 release keystore 签名。"
 }
