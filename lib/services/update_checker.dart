@@ -149,7 +149,7 @@ class UpdateChecker {
   /// 将 Gitee 上的 update.json 反序列化为 [UpdateInfo]。
   /// 清单 schema 约定（与发版脚本 _publish_v266.py 对齐）：
   ///   version / apkUrl / apkSha256 / releaseNotes 为必填或可选；
-  ///   releaseUrl 缺省时兜底到 youtiao-releases-2。
+  ///   releaseUrl 缺省时兜底到 youtiao-releases-3（v2.7.8 起的新 APK 仓）。
   /// 解析失败（缺 version）返回 null。
   static UpdateInfo? parseManifest(Map<String, dynamic> data) {
     final version = (data['version'] as String? ?? '').toString().trim();
@@ -171,8 +171,11 @@ class UpdateChecker {
       // S4 修复：以现网 update.json 的 releaseNotes 为准（不再读旧的 notes 键）。
       releaseNotes: data['releaseNotes'] as String?,
       apkUrl: apkUrl,
+      // v2.7.8：APK 仓切到 youtiao-releases-3（releases-2 附件配额已满）。
+      // 优先取清单里的 releaseUrl（服务端可随时换仓而无需改 App），兜底值仅用于
+      // 旧版清单缺少该键时——换仓时必须同步更新这里，否则「查看更新详情」会 404。
       releaseUrl: data['releaseUrl'] as String? ??
-          'https://gitee.com/jason1012/youtiao-releases-2/releases/tag/$tag',
+          'https://gitee.com/jason1012/youtiao-releases-3/releases/tag/$tag',
       apkSha256: apkSha256,
     );
   }

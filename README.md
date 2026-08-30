@@ -6,7 +6,7 @@
 
 开源协议 **[MIT](LICENSE)**
 
-> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额已用尽）。历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**；最新版 v2.4.1 起统一发布在承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。点此直达最新版 👉 [v2.5.4 下载](https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.4)
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额按仓 1 GB）。发布仓依次承接：≤v2.4.0 在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**，v2.4.1~v2.7.7 在 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**，**v2.7.8 起在 [youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**。点此直达最新版 👉 [v2.7.8 下载](https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.7.8)
 
 ## ✨ 功能特性
 
@@ -80,11 +80,14 @@ flutter build apk --release   # 构建 Android release 包
 
 ## 📦 发行版（Release）
 
-安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。**本仓库已停止上传 APK**，历史版本（≤ v2.4.0）发布在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（配额已满）；最新版 v2.4.1 起承接仓库 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**。
+安装包不纳入 git（二进制大文件，被 `.gitignore` 忽略）。**本仓库已停止上传 APK**，发布仓按 Gitee 附件配额（1 GB/仓）依次承接：
 
-- 📥 最新版 `v2.5.3`（versionCode 74）下载：<https://gitee.com/jason1012/youtiao-releases-2/releases/tag/v2.5.3>
-- 全部发行版列表（最新）：<https://gitee.com/jason1012/youtiao-releases-2/releases>
-- 历史发行版（≤v2.4.0）：<https://gitee.com/jason1012/youtiao-releases/releases>
+- ≤ v2.4.0：**[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（配额已满）
+- v2.4.1 ~ v2.7.7：**[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**（配额已满）
+- **v2.7.8 起：[youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**（当前）
+
+- 📥 最新版 `v2.7.8`（versionCode 99）下载：<https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.7.8>
+- 全部发行版列表（最新）：<https://gitee.com/jason1012/youtiao-releases-3/releases>
 
 ## 📁 项目结构
 

@@ -2,13 +2,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:todolist/services/update_checker.dart';
 
 /// 清单 schema 回归测试（S4 / S5）。
-/// 锁定：update.json 用 `releaseNotes` 键、兜底 releaseUrl 指向 youtiao-releases-2。
+/// 锁定：update.json 用 `releaseNotes` 键、兜底 releaseUrl 指向当前 APK 仓。
+/// v2.7.8：APK 仓由 youtiao-releases-2 切到 youtiao-releases-3（旧仓附件配额已满），
+/// 兜底 URL 必须随仓迁移同步更新，否则「查看更新详情」会指向不存在的 tag 页。
 void main() {
   group('UpdateChecker.parseManifest 清单 schema', () {
     test('releaseNotes 被正确读取（S4 回归：不再读旧的 notes 键）', () {
       final info = UpdateChecker.parseManifest({
         'version': '2.6.7',
-        'apkUrl': 'https://gitee.com/jason1012/youtiao-releases-2/releases/download/v2.6.7/app.apk',
+        'apkUrl': 'https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.6.7/app.apk',
         'apkSha256': 'ABCDEF',
         'releaseNotes': '本版本修复了若干体验问题。',
       });
@@ -30,10 +32,10 @@ void main() {
       expect(UpdateChecker.parseManifest(const <String, dynamic>{}), isNull);
     });
 
-    test('releaseUrl 缺省时兜底到 youtiao-releases-2（S5 回归）', () {
+    test('releaseUrl 缺省时兜底到 youtiao-releases-3（S5 回归 / v2.7.8 换仓）', () {
       final info = UpdateChecker.parseManifest({'version': '2.6.7'});
       expect(info, isNotNull);
-      expect(info!.releaseUrl, contains('youtiao-releases-2'));
+      expect(info!.releaseUrl, contains('youtiao-releases-3'));
       expect(info.releaseUrl, isNot(contains('youtiao-releases/')));
     });
 
