@@ -1540,8 +1540,20 @@ class TaskProvider extends ChangeNotifier {
   /// 自 [old] 取，避免丢失 tags / subtasks / reminderOffsetMin 等新字段
   /// （曾于 v1.9.4 / v2.3.3 / v2.3.4 / v2.5.0 多次踩坑）。
   void updateTask(Task updated) {
+    final ok = _applyTaskUpdate(updated);
+    if (ok) {
+      notifyListeners();
+      _persist();
+    }
+  }
+
+  /// P2-4：把一次任务更新应用到内存列表（重算拼音 / 重排提醒），但**不** notify、
+  /// **不**落库——供批量路径（[batchUpdate] / [undoBatchEdit]）循环复用后统一
+  /// 落库一次，消除逐条 `_persist()` 的 N 倍写放大（全量差量写 SQLite + 小组件刷新）。
+  /// 返回是否命中（未命中 = 任务不存在，调用方可据此决定是否需要通知/落库）。
+  bool _applyTaskUpdate(Task updated) {
     final i = _tasks.indexWhere((t) => t.id == updated.id);
-    if (i == -1) return;
+    if (i == -1) return false;
     final old = _tasks[i];
     // A1：标题变化时重算拼音首字母（标题不变则沿用旧值）。
     final pin = updated.title == old.title
@@ -1556,18 +1568,33 @@ class TaskProvider extends ChangeNotifier {
       pinyinInitials: pin,
     );
     // 截止时间或重复设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
+    // P1-1：判定必须覆盖「一切会影响提醒触发时刻/是否触发」的字段——
+    // - reminderOffsetMin：一次性提醒时刻 = due.subtract(offset)（notification_service L405）；
+    // - monthlyDay / monthlyWeekday / monthlyWeekIndex / monthlyFromEnd：
+    //   monthly 的「每月几号 / 第几个周几 / 倒数第 N 天」由它们决定（OS 周期闹钟，
+    //   不重排则旧规则的闹钟继续按旧日期每月响，新规则永远不响）；
+    // - repeatUntil / skipDates：interval 下次 occurrence 的边界（不重排则结束日期
+    //   之后仍可能弹、已设置的跳过日不生效）。
+    // 旧判定只比 dueDate/repeat/repeatMinute/repeatInterval/repeatWeekdays/repeatAnchor，
+    // 「只改提前量 / 只改每月几号 / 只设结束日期」时 remindersChanged=false，旧提醒继续响。
     final remindersChanged = old.dueDate != updated.dueDate ||
         old.repeat != updated.repeat ||
         old.repeatMinute != updated.repeatMinute ||
         old.repeatInterval != updated.repeatInterval ||
         !_listEq(old.repeatWeekdays, updated.repeatWeekdays) ||
-        old.repeatAnchor != updated.repeatAnchor;
+        old.repeatAnchor != updated.repeatAnchor ||
+        old.reminderOffsetMin != updated.reminderOffsetMin ||
+        old.monthlyDay != updated.monthlyDay ||
+        old.monthlyWeekday != updated.monthlyWeekday ||
+        old.monthlyWeekIndex != updated.monthlyWeekIndex ||
+        old.monthlyFromEnd != updated.monthlyFromEnd ||
+        old.repeatUntil != updated.repeatUntil ||
+        !_listEq(old.skipDates, updated.skipDates);
     if (remindersChanged) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(_tasks[i]);
     }
-    notifyListeners();
-    _persist();
+    return true;
   }
 
   /// P0-1：批量编辑。对 [ids] 命中的任务逐一应用 [transform] 后落库。
@@ -1582,16 +1609,22 @@ class TaskProvider extends ChangeNotifier {
   /// 要改完成态请逐条调用 [toggleDone] / [setStatus]——它们还会顺带重排重复提醒。
   int batchUpdate(List<String> ids, Task Function(Task) transform) {
     if (ids.isEmpty) return 0;
-    // 先快照再逐条更新：[updateTask] 会改动 _tasks，边遍历边改不安全。
+    // 先快照再逐条更新：更新会改动 _tasks，边遍历边改不安全。
     final targets = ids.map(byId).whereType<Task>().toList();
     // F1：批量编辑一次性改写 N 条且无快照，历史上「+N 天数输错 / 分类选错」不可逆。
     // 这里外套一份「改前快照」，供 [undoBatchEdit] 一键还原。
     // 撤销按 id 定位（见 [undoBatchEdit]），无需记录索引——中间有插删时索引会错位。
     _lastEditBatch = targets.map((t) => t.copyWith()).toList();
+    var changed = 0;
     for (final t in targets) {
-      updateTask(transform(t));
+      // P2-4：循环内只改内存（拼音/提醒重排照常逐条生效），循环后统一落库一次。
+      if (_applyTaskUpdate(transform(t))) changed++;
     }
-    return targets.length;
+    if (changed > 0) {
+      notifyListeners();
+      _persist();
+    }
+    return changed;
   }
 
   // ===== 批量编辑（改前快照 + 撤销）=====
@@ -1601,24 +1634,31 @@ class TaskProvider extends ChangeNotifier {
   /// 撤销上一次批量编辑：把改前快照逐条写回被改写的任务。
   /// 仅可撤销最近一次批量编辑（覆盖式缓冲）；与 [undoDelete] 互不影响。
   ///
-  /// P1-1：必须逐条走 [updateTask] 而非直接改内存——批量顺延「+N 天」后撤销时，
-  /// 截止日期会回滚，唯有 updateTask 会触发 `_cancelRemindersFor/_scheduleRemindersFor`
+  /// P1-1(v2.7.6)：必须逐条应用完整更新链路而非直接改内存——批量顺延「+N 天」后撤销时，
+  /// 截止日期会回滚，唯有重排链路会触发 `_cancelRemindersFor/_scheduleRemindersFor`
   /// 重排提醒，否则系统里残留的提醒仍指向顺延后的新日期（截止日期与通知错位）。
   ///
-  /// P1-2：按 id 定位而非索引——快照记录的是 batchUpdate 执行时的列表位置，
+  /// P1-2(v2.7.6)：按 id 定位而非索引——快照记录的是 batchUpdate 执行时的列表位置，
   /// 之后若用户新增/删除/排序过任务，按旧索引写回会覆盖到无辜任务（数据错乱）。
   /// 这里用 `indexWhere(id)` 找当前位置；找不到说明任务已被删除，跳过（不复活）。
+  ///
+  /// P2-4：撤销循环内只改内存（[undoBatchEdit] 逐条走 [_applyTaskUpdate]，
+  /// 提醒重排 / 拼音重算照常生效），循环结束后统一 notify + 落库一次，
+  /// 消除 N 条 × 全量持久化的写放大。
   void undoBatchEdit() {
     if (_lastEditBatch.isEmpty) return;
+    var changed = false;
     for (final orig in _lastEditBatch) {
-      final cur = byId(orig.id);
-      if (cur == null) continue; // 任务已不在列表（被删除），不允许复活
-      // updateTask 会强制保留 status/completedAt/focusSecTotal/order（批量编辑
-      // 本就不改这些字段），并复用提醒重排 / 拼音重算 / 持久化等既有逻辑。
-      updateTask(orig);
+      if (byId(orig.id) == null) continue; // 任务已不在列表（被删除），不允许复活
+      // _applyTaskUpdate 会强制保留 status/completedAt/focusSecTotal/order
+      // （批量编辑本就不改这些字段），并复用提醒重排 / 拼音重算等既有逻辑。
+      if (_applyTaskUpdate(orig)) changed = true;
     }
     _lastEditBatch = [];
-    notifyListeners();
+    if (changed) {
+      notifyListeners();
+      _persist();
+    }
   }
 
   /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。
@@ -1751,9 +1791,13 @@ class TaskProvider extends ChangeNotifier {
   /// [includeTrash] 为 true 且备份含回收站时，用备份的回收站覆盖当前回收站。
   Future<void> restoreFromJson(String raw, {bool includeTrash = true}) async {
     final data = jsonDecode(raw) as Map<String, dynamic>;
-    // 结构预校验：选到其它应用的 JSON 时直接拒绝，避免清空全部任务。
-    if (data['app'] != '有条' && data['tasks'] is! List) {
-      throw Exception('不是「有条」的备份文件');
+    // 结构预校验（P2-2）：`tasks` 必须是显式列表，无论 app 标记如何。
+    // 旧逻辑 `app != '有条' && tasks is! List` 会放行「带『有条』标记但 tasks 缺失/
+    // 非列表」的损坏/截断备份（list 兜底为 []），恢复时把现有任务+回收站**全清**，
+    // 清空数据仅靠 UI 二次确认兜底——纵深防线单薄。现在校验层直接拒绝；
+    // 「清空恢复」只允许 `tasks: []` 显式空数组这一条有意路径。
+    if (data['tasks'] is! List) {
+      throw Exception('不是「有条」的备份文件（缺少任务列表）');
     }
     // 干跑解析：任一任务字段非法（如未知 priority / category）先在此抛错，
     // 此时尚未清空内存态，用户数据不被破坏（修复前会留下空列表吓人）。
@@ -1900,14 +1944,41 @@ class TaskProvider extends ChangeNotifier {
     await NotificationService.instance.scheduleForTask(task);
   }
 
+  /// 重复任务当前是否仍应（重新）挂重复提醒。
+  ///
+  /// P1-2：interval（每隔 N 天）的提醒是不带 OS 周期重复的**一次性**调度
+  /// （notification_service `RepeatType.interval` 分支），依赖启动 / 回前台 /
+  /// 完成态变更时重挂；其语义是「锚点 repeatAnchor + 步进 repeatInterval」，
+  /// 与 dueDate 是否设置 / 是否已过**无关**。旧门槛
+  /// `dueDate != null && !_dateHasPassed(dueDate)` 导致：
+  /// - 不设截止日期 → 门槛直接不满足 → interval 提醒**从不调度**；
+  /// - 截止日期设为当天 → 首轮后 `_dateHasPassed` 恒为 true → 第 2 个循环日起提醒永久消失。
+  /// 现对 interval 改按 repeatUntil 判定（未设结束日期 = 一直有效，具体下次
+  /// occurrence 及 skipDates 边界由通知服务的 `_nextIntervalOccurrence` 自行计算）；
+  /// 其余重复类型（daily/weekly/monthly，OS 原生周期重复）维持原门槛：
+  /// 有截止日期且截止日期未过，逾期后自动停止。
+  bool _shouldScheduleRepeatReminder(Task t) {
+    if (!t.isRepeating || t.repeatMinute == null) return false;
+    if (t.repeat == RepeatType.interval) {
+      final u = t.repeatUntil;
+      if (u == null) return true;
+      // repeatUntil 为 yyyy-MM-dd 串；解析失败时宽松放行，
+      // 具体是否还有合法循环日由通知服务的 repeatsOn 过滤兜底。
+      final until = DateTime.tryParse(u);
+      if (until == null) return true;
+      return !_dateHasPassed(until);
+    }
+    return t.dueDate != null && !_dateHasPassed(t.dueDate!);
+  }
+
   /// 为单个任务调度其全部本地提醒（截止提醒 + 重复提醒）。
-  /// 重复提醒只在「有截止日期且截止日期未过」时才调度，逾期后自动停止。
+  /// 重复提醒只在「截止日期未过（interval 除外，见
+  /// [_shouldScheduleRepeatReminder]）」时才调度，逾期后自动停止。
   void _scheduleRemindersFor(Task t) {
     if (t.dueDate != null) {
       NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
     }
-    if (t.isRepeating && t.repeatMinute != null &&
-        t.dueDate != null && !_dateHasPassed(t.dueDate!)) {
+    if (_shouldScheduleRepeatReminder(t)) {
       NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
     }
   }
@@ -1922,10 +1993,8 @@ class TaskProvider extends ChangeNotifier {
   /// 仅当任务仍「未过截止日」才挂；具体「是否跳过今日」由通知服务依据
   /// [Task.done] + [Task.completedAt] 是否为今天自行判断（当天已完成→挂明天）。
   void _rescheduleRepeatOnCompletion(Task t) {
-    if (t.isRepeating &&
-        t.repeatMinute != null &&
-        t.dueDate != null &&
-        !_dateHasPassed(t.dueDate!)) {
+    // P1-2：门槛统一收口到 [_shouldScheduleRepeatReminder]（interval 不再受 dueDate 限制）。
+    if (_shouldScheduleRepeatReminder(t)) {
       NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
     }
   }
@@ -1952,15 +2021,17 @@ class TaskProvider extends ChangeNotifier {
       if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
         NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
       }
-      if (t.isRepeating && t.repeatMinute != null &&
-          t.dueDate != null && !_dateHasPassed(t.dueDate!)) {
+      // P1-2：门槛统一收口到 [_shouldScheduleRepeatReminder]——interval 重复提醒
+      // 不再因 dueDate 缺失 / 已过而漏挂（否则首轮后永久丢失）。
+      if (_shouldScheduleRepeatReminder(t)) {
         NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
       }
     }
   }
 
-  /// 两个 int 列表内容是否相等（[List] 默认 == 比较引用，重复星期需按内容比较）。
-  static bool _listEq(List<int> a, List<int> b) {
+  /// 列表内容是否相等（[List] 默认 == 比较引用，重复星期 / 跳过日期需按内容比较）。
+  /// P1-1：泛型化——除 repeatWeekdays(List<int>) 外，skipDates(List<String>) 也按内容比较。
+  static bool _listEq<T>(List<T> a, List<T> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (a[i] != b[i]) return false;

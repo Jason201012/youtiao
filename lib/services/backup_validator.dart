@@ -58,14 +58,15 @@ class BackupValidator {
       return BackupValidationResult(false, '读取失败：$e');
     }
 
-    // 2) 来源校验：必须是「有条」的备份，或至少带合法 tasks 列表（兼容老/第三方导出）。
-    final app = data['app'];
+    // 2) 来源校验（P2-2）：`tasks` 必须是显式列表，无论 app 标记如何。
+    //    旧逻辑「非有条备份 → 至少带 tasks 列表」的判定，对「带『有条』标记但
+    //    tasks 缺失/非列表」的损坏/截断/手工构造备份会放行（isEmpty=true 交 UI
+    //    兜底），恢复时清空全部数据——现改为校验层直接拒绝；「清空恢复」仅允许
+    //    `tasks: []` 显式空数组形态，把空恢复作为唯一有意的清空路径。
     final tasksRaw = data['tasks'];
-    final isYoutiao = app == '有条';
-    final hasTasksList = tasksRaw is List;
-    if (!isYoutiao && !hasTasksList) {
+    if (tasksRaw is! List) {
       return const BackupValidationResult(
-          false, '不是「有条」的备份文件（缺少 app/任务列表），拒绝恢复以防清空数据');
+          false, '不是「有条」的备份文件（缺少任务列表），拒绝恢复以防清空数据');
     }
 
     // 3) schemaVersion / version 容错：有则应为合法整数且 ≥1；缺省不视为错误（老备份无此字段）。

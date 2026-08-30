@@ -54,6 +54,25 @@ void main() {
       expect(r.message, contains('不是「有条'));
     });
 
+    test('带「有条」标记但 tasks 缺失被拒（P2-2，防空档备份清库）', () {
+      // 旧逻辑会放行这类文件并按空备份恢复，把现有任务+回收站全清。
+      final r = BackupValidator.validate(jsonEncode({'app': '有条'}));
+      expect(r.ok, isFalse);
+      expect(r.message, contains('任务列表'));
+    });
+
+    test('带「有条」标记但 tasks 非列表被拒（P2-2）', () {
+      final r = BackupValidator.validate(jsonEncode({'app': '有条', 'tasks': 'oops'}));
+      expect(r.ok, isFalse);
+      expect(r.message, contains('任务列表'));
+    });
+
+    test('显式空数组 tasks: [] 仍允许（清空恢复的唯一合法路径）', () {
+      final r = BackupValidator.validate(jsonEncode({'app': '有条', 'tasks': []}));
+      expect(r.ok, isTrue);
+      expect(r.taskCount, 0);
+    });
+
     test('顶层非对象被拒', () {
       final r = BackupValidator.validate(jsonEncode([1, 2, 3]));
       expect(r.ok, isFalse);

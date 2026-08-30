@@ -117,8 +117,13 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
           nt = _shiftTo(nt, today.add(const Duration(days: 1)));
           break;
         case _DueMode.plusDays:
-          if (days != null) {
-            nt = _shiftTo(nt, today.add(Duration(days: days)));
+          // P2-1：改为「各自 dueDate + N 天」——旧实现把每条任务统一平移到
+          // 「今天 + N」，对未来截止的任务实际是**提前**（截止被拉近），与弹窗
+          // 「按 +N 天顺延」的直觉语义不符。现保留原时分，各自在原截止日上加 N 天；
+          // 无截止日期的任务原样跳过（与 today/tomorrow 模式口径一致）。
+          final d = nt.dueDate;
+          if (days != null && d != null) {
+            nt = nt.copyWith(dueDate: d.add(Duration(days: days)));
           }
           break;
         case _DueMode.clear:

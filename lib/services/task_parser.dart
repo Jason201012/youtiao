@@ -464,23 +464,32 @@ class TaskParser {
     }
 
     // ── 5.5 提醒提前量：提前 N 分钟/小时/天，或「到期前 N ...」──
+    // P2-3：健壮性收口——
+    // 1) `int.parse` → `int.tryParse`：20 位以上超出 int64 的数字串原先会抛
+    //    FormatException 且整条解析链无 try/catch，直接崩掉快速录入；
+    // 2) 按单位收口上限（天 ≤365 / 小时 ≤8760 / 分钟 ≤525600，均为 1 年）：
+    //    超大提前量使 due.subtract(...) 下溢到远古时间，提醒被调度层静默丢弃；
+    //    收口后 label 也不再出现「提前 1234567 天」这类荒谬文案。
     final offRe = RegExp(r'(提前|到期前)(\d+)(分钟|分|小时|时|天)');
     final om = offRe.firstMatch(src);
     if (om != null && free(om.start, om.end)) {
-      final n = int.parse(om.group(2)!);
       final unit = om.group(3)!;
-      final mins = switch (unit) {
-        '天' => n * 1440,
-        '小时' || '时' => n * 60,
-        _ => n,
-      };
-      reminderOffsetMin = mins;
-      final label = mins >= 1440
-          ? '提前${mins ~/ 1440}天'
-          : mins >= 60
-              ? '提前${mins ~/ 60}小时'
-              : '提前${mins}分钟';
-      mark(om.start, om.end, TokenKind.reminder, label);
+      final n = int.tryParse(om.group(2)!);
+      if (n != null) {
+        final mins = switch (unit) {
+          '天' => (n > 365 ? 365 : n) * 1440,
+          '小时' || '时' => (n > 8760 ? 8760 : n) * 60,
+          _ => n > 525600 ? 525600 : n,
+        };
+        reminderOffsetMin = mins;
+        final label = mins >= 1440
+            ? '提前${mins ~/ 1440}天'
+            : mins >= 60
+                ? '提前${mins ~/ 60}小时'
+                : '提前${mins}分钟';
+        mark(om.start, om.end, TokenKind.reminder, label);
+      }
+      // n == null（超出 int64）：放弃该 token，数字残段留作标题，不崩不误配。
     }
 
     // ── 5.6 预估时长：`45分钟` / `2小时30分` / `90min`（P1-5）────────

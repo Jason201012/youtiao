@@ -409,4 +409,26 @@ void main() {
       expect(t.repeatsOn(DateTime(2026, 1, 30)), isFalse);
     });
   });
+
+  group('提醒提前量边界（P2-3）', () {
+    test('常规值原样解析', () {
+      expect(_p('提前30分钟 A').reminderOffsetMin, 30);
+      expect(_p('提前2小时 A').reminderOffsetMin, 120);
+      expect(_p('到期前1天 A').reminderOffsetMin, 1440);
+    });
+
+    test('超大值收口到 1 年（525600 分钟），不崩、不下溢', () {
+      expect(_p('提前100000天 A').reminderOffsetMin, 525600); // 天 ≤365
+      expect(_p('提前999999999小时 A').reminderOffsetMin, 525600); // 小时 ≤8760
+      expect(_p('提前999999999999999分钟 A').reminderOffsetMin, 525600); // 分 ≤525600
+    });
+
+    test('超出 int64 的数字串不抛 FormatException（tryParse 兜底）', () {
+      // 20 位以上超出 int64：旧实现 int.parse 直接崩掉整条解析链。
+      final r = _p('提前99999999999999999999999天 A');
+      expect(r.isValid, isTrue); // 整体解析不崩
+      expect(r.reminderOffsetMin, isNull); // 非法 token 被放弃
+      expect(r.title, contains('A'));
+    });
+  });
 }
