@@ -45,6 +45,13 @@ app.*.map.json
 **/android/key.properties
 **/android/!gradle-wrapper.properties
 
+# ============ 发版密钥（绝不能入库！） ============
+# ECDSA-P256 更新清单签名私钥（与 release jks 同目录，仅存发版机）
+update_sign_key.pem
+update_sign_key.pub.pem
+# 若私钥临时落到仓库根目录，也必须被忽略
+*.sign_key.pem
+
 # iOS/XCode related
 **/ios/**/*.mode1v3
 **/ios/**/*.mode2v3

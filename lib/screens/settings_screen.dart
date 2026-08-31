@@ -98,7 +98,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               const Text(
                 '开启后，每日自动快照会以 AES-256-GCM 加密后落盘。\n'
-                '口令仅保存在本机，不会随备份文件导出——换机恢复后需重新设置。',
+                '口令保存在系统密钥库（Android 密钥库 / iOS Keychain），不再以明文写入磁盘；'
+                '也不会随备份文件导出——换机恢复后需重新设置。',
               ),
               const SizedBox(height: 12),
               TextField(
@@ -136,6 +137,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     return result;
+  }
+
+/// P1-2：把空闲秒数格式化为可读文案（0→关闭）。
+String _formatIdle(int seconds) {
+  if (seconds <= 0) return '关闭';
+  if (seconds < 60) return '$seconds 秒';
+  if (seconds % 60 == 0) return '${seconds ~/ 60} 分钟';
+  return '${(seconds / 60).toStringAsFixed(1)} 分钟';
+}
+
+/// P1-2：选择「无操作自动锁定」时长。0=永不，其余为秒数。
+  /// 仅在应用锁开启时才有意义；这里不强制校验开启态，由用户自行决定，
+  /// 未开启应用锁时该设置无效（AppLockProvider.lock 在不启用时为空操作）。
+  Future<void> _pickIdleLock(BuildContext ctx, TaskProvider p) async {
+    final options = const [
+      (0, '关闭'),
+      (30, '30 秒'),
+      (60, '1 分钟'),
+      (300, '5 分钟'),
+    ];
+    final current = p.appLockIdleSeconds;
+    final picked = await showDialog<int>(
+      context: ctx,
+      builder: (dctx) => AlertDialog(
+        title: const Text('无操作自动锁定'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('解锁后若持续无操作，到点自动重新上锁。'),
+            const SizedBox(height: 8),
+            ...options.map(
+              (o) => RadioListTile<int>(
+                title: Text(o.$2),
+                value: o.$1,
+                groupValue: current,
+                onChanged: (v) => Navigator.of(dctx).pop(v),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (picked != null && picked != current) {
+      await p.setAppLockIdleSeconds(picked);
+    }
   }
 
   @override
@@ -592,6 +645,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 }
                               }
                             : null,
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P1-2：无操作自动锁定（仅在应用锁开启时生效）。点击弹窗选择时长。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.timer,
+                        label: '无操作自动锁定',
+                        subtitle: provider.appLockIdleSeconds <= 0
+                            ? '关闭（仅回到前台时锁定）'
+                            : '空闲 ${_formatIdle(provider.appLockIdleSeconds)} 后自动锁定',
+                        value: provider.appLockIdleSeconds <= 0 ? '关闭' : _formatIdle(provider.appLockIdleSeconds),
+                        onTap: () => _pickIdleLock(context, provider),
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),

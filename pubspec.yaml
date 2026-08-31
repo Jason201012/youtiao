@@ -1,7 +1,7 @@
 name: todolist
 description: Material 3 TodoList 应用（设计稿 1:1 还原）
 publish_to: 'none'
-version: 2.7.9+100
+version: 2.8.0+101
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -52,6 +52,7 @@ dependencies:
   excel: ^4.0.6
   # pdf 锁 <3.12.0：本项目 environment.sdk 为 '>=3.3.0'，避免解析到要求更高 Dart 的 3.13。
   pdf: '>=3.10.8 <3.12.0'
+  flutter_secure_storage: ^11.0.0
 
 dev_dependencies:
   flutter_test:

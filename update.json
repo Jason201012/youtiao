@@ -1,7 +1,8 @@
 {
-  "version": "2.7.9",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.7.9/app-release-2.7.9-arm64.apk",
-  "apkSha256": "8f4a2f8c43b581aa720167739bd5debe30e4af44ef453d22a7914e44c332dfa9",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.7.9",
-  "releaseNotes": "v2.7.9（安全审计修复）：\n【中危 M-01】应用锁可被通知 / 桌面小组件点击绕过——锁定时外部跳转意图只暂存、解锁后再消费，杜绝锁屏直达任务详情。\n【更新链路 L-01~L-04/L-10/L-13】version 做 semver 白名单且下载落盘固定名；APK 直链叠加作者发布仓 releases/download/ 路径前缀、重定向逐跳校验主机；下载 200MB 熔断 + 失败清理半成品；releaseUrl 走白名单；releaseNotes 截断 8000 字。\n【隐私 L-05/L-06/L-07/L-08/L-12】installApk 加 updates/ 分隔符边界校验；通知默认锁屏隐藏；新增 FLAG_SECURE 开关；自动备份可选 AES-GCM 加密；备注链接默认复制不外跳。\n【健壮性 L-09/L-11】导入 32MB 预检 + 附件流式复制；release 模式日志静默。\n【加固 I-02】新增 network_security_config 禁明文 + 仅系统 CA。固定 release keystore 签名。"
+  "version": "2.8.0",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.0/app-release-2.8.0-arm64.apk",
+  "apkSha256": "16f0bab0a64f313a5e562678c41644cf79345ec93097fc14086d73f017a4bce7",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.0",
+  "releaseNotes": "v2.8.0（安全漏洞审计报告 v2.7.9 修复批次）\n\n【P1-1 备份口令明文存储】自动备份口令改存系统密钥库（Android KeyStore / iOS Keychain），不再明文落盘；旧版 SharedPreferences 明文一次性迁移后删除。\n\n【P1-2 无操作自动锁定】新增「无操作自动锁定」（30s/1min/5min/永不 可选）；锁屏后所有外部意图（通知/小组件/分享）只暂存、解锁后由监听统一消费，杜绝锁屏绕过。\n\n【P2-2 暂存意图覆盖丢失】冷启动暂存由单值改为队列（上限 20），多次通知/分享不再相互覆盖丢失。\n\n【P2-3 解锁后静默完成】暂存「完成」类 action 解锁后先弹确认对话框（列出任务数），取消则丢弃，不再静默完成。\n\n【P2-4 模板文件名白名单偏严】用户模板文件名先做 sanitize（非法字符转 _）再走路径安全校验，中文名不再被拒。\n\n【C-1 移除冗余权限】移除 READ_MEDIA_IMAGES；选图/拍照改走系统 Photo Picker（requestFullMetadata=false）。\n\n【C-2 更新清单独立签名校验】update.json 现带 ECDSA-P256 签名（私钥仅存发版机），App 端强校验、失败拒收，即便 Gitee/TLS 被攻破也无法投毒；无签名维持现状（渐进式，不破坏历史 release）。",
+  "signature": "P84up3TGDhncR3QS7UZ+BO1KEQtdMb4lrkoiz82hqmSHqlKfBmp0Dp0VoLHRFb34oEwpJaOx9Ohc/0Jt0rYgow=="
 }

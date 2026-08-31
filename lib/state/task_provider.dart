@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:todolist/services/app_log.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/attachment_service.dart';
@@ -274,23 +275,64 @@ class TaskProvider extends ChangeNotifier {
   bool _autoBackupEncrypt = false;
   bool get autoBackupEncrypt => _autoBackupEncrypt;
 
-  /// 自动备份口令。仅保存在本机 SharedPreferences，**不纳入备份白名单**
+  /// 自动备份口令的密钥库后端（P1-1 修复）。
+  ///
+  /// 旧实现把口令以明文写在 SharedPreferences 的 XML 里（路径
+  /// `/data/data/com.example.todolist/shared_prefs/`），任何有 ADB / root
+  /// 权限的应用都能直接读出口令。改为 `flutter_secure_storage`：
+  /// - Android 走 EncryptedSharedPreferences（底层 AES-256 + Android 密钥库），
+  ///   口令不再以明文落在磁盘上；
+  /// - iOS 走 Keychain。
+  /// 该后端使用独立的存储文件，与主 SharedPreferences 互不干扰。
+  ///
+  /// 能力边界（与旧实现一致，须如实告知用户）：它防的是「口令被静态读出」，
+  /// **不**防已取得 root / 物理接触并能读取 App 私有目录、且逆向密钥库实现的攻击者。
+  /// 设置页文案已同步收紧。
+  static const FlutterSecureStorage _secureStore = FlutterSecureStorage(
+    // v11 起 AndroidOptions 默认即 AES-GCM + Android KeyStore 硬件加密，
+    // 不再需要（也已移除）encryptedSharedPreferences 选项。
+    aOptions: AndroidOptions(),
+  );
+  static const String _kSecureAutoBackupPass = 'auto_backup_pass';
+  /// 旧版（v2.7.9 之前）明文存储口令的 SharedPreferences key，仅用于一次性迁移。
+  static const String _kAutoBackupPassLegacy = 'auto_backup_pass';
+
+  /// 自动备份口令。仅保存在本机密钥库（见 [_secureStore]），**不纳入备份白名单**
   /// （见 prefs_backup.dart）——换机恢复后不会带走它，届时若开关仍处于开启态，
   /// 自动备份会以「口令缺失」显式失败并提示重设，绝不静默降级为明文。
   ///
   /// 能力边界：它防的是「快照文件被单独拷出后可读」（文件管理器、ADB pull、
-  /// 误分享等），**不**防已取得 root / 物理接触并能读取 App 私有目录的攻击者
-  /// （那种场景下口令本身也可被读出）。设置页文案需如实说明这一点。
-  static const String _kAutoBackupPass = 'auto_backup_pass';
+  /// 误分享等）以及「口令在磁盘上以明文静态存储」，**不**防已取得 root / 物理接触
+  /// 并能逆向密钥库实现的攻击者（那种场景下口令仍可能被读出）。设置页文案需如实说明这一点。
   String? _autoBackupPass;
   bool get hasAutoBackupPassphrase =>
       _autoBackupPass != null && _autoBackupPass!.isNotEmpty;
 
+  /// 从密钥库载入口令；兼容旧版曾明文存于 SharedPreferences 的情况，
+  /// 读到旧值后迁移进密钥库并删除明文副本。
+  Future<void> _loadAutoBackupPass() async {
+    String? pass = await _secureStore.read(key: _kSecureAutoBackupPass);
+    if (pass == null) {
+      // 旧版兼容：口令曾明文存于 SharedPreferences，迁移到密钥库后删除明文。
+      final prefs = await SharedPreferences.getInstance();
+      pass = prefs.getString(_kAutoBackupPassLegacy);
+      if (pass != null && pass.isNotEmpty) {
+        await _secureStore.write(key: _kSecureAutoBackupPass, value: pass);
+        await prefs.remove(_kAutoBackupPassLegacy);
+      }
+    }
+    _autoBackupPass = pass;
+  }
+
   /// 设置 / 更新自动备份口令（不为空即可，长度下限 6 由 UI 侧校验）。
+  /// 空串表示清空口令，从密钥库删除而非写入空值。
   Future<void> setAutoBackupPassphrase(String pass) async {
     _autoBackupPass = pass;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kAutoBackupPass, pass);
+    if (pass.isEmpty) {
+      await _secureStore.delete(key: _kSecureAutoBackupPass);
+    } else {
+      await _secureStore.write(key: _kSecureAutoBackupPass, value: pass);
+    }
     notifyListeners();
   }
 
@@ -319,6 +361,22 @@ class TaskProvider extends ChangeNotifier {
   Future<void> setCalendarLunar(bool v) async {
     if (v == _calendarLunar) return;
     _calendarLunar = v;
+    notifyListeners();
+    await _persistSettings();
+  }
+
+  // ===== P1-2：无操作自动锁定（应用锁增强）=====
+  /// 解锁后无操作多久自动重新上锁，单位秒。0 = 永不（仅依赖「回到前台」锁定）。
+  /// 可选值：0 / 30 / 60 / 300。仅在应用锁开启（AppLockProvider.appLockEnabled）时生效。
+  static const String _kAppLockIdleSeconds = 'app_lock_idle_seconds';
+  int _appLockIdleSeconds = 0;
+  int get appLockIdleSeconds => _appLockIdleSeconds;
+  /// 解析为 Duration；<=0 视为「永不」（返回 null）。
+  Duration? get appLockIdleDuration =>
+      _appLockIdleSeconds <= 0 ? null : Duration(seconds: _appLockIdleSeconds);
+  Future<void> setAppLockIdleSeconds(int seconds) async {
+    if (seconds == _appLockIdleSeconds) return;
+    _appLockIdleSeconds = seconds;
     notifyListeners();
     await _persistSettings();
   }
@@ -794,7 +852,9 @@ class TaskProvider extends ChangeNotifier {
     _screenSecurityEnabled = prefs.getBool(_kScreenSecurity) ?? true;
     _allowExternalLinks = prefs.getBool(_kAllowExternalLinks) ?? false;
     _autoBackupEncrypt = prefs.getBool(_kAutoBackupEncrypt) ?? false;
-    _autoBackupPass = prefs.getString(_kAutoBackupPass);
+    // P1-1：口令改从密钥库读取（含旧版明文迁移），不再读 SharedPreferences 明文副本。
+    await _loadAutoBackupPass();
+    _appLockIdleSeconds = prefs.getInt(_kAppLockIdleSeconds) ?? 0; // P1-2
     _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
     _briefingEveningHour = prefs.getInt(_kBriefEveningH) ?? 22;
     _briefingEveningMinute = prefs.getInt(_kBriefEveningM) ?? 0;
@@ -880,6 +940,7 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setBool(_kScreenSecurity, _screenSecurityEnabled);
     await prefs.setBool(_kAllowExternalLinks, _allowExternalLinks);
     await prefs.setBool(_kAutoBackupEncrypt, _autoBackupEncrypt);
+    await prefs.setInt(_kAppLockIdleSeconds, _appLockIdleSeconds); // P1-2
     await prefs.setBool(_kBriefEveningOn, _briefingEveningEnabled);
     await prefs.setInt(_kBriefEveningH, _briefingEveningHour);
     await prefs.setInt(_kBriefEveningM, _briefingEveningMinute);

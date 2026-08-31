@@ -110,6 +110,16 @@ class AppLockProvider extends ChangeNotifier {
     }
   }
 
+  /// P1-2：无操作超时强制上锁。仅当已启用应用锁且当前处于解锁态时生效。
+  /// 由 MainScaffold 的空闲定时器触发；未启用锁时调用为无操作，绝不凭空上锁。
+  /// 定时上锁会清除「解锁宽限期」标记，避免刚超时锁定的瞬间被 lifecycle 抖动误解锁。
+  void lock() {
+    if (!_enabled || _locked) return;
+    _lastUnlockAt = null;
+    _locked = true;
+    notifyListeners();
+  }
+
   /// 调起系统生物识别验证。成功返回 true 并解锁；失败/取消返回 false。
   /// [reason] 为系统弹窗的本地化提示文案。
   Future<bool> authenticate({String reason = '验证身份以进入有条'}) async {

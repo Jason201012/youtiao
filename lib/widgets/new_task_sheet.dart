@@ -382,14 +382,23 @@ class _TaskSheetState extends State<TaskSheet> {
   }
 
   /// 从相册选图片（插图）。
+  /// C-1 修复：显式 requestFullMetadata=false 走系统 Photo Picker，
+  /// 不再依赖 READ_MEDIA_IMAGES 权限（移除该权限后可降低隐私合规审计面）。
+  /// 注：相机路径本就不读媒体库，同样显式关闭 full metadata 以求一致。
   Future<void> _addImage() async {
-    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      requestFullMetadata: false,
+    );
     if (picked != null) await _importPicked(picked, AttachmentType.image);
   }
 
   /// 拍照（相机）。
   Future<void> _takePhoto() async {
-    final picked = await ImagePicker().pickImage(source: ImageSource.camera);
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.camera,
+      requestFullMetadata: false,
+    );
     if (picked != null) await _importPicked(picked, AttachmentType.image);
   }
 

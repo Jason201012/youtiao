@@ -337,7 +337,16 @@ class UserTemplateStore {
 
   /// 把经白名单校验的文件名拼到目录内，并在拼装后断言结果确实落在 [dir] 之内
   /// （双重防护，与 `AttachmentService._safeFileFor` 同思路）。不安全则抛 [ArgumentError]。
+  ///
+  /// P2-4（修复）：先对白名单之外的字符做 sanitize（替换为 `_`），而非直接拒绝——
+  /// 这样即便未来模板文件名混入了中文 / 空格等合法但不属于白名单的字符，也不会被整条丢弃，
+  /// 而是收敛为安全文件名后再做硬性路径安全校验。路径穿越类字符（`/ \ ..`）仍会被拦截。
   static File _safeFileFor(Directory dir, String fileName) {
+    if (fileName.isEmpty || fileName.length > 140) {
+      throw ArgumentError('非法模板文件名');
+    }
+    // 先 sanitize：白名单外的字符统一替换为 `_`（中文、空格、标点等不再被拒）。
+    fileName = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     if (fileName.isEmpty || fileName.length > 140) {
       throw ArgumentError('非法模板文件名');
     }
@@ -345,8 +354,7 @@ class UserTemplateStore {
         fileName == '..' ||
         fileName.contains('..') ||
         fileName.contains('/') ||
-        fileName.contains('\\') ||
-        !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(fileName)) {
+        fileName.contains('\\')) {
       throw ArgumentError('非法模板文件名：$fileName');
     }
     final absDir = dir.absolute.path;

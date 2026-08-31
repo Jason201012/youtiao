@@ -21,10 +21,11 @@
     <!-- 附件（P0-1）：录音所需麦克风权限 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 附件（P0-1）：Android 13+ 读取相册图片所需权限。
-         注：image_picker 默认 requestFullMetadata=true 会绕开 Photo Picker、走传统 content
-         resolver，因此仍依赖本权限；若改为 requestFullMetadata=false 显式走 Photo Picker
-         并完成真机验证（尤其 ColorOS 等国产 ROM），方可移除本声明。本次为稳妥保留。 -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+         C-1 修复：image_picker 已显式 requestFullMetadata=false 走系统 Photo Picker，
+         不再走传统 content resolver，故不再需要本权限——移除以收窄隐私合规审计面。
+         注意：移除后需在真机（尤其 ColorOS / 小米等国产 ROM）验证相册选图仍可走 Photo Picker；
+         若个别 ROM 仍走传统选择器，需回退本声明。 -->
+    <!-- <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" /> -->
     <!-- 附件（P0-1）：Android 12 及以下读取外部存储（相册 / 文件）所需权限。
          P2-10 收窄：仅保留到 API 29；API 30+ 选文件走 SAF / Photo Picker，不再申请 broad 存储读权限。
          已移除 READ_MEDIA_VIDEO（应用不读取视频库，选文件统一走 SAF）。 -->

@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pointycastle/export.dart';
 
 import 'package:todolist/services/update_policy.dart';
 
@@ -136,6 +138,20 @@ class UpdateChecker {
         return UpdateResult(hasUpdate: false, error: 'HTTP ${resp.statusCode}');
       }
       final Map<String, dynamic> data = jsonDecode(resp.body);
+      // C-2（更新链路签名校验）：若清单携带 `signature` 字段，则强校验其 ECDSA-P256 签名，
+      // 确保清单确实来自开发者私钥、未被篡改（即便 Gitee 账户或 TLS 被攻破也无法伪造）。
+      // 无签名为「旧版未签名发布」，维持现状继续（渐进式，不破坏历史 release）。
+      final sig = data['signature'] as String?;
+      if (sig != null && sig.isNotEmpty) {
+        final signable = Map<String, dynamic>.from(data)..remove('signature');
+        final ok = _verifyUpdateSignature(
+            utf8.encode(_canonicalJson(signable)), sig);
+        if (!ok) {
+          return const UpdateResult(
+              hasUpdate: false,
+              error: 'update.json 签名校验失败（可能被篡改，已拒绝）');
+        }
+      }
       // 解析与版本比较逻辑抽到 [_parse]，便于单元测试固化清单 schema（见 S4/S5）。
       final info = parseManifest(data);
       if (info == null) {
@@ -238,4 +254,133 @@ class UpdateChecker {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('update_skip_version', v);
   }
+}
+
+/// ============================================================
+/// C-2：更新清单（update.json）独立签名校验
+/// ============================================================
+/// 内置 ECDSA P-256 公钥（uncompressed 65 字节，含 0x04 前缀）。
+///
+/// 设计要点：用**非对称**公钥而非对称密钥——即便 APK 被逆向，攻击者也只能拿到公钥，
+/// 无法伪造签名（私钥仅存在于发版机，绝不进仓库 / 不进 App）。这与 P1-1 的密钥库思路一致：
+/// 「校验锚」放在客户端、签名权留在服务端。
+///
+/// 私钥生成与签名见仓库 `_sign_update.py`；公钥轮换需同步改此处与发版脚本。
+/// 校验失败一律视为被篡改并拒收清单（见 [UpdateChecker.check]）。
+const List<int> _updateSignPubKey = <int>[
+  4, 225, 57, 64, 208, 41, 72, 167, 120, 190, 72, 152, 218, 51, 245, 41,
+  229, 196, 238, 185, 31, 19, 200, 227, 37, 190, 167, 250, 187, 212, 216, 171,
+  3, 140, 73, 54, 57, 68, 22, 105, 69, 41, 166, 33, 70, 252, 31, 162,
+  130, 91, 79, 221, 17, 190, 234, 12, 76, 108, 182, 65, 224, 148, 252, 211, 177,
+];
+
+/// 校验 update.json 的 ECDSA-P256 签名。
+///
+/// [payload] 为「去除 signature 字段后、规范化（排序键、紧凑分隔符、UTF-8 原文）」的清单字节，
+/// [b64Sig] 为 base64 编码的 64 字节原始签名（r 高 32 字节 ‖ s 低 32 字节，大端）。
+/// 任何异常（长度不符、解码失败、点非法、签名不匹配）均返回 false，绝不吞掉失败而放行。
+bool _verifyUpdateSignature(List<int> payload, String b64Sig) {
+  try {
+    final raw = base64Decode(b64Sig);
+    if (raw.length != 64) return false; // 非压缩 P-256 签名固定 64 字节
+    final r = _bytesToBigInt(raw.sublist(0, 32));
+    final s = _bytesToBigInt(raw.sublist(32, 64));
+    final domain = ECDomainParameters('secp256r1');
+    final q = domain.curve.decodePoint(Uint8List.fromList(_updateSignPubKey));
+    if (q == null) return false;
+    final pubKey = ECPublicKey(q, domain);
+    final signer = ECDSASigner(SHA256Digest()); // 内部会先对 payload 做 SHA-256
+    signer.init(false, PublicKeyParameter<ECPublicKey>(pubKey));
+    return signer.verifySignature(Uint8List.fromList(payload), ECSignature(r, s));
+  } catch (_) {
+    return false;
+  }
+}
+
+/// 大端字节序列 → BigInt。
+BigInt _bytesToBigInt(List<int> bytes) {
+  BigInt result = BigInt.zero;
+  for (final b in bytes) {
+    result = (result << 8) | BigInt.from(b & 0xff);
+  }
+  return result;
+}
+
+/// 生成与发版脚本（Python `json.dumps(..., sort_keys=True, separators=(',',':'),
+/// ensure_ascii=False)`）逐字节对齐的规范化 JSON。
+///
+/// 双方必须对「待签名内容」有一致字节视图，否则验签永远失败。这里手动实现
+/// 「按键排序 + 紧凑分隔符 + UTF-8 原文」，与 Python 默认行为严格对齐。
+String _canonicalJson(dynamic value) {
+  final sb = StringBuffer();
+  _writeCanonical(value, sb);
+  return sb.toString();
+}
+
+void _writeCanonical(dynamic v, StringBuffer sb) {
+  if (v is Map) {
+    sb.write('{');
+    final keys = v.keys.cast<String>().toList()..sort();
+    for (var i = 0; i < keys.length; i++) {
+      if (i > 0) sb.write(',');
+      _writeJsonString(keys[i], sb);
+      sb.write(':');
+      _writeCanonical(v[keys[i]], sb);
+    }
+    sb.write('}');
+  } else if (v is List) {
+    sb.write('[');
+    for (var i = 0; i < v.length; i++) {
+      if (i > 0) sb.write(',');
+      _writeCanonical(v[i], sb);
+    }
+    sb.write(']');
+  } else if (v is String) {
+    _writeJsonString(v, sb);
+  } else if (v is num) {
+    sb.write(v.toString());
+  } else if (v is bool) {
+    sb.write(v ? 'true' : 'false');
+  } else if (v == null) {
+    sb.write('null');
+  } else {
+    sb.write(jsonEncode(v)); // 兜底，正常清单不会走到
+  }
+}
+
+/// 与 Python json.dumps 默认转义规则对齐：转义 `"` `\` 与 C0 控制字符，其余原样（UTF-8）。
+void _writeJsonString(String s, StringBuffer sb) {
+  sb.write('"');
+  for (final ch in s.codeUnits) {
+    switch (ch) {
+      case 0x22:
+        sb.write(r'\"');
+        continue;
+      case 0x5c:
+        sb.write(r'\\');
+        continue;
+      case 0x0a:
+        sb.write(r'\n');
+        continue;
+      case 0x0d:
+        sb.write(r'\r');
+        continue;
+      case 0x09:
+        sb.write(r'\t');
+        continue;
+      case 0x08:
+        sb.write(r'\b');
+        continue;
+      case 0x0c:
+        sb.write(r'\f');
+        continue;
+      default:
+        if (ch < 0x20) {
+          sb.write('\\u${ch.toRadixString(16).padLeft(4, '0')}');
+        } else {
+          sb.write(String.fromCharCode(ch));
+        }
+    }
+  }
+  sb.write('"');
 }
