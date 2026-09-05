@@ -117,3 +117,4 @@ _build_fixed_release.py
 _probe_*
 _run_dart.py
 _run_test_lock.py
+android/.kotlin/

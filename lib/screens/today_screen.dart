@@ -12,6 +12,7 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/widgets/review_card.dart';
 import 'package:todolist/widgets/today_share_sheet.dart';
 
@@ -317,8 +318,22 @@ class _HabitList extends StatelessWidget {
         if (list.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Text('还没有习惯，去添加一个吧',
-                style: TextStyle(fontSize: 13, color: ext.meta)),
+            // U20：空状态从纯文字改为可操作入口——点「去创建」跳到习惯 Tab。
+            child: Row(
+              children: [
+                Text('还没有习惯，去添加一个吧',
+                    style: TextStyle(fontSize: 13, color: ext.meta)),
+                const SizedBox(width: 10),
+                TextButton.icon(
+                  onPressed: () => AppNav.jumpToTab(4),
+                  style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8)),
+                  icon: const Icon(Symbols.add, size: 16),
+                  label: const Text('去创建'),
+                ),
+              ],
+            ),
           )
         else
           for (int i = 0; i < list.length; i++)

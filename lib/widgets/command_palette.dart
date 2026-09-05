@@ -103,8 +103,11 @@ class _CommandPaletteState extends State<CommandPalette> {
     final c = _cmd;
     if (c == null || !c.isKnown) return false;
     if (c.isDone) {
-      // 兜底：宿主没注入回调时安静地什么都不做，不留死链。
-      widget.onCompleteSelected?.call();
+      // U20：宿主未注入完成回调时返回 false（不消费回车）——此前 `?.call()` +
+      // 直接 pop 会让用户以为执行了，实际没做任何事。
+      final complete = widget.onCompleteSelected;
+      if (complete == null) return false;
+      complete();
       Navigator.pop(context);
       return true;
     }
@@ -240,6 +243,19 @@ class _CommandPaletteState extends State<CommandPalette> {
                     // P1-6：命令模式优先；不是命令才回落到搜索结果。
                     if (_runCommand()) return;
                     if (_filtered.isNotEmpty) _pick(_filtered.first);
+                    // U20：命令模式回车但命令不可执行（如 /done 未注入回调、
+                    // 未知命令）——落空时给一句明确反馈，避免「敲了回车没反应」。
+                    if (_cmd != null) {
+                      final hint = _cmd!.isKnown
+                          ? '该命令当前不可用'
+                          : '未知命令 /${_cmd!.name}';
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(hint),
+                          duration: const Duration(milliseconds: 900),
+                        ),
+                      );
+                    }
                   },
                 ),
               ),

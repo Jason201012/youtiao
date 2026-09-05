@@ -7,6 +7,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/completion_ring.dart';
 import 'package:todolist/widgets/stat_card.dart';
 import 'package:todolist/widgets/category_progress.dart';
@@ -33,6 +34,8 @@ class BoardScreen extends StatelessWidget {
         TopAppBar(
           title: '看板',
           actions: [
+            // U4：命令面板移动端入口。
+            const CommandPaletteButton(currentIndex: 1),
             // 分享：把看板数据生成一张长图，可保存到相册或直接分享
             IconButton(
               onPressed: () => showShareSheet(context),

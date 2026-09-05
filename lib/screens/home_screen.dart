@@ -11,6 +11,7 @@ import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/review_card.dart';
@@ -278,6 +279,9 @@ class HomeScreenState extends State<HomeScreen> {
       task: t,
       selecting: _selecting,
       selected: _selected.contains(t.id),
+      // U5：仅拖拽重排场景保留任务行固定窄标题（绕过 shrinkWrap 弹性零宽 bug）；
+      // 搜索结果 / 标签筛选等普通列表用全宽 Expanded，长标题可读、整行可点进详情。
+      constrainTitleWidth: dragIndex != null,
       onToggle: () => provider.toggleDone(t.id),
       onLongPress: () => _enterSelect(t),
       onEdit: () => TaskSheet.show(context, task: t),
@@ -618,6 +622,8 @@ class HomeScreenState extends State<HomeScreen> {
                 : TopAppBar(
                     title: '首页',
                     actions: [
+                      // U4：命令面板移动端入口（原来只有桌面 Ctrl+P 可达）。
+                      const CommandPaletteButton(currentIndex: 0),
                       IconButton(
                         onPressed: _enterSearch,
                         icon: Icon(Symbols.search, size: 24, color: onBg),
@@ -937,10 +943,36 @@ class _PostponeButton extends StatelessWidget {
   const _PostponeButton({required this.ids});
 
   Future<void> _postpone(BuildContext context, DateTime day) async {
-    final n = context.read<TaskProvider>().postponeTo(ids, day);
+    final provider = context.read<TaskProvider>();
+    // U9：先记录各任务原截止日期（仅取有截止的），供 snackbar 展示「原日期」。
+    final originalDates = <String>{};
+    for (final id in ids) {
+      final t = provider.byId(id);
+      if (t?.dueDate != null) {
+        originalDates.add(
+            '${t!.dueDate!.month}月${t.dueDate!.day}日');
+      }
+    }
+    final n = provider.postponeTo(ids, day);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('已顺延 $n 条任务')));
+    final origText = originalDates.isEmpty
+        ? ''
+        : '原截止：${originalDates.take(3).join('、')}'
+            '${originalDates.length > 3 ? ' 等 ${originalDates.length} 个日期' : ''}';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已顺延 $n 条任务到 '
+            '${day.month}月${day.day}日'
+            '${origText.isEmpty ? '' : ' · $origText'}'),
+        duration: const Duration(seconds: 4),
+        action: SnackBarAction(
+          // U9：顺延经 batchUpdate 落库，_lastEditBatch 留有改前快照，
+          // undoBatchEdit 可一键还原全部日期与提醒。
+          label: '撤销',
+          onPressed: () => context.read<TaskProvider>().undoBatchEdit(),
+        ),
+      ),
+    );
   }
 
   /// 自定义天数：弹窗输入后按「今天 + N 天」改期。
@@ -967,7 +999,16 @@ class _PostponeButton extends StatelessWidget {
       ),
     );
     ctl.dispose();
-    if (days == null || days <= 0 || !context.mounted) return;
+    // U20：输入非数字 / ≤0 时旧实现静默 return（用户以为执行了）；改为显式提示。
+    if (days == null || days <= 0) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请输入大于 0 的天数')),
+        );
+      }
+      return;
+    }
+    if (!context.mounted) return;
     final now = DateTime.now();
     await _postpone(
         context, DateTime(now.year, now.month, now.day).add(Duration(days: days)));
@@ -1086,6 +1127,8 @@ class _DismissibleTask extends StatelessWidget {
   final VoidCallback? onEdit;
   final VoidCallback? onSelect;
   final void Function(Task removed) onDeleted;
+  /// U5：转发给 [TaskRow.constrainTitleWidth]（仅拖拽重排场景为 true）。
+  final bool constrainTitleWidth;
   const _DismissibleTask({
     required this.task,
     this.selecting = false,
@@ -1094,6 +1137,7 @@ class _DismissibleTask extends StatelessWidget {
     this.onLongPress,
     this.onEdit,
     this.onSelect,
+    this.constrainTitleWidth = false,
     required this.onDeleted,
   });
 
@@ -1113,6 +1157,7 @@ class _DismissibleTask extends StatelessWidget {
       selecting: selecting,
       selected: selected,
       onSelect: selecting ? onSelect : null,
+      constrainTitleWidth: constrainTitleWidth,
     );
 
     // 多选模式下不响应滑动手势

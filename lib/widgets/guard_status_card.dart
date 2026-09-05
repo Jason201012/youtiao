@@ -13,13 +13,14 @@ class GuardStatusCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ext = appColors(context);
     final onBg = Theme.of(context).colorScheme.onBackground;
-    final active = enabled
-        ? const Color(0xFF0F6E56)
-        : ext.meta;
+    final scheme = Theme.of(context).colorScheme;
+    // U16：硬编码 0xFF0F6E56 / 0xFFE1F5EE（浅绿系）在深色模式下文字/背景近同、
+    // 无法辨识。改为语义色：开启态用主色 + 主色淡底（暗色下自动适配）。
+    final active = enabled ? scheme.primary : ext.meta;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
+        color: scheme.surface,
         borderRadius: BorderRadius.circular(AppColors.cardRadius),
       ),
       child: Row(
@@ -44,7 +45,7 @@ class GuardStatusCard extends StatelessWidget {
             height: 22,
             padding: const EdgeInsets.symmetric(horizontal: 10),
             decoration: BoxDecoration(
-              color: enabled ? const Color(0xFFE1F5EE) : ext.track,
+              color: enabled ? scheme.primary.withOpacity(0.14) : ext.track,
               borderRadius: BorderRadius.circular(AppColors.chipRadius),
             ),
             child: Center(

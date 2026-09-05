@@ -5,6 +5,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/quick_entry_sheet.dart';
 
 /// P1-13：全局标签管理页
 /// - 全库标签聚合列表：每个标签显示「任务数 / 完成率」
@@ -491,32 +492,44 @@ class _TagManageScreenState extends State<TagManageScreen> {
     );
   }
 
-  /// 新增标签对话框
+  /// 新增标签对话框。
+  ///
+  /// U1 修复：标签是任务的属性（存于 [Task.tags]，无独立实体），无法凭空创建；
+  /// 旧实现输入名称后只弹「已创建」假提示、无任何数据写入——用户反复重试并
+  /// 损害对其它成功提示的信任。现改为真实链路：确认后唤起快速录入层，预填
+  /// `#标签名` 语法，用户补一句标题即可建出一条带该标签的任务（标签随之诞生、
+  /// 在本页可见可管理）。预填文本里不含日期/优先级，避免被解析器吃掉标签前缀。
   void _showAddTagDialog(BuildContext context, TaskProvider provider) {
     final controller = TextEditingController();
     showDialog(
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('新增标签'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: '标签名称',
-            hintText: '输入新标签名称',
-          ),
-          onSubmitted: (v) {
-            final name = v.trim();
-            if (name.isEmpty) return;
-            // 新增标签通过创建一条空任务实现（标签附加到任务上）
-            // 实际上标签管理页不直接创建任务，提示用户从任务编辑页添加标签
-            Navigator.pop(d);
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('标签「$name」已创建。可在任务编辑中绑定此标签。'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: '标签名称',
+                hintText: '输入新标签名称',
               ),
-            );
-          },
+              onSubmitted: (v) {
+                final name = v.trim();
+                if (name.isEmpty) return;
+                Navigator.pop(d);
+                _createTaskWithTag(context, name);
+              },
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '标签需绑定在任务上。确定后将打开快速录入，'
+              '输入任务标题并保存，该标签即创建成功。',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -528,17 +541,24 @@ class _TagManageScreenState extends State<TagManageScreen> {
               final name = controller.text.trim();
               if (name.isEmpty) return;
               Navigator.pop(d);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('标签「$name」已创建。可在任务编辑中绑定此标签。'),
-                ),
-              );
+              _createTaskWithTag(context, name);
             },
-            child: const Text('确定'),
+            child: const Text('下一步'),
           ),
         ],
       ),
     );
+  }
+
+  /// U1：带标签名唤起快速录入。名字含空白/`#`/`!` 时会被解析器截断，先提示防错位。
+  void _createTaskWithTag(BuildContext context, String name) {
+    if (!RegExp(r'^[^\s#＃!！]+$').hasMatch(name)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('标签名「$name」不能含空格或 #/！，请重新输入')),
+      );
+      return;
+    }
+    QuickEntrySheet.show(context, initialText: '#$name ');
   }
 }
 

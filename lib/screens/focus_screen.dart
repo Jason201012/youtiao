@@ -6,6 +6,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/focus_share_sheet.dart';
 import 'package:todolist/widgets/focus_trend_stats.dart';
 import 'package:todolist/widgets/focus_task_stats.dart';
@@ -137,79 +138,103 @@ class _FocusScreenState extends State<FocusScreen> {
       builder: (ctx) {
         int? picked;
         return StatefulBuilder(
-          builder: (ctx2, setSt) => AlertDialog(
-            title: const Text('自定义专注时长'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: minCtl,
-                        keyboardType: TextInputType.number,
-                        textAlign: TextAlign.center,
-                        decoration: const InputDecoration(
-                          labelText: '分钟',
-                          border: OutlineInputBorder(),
+          builder: (ctx2, setSt) {
+            String? errorText;
+            return AlertDialog(
+              title: const Text('自定义专注时长'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: minCtl,
+                          keyboardType: TextInputType.number,
+                          textAlign: TextAlign.center,
+                          decoration: const InputDecoration(
+                            labelText: '分钟',
+                            border: OutlineInputBorder(),
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: secCtl,
-                        keyboardType: TextInputType.number,
-                        textAlign: TextAlign.center,
-                        decoration: const InputDecoration(
-                          labelText: '秒',
-                          border: OutlineInputBorder(),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: secCtl,
+                          keyboardType: TextInputType.number,
+                          textAlign: TextAlign.center,
+                          decoration: const InputDecoration(
+                            labelText: '秒',
+                            border: OutlineInputBorder(),
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final m in [10, 20, 30, 45, 60, 90])
+                        ChoiceChip(
+                          label: Text('$m 分'),
+                          selected: picked == m * 60,
+                          onSelected: (_) {
+                            picked = m * 60;
+                            minCtl.text = '$m';
+                            secCtl.text = '00';
+                            setSt(() {});
+                          },
+                        ),
+                    ],
+                  ),
+                  // U14：非法输入此前直接关对话框、零提示（用户以为成功了）。
+                  // 改为在对话框内给出可读错误，由用户改正后再提交。
+                  Builder(builder: (_) {
+                    if (errorText == null) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(
+                        errorText!,
+                        style: TextStyle(
+                          color: Theme.of(ctx2).colorScheme.error,
+                          fontSize: 12,
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(null),
+                  child: const Text('取消'),
                 ),
-                const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final m in [10, 20, 30, 45, 60, 90])
-                      ChoiceChip(
-                        label: Text('$m 分'),
-                        selected: picked == m * 60,
-                        onSelected: (_) {
-                          picked = m * 60;
-                          minCtl.text = '$m';
-                          secCtl.text = '00';
-                          setSt(() {});
-                        },
-                      ),
-                  ],
+                FilledButton(
+                  onPressed: () {
+                    final m = int.tryParse(minCtl.text);
+                    final s = int.tryParse(secCtl.text);
+                    // U14：明确校验三段错误，替代旧「?? 0 后再判 total<=0 关框」。
+                    if (m == null || s == null || (m == 0 && s == 0)) {
+                      errorText = '请输入有效时长（分钟和秒都填数字）';
+                    } else if (m! < 0 || s! < 0 || s! > 59) {
+                      errorText = '秒需在 0-59 之间，分钟不能为负';
+                    } else if (m! * 60 + s! > 24 * 3600) {
+                      errorText = '专注时长不能超过 24 小时';
+                    } else {
+                      Navigator.of(ctx).pop(m! * 60 + s!);
+                      return;
+                    }
+                    setSt(() {});
+                  },
+                  child: const Text('确定'),
                 ),
               ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(null),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final m = int.tryParse(minCtl.text) ?? 0;
-                  final s = int.tryParse(secCtl.text) ?? 0;
-                  final total = m * 60 + s;
-                  if (total <= 0 || total > 24 * 3600) {
-                    Navigator.of(ctx).pop(null);
-                    return;
-                  }
-                  Navigator.of(ctx).pop(total);
-                },
-                child: const Text('确定'),
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -289,7 +314,11 @@ class _FocusScreenState extends State<FocusScreen> {
 
     return Column(
       children: [
-        const TopAppBar(title: '专注'),
+        const TopAppBar(
+          title: '专注',
+          // U4：命令面板移动端入口。
+          actions: [CommandPaletteButton(currentIndex: 3)],
+        ),
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(
@@ -1160,6 +1189,8 @@ class _NumField extends StatelessWidget {
 }
 
 /// 打开番茄循环设置对话框：专注 / 短休 / 长休时长（分钟）与每轮个数。
+/// U14：非法输入（非数字 / ≤0 / 越界）此前在对话框直接 `?? 0` 提交，
+/// Provider 又对 ≤0 静默忽略——用户以为改成功、实际没变。现前置校验并给出错误。
 Future<void> _openPomodoroSettings(BuildContext context, FocusProvider focus) async {
   final focusMin = TextEditingController(text: '${focus.pomoFocusSec ~/ 60}');
   final shortMin = TextEditingController(text: '${focus.pomoShortSec ~/ 60}');
@@ -1168,36 +1199,81 @@ Future<void> _openPomodoroSettings(BuildContext context, FocusProvider focus) as
 
   final result = await showDialog<Map<String, int>>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('番茄循环设置'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _NumField(label: '专注时长（分钟）', ctl: focusMin),
-            _NumField(label: '短休时长（分钟）', ctl: shortMin),
-            _NumField(label: '长休时长（分钟）', ctl: longMin),
-            _NumField(label: '每几轮长休一次', ctl: roundsCtl),
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx2, setSt) {
+        String? err;
+        void applyError(String msg) {
+          err = msg;
+          setSt(() {});
+        }
+
+        return AlertDialog(
+          title: const Text('番茄循环设置'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _NumField(label: '专注时长（分钟）', ctl: focusMin),
+                _NumField(label: '短休时长（分钟）', ctl: shortMin),
+                _NumField(label: '长休时长（分钟）', ctl: longMin),
+                _NumField(label: '每几轮长休一次', ctl: roundsCtl),
+                if (err != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        err!,
+                        style: TextStyle(
+                          color: Theme.of(ctx2).colorScheme.error,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                int? v(String t, int maxMin, String name) {
+                  final n = int.tryParse(t.trim());
+                  if (n == null || n < 1) {
+                    applyError('$name需为正整数（当前填的是「${t.trim()}」）');
+                    return null;
+                  }
+                  if (n > maxMin) {
+                    applyError('$name不能超过 $maxMin 分钟');
+                    return null;
+                  }
+                  return n;
+                }
+
+                final f = v(focusMin.text, 24 * 60, '专注时长');
+                if (f == null) return;
+                final s = v(shortMin.text, 120, '短休时长');
+                if (s == null) return;
+                final l = v(longMin.text, 240, '长休时长');
+                if (l == null) return;
+                final r = v(roundsCtl.text, 20, '每几轮长休');
+                if (r == null) return;
+                Navigator.of(ctx).pop({
+                  'focus': f,
+                  'short': s,
+                  'long': l,
+                  'rounds': r,
+                });
+              },
+              child: const Text('保存'),
+            ),
           ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(null),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () {
-            Navigator.of(ctx).pop({
-              'focus': int.tryParse(focusMin.text) ?? 0,
-              'short': int.tryParse(shortMin.text) ?? 0,
-              'long': int.tryParse(longMin.text) ?? 0,
-              'rounds': int.tryParse(roundsCtl.text) ?? 0,
-            });
-          },
-          child: const Text('保存'),
-        ),
-      ],
+        );
+      },
     ),
   );
 

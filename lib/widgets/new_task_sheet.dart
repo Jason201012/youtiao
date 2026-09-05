@@ -76,6 +76,21 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 仅对「不重复」且有截止时间的任务有意义。
   int _reminderOffsetMin = 0;
 
+  // ===== U11：脏数据保护基线（进入编辑时的字段快照）=====
+  // 旧实现点 X / 返回键直接关闭——长备注、子任务、附件全丢且无任何提示。
+  // 这里记录进入时的基线，[_isDirty] 对比当前值与基线，脏了先弹确认再关。
+  String? _baseTitle;
+  String? _baseNote;
+  DateTime? _baseDue;
+  DateTime? _baseStart;
+  RepeatType _baseRepeat = RepeatType.none;
+  List<String> _baseTags = const [];
+  List<SubTask> _baseSubtasks = const [];
+  List<AttachmentRef> _baseAttachments = const [];
+  bool _basePinned = false;
+  int _basePriority = 1; // 1=medium（构造默认）
+  int _baseCategory = 0; // 0=work（构造默认）
+
   /// 是否置顶/星标：置顶任务在所属分区内固定排最前。仅编辑模式可切换。
   bool _pinned = false;
 
@@ -132,6 +147,62 @@ class _TaskSheetState extends State<TaskSheet> {
       // 记录进入编辑前正式目录的附件文件名集合，供取消保存时清理孤儿。
       _baselineAttachmentFiles = _attachments.map((a) => a.fileName).toSet();
     }
+    // U11：记录脏数据比较基线（无论新建/编辑/草稿，未改动即视为干净）。
+    _baseTitle = _titleController.text;
+    _baseNote = _noteController.text;
+    _baseDue = _dueDate;
+    _baseStart = _startDate;
+    _baseRepeat = _repeat;
+    _baseTags = List.from(_tags);
+    _baseSubtasks = _subtasks.map((s) => s.copyWith()).toList();
+    _baseAttachments = List.from(_attachments);
+    _basePinned = _pinned;
+    _basePriority = _priority.index;
+    _baseCategory = _category.index;
+  }
+
+  /// U11：是否有未保存的实质改动（相对进入时的基线）。
+  bool get _isDirty {
+    if (_titleController.text != _baseTitle) return true;
+    if (_noteController.text != _baseNote) return true;
+    if (_dueDate != _baseDue) return true;
+    if (_startDate != _baseStart) return true;
+    if (_repeat != _baseRepeat) return true;
+    if (_pinned != _basePinned) return true;
+    if (_priority.index != _basePriority) return true;
+    if (_category.index != _baseCategory) return true;
+    if (_tags.length != _baseTags.length) return true;
+    for (var i = 0; i < _tags.length && i < _baseTags.length; i++) {
+      if (_tags[i] != _baseTags[i]) return true;
+    }
+    if (_subtasks.length != _baseSubtasks.length) return true;
+    if (_attachments.length != _baseAttachments.length) return true;
+    return false;
+  }
+
+  /// U11：统一关闭入口——有未保存改动时先弹确认，避免长备注/子任务误丢。
+  /// 返回 true 表示应真正关闭。对话框与场景解耦，供 PopScope / X 按钮共用。
+  Future<bool> _confirmDiscardIfDirty() async {
+    if (!_isDirty || _saved) return true;
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('放弃未保存的修改？'),
+        content: const Text('本次输入尚未保存，关闭将丢失这些改动。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('继续编辑'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('放弃并关闭'),
+          ),
+        ],
+      ),
+    );
+    return leave == true;
   }
 
   @override
@@ -559,6 +630,36 @@ class _TaskSheetState extends State<TaskSheet> {
   Future<void> _save() async {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
+    // U12：可设过去时间但无任何提示 = 提醒静默失效（15:00 建「今天 09:00」，
+    // 保存成功却永不响铃——对提醒类 App 是信任级伤害）。一次性任务且截止时刻已过
+    // 时，先提示「提醒不会触发」，由用户决定是否仍要保存（补录历史仍可能有意）。
+    final now = DateTime.now();
+    final duePast = _repeat == RepeatType.none &&
+        _dueDate != null &&
+        _dueDate!.isBefore(now);
+    if (duePast) {
+      final continueAnyway = await showDialog<bool>(
+        context: context,
+        builder: (d) => AlertDialog(
+          title: const Text('截止时间已过'),
+          content: Text(
+            '所选截止时间（${_formatDate(_dueDate!)} ${_formatTime(_dueDate!)}）'
+            '已早于当前时刻，保存后提醒将不会触发。\n\n仍要保存吗？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(d, false),
+              child: const Text('返回修改'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(d, true),
+              child: const Text('仍要保存'),
+            ),
+          ],
+        ),
+      );
+      if (continueAnyway != true) return;
+    }
     final provider = Provider.of<TaskProvider>(context, listen: false);
     final repeatMinute =
         _repeat != RepeatType.none ? _repeatTime.hour * 60 + _repeatTime.minute : null;
@@ -629,7 +730,15 @@ class _TaskSheetState extends State<TaskSheet> {
     final ext = appColors(context);
     final provider = Provider.of<TaskProvider>(context, listen: false);
     final canSave = _titleController.text.trim().isNotEmpty;
-    return Container(
+    // U11：拦截系统返回键（Android back / 桌面 Esc 等）——脏数据时先弹确认。
+    return PopScope(
+      canPop: !_isDirty || _saved,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final leave = await _confirmDiscardIfDirty();
+        if (leave && mounted) Navigator.pop(context);
+      },
+      child: Container(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.of(context).size.height -
             MediaQuery.of(context).viewInsets.bottom -
@@ -661,7 +770,11 @@ class _TaskSheetState extends State<TaskSheet> {
                       color: scheme.onSurface)),
               IconButton(
                 icon: Icon(Symbols.close, color: ext.meta),
-                onPressed: () => Navigator.pop(context),
+                // U11：脏数据时先弹确认，不再无提示直接关闭。
+                onPressed: () async {
+                  final leave = await _confirmDiscardIfDirty();
+                  if (leave && mounted) Navigator.pop(context);
+                },
               ),
             ],
           ),
@@ -1013,7 +1126,23 @@ class _TaskSheetState extends State<TaskSheet> {
                       fontSize: 16,
                     ),
                   ),
-                  Icon(Symbols.calendar_month, size: 20, color: ext.meta),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // U11：选定的日期可一键清除（此前只有选取没有清除）。
+                      if (_dueDate != null)
+                        GestureDetector(
+                          onTap: () => setState(() => _dueDate = null),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 4),
+                            child: Icon(Symbols.close,
+                                size: 16, color: ext.meta),
+                          ),
+                        ),
+                      Icon(Symbols.calendar_month, size: 20, color: ext.meta),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -1312,7 +1441,8 @@ class _TaskSheetState extends State<TaskSheet> {
           ),
         ],
       ),
-      ),
+      ), // Container
+      ), // PopScope
     );
   }
 }

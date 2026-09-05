@@ -11,6 +11,7 @@ import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/settings_row.dart';
 import 'package:todolist/widgets/backup_sheet.dart';
 import 'package:todolist/widgets/export_sheet.dart';
@@ -46,8 +47,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final info = await PackageInfo.fromPlatform();
       if (mounted) setState(() => _version = info.version);
     } catch (_) {
-      // 读取失败则回退到编译期已知版本，保证不至于显示空白
-      if (mounted) setState(() => _version = '2.6.9');
+      // 读取失败则回退到编译期已知版本，保证不至于显示空白。
+      // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
+      // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
+      if (mounted) setState(() => _version = '2.8.1');
     }
   }
 
@@ -357,7 +360,11 @@ String _formatIdle(int seconds) {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        const TopAppBar(title: '设置'),
+        const TopAppBar(
+          title: '设置',
+          // U4：命令面板移动端入口。
+          actions: [CommandPaletteButton(currentIndex: 5)],
+        ),
         Expanded(
           child: Consumer<TaskProvider>(
             builder: (context, provider, _) {
@@ -581,6 +588,35 @@ String _formatIdle(int seconds) {
                                 ],
                               ),
                             ),
+                            // U19：勿扰起止倒挂（如 22:00-7:00）在本 App 有明确定义
+                            // ——表示「跨天勿扰」（22:00 到次日 7:00）。此前静默接受且
+                            // 无任何说明，用户误以为设置未生效。这里显式提示语义。
+                            if (provider.dndStartHour >=
+                                provider.dndEndHour) ...[
+                              const SizedBox(height: 6),
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 4),
+                                child: Row(
+                                  children: [
+                                    Icon(Symbols.info,
+                                        size: 14,
+                                        color: appColors(context).meta),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        '结束早于开始 = 跨天勿扰'
+                                        '（${provider.dndStartHour}:00 至次日 '
+                                        '${provider.dndEndHour}:00 不提醒）',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: appColors(context).meta),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           ],
                         ],
                       ),
@@ -720,7 +756,10 @@ String _formatIdle(int seconds) {
                       ),
                     ),
                     const SizedBox(height: 24),
-                    _GroupTitle('数据'),
+                    // U17：原「数据」一组塞 15 项（回收站/标签/备份/加密/应用锁/截屏/
+                    // 模板/导出/存储全混），难找且语义混乱。拆成「数据与备份」、
+                    // 「隐私与安全」、「内容与工具」三组（下面组标题见各分隔点）。
+                    _GroupTitle('数据与备份'),
                     // P1-12：回收站行 + 过期预告统计
                     SettingsRow(
                       icon: Symbols.delete,
@@ -753,6 +792,37 @@ String _formatIdle(int seconds) {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // 回收站自动清理：选择保留天数（7/30/90/永不）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.delete_sweep,
+                        label: '回收站自动清理',
+                        value: provider.trashRetentionLabel,
+                        onTap: () async {
+                          final picked = await showDialog<int>(
+                            context: context,
+                            builder: (d) => AlertDialog(
+                              title: const Text('回收站保留时长'),
+                              content: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: TaskProvider.trashRetentionOptions
+                                    .map((days) => RadioListTile<int>(
+                                          title: Text(days < 0 ? '永不自动清理' : '$days 天'),
+                                          value: days,
+                                          groupValue: provider.trashRetentionDays,
+                                          onChanged: (v) => Navigator.of(d).pop(v),
+                                        ))
+                                    .toList(),
+                              ),
+                            ),
+                          );
+                          if (picked != null) {
+                            provider.setTrashRetentionDays(picked);
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     SettingsRow(
                       icon: Symbols.backup,
                       label: '备份与恢复',
@@ -774,6 +844,50 @@ String _formatIdle(int seconds) {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // L-08：本地自动备份加密（默认关闭，需先设口令）。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.enhanced_encryption,
+                        label: '加密本地自动备份',
+                        subtitle: provider.autoBackupEncrypt
+                            ? '每日快照以 AES-256-GCM 加密后落盘（.enc.json）'
+                            : '每日快照为明文 JSON；仅防误删，不防文件被拷出',
+                        switchValue: provider.autoBackupEncrypt,
+                        onSwitchChanged: (v) async {
+                          if (v && !provider.hasAutoBackupPassphrase) {
+                            final pass =
+                                await _requestAutoBackupPassphrase(context);
+                            if (pass == null) return; // 用户取消
+                            await provider.setAutoBackupPassphrase(pass);
+                          }
+                          final ok = await provider.setAutoBackupEncrypt(v);
+                          if (!ok && mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('开启加密前需要先设置备份口令'),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // F15：补「修改 / 重置口令」入口。加密开关行只决定「是否启用」，
+                    // 不暴露口令变更路径——找不到入口的用户只能卸装清库。
+                    // 已设过口令：进入「先校验旧口令 → 设新口令」；未设：直接设。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.password,
+                        label: provider.hasAutoBackupPassphrase
+                            ? '修改 / 重置备份口令'
+                            : '设置备份口令',
+                        subtitle: provider.hasAutoBackupPassphrase
+                            ? '修改需先验证当前口令；忘记则可强清（旧加密快照永久无法解开）'
+                            : '未设置口令；可现在设置以启用加密快照',
+                        onTap: () => _changeAutoBackupPassphrase(context),
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     // P0-3 日历农历：默认开启，与「农历重复」录入形成展示闭环。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(
@@ -784,7 +898,11 @@ String _formatIdle(int seconds) {
                         onSwitchChanged: (v) => provider.setCalendarLunar(v),
                       ),
                     ),
-                    const SizedBox(height: AppColors.contentGap),
+                    const SizedBox(height: 24),
+                    // U17：把原「数据」巨组（15 项全混）拆成更清晰的子组——
+                    // 「数据与备份」（回收站/标签/备份/加密/口令/农历）与
+                    // 「隐私与安全」（应用锁/锁屏/截屏/外链）。下面这组为隐私与安全。
+                    _GroupTitle('隐私与安全'),
                     // A4 应用锁：基于系统生物识别；设备不支持时禁用并提示。
                     // v2.6.4+：验证失败/不可用时系统弹窗允许降级用手机锁屏密码。
                     Consumer<AppLockProvider>(
@@ -850,50 +968,6 @@ String _formatIdle(int seconds) {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
-                    // L-08：本地自动备份加密（默认关闭，需先设口令）。
-                    Consumer<TaskProvider>(
-                      builder: (context, provider, _) => SettingsRow(
-                        icon: Symbols.enhanced_encryption,
-                        label: '加密本地自动备份',
-                        subtitle: provider.autoBackupEncrypt
-                            ? '每日快照以 AES-256-GCM 加密后落盘（.enc.json）'
-                            : '每日快照为明文 JSON；仅防误删，不防文件被拷出',
-                        switchValue: provider.autoBackupEncrypt,
-                        onSwitchChanged: (v) async {
-                          if (v && !provider.hasAutoBackupPassphrase) {
-                            final pass =
-                                await _requestAutoBackupPassphrase(context);
-                            if (pass == null) return; // 用户取消
-                            await provider.setAutoBackupPassphrase(pass);
-                          }
-                          final ok = await provider.setAutoBackupEncrypt(v);
-                          if (!ok && mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('开启加密前需要先设置备份口令'),
-                              ),
-                            );
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: AppColors.contentGap),
-                    // F15：补「修改 / 重置口令」入口。加密开关行只决定「是否启用」，
-                    // 不暴露口令变更路径——找不到入口的用户只能卸装清库。
-                    // 已设过口令：进入「先校验旧口令 → 设新口令」；未设：直接设。
-                    Consumer<TaskProvider>(
-                      builder: (context, provider, _) => SettingsRow(
-                        icon: Symbols.password,
-                        label: provider.hasAutoBackupPassphrase
-                            ? '修改 / 重置备份口令'
-                            : '设置备份口令',
-                        subtitle: provider.hasAutoBackupPassphrase
-                            ? '修改需先验证当前口令；忘记则可强清（旧加密快照永久无法解开）'
-                            : '未设置口令；可现在设置以启用加密快照',
-                        onTap: () => _changeAutoBackupPassphrase(context),
-                      ),
-                    ),
-                    const SizedBox(height: AppColors.contentGap),
                     // L-12：备注外链点击（默认关闭——本 App 除检查更新外不联网）。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(
@@ -906,37 +980,8 @@ String _formatIdle(int seconds) {
                         onSwitchChanged: (v) => provider.setAllowExternalLinks(v),
                       ),
                     ),
-                    const SizedBox(height: AppColors.contentGap),
-                    // 回收站自动清理：选择保留天数（7/30/90/永不）。
-                    Consumer<TaskProvider>(
-                      builder: (context, provider, _) => SettingsRow(
-                        icon: Symbols.delete_sweep,
-                        label: '回收站自动清理',
-                        value: provider.trashRetentionLabel,
-                        onTap: () async {
-                          final picked = await showDialog<int>(
-                            context: context,
-                            builder: (d) => AlertDialog(
-                              title: const Text('回收站保留时长'),
-                              content: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: TaskProvider.trashRetentionOptions
-                                    .map((days) => RadioListTile<int>(
-                                          title: Text(days < 0 ? '永不自动清理' : '$days 天'),
-                                          value: days,
-                                          groupValue: provider.trashRetentionDays,
-                                          onChanged: (v) => Navigator.of(d).pop(v),
-                                        ))
-                                    .toList(),
-                              ),
-                            ),
-                          );
-                          if (picked != null) {
-                            provider.setTrashRetentionDays(picked);
-                          }
-                        },
-                      ),
-                    ),
+                    const SizedBox(height: 24),
+                    _GroupTitle('内容与工具'),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(
                       icon: Symbols.playlist_add,

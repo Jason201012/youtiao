@@ -112,6 +112,17 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     super.dispose();
   }
 
+  // ===== U13：语义化次要文本色（修复硬编码 Colors.blackXX 在深色模式隐形）=====
+  Color get _muted => Theme.of(context).brightness == Brightness.dark
+      ? Colors.white70
+      : Colors.black54;
+  Color get _faint => Theme.of(context).brightness == Brightness.dark
+      ? Colors.white60
+      : Colors.black45;
+  Color get _outline => Theme.of(context).brightness == Brightness.dark
+      ? Colors.white24
+      : Colors.black12;
+
   @override
   Widget build(BuildContext context) {
     final colors = appColors(context);
@@ -174,7 +185,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             height: 7,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(4),
-              color: i == _page ? primary : Colors.black12,
+              color: i == _page ? primary : _outline,
             ),
           ),
         ),
@@ -218,15 +229,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             style: TextStyle(fontSize: 26, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             '本地优先的待办 · 习惯 · 专注',
-            style: TextStyle(fontSize: 14, color: Colors.black54),
+            style: TextStyle(fontSize: 14, color: _muted),
           ),
           const SizedBox(height: 18),
-          const Text(
+          Text(
             '数据只存在你手机上\n无需账号 · 不上传云端',
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 13, color: Colors.black45, height: 1.7),
+            style: TextStyle(fontSize: 13, color: _faint, height: 1.7),
           ),
         ],
       ),
@@ -284,7 +295,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(title, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
-                Text(desc, style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
+                Text(desc, style: TextStyle(fontSize: 11.5, color: _muted)),
               ],
             ),
           ),
@@ -326,15 +337,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           // 精确闹钟行（ColorOS 需手动开启才准点，可点击跳转设置）
           _exactAlarmRow(colors, primary),
           const SizedBox(height: 10),
-          const Text(
+          Text(
             '任务、习惯到点提醒；ColorOS 需精确闹钟权限才准点',
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 11, color: Colors.black45),
+            style: TextStyle(fontSize: 11, color: _faint),
           ),
           const SizedBox(height: 14),
-          const Text(
+          Text(
             '已为你放入 7 条示例任务',
-            style: TextStyle(fontSize: 12, color: Colors.black54),
+            style: TextStyle(fontSize: 12, color: _muted),
           ),
           const SizedBox(height: 10),
           // 示例任务二选一
@@ -379,7 +390,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                Text(desc, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                Text(desc, style: TextStyle(fontSize: 11, color: _muted)),
               ],
             ),
           ),
@@ -410,19 +421,19 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           children: [
             Icon(Icons.alarm, size: 18, color: primary),
             const SizedBox(width: 12),
-            const Expanded(
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('精确闹钟', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                  Text('ColorOS 需开启才准点', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                  const Text('精确闹钟', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text('ColorOS 需开启才准点', style: TextStyle(fontSize: 11, color: _muted)),
                 ],
               ),
             ),
             if (needGrant)
-              const Icon(Icons.open_in_new, size: 16, color: Colors.black45)
+              Icon(Icons.open_in_new, size: 16, color: _faint)
             else
-              const Icon(Icons.check_circle, size: 16, color: Colors.green),
+              Icon(Icons.check_circle, size: 16, color: primary),
           ],
         ),
       ),
@@ -444,7 +455,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: selected ? primary : Colors.black12,
+              color: selected ? primary : _outline,
               width: selected ? 1.5 : 1,
             ),
             color: selected ? primary.withAlpha(12) : Colors.transparent,
@@ -454,7 +465,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             style: TextStyle(
               fontSize: 12.5,
               fontWeight: FontWeight.w600,
-              color: selected ? primary : Colors.black54,
+              color: selected ? primary : _muted,
             ),
           ),
         ),

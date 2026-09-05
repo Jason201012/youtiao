@@ -158,6 +158,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                       final done = _isDone(d);
                       final skipped = _isSkipped(d);
                       final wd = weekdayNames[(d.weekday - 1).clamp(0, 6)];
+                      // U16：完成态原硬编码 Colors.green，深色主题下刺眼且与
+                      // App 语义色脱节；改主色（与全局完成勾选一致）。
+                      final doneColor = Theme.of(context).colorScheme.primary;
                       return ListTile(
                         leading: Icon(
                           done
@@ -166,7 +169,7 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                                   ? Symbols.block
                                   : Symbols.repeat,
                           color: done
-                              ? Colors.green
+                              ? doneColor
                               : skipped
                                   ? Colors.grey
                                   : Theme.of(context).colorScheme.primary,
@@ -177,7 +180,8 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                         subtitle: Text(
                           done ? '已完成' : skipped ? '已跳过' : '待处理',
                           style: TextStyle(
-                            color: done ? Colors.green : skipped ? Colors.grey : null,
+                            color:
+                                done ? doneColor : skipped ? Colors.grey : null,
                           ),
                         ),
                         trailing: PopupMenuButton<String>(

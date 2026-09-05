@@ -10,6 +10,7 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/focus_chart.dart';
 
 /// 任务日历（月 / 周视图）：
@@ -39,6 +40,18 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   void _shiftMonth(int delta) =>
       setState(() => _focused = DateTime(_focused.year, _focused.month + delta, 1));
+
+  /// U19：一键回到「今天」所在月份（翻了很久的月历找不回来时的出路）。
+  void _goToday() {
+    final now = DateTime.now();
+    final target = DateTime(now.year, now.month, 1);
+    // 若已在该月（或今天是该月 1 号即聚焦本月）无需重设。
+    if (_focused.year == target.year && _focused.month == target.month) return;
+    setState(() {
+      _focused = target;
+      _viewDate = now;
+    });
+  }
 
   void _shiftWeek(int delta) =>
       setState(() => _viewDate = _viewDate.add(Duration(days: 7 * delta)));
@@ -72,7 +85,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
     return Column(
       children: [
-        const TopAppBar(title: '日历'),
+        const TopAppBar(
+          title: '日历',
+          // U4：命令面板移动端入口。
+          actions: [CommandPaletteButton(currentIndex: 2)],
+        ),
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(
@@ -185,6 +202,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
               ),
             ],
           ),
+          // U19：翻离本月后显示「回到今天」快捷入口（本月内隐藏，避免噪音）。
+          if (!(_focused.year == today.year && _focused.month == today.month))
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: _goToday,
+                style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10)),
+                icon: const Icon(Symbols.today, size: 16),
+                label: const Text('回到今天'),
+              ),
+            ),
           const SizedBox(height: 8),
           // 星期表头
           Row(

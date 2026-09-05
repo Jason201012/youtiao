@@ -22,6 +22,16 @@ class TaskRow extends StatelessWidget {
   final bool selecting;
   final bool selected;
   final VoidCallback? onSelect;
+
+  /// U5：是否把标题区锁死在固定窄宽（默认否）。
+  ///
+  /// 旧实现为绕过 ReorderableListView + shrinkWrap 嵌套滚动下弹性插槽拿零宽度的
+  /// 布局 bug，把标题统一塞进 80px 固定 [SizedBox]——但该组件同样被搜索结果、
+  /// 标签筛选列表复用，导致长标题只能显示 3~5 字、且进详情的点击热区只剩 80px
+  /// （点行内其它位置毫无反应）。现改为默认 [Expanded] 全宽（标题可读、热区覆盖
+  /// 整行），仅 [ReorderableListView] 场景传 true 保留 80px 兜底。
+  final bool constrainTitleWidth;
+
   const TaskRow({
     super.key,
     required this.task,
@@ -31,6 +41,7 @@ class TaskRow extends StatelessWidget {
     this.selecting = false,
     this.selected = false,
     this.onSelect,
+    this.constrainTitleWidth = false,
   });
 
   Color _priorityColor(BuildContext context) {
@@ -127,23 +138,35 @@ class TaskRow extends StatelessWidget {
           leading,
           if (!selecting) const SizedBox(width: 12),
           // 标题（+ 备注预览 + 标签 + 子任务进度）。
-          // 正式修复：用固定宽度 SizedBox 替代 Expanded，绕过弹性布局的零宽度约束。
-          // 根因：ReorderableListView + shrinkWrap 嵌套滚动场景下，Row 的弹性插槽收到零宽度，
-          // 导致 Expanded/Flexible(tight)/Flexible(loose)/UnconstrainedBox 全部异常。
-          // 宽度选 80px：中文 3-5 字约 63-105px，够常见标题+省略号；
-          // 同时为右侧 MetaInfo（时间/循环图标）+ 专注按钮预留最大空间，避免溢出卡片边界。
-          SizedBox(
-            width: 80,
-            child: _TitleBlock(
-              task: task,
-              ext: ext,
-              titleColor: titleColor,
-              hasNote: hasNote,
-              hasSub: hasSub,
-              hasTag: hasTag,
-              onTap: onTap,
+          // U5：默认可重排场景之外用 Expanded，标题吃满剩余宽度、长标题可见、
+          // 整块都是进详情的点击热区；仅 ReorderableListView 场景保留固定窄宽
+          // 兜底（历史原因：shrinkWrap 嵌套滚动下弹性插槽可能收到零宽度）。
+          if (constrainTitleWidth)
+            SizedBox(
+              width: 80,
+              child: _TitleBlock(
+                task: task,
+                ext: ext,
+                titleColor: titleColor,
+                hasNote: hasNote,
+                hasSub: hasSub,
+                hasTag: hasTag,
+                onTap: onTap,
+              ),
+            )
+          else
+            Expanded(
+              flex: 3,
+              child: _TitleBlock(
+                task: task,
+                ext: ext,
+                titleColor: titleColor,
+                hasNote: hasNote,
+                hasSub: hasSub,
+                hasTag: hasTag,
+                onTap: onTap,
+              ),
             ),
-          ),
           // 截止信息 + 每日提醒标识 + 累计专注。
           // 未完成任务：用 Expanded 包裹，MetaInfo 填满标题+按钮之间的剩余空间，
           //   超长内容走 Text ellipsis 省略。

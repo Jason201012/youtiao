@@ -131,6 +131,11 @@ class NotificationService {
   /// 仅对携带 task: 前缀 payload 的任务提醒生效（习惯提醒不显示完成按钮）。
   static const String completeActionId = 'complete';
 
+  /// U3：习惯提醒的「打卡」action：点击后直接补打今天，不进 App、不打断当前场景。
+  /// 只在习惯提醒（habit: 前缀）上挂；已打卡的提醒不会弹（调度层已 skipToday），
+  /// 但保险起见消费端仍做幂等（checkInOnDay 已存在则忽略）。
+  static const String habitCheckInActionId = 'habit_checkin';
+
   /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
   /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
   static List<AndroidNotificationAction> get _taskActions => [
@@ -865,7 +870,12 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: true,
-        actions: [AndroidNotificationAction(snoozeActionId, '稍后提醒')],
+        actions: [
+          AndroidNotificationAction(snoozeActionId, '稍后提醒'),
+          // U3：习惯提醒补「打卡」action——此前「完成」只处理任务，习惯只能进 App
+          // 手动打卡；赶路/开会时点一下即可打卡，不打断当前场景。
+          AndroidNotificationAction(habitCheckInActionId, '打卡'),
+        ],
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
       );
@@ -1305,6 +1315,34 @@ class NotificationService {
       );
     } catch (e) {
       AppLog.d('[通知] 完成确认通知失败 id=$taskId: $e');
+    }
+  }
+
+  /// U3：通知「打卡」action 后的覆盖式确认通知：用习惯提醒 id 段位（日 0）弹出
+  /// 「已打卡 ✓」，不刷屏不叠加。payload 置空避免点开跳转。
+  Future<void> showHabitCheckedConfirm(Habit habit) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        _habitNotifyIdOf(habit.id, 0),
+        '已打卡 ✓',
+        '${habit.emoji} ${habit.title}',
+        detail,
+      );
+    } catch (e) {
+      AppLog.d('[通知] 习惯打卡确认通知失败 id=${habit.id}: $e');
     }
   }
 

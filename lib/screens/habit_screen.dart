@@ -10,6 +10,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
+import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/habit_heatmap.dart';
 import 'package:todolist/widgets/habit_share_card.dart';
 import 'package:todolist/widgets/streak_celebration.dart';
@@ -38,7 +39,11 @@ class HabitScreen extends StatelessWidget {
       body: SafeArea(
         child: Column(
           children: [
-            const TopAppBar(title: '习惯'),
+            const TopAppBar(
+              title: '习惯',
+              // U4：命令面板移动端入口。
+              actions: [CommandPaletteButton(currentIndex: 4)],
+            ),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(
@@ -404,7 +409,11 @@ class _HabitTile extends StatelessWidget {
   }
 }
 
-/// 提醒时间 chip：点击改时间，长按取消提醒（沿用原习惯页交互）。
+/// 提醒时间 chip：点击改时间；长按取消提醒，先确认再撤（U18）。
+///
+/// 旧实现长按即静默取消提醒且无任何提示/确认——手势不可发现、误触即丢设置。
+/// 现改为：长按先弹确认；同时在 chip 下方给出「长按可取消」的弱提示文案，
+/// 让用户知道该手势存在，不再靠猜。
 class _ReminderChip extends StatelessWidget {
   final Habit habit;
   const _ReminderChip({required this.habit});
@@ -412,35 +421,64 @@ class _ReminderChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
-    return GestureDetector(
-      onTap: () async {
-        final cur = habit.reminderMinute!;
-        final picked = await showTimePicker(
-          context: context,
-          initialTime: TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
-        );
-        if (picked != null) {
-          context
-              .read<HabitProvider>()
-              .setReminder(habit, picked.hour * 60 + picked.minute);
-        }
-      },
-      onLongPress: () =>
-          context.read<HabitProvider>().setReminder(habit, null),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-        decoration: BoxDecoration(
-          color: ext.chip,
-          borderRadius: BorderRadius.circular(AppColors.chipRadius),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Symbols.alarm, size: 12, color: ext.meta),
-            const SizedBox(width: 3),
-            Text(_fmtMinute(habit.reminderMinute!),
-                style: TextStyle(fontSize: 11, color: ext.meta)),
-          ],
+    return Tooltip(
+      message: '点按修改时间 · 长按取消提醒',
+      waitDuration: const Duration(milliseconds: 400),
+      child: GestureDetector(
+        onTap: () async {
+          final cur = habit.reminderMinute!;
+          final picked = await showTimePicker(
+            context: context,
+            initialTime: TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
+          );
+          if (picked != null) {
+            context
+                .read<HabitProvider>()
+                .setReminder(habit, picked.hour * 60 + picked.minute);
+          }
+        },
+        onLongPress: () async {
+          // U18：取消提醒是不可逆操作，先弹确认，避免误长按清掉提醒。
+          final hp = context.read<HabitProvider>();
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (d) => AlertDialog(
+              title: const Text('取消提醒？'),
+              content: Text(
+                '「${habit.title}」到点将不再提醒。确定取消吗？',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(d, false),
+                  child: const Text('保留提醒'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                  onPressed: () => Navigator.pop(d, true),
+                  child: const Text('取消提醒'),
+                ),
+              ],
+            ),
+          );
+          if (confirmed == true) {
+            await hp.setReminder(habit, null);
+          }
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: ext.chip,
+            borderRadius: BorderRadius.circular(AppColors.chipRadius),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Symbols.alarm, size: 12, color: ext.meta),
+              const SizedBox(width: 3),
+              Text(_fmtMinute(habit.reminderMinute!),
+                  style: TextStyle(fontSize: 11, color: ext.meta)),
+            ],
+          ),
         ),
       ),
     );
@@ -867,7 +905,12 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
 
 /// 单习惯详情弹层：该习惯自己的热力图 + 连续/累计统计 + 打卡（带破纪录庆祝）+ 分享。
 ///
-/// 与首页聚合热力图区分，这里只展示当前这一个习惯的打卡密度与连续天数。
+/// U2/U3/U15 增强：此前弹层只有「打卡 / 分享」两个按钮——习惯打错字无法改名、
+/// 不想要的习惯无法删除、忘了打卡只能眼睁睁看 streak 归零；已打卡按钮还误触即撤。
+/// 现补：
+/// - 顶栏「编辑」（改名/改星期/改周目标/归档/删除，删除带二次确认）；
+/// - 「补卡」按钮（日期选择器选过去日期，调 [HabitProvider.checkInOnDay]）；
+/// - 已打卡时主按钮先弹确认再取消，避免误触清掉连续记录。
 class _HabitDetailSheet extends StatelessWidget {
   final Habit habit;
   const _HabitDetailSheet({required this.habit});
@@ -882,6 +925,67 @@ class _HabitDetailSheet extends StatelessWidget {
       ),
       builder: (_) => _HabitDetailSheet(habit: habit),
     );
+  }
+
+  /// U3：补卡——选过去某天标记打卡。补的是提醒日/错过日，不限今天。
+  Future<void> _backfillCheckIn(BuildContext context, HabitProvider hp) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final first = DateTime(habit.createdAt.year, habit.createdAt.month,
+        habit.createdAt.day);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: today.subtract(const Duration(days: 1)),
+      firstDate: first.isBefore(today) ? first : today.subtract(const Duration(days: 30)),
+      lastDate: today,
+      helpText: '选择要补卡的日期',
+    );
+    if (picked == null) return;
+    // 幂等：已打卡则提示已存在，不重复记。
+    if (hp.isCheckedOn(habit, picked)) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(
+              '${picked.month}月${picked.day}日 已打过卡')),
+        );
+      }
+      return;
+    }
+    await hp.checkInOnDay(habit, picked);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(
+            '已补 ${picked.month}月${picked.day}日 打卡（连续天数已更新）')),
+      );
+    }
+  }
+
+  /// U15：已打卡状态下点主按钮 = 取消今日打卡，先确认再撤（防误触清连续记录）。
+  Future<void> _confirmUncheckToday(
+      BuildContext context, HabitProvider hp) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('取消今日打卡？'),
+        content: Text(
+          '「${habit.title}」今天的打卡会被撤销，连续天数可能回退。确定继续吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('保留'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('撤销打卡'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await hp.uncheckInOnDay(habit, DateTime.now());
+    }
   }
 
   @override
@@ -914,7 +1018,13 @@ class _HabitDetailSheet extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Spacer(),
+                  const Spacer(),
+                  // U2：编辑习惯入口（改名 / 星期 / 周目标 / 归档 / 删除）。
+                  IconButton(
+                    tooltip: '编辑习惯',
+                    icon: const Icon(Symbols.edit),
+                    onPressed: () => _HabitEditSheet.show(context, habit),
+                  ),
                   IconButton(
                     icon: const Icon(Symbols.close),
                     onPressed: () => Navigator.of(context).pop(),
@@ -1029,13 +1139,25 @@ class _HabitDetailSheet extends StatelessWidget {
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: () =>
-                          checkInWithCelebration(context, hp, habit),
+                      // U15：已打卡时点主按钮先确认再撤（见 _confirmUncheckToday），
+                      // 不再是「像状态标签却一碰就取消」的静默破坏。
+                      onPressed: isCheckedToday
+                          ? () => _confirmUncheckToday(context, hp)
+                          : () => checkInWithCelebration(context, hp, habit),
                       icon: Icon(
                         isCheckedToday ? Icons.check : Icons.add,
                       ),
                       label:
                           Text(isCheckedToday ? '今日已打卡' : '打卡'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  // U3：补卡入口——热力图纯展示，过去漏卡的唯一补救路径此前不存在。
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _backfillCheckIn(context, hp),
+                      icon: const Icon(Symbols.event_available),
+                      label: const Text('补卡'),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -1048,8 +1170,273 @@ class _HabitDetailSheet extends StatelessWidget {
                   ),
                 ],
               ),
+              if (habit.archived)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Row(
+                    children: [
+                      Icon(Symbols.archive, size: 16, color: ext.meta),
+                      const SizedBox(width: 6),
+                      Text('该习惯已归档，不再出现在今日打卡与提醒中',
+                          style: TextStyle(fontSize: 12, color: ext.meta)),
+                    ],
+                  ),
+                ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// U2：编辑习惯底部弹层（改名 / 打卡星期 / 周目标 / 归档 / 删除）。
+///
+/// 详情弹层顶栏的「编辑」打开这里。保存走 [HabitProvider.updateHabit]（星期变更会
+/// 重排提醒）；删除需二次确认（清除全部历史打卡，不可恢复）。
+class _HabitEditSheet extends StatefulWidget {
+  final Habit habit;
+  const _HabitEditSheet({required this.habit});
+
+  static void show(BuildContext context, Habit habit) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _HabitEditSheet(habit: habit),
+    );
+  }
+
+  @override
+  State<_HabitEditSheet> createState() => _HabitEditSheetState();
+}
+
+class _HabitEditSheetState extends State<_HabitEditSheet> {
+  late final TextEditingController _titleCtl =
+      TextEditingController(text: widget.habit.title);
+  late final Set<int> _weekdays = {...widget.habit.weekdays};
+  late int _weeklyGoal = widget.habit.weeklyGoal;
+  late bool _archived = widget.habit.archived;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _titleCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final title = _titleCtl.text.trim();
+    if (title.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('习惯名称不能为空')));
+      return;
+    }
+    setState(() => _saving = true);
+    final hp = context.read<HabitProvider>();
+    await hp.updateHabit(
+      widget.habit,
+      title: title,
+      weekdays: _weekdays.toList()..sort(),
+      weeklyGoal: _weeklyGoal,
+      archived: _archived,
+    );
+    if (!mounted) return;
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已保存「$title」')),
+    );
+  }
+
+  Future<void> _delete() async {
+    final hp = context.read<HabitProvider>();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('删除该习惯？'),
+        content: Text(
+          '将删除「${widget.habit.title}」及其全部打卡记录，不可恢复。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await hp.deleteHabit(widget.habit.id);
+    if (!mounted) return;
+    // 关闭编辑层 + 其下的详情弹层，回到习惯列表（删除后详情已无意义）。
+    Navigator.of(context).pop();
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('习惯已删除')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final wdLabels = ['一', '二', '三', '四', '五', '六', '日'];
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: ext.meta,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text('编辑习惯',
+                style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: onBg)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _titleCtl,
+              decoration: InputDecoration(
+                labelText: '习惯名称',
+                filled: true,
+                fillColor: ext.chip,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text('打卡日（不选 = 每天）',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: List.generate(7, (i) {
+                final wd = i + 1;
+                final sel = _weekdays.isEmpty || _weekdays.contains(wd);
+                final active = _weekdays.isEmpty ? false : _weekdays.contains(wd);
+                final isAll = _weekdays.isEmpty;
+                return GestureDetector(
+                  onTap: () => setState(() {
+                    if (isAll) {
+                      // 从「每天」点某个星期 → 进入「仅该天」。
+                      _weekdays
+                        ..clear()
+                        ..add(wd);
+                    } else if (active) {
+                      _weekdays.remove(wd);
+                      if (_weekdays.isEmpty) _weekdays.addAll(List.generate(7, (x) => x + 1));
+                    } else {
+                      _weekdays.add(wd);
+                    }
+                  }),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: sel
+                          ? Theme.of(context).colorScheme.primary.withOpacity(0.14)
+                          : ext.chip,
+                      borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                    ),
+                    child: Text(
+                      '周${wdLabels[wd - 1]}',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: sel
+                            ? Theme.of(context).colorScheme.primary
+                            : ext.meta,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Text('每周目标次数', style: TextStyle(fontWeight: FontWeight.w600)),
+                const Spacer(),
+                IconButton(
+                  onPressed: _weeklyGoal > 0
+                      ? () => setState(() => _weeklyGoal--)
+                      : null,
+                  icon: const Icon(Symbols.remove_circle_outline),
+                  visualDensity: VisualDensity.compact,
+                ),
+                Text('$_weeklyGoal',
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold)),
+                IconButton(
+                  onPressed: _weeklyGoal < 14
+                      ? () => setState(() => _weeklyGoal++)
+                      : null,
+                  icon: const Icon(Symbols.add_circle_outline),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(Symbols.archive, size: 20, color: ext.meta),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('归档（不再出现在今日打卡与提醒）')),
+                Switch(
+                  value: _archived,
+                  onChanged: (v) => setState(() => _archived = v),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                    ),
+                    onPressed: _saving ? null : _delete,
+                    icon: const Icon(Symbols.delete_outline),
+                    label: const Text('删除'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _saving ? null : _save,
+                    child: const Text('保存'),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

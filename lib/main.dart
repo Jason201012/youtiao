@@ -12,6 +12,7 @@ import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/background_service.dart';
 import 'package:todolist/services/app_log.dart';
+import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/services/secure_window.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/services/attachment_service.dart';
@@ -70,6 +71,10 @@ final List<String> _pendingSnoozeHabitIds = [];
 /// 冷启动时点击通知「完成」action 先于导航器就绪到达，暂存任务 id。
 /// 解锁后消费需先弹确认对话框（P2-3），避免刚解锁就被静默改动数据并弹确认通知。
 final List<String> _pendingCompleteTaskIds = [];
+
+/// U3：冷启动时点击习惯通知「打卡」action 先于导航器就绪到达，暂存习惯 id。
+/// 打卡是幂等正向操作，解锁后直接补打、无需确认（与「完成」任务的确认框不同）。
+final List<String> _pendingHabitCheckInIds = [];
 
 /// 冷启动时由「分享」入口转发过来的文本 + 来源包名，先于导航器就绪到达，待首帧后弹出预填录入层。
 class _PendingShare {
@@ -380,7 +385,33 @@ void _handleNotificationAction(String? actionId, String? payload) {
       // P2-2 + P2-3：入队，解锁后消费前先弹确认对话框。
       _enqueue(_pendingCompleteTaskIds, taskId);
     }
+    return;
   }
+  if (actionId == NotificationService.habitCheckInActionId) {
+    // U3：习惯提醒「打卡」action——直接把该习惯今天标记为已打卡。
+    // 与任务「完成」不同：打卡是幂等正向操作、无数据破坏风险，
+    // 锁定期间入队、解锁后直接补打（无需确认框）。
+    final habitId = NotificationService.parseHabitId(payload);
+    if (habitId == null) return;
+    final state = _navigatorKey.currentState;
+    if (state != null && !_isAppLocked) {
+      _doHabitCheckIn(state, habitId);
+    } else {
+      _enqueue(_pendingHabitCheckInIds, habitId);
+    }
+  }
+}
+
+/// U3：把习惯标记为今天已打卡。与补卡共用 [HabitProvider.checkInOnDay]（幂等：
+/// 已打卡则忽略），打卡后弹覆盖式确认通知（同 id 不刷屏），用户无需进 App。
+void _doHabitCheckIn(NavigatorState nav, String habitId) {
+  final hp = Provider.of<HabitProvider>(nav.context, listen: false);
+  final habit = hp.byId(habitId);
+  if (habit == null) return;
+  final now = DateTime.now();
+  // 异步打卡：checkInOnDay 内部持久化 + 重排今日提醒/挽留；失败静默。
+  hp.checkInOnDay(habit, now).catchError((_) => false);
+  NotificationService.instance.showHabitCheckedConfirm(habit);
 }
 
 /// 用 task/habit id 从 Provider 取实体并触发稍后提醒调度。
@@ -722,6 +753,10 @@ class _MainScaffoldState extends State<MainScaffold>
         () => setState(() => _index = 0);
     // 任务行「专注」按钮请求跳到专注 Tab（index=3）；FocusProvider 静态回调。
     FocusProvider.jumpToFocusTab = () => setState(() => _index = 3);
+    // U4：命令面板移动端顶栏入口——各 Tab 页经 AppNav.jumpToTab 请求切 Tab。
+    AppNav.onJumpToTab = (i) {
+      if (i >= 0 && i < _tabCount && mounted) setState(() => _index = i);
+    };
     // M-01：监听解锁事件——locked 由 true 变 false 时，把锁定期间暂存的
     // 通知跳转 / 通知 action / 分享 / 小组件意图一次性消费掉。
     _appLock = Provider.of<AppLockProvider>(context, listen: false);
@@ -793,6 +828,10 @@ class _MainScaffoldState extends State<MainScaffold>
     if (_pendingCompleteTaskIds.isNotEmpty) {
       await _confirmPendingCompletes(state);
     }
+    // U3：习惯「打卡」action——幂等正向，直接补打、无需确认框。
+    while (_pendingHabitCheckInIds.isNotEmpty) {
+      _doHabitCheckIn(state, _pendingHabitCheckInIds.removeAt(0));
+    }
   }
 
   /// P2-3：解锁后消费暂存的「完成」action 前，先弹确认对话框，让用户确认是否真的完成。
@@ -841,6 +880,8 @@ class _MainScaffoldState extends State<MainScaffold>
       _idleTimer?.cancel();
     } catch (_) {}
     _idleTimer = null;
+    // U4：卸载时清掉 Tab 跳转钩子，避免悬浮引用。
+    AppNav.onJumpToTab = null;
     try {
       _appLock.removeListener(_onAppLockChanged);
     } catch (_) {
