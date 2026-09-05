@@ -979,6 +979,15 @@ class _MainScaffoldState extends State<MainScaffold>
       builder: (context, appLock, _) {
         // A4 应用锁：未解锁时渲染独立解锁页，屏蔽主界面交互。
         if (appLock.locked) {
+          // F9：应用锁触发瞬间，把根 Navigator 上之前 push 的所有路由（任务详情 /
+          // 看板 / 设置等详情页）一次性弹回首页。否则那些详情页会停在栈顶，
+          // AppLockGate 仅替换 MainScaffold 内的视图，那些详情页仍然盖在解锁门
+          // 之上——侧滑手势 / 系统返回键都会先落到详情页再回到门，应用锁形同虚设。
+          // popUntil 用 isFirst 而非 immediatePop，避免 root 路由被一并 pop 掉。
+          final nav = _navigatorKey.currentState;
+          if (nav != null && nav.canPop()) {
+            nav.popUntil((r) => r.isFirst);
+          }
           return const AppLockGate();
         }
         final task = context.watch<TaskProvider>();

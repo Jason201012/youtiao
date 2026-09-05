@@ -164,6 +164,18 @@ class NotificationService {
   /// 兜底定时器触发时校验「自己是否仍是当前最新一代」，不是则静默作废。
   final Map<String, int> _deadlineGen = {};
 
+  /// F11：「稍后提醒（snooze）」独立 id 段。
+  ///
+  /// 此前 snooze 复用一次性「截止提醒」的 [_notifyIdOf]，而重复提醒的 payload
+  /// 同为 `task:<id>`、_handleNotificationAction 只按前缀路由 →
+  /// 在重复提醒上点「稍后提醒」会用**截止提醒的 id** 重新调度，
+  /// 把该任务未来的截止闹钟覆盖删除（直到下次全量重排才恢复）。
+  /// 这里给 snooze 一个独立段位，彻底杜绝顶掉其它提醒。
+  static int _snoozeNotifyIdOf(String id) {
+    final base = int.tryParse(id) ?? id.hashCode;
+    return 1900000000 + (base % 10000000).abs();
+  }
+
   /// 重复提醒使用独立 id 段，与一次性「截止提醒」（0..N）、习惯提醒（1e9+）都互不重叠，
   /// 避免同一任务的两种提醒互相 cancel 掉。dayIndex：daily / interval 用 0；
   /// weekly / weekday 用 1..7（对应周一..周日），每个星期一个独立 id。
@@ -453,6 +465,10 @@ class NotificationService {
         actions: _taskActions,
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
+        // P2-8：应用内兜底定时器与系统闹钟几乎同时 show 同一 id 的通知，
+        // Android 对已在通知栏 alerting 的通知再次 notify 会**再响一次**（叮叮两声）。
+        // onlyAlertOnce 让同一 id 的后续更新只刷新内容、不再触发响铃/震动。
+        onlyAlertOnce: true,
       );
       final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
@@ -494,11 +510,16 @@ class NotificationService {
   /// 按任务 id 取消单条已调度的「截止提醒」通知。
   /// 同时作废在途的「应用内兜底定时器」（代号 +1，使其触发时判定为过期一代），
   /// 让提前完成/改期的任务不再弹出陈旧提醒（S4）。
+  /// F11：snooze 已改用独立段位，这里一并取消，避免「任务已删除但 snooze 仍会弹」。
   Future<void> cancel(String id) {
     // S4 修复：作废该任务在途的兜底定时器（代号 +1 使其判定为过期一代）。
     _deadlineGen[id] = (_deadlineGen[id] ?? 0) + 1;
+    unawaited(_plugin.cancel(_snoozeNotifyIdOf(id)));
     return _plugin.cancel(_notifyIdOf(id));
   }
+
+  /// F11：单独取消某任务的「稍后提醒」通知（snooze 后任务被完成时调用）。
+  Future<void> cancelSnooze(String id) => _plugin.cancel(_snoozeNotifyIdOf(id));
 
   /// 为「重复任务」调度本地提醒：按 [Task.repeat] 规则在设定时刻重复触发
   /// （setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。返回 true 表示已提交。
@@ -522,9 +543,17 @@ class NotificationService {
       AppLog.d('[通知] 未调度重复提醒 id=${task.id}：非重复任务或无提醒时间');
       return false;
     }
-    try {
-      final loc = _loc ?? tz.UTC;
-      final m = task.repeatMinute!;
+      // F3：「结束重复」（repeatUntil）对**所有**重复类型生效，而非只有 interval。
+      // OS 周期闹钟（daily/weekly/monthly）一旦挂上就会一直响，若不在此处拦，
+      // 用户点「结束重复」后重启 App / 切一次开关就会死灰复燃。
+      if (_repeatEnded(task)) {
+        await cancelRepeatReminder(task.id);
+        AppLog.d('[通知] 未调度重复提醒 id=${task.id}：重复已于 ${task.repeatUntil} 结束');
+        return false;
+      }
+      try {
+        final loc = _loc ?? tz.UTC;
+        final m = task.repeatMinute!;
       final hh = m ~/ 60;
       final mm = m % 60;
       final now = tz.TZDateTime.now(loc);
@@ -661,6 +690,18 @@ class NotificationService {
     }
   }
 
+  /// F3：重复是否已结束（[Task.repeatUntil] 严格早于今天）。
+  /// 与 [Task.isRepeatEnded] 同一口径，此处独立实现以避免 service 反向依赖 Provider。
+  static bool _repeatEnded(Task task) {
+    final u = task.repeatUntil;
+    if (u == null) return false;
+    final until = DateTime.tryParse(u);
+    if (until == null) return false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return today.isAfter(DateTime(until.year, until.month, until.day));
+  }
+
   /// 计算 monthly 任务下一次 occurrence 的「日期+时刻」。
   /// 优先本月目标日；若已过（或 skipToday 且恰为今天）则顺延到下一月。
   /// 「每月 N 号」模式用 [Task.monthlyDay]（溢出夹到当月最后一天）；
@@ -728,16 +769,28 @@ class NotificationService {
     final today = DateTime(now.year, now.month, now.day);
     final ad = DateTime(a.year, a.month, a.day);
     final diff = today.difference(ad).inDays;
-    // 已过去的天数里，最大的可整除步数 → 下一次 occurrence
-    final k = diff < 0 ? 0 : (diff ~/ n);
-    var occDate = ad.add(Duration(days: (k + 1) * n));
-    var result =
-        tz.TZDateTime(loc, occDate.year, occDate.month, occDate.day, m ~/ 60, m % 60);
-    if (skipToday && _sameDay(DateTime(result.year, result.month, result.day), today)) {
-      final nextDate = ad.add(Duration(days: (k + 2) * n));
-      result = tz.TZDateTime(
-          loc, nextDate.year, nextDate.month, nextDate.day, m ~/ 60, m % 60);
+    tz.TZDateTime at(DateTime date) =>
+        tz.TZDateTime(loc, date.year, date.month, date.day, m ~/ 60, m % 60);
+
+    // F4：「下一次 occurrence」必须包含**今天**。
+    // 旧实现无条件 +1 个周期（(k+1)*n），当 diff % n == 0（今天恰为循环日）时
+    // 结果永远 ≥ 明天；而首页今日分区 / 桌面小组件 / 晨报都以 repeatsOn 判定，
+    // 把锚点当天算作循环日——于是「UI 显示今天该做，闹钟却排在 N 天后」。
+    // 这里先判「今天是否为循环日 + 时刻未过 + 未被要求跳过」，命中即挂今天。
+    final DateTime occDate;
+    if (diff < 0) {
+      occDate = ad; // 锚点在未来：首个 occurrence 即锚点日
+    } else {
+      final base = ad.add(Duration(days: (diff ~/ n) * n));
+      final todayIsOccurrence = diff % n == 0;
+      final notYetPassed = !at(base).isBefore(now);
+      if (todayIsOccurrence && notYetPassed && !skipToday) {
+        occDate = base;
+      } else {
+        occDate = ad.add(Duration(days: ((diff ~/ n) + 1) * n));
+      }
     }
+    var result = at(occDate);
     // 尊重 skipDates / repeatUntil：若算出的下次 occurrence 落在「跳过日」或「已超结束日」，
     // 顺延到下一个真正命中的循环日（上限 60 次防死循环，覆盖最极端间隔）。
     var guard = 0;
@@ -889,9 +942,12 @@ class NotificationService {
     }
   }
 
-  /// 稍后提醒（snooze）：用同一通知 id 在 [delay] 后重新弹出该任务提醒。
-  /// 覆盖式调度（不新建通知），点「稍后提醒」后原通知消失、[delay] 后再弹一次；
-  /// [delay] 默认 10 分钟。仅对「截止提醒」一次性任务有效（重复 / 习惯走各自方法）。
+  /// 稍后提醒（snooze）：在 [delay] 后重新弹出该任务提醒。
+  ///
+  /// F11：使用独立的 [_snoozeNotifyIdOf] 段位，不再复用一次性「截止提醒」的
+  /// [_notifyIdOf]——否则在重复提醒上点「稍后提醒」会覆盖掉同任务未来的截止闹钟。
+  /// P2-6'：落点过一次勿扰顺延，并补回「稍后提醒 / 完成」两个 action 按钮，
+  /// 使 snooze 后的通知仍可二次 snooze、仍可在通知栏直接完成。
   Future<bool> snoozeTaskReminder(Task task,
       {Duration delay = const Duration(minutes: 10), bool playSound = true}) async {
     if (!enabled) {
@@ -899,7 +955,16 @@ class NotificationService {
       return false;
     }
     final loc = _loc ?? tz.UTC;
-    final when = tz.TZDateTime.now(loc).add(delay);
+    var when = tz.TZDateTime.now(loc).add(delay);
+    // P2-6'：snooze 落点同样感知勿扰（此前只有一次性截止提醒会顺延，
+    // 勿扰内点「稍后提醒」照弹，与用户对勿扰的预期矛盾）。
+    if (dndDefer != null) {
+      final deferred = dndDefer!(when);
+      if (deferred != null) {
+        when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
+            deferred.hour, deferred.minute);
+      }
+    }
     // S4 修复：作废在途兜底定时器（若有），使本次 snooze 的提醒能正常弹出。
     _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
     final chId = playSound ? _chSound : _chSilent;
@@ -911,13 +976,15 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: playSound,
+        // P2-6'：补回 action 按钮，让 snooze 后的通知也能继续 snooze / 直接完成。
+        actions: _taskActions,
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
       ),
     );
     try {
       await _plugin.zonedSchedule(
-        _notifyIdOf(task.id),
+        _snoozeNotifyIdOf(task.id),
         '任务提醒',
         task.title.isNotEmpty ? task.title : '无标题任务',
         when,
@@ -1017,7 +1084,15 @@ class NotificationService {
     }
     try {
       final id = evening ? briefingEveningNotifyId : briefingMorningNotifyId;
-      final when = nextBriefingTime(hour, minute);
+      var when = nextBriefingTime(hour, minute);
+      // P2-7：简报此前完全不感知勿扰，而默认勿扰 22:00-07:00 恰好覆盖晚报整点
+      // （22:00）与晨报常用时刻——用户开了勿扰仍被简报吵醒。现与其它定时通知统一。
+      if (dndDefer != null) {
+        final deferred = dndDefer!(when);
+        if (deferred != null) {
+          when = tz.TZDateTime.from(deferred, _loc ?? tz.UTC);
+        }
+      }
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
@@ -1154,7 +1229,16 @@ class NotificationService {
       final loc = _loc ?? tz.UTC;
       final now = tz.TZDateTime.now(loc);
       // 明天 00:00（与原生 MidnightResetReceiver 清理同一时刻，口径一致）。
-      final when = tz.TZDateTime(loc, now.year, now.month, now.day + 1);
+      var when = tz.TZDateTime(loc, now.year, now.month, now.day + 1);
+      // P2-7：回收站过期预告固定排 00:00，正好落在默认勿扰 22:00-07:00 内，
+      // 此前完全不感知勿扰。现与简报 / 习惯挽留统一走 dndDefer 顺延。
+      if (dndDefer != null) {
+        final deferred = dndDefer!(when);
+        if (deferred != null) {
+          when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
+              deferred.hour, deferred.minute);
+        }
+      }
       final mode = await _scheduleMode;
       // 标题/正文：聚合最多展示前几条任务名，避免通知体过长。
       final titles = expiringTomorrow.take(5).map((t) => t.title.trim()).toList();

@@ -19,6 +19,7 @@ const List<String> _backedUpPrefKeys = <String>[
   'theme_pure_black',
   // —— 应用锁 ——
   'app_lock_enabled',
+  'app_lock_idle_seconds',
   // —— 专注 / 番茄钟 ——
   'focus_pomo_enabled',
   'focus_pomo_focus_sec',
@@ -42,6 +43,26 @@ const List<String> _backedUpPrefKeys = <String>[
   'background_guard',
   'onboarding_seen',
   'auto_backup_enabled',
+  // P2-12：v2.7.x / v2.8.x 新增的偏好若未纳入白名单，恢复后会被静默丢弃，
+  // 用户表现为「我明明打开了 X，怎么同步过来还是关着」。逐项与 task_provider / 其它
+  // Provider 的 setter / 持久化键名核对补齐：
+  'calendar_lunar',           // 日历农历显示
+  'lock_screen_private',      // 锁屏隐藏通知内容（L-06）
+  'flag_secure',              // 防截屏/录屏（L-07）
+  'allow_external_links',     // 备注外链点击（L-12）
+  // 早晚简报
+  'briefing_morning_enabled',
+  'briefing_morning_hour',
+  'briefing_morning_minute',
+  'briefing_evening_enabled',
+  'briefing_evening_hour',
+  'briefing_evening_minute',
+  // 习惯漏卡挽留（P1-7）
+  'habit_nudge_enabled',
+  'habit_nudge_hour',
+  'habit_nudge_minute',
+  // 归档标签 / 自动备份口令关闭后的清理用标记
+  'archived_tags',
 ];
 
 /// 读取白名单内的偏好键，返回可被 JSON 序列化的 `{key: value}` 映射。

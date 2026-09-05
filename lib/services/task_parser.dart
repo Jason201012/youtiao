@@ -686,11 +686,18 @@ class TaskParser {
     }
     // N天后
     if (m.group(5) != null) {
-      return today.add(Duration(days: int.parse(m.group(5)!)));
+      // P2-4：用 tryParse 防非法整型；上限 3650 天（10 年）——超出会把任务推到
+      // 几十年后无意义的远期；异常日期直接返回 null（任务不留日期，按需重输）。
+      final n = int.tryParse(m.group(5)!);
+      if (n == null || n < 0 || n > 3650) return null;
+      return today.add(Duration(days: n));
     }
     // N周后
     if (m.group(6) != null) {
-      return today.add(Duration(days: int.parse(m.group(6)!) * 7));
+      // 同上：tryParse + 上限（约 520 周）。
+      final n = int.tryParse(m.group(6)!);
+      if (n == null || n < 0 || n > 520) return null;
+      return today.add(Duration(days: n * 7));
     }
 
     // 星期类：取最后一个字判断目标星期

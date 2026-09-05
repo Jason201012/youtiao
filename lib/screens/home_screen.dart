@@ -211,11 +211,33 @@ class HomeScreenState extends State<HomeScreen> {
   }
 
   /// 批量删除已选项，并弹出带撤销的提示
-  void _deleteSelected(BuildContext context) {
+  ///
+  /// U8：删除是单向不可逆操作（虽然有撤销 snackbar，但用户容易错过撤销时限），
+  /// 故在执行前弹确认框，让用户看清影响条数后再继续。
+  Future<void> _deleteSelected(BuildContext context) async {
     final ids = _selected.toList();
     if (ids.isEmpty) return;
     final count = ids.length;
     final provider = context.read<TaskProvider>();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('批量删除？'),
+        content: Text('将删除 $count 项任务（可在 5 秒内撤销）。继续吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(d, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     provider.deleteTasks(ids);
     _exitSelect();
     _showBatchUndoSnackBar(context, provider, count);

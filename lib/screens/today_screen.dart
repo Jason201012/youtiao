@@ -10,6 +10,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/review_card.dart';
 import 'package:todolist/widgets/today_share_sheet.dart';
@@ -241,14 +242,27 @@ class _TodoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // U6：整行点击进任务详情（与首页/看板交互一致）；勾选完成改由最左侧
+    // 的 Checkbox 自身处理，不再让整行 toggle——避免误触「明明想看看详情、
+    // 结果被勾掉了」。
     return InkWell(
-      onTap: () => onToggle(task),
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: task.id)),
+      ),
       borderRadius: BorderRadius.circular(8),
       child: Padding(
         padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
         child: Row(
           children: [
-            _checkbox(),
+            // U6：Checkbox 自身即可触发 toggle——保持原 _checkbox 视觉（空心
+            // 边框圆角），点击区域仍由 InkWell 接管进入详情；改用 Checkbox
+            // 是为了符合 a11y 预期（语义化勾选控件）。
+            Checkbox(
+              value: task.done,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              onChanged: (_) => onToggle(task),
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(

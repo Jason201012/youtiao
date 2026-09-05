@@ -6,6 +6,7 @@ import 'package:todolist/models/checkin.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/backup_validator.dart';
 import 'package:todolist/services/backup_crypto.dart';
 import 'package:todolist/services/prefs_backup.dart';
@@ -167,10 +168,24 @@ class BackupSheet {
       final habitMap = habitProvider.backupData();
       map['habits'] = habitMap['habits'];
       map['check_ins'] = habitMap['check_ins'];
-      // P0-1：手动备份同步纳入附件二进制（base64 内联），与自动备份 (_writeAutoBackup)
-      // 一致，保证手动导出的备份也能完整还原附件；缺失文件由 collectBlobs 自动跳过。
+// P0-1：手动备份同步纳入附件二进制（base64 内联），与自动备份 (_writeAutoBackup)
+// 一致，保证手动导出的备份也能完整还原附件；缺失文件由 collectBlobs 自动跳过。
       map['attachments'] = await provider.collectAttachmentBlobs(includeTrash);
-      final plain = const JsonEncoder.withIndent('  ').convert(map);
+      // P2-19：手动备份与自动备份保持一致——一并打包 App 级偏好。
+      // 旧版仅自动备份含，手动导出不含，恢复后界面开关看着对、实际是默认值。
+      // 现在手动备份也带一份；写回时由 _doRestore 调用 applyAppPrefs。
+      map['prefs'] = await collectAppPrefs();
+      // P2-9：附件统计提示——若 collectBlobs 因超体积 / 缺失跳过了附件，
+      // 在 snackbar 文案中告知用户，避免「我存的附件怎么没在备份里」的迷惑。
+      final collectStats = readCollectStats(map['attachments'] as Map<String, dynamic>);
+      // F13：导出前做大小预检。附件内联后整包若超过 32 MB，分享面板单文件大小
+      // 敏感、还原端也会按 [DataIo.maxImportTextBytes] 拒绝读取——「写得出去、
+      // 取不回来」。这里自动剥离 attachments 段，保住任务/习惯/偏好主体，
+      // 并在 snackbar 文案里告知用户「附件已剥离」，提示有需要可手动另存。
+      final stripped = DataIo.trimForExport(map);
+      final payloadMap = stripped.$1;
+      final attachmentsDropped = stripped.$2;
+      final plain = const JsonEncoder.withIndent('  ').convert(payloadMap);
 
       // 口令加密导出：明文经 AES-256-GCM 信封化，落盘 / 分享的都是密文。
       // P0-1 守卫：encryptOn 为真而口令缺失时 buildBackupPayload 会抛
@@ -186,6 +201,19 @@ class BackupSheet {
       String msg = isEnc
           ? '已加密保存到「下载」目录（凭口令恢复）'
           : '已保存到「下载」目录（Downloads）';
+      // F13：超额自动剥离附件后，把这件事明确告诉用户，避免「为什么附件没在里面」
+      // 的迷惑；并给出后续手动另存的提示（不在本补丁里做导入侧动作，避免范围蔓延）。
+      if (attachmentsDropped) {
+        msg = isEnc
+            ? '已加密保存到「下载」目录（附件因体积超限已剥离，凭口令恢复）'
+            : '已保存到「下载」目录（附件因体积超限已剥离）';
+      }
+      // P2-9：附件被打包阶段被跳过的提示——优先级低于 F13 的「剥离」，
+      // 后者更严重，覆盖在前者上。
+      else if (collectStats.hasSkipped) {
+        final statMsg = collectStats.summary();
+        if (statMsg != null) msg = '$msg（$statMsg）';
+      }
       try {
         await DataIo.saveToDownloads(
           name,
@@ -363,6 +391,24 @@ class BackupSheet {
           await habitProvider.restoreFromJson(data);
         } catch (e) {
           failures.add('习惯/打卡（$e）');
+        }
+      }
+      // P2-19：恢复偏好（仅当备份含 prefs 字段；老备份无则保持现有偏好不动）。
+      // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences；
+      // 内存态由各 Provider 在下一次 build 时通过自身的 getter 读取最新值。
+      // 不在此处强 reload——多数 Provider 的 getter 已直接读 SharedPreferences
+      // （如 [TaskProvider.themeFollowSystem] 等），无须 reload 即可生效；
+      // 一次性重启最稳妥，但用户期望「恢复完立即看到效果」，由它们的 getter 兜底。
+      if (data['prefs'] is Map) {
+        try {
+          await applyAppPrefs(Map<String, dynamic>.from(data['prefs'] as Map));
+          // 主动触发监听者刷新：偏好字段集中在 TaskProvider / ThemeProvider，
+          // notifyListeners() 强制重建即可让设置面板立刻反映新值。
+          try {
+            Provider.of<TaskProvider>(context, listen: false).notifyListeners();
+          } catch (_) {}
+        } catch (e) {
+          failures.add('偏好（$e）');
         }
       }
 

@@ -120,6 +120,10 @@ class TaskProvider extends ChangeNotifier {
     if (endHour != null) _dndEndHour = endHour.clamp(0, 23);
     notifyListeners();
     await _persistSettings();
+    // P2-5'：勿扰时段/开关变更后必须重排已调度通知。
+    // 此前只有「通知开关 / 声音开关」会重排，导致「周一排的周三 23:30 提醒，
+    // 周二才开勿扰 22:00-07:00」时旧闹钟照常深夜弹出；反向关闭也恢复不了顺延。
+    if (_notificationsEnabled) _rescheduleAllActive();
   }
 
   /// 判断给定小时（0-23）是否处于勿扰区间内。区间可跨午夜（start>end 表示
@@ -166,17 +170,47 @@ class TaskProvider extends ChangeNotifier {
     await _persistSettings();
   }
 
-  /// 本周（周一 00:00 – 周日 23:59:59）已完成的任务数。基于全部任务（含回收站外的）的
-  /// completedAt 落在周区间内计数，与 [WeeklyReview.completedCount] 口径一致（复用同一区间逻辑）。
+  /// F7：全库「完成日 → 完成次数」映射（occurrence 级，date-only）。
+  ///
+  /// 这是全部完成类统计的**单一事实源**。此前统计只读 [Task.completedAt] 单槽，
+  /// 而重复任务的 completedAt 会在午夜重置时被清空 → 「连续 30 天完成每天喝水」
+  /// 在热力图 / 周报 / 连续天数上只算 1 天。现在按「任务 × 完成日」去重计数，
+  /// 一次性任务（doneDates 为空、仅 completedAt）与历史数据同样正确。
+  Map<DateTime, int> get completionDayCounts {
+    final map = <DateTime, int>{};
+    for (final t in _tasks) {
+      final keys = <String>{...t.doneDates};
+      if (t.done && t.completedAt != null) keys.add(_ymd(t.completedAt!));
+      for (final k in keys) {
+        final d = _parseYmdSafe(k);
+        if (d == null) continue;
+        map[d] = (map[d] ?? 0) + 1;
+      }
+    }
+    return map;
+  }
+
+  /// 解析 yyyy-MM-dd 串为 date-only [DateTime]；非法串返回 null（避免脏数据污染统计）。
+  static DateTime? _parseYmdSafe(String s) {
+    final parts = s.split('-');
+    if (parts.length != 3) return null;
+    final y = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    final d = int.tryParse(parts[2]);
+    if (y == null || m == null || d == null) return null;
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return DateTime(y, m, d);
+  }
+
+  /// 本周（周一 00:00 – 周日 23:59:59）已完成的任务数。
+  /// F7：改按 [completionDayCounts] 的 occurrence 级口径统计——重复任务本周
+  /// 完成 3 次即计 3 次，而不是被午夜重置抹成 1 次。
   int get weeklyCompletedCount {
     final start = _mondayOf(DateTime.now());
     final end = start.add(const Duration(days: 6, hours: 23, minutes: 59, seconds: 59));
     int n = 0;
-    for (final t in _tasks) {
-      if (t.done && t.completedAt != null) {
-        final d = DateTime(t.completedAt!.year, t.completedAt!.month, t.completedAt!.day);
-        if (!d.isBefore(start) && !d.isAfter(end)) n++;
-      }
+    for (final entry in completionDayCounts.entries) {
+      if (!entry.key.isBefore(start) && !entry.key.isAfter(end)) n += entry.value;
     }
     return n;
   }
@@ -196,6 +230,10 @@ class TaskProvider extends ChangeNotifier {
   static const String _kArchivedTags = 'archived_tags';
   /// P0-3：日历月视图是否显示农历 / 节气 / 传统节日（纯离线计算，默认开启）。
   static const String _kCalendarLunar = 'calendar_lunar';
+  /// P2-17：最近一次成功快照的日期也持久化。此前只存内存，每次冷启动都会重写
+  /// 当日快照（拖慢启动）；加密开关切换当天还会出现「明文 + 加密」两份并存，
+  /// 挤占 7 份滚动名额，与面板文案「保留最近 7 天」不符。
+  static const String _kLastAutoBackup = 'last_auto_backup_date';
   bool _autoBackupEnabled = true;
   bool get autoBackupEnabled => _autoBackupEnabled;
   /// 最近一次自动备份成功的本地日期（YYYY-MM-DD），null 表示从未成功过。
@@ -310,16 +348,26 @@ class TaskProvider extends ChangeNotifier {
 
   /// 从密钥库载入口令；兼容旧版曾明文存于 SharedPreferences 的情况，
   /// 读到旧值后迁移进密钥库并删除明文副本。
+  ///
+  /// P2-11：迁移是「写密钥库 → 删明文」两步操作，进程若在两步之间被杀，
+  /// 下次启动 `secureStore.read` 已能读到值，迁移分支不再执行，
+  /// 明文口令就永久残留在 shared_prefs XML 里。现改为**每次启动都尝试清理**
+  /// legacy key（只要密钥库里已有口令，或本次刚写入成功），把两步收敛为幂等。
   Future<void> _loadAutoBackupPass() async {
     String? pass = await _secureStore.read(key: _kSecureAutoBackupPass);
+    final prefs = await SharedPreferences.getInstance();
+    final legacy = prefs.getString(_kAutoBackupPassLegacy);
     if (pass == null) {
       // 旧版兼容：口令曾明文存于 SharedPreferences，迁移到密钥库后删除明文。
-      final prefs = await SharedPreferences.getInstance();
-      pass = prefs.getString(_kAutoBackupPassLegacy);
-      if (pass != null && pass.isNotEmpty) {
-        await _secureStore.write(key: _kSecureAutoBackupPass, value: pass);
-        await prefs.remove(_kAutoBackupPassLegacy);
+      if (legacy != null && legacy.isNotEmpty) {
+        await _secureStore.write(key: _kSecureAutoBackupPass, value: legacy);
+        pass = legacy;
       }
+    }
+    // 无论本次是否发生迁移：只要密钥库已有口令（或刚写入成功），
+    // legacy 明文副本就是冗余且危险的，无条件清理（幂等）。
+    if (legacy != null && pass != null && pass.isNotEmpty) {
+      await prefs.remove(_kAutoBackupPassLegacy);
     }
     _autoBackupPass = pass;
   }
@@ -334,6 +382,39 @@ class TaskProvider extends ChangeNotifier {
       await _secureStore.write(key: _kSecureAutoBackupPass, value: pass);
     }
     notifyListeners();
+  }
+
+  /// 校验输入是否与密钥库中现存口令一致（F15「修改口令」先验证旧口令用）。
+  /// 密钥库中无口令时恒返回 false（无从比对）。
+  bool verifyAutoBackupPassphrase(String pass) {
+    final cur = _autoBackupPass;
+    if (cur == null || cur.isEmpty) return false;
+    return pass == cur;
+  }
+
+  /// F15：修改 / 重设自动备份口令。
+  ///
+  /// - 记得旧口令：[oldPass] 传入并校验通过后才写入新口令（返回 false = 旧口令不对）。
+  /// - 忘记旧口令：[oldPass] 传 null（或 [force]=true）强制重设——调用方必须在 UI 上
+  ///   明示后果：**历史加密快照将永远无法解开**，本操作只保证此后的快照可用新口令打开。
+  /// - 同时清掉 legacy 明文副本（若仍残留），避免换口令后旧明文仍躺在 shared_prefs。
+  Future<bool> changeAutoBackupPassphrase(
+    String newPass, {
+    String? oldPass,
+    bool force = false,
+  }) async {
+    if (newPass.isEmpty) return false;
+    if (!force) {
+      if (oldPass == null || !verifyAutoBackupPassphrase(oldPass)) return false;
+    }
+    await setAutoBackupPassphrase(newPass);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kAutoBackupPassLegacy);
+    } catch (_) {
+      // 明文副本清理失败不阻断换口令主流程。
+    }
+    return true;
   }
 
   /// 开关自动备份加密。开启时若尚无口令则拒绝（返回 false），由 UI 引导先设口令。
@@ -403,6 +484,10 @@ class TaskProvider extends ChangeNotifier {
 
   /// 重命名标签：全库替换所有任务上的 [oldName] 为 [newName]，并持久化。
   /// 重命名后旧标签不再存在，新标签自动加入筛选。
+  ///
+  /// P2-23：原实现循环内逐条 `updateTask`，每条都会 notifyListeners + 全量落库，
+  /// 500 条任务的标签重命名 = 501 次全量序列化。现改为循环内只改内存
+  /// （[`_applyTaskUpdate`] 不 notify / 不落库），循环后统一 notify + 落库一次。
   Future<void> renameTag(String oldName, String newName) async {
     if (oldName == newName || newName.trim().isEmpty) return;
     final trimmed = newName.trim();
@@ -410,8 +495,7 @@ class TaskProvider extends ChangeNotifier {
     for (final t in _tasks) {
       if (t.tags.contains(oldName)) {
         final newTags = t.tags.map((e) => e == oldName ? trimmed : e).toList();
-        updateTask(t.copyWith(tags: newTags));
-        changed = true;
+        if (_applyTaskUpdate(t.copyWith(tags: newTags))) changed = true;
       }
     }
     // 归档状态迁移：旧标签已归档 → 新标签继承归档状态
@@ -421,11 +505,12 @@ class TaskProvider extends ChangeNotifier {
     if (changed) {
       notifyListeners();
       await _persist();
-      await _persistTagArchive();
     }
+    await _persistTagArchive();
   }
 
   /// 合并标签：把 [source] 标签的所有任务改为 [target] 标签，然后删除 [source]。
+  /// P2-23：同样改为「逐条改内存 + 单次落库」，消除 N 倍写放大。
   Future<void> mergeTags(String source, String target) async {
     if (source == target) return;
     var changed = false;
@@ -439,34 +524,33 @@ class TaskProvider extends ChangeNotifier {
             if (!newTags.contains(e)) newTags.add(e);
           }
         }
-        updateTask(t.copyWith(tags: newTags));
-        changed = true;
+        if (_applyTaskUpdate(t.copyWith(tags: newTags))) changed = true;
       }
     }
     _archivedTags.remove(source);
     if (changed) {
       notifyListeners();
       await _persist();
-      await _persistTagArchive();
     }
+    await _persistTagArchive();
   }
 
   /// 删除标签：从所有任务中移除 [name]。
+  /// P2-23：同样改为「逐条改内存 + 单次落库」。
   Future<void> deleteTag(String name) async {
     var changed = false;
     for (final t in _tasks) {
       if (t.tags.contains(name)) {
         final newTags = t.tags.where((e) => e != name).toList();
-        updateTask(t.copyWith(tags: newTags));
-        changed = true;
+        if (_applyTaskUpdate(t.copyWith(tags: newTags))) changed = true;
       }
     }
     _archivedTags.remove(name);
     if (changed) {
       notifyListeners();
       await _persist();
-      await _persistTagArchive();
     }
+    await _persistTagArchive();
   }
 
   /// 某标签下的任务数（含所有状态）。
@@ -528,6 +612,9 @@ class TaskProvider extends ChangeNotifier {
       await _writeAutoBackup(now);
       _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
       _lastAutoBackupError = null;
+      // P2-17：落盘最近成功日期，避免重启重复写当日快照 / 同日双形态并存。
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kLastAutoBackup, todayKey);
     } catch (e, s) {
       _lastAutoBackupError = '自动备份失败：$e';
       AppLog.d('$_lastAutoBackupError\n$s');
@@ -585,11 +672,18 @@ class TaskProvider extends ChangeNotifier {
       final dir = await getApplicationDocumentsDirectory();
       final base = Directory('${dir.path}/backup/auto');
       if (!await base.exists()) return;
-      final files = base
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.endsWith('.json'))
-          .toList();
+      final all = base.listSync().whereType<File>().toList();
+      // P2-18：原子写中断留下的 .tmp / .bak 残片（含附件 base64，可达数十 MB）
+      // 此前既不参与滚动清理、也不展示给用户，属于「看不到也删不掉」的永久泄漏。
+      // 这里无条件清理（只认 .json 为有效快照）。
+      for (final f in all) {
+        if (!f.path.endsWith('.json')) {
+          try {
+            await f.delete();
+          } catch (_) {}
+        }
+      }
+      final files = all.where((f) => f.path.endsWith('.json')).toList();
       // 旧→新：按文件名（含日期）比较，'.' < '-'，故 .enc.json 与 .json 同日排序稳定。
       files.sort((a, b) => _autoBackupName(a).compareTo(_autoBackupName(b)));
       // 保留最新 7 份，其余删除
@@ -684,10 +778,22 @@ class TaskProvider extends ChangeNotifier {
     if (_trashRetentionDays < 0) return false; // 永不自动清理
     final cutoff = DateTime.now().subtract(Duration(days: _trashRetentionDays));
     final before = _trash.length;
+    // P2-13：回收站到期自动清理此前只 removeWhere，不删附件目录
+    // （对比 permanentDelete / clearTrash 都有 AttachmentService.removeDir），
+    // 导致 attachments/<taskId>/ 成孤儿目录持续占空间，也与「到期即销毁」的隐私预期不符。
+    final expired = _trash
+        .where((t) => t.deletedAt != null && t.deletedAt!.isBefore(cutoff))
+        .map((t) => t.id)
+        .toList();
     _trash.removeWhere((t) {
       if (t.deletedAt == null) return false; // 无删除时间视为新近，保留
       return t.deletedAt!.isBefore(cutoff);
     });
+    for (final id in expired) {
+      NotificationService.instance.cancel(id);
+      NotificationService.instance.cancelRepeatReminder(id);
+      AttachmentService.removeDir(id);
+    }
     final removed = _trash.length != before;
     if (removed && persist) _persist();
     return removed;
@@ -733,8 +839,11 @@ class TaskProvider extends ChangeNotifier {
     _notificationsEnabled = v;
     NotificationService.instance.enabled = v;
     if (v) {
-      // 打开开关时重新请求通知权限（若之前被拒可再次弹窗）
-      NotificationService.instance.requestPermission();
+      // P2-10：打开开关时重新请求通知权限（若之前被拒可再次弹窗）。
+      // 此前未 await 也不看返回值：用户首启拒绝后界面仍显示「已开启」，
+      // 而所有提醒静默失效，只有点「发送测试通知」才会发现。
+      final granted = await NotificationService.instance.requestPermission();
+      if (granted != null) _lastNotificationPermissionDenied = !granted;
       // 重新调度所有「未完成且未过期」的截止提醒 + 每日提醒，应用新状态
       _rescheduleAllActive();
     } else {
@@ -742,6 +851,19 @@ class TaskProvider extends ChangeNotifier {
     }
     notifyListeners();
     await _persistSettings();
+  }
+
+  /// P2-10：最近一次查询到的「通知权限被系统拒绝」状态（null = 未查询/平台不支持）。
+  /// 设置页据此提示用户去系统设置开启，避免「开关已开但提醒从不响」的静默失效。
+  bool? _lastNotificationPermissionDenied;
+  bool? get notificationPermissionDenied => _lastNotificationPermissionDenied;
+
+  /// P2-10：主动查询一次通知权限状态并刷新 [notificationPermissionDenied]。
+  /// 在 App 回到前台 / 设置页展示时调用（Android 13+ 才有效）。
+  Future<void> refreshNotificationPermission() async {
+    final r = await NotificationService.instance.checkPermission();
+    _lastNotificationPermissionDenied = (r == null) ? null : !r;
+    notifyListeners();
   }
 
   /// 请求通知权限并返回是否授予（设置页「发送测试通知」前调用，
@@ -844,6 +966,16 @@ class TaskProvider extends ChangeNotifier {
     _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
     _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
     _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
+    // P2-17：恢复最近一次成功快照日期（无记录则回退 null，本次启动会补写）。
+    final lastBackup = prefs.getString(_kLastAutoBackup);
+    if (lastBackup != null && lastBackup.length >= 10) {
+      final y = int.tryParse(lastBackup.substring(0, 4));
+      final m = int.tryParse(lastBackup.substring(5, 7));
+      final d = int.tryParse(lastBackup.substring(8, 10));
+      if (y != null && m != null && d != null) {
+        _lastAutoBackupDate = DateTime(y, m, d);
+      }
+    }
     _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet(); // P1-13
     _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true; // P0-3
     // L-06 / L-07 / L-12：隐私相关开关（默认值见各字段注释）。
@@ -901,8 +1033,28 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 供生命周期/周期守护调用的对外入口：跨天则重置每日任务并刷新 UI。
+  ///
+  /// F5：interval（每隔 N 天）的提醒是不带 OS 周期重复的**一次性**闹钟，
+  /// 响过一次后不会自动挂下一个周期；而本 App 默认开启「后台提醒守护」保进程常驻，
+  /// 用户恰恰最不容易重启 App——「每隔 3 天浇水」响一次后就此静默失踪。
+  /// 这里在每次回到前台 / 每 15 分钟守护周期补挂一次 interval 提醒
+  /// （其余类型走 OS 周期闹钟，重排代价小、一并刷新无妨）。
   void checkDailyReset() {
-    if (_resetDailyIfNeeded()) notifyListeners();
+    final changed = _resetDailyIfNeeded();
+    if (_notificationsEnabled) _rescheduleIntervalReminders();
+    if (changed) notifyListeners();
+  }
+
+  /// F5：仅为 interval 重复任务重挂「下一次 occurrence」的一次性闹钟。
+  /// 与 [_rescheduleAllActive] 区分：后者是全量重排（含截止提醒），代价更高，
+  /// 不适合每 15 分钟跑一次；这里只补挂真正会丢的那部分。
+  void _rescheduleIntervalReminders() {
+    for (final t in _tasks) {
+      if (t.repeat != RepeatType.interval) continue;
+      if (!_shouldScheduleRepeatReminder(t)) continue;
+      NotificationService.instance
+          .scheduleRepeatReminder(t, playSound: _soundEnabled);
+    }
   }
 
   /// App 在前台/后台存活期间的轻量守护：周期性（15 分钟）+ 回到前台时检查「日期是否已跨天」，
@@ -1141,44 +1293,35 @@ class TaskProvider extends ChangeNotifier {
     return List.generate(7, (i) => today.subtract(Duration(days: 6 - i)));
   }
 
-  /// 近 7 日每日完成数（旧→新），按 completedAt 统计。
+  /// 近 7 日每日完成数（旧→新）。F7：按 occurrence 级 [completionDayCounts] 统计。
   List<int> get weekTrend {
     final days = weekTrendDates;
     final counts = List.filled(7, 0);
-    for (final t in _tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final d = DateTime(t.completedAt!.year, t.completedAt!.month, t.completedAt!.day);
-      final idx = days.indexWhere((day) => day.isAtSameMomentAs(d));
-      if (idx != -1) counts[idx]++;
+    final src = completionDayCounts;
+    for (var i = 0; i < days.length; i++) {
+      counts[i] = src[days[i]] ?? 0;
     }
     return counts;
   }
 
   /// 上一周（往前 8-14 天）每日完成数（旧→新），用于环比。
+  /// F7：同样改按 occurrence 级统计口径。
   List<int> get lastWeekTrend {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final days = List.generate(7, (i) => today.subtract(Duration(days: 13 - i)));
     final counts = List.filled(7, 0);
-    for (final t in _tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final d = DateTime(t.completedAt!.year, t.completedAt!.month, t.completedAt!.day);
-      final idx = days.indexWhere((day) => day.isAtSameMomentAs(d));
-      if (idx != -1) counts[idx]++;
+    final src = completionDayCounts;
+    for (var i = 0; i < days.length; i++) {
+      counts[i] = src[days[i]] ?? 0;
     }
     return counts;
   }
 
-  /// 有完成记录（completedAt 当天 ≥1 个已完成任务）的所有日期（date-only）。
-  Set<DateTime> get completionDays {
-    final s = <DateTime>{};
-    for (final t in _tasks) {
-      if (t.done && t.completedAt != null) {
-        s.add(DateTime(t.completedAt!.year, t.completedAt!.month, t.completedAt!.day));
-      }
-    }
-    return s;
-  }
+  /// 有完成记录（当天 ≥1 个完成任务）的所有日期（date-only）。
+  /// F7：来源由「遍历 completedAt」改为 [completionDayCounts]，
+  /// 重复任务被午夜重置掉的历史完成日不再丢失。
+  Set<DateTime> get completionDays => completionDayCounts.keys.toSet();
 
   static DateTime _dateOnly(DateTime d) =>
       DateTime(d.year, d.month, d.day);
@@ -1221,13 +1364,13 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 指定月份内「每天完成数」映射（date-only → 完成数），用于日历热力图。
+  /// F7：改按 [completionDayCounts] 统计，重复任务的历史完成日不再因午夜重置而消失。
   Map<DateTime, int> completionsInMonth(DateTime monthAnchor) {
     final map = <DateTime, int>{};
-    for (final t in _tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final d = _dateOnly(t.completedAt!);
+    for (final entry in completionDayCounts.entries) {
+      final d = entry.key;
       if (d.year == monthAnchor.year && d.month == monthAnchor.month) {
-        map[d] = (map[d] ?? 0) + 1;
+        map[d] = entry.value;
       }
     }
     return map;
@@ -1237,16 +1380,17 @@ class TaskProvider extends ChangeNotifier {
   int completionsInMonthCount(DateTime monthAnchor) =>
       completionsInMonth(monthAnchor).values.fold(0, (a, b) => a + b);
 
-  /// 某天完成的所有任务（按完成时间倒序），点击日历格查看当天明细用。
+  /// 某天完成的所有任务，按完成时间倒序；点击日历格查看当天明细用。
+  /// F7：命中条件改为 [Task.isDoneOn]——重复任务当天完成但已被午夜重置为未完成
+  /// 时，仍然要出现在「那天完成了什么」的明细里。
   List<Task> tasksCompletedOn(DateTime day) {
     final d = _dateOnly(day);
-    final list = _tasks
-        .where((t) =>
-            t.done &&
-            t.completedAt != null &&
-            _dateOnly(t.completedAt!) == d)
-        .toList();
-    list.sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
+    final list = _tasks.where((t) => t.isDoneOn(d)).toList();
+    list.sort((a, b) {
+      final ca = a.completedAt ?? d;
+      final cb = b.completedAt ?? d;
+      return cb.compareTo(ca);
+    });
     return list;
   }
 
@@ -1311,21 +1455,32 @@ class TaskProvider extends ChangeNotifier {
       return DateTime(due.year, due.month, due.day).difference(today).inDays;
     }
 
-    final active = _tasks.where((t) => !t.done && !t.isRepeating);
-    final overdue = active.where((t) => (dayDiff(t.dueDate) ?? 0) < 0).length;
-    final today =
-        active.where((t) => dayDiff(t.dueDate) == 0 || t.dueDate == null).length;
-    final future = active.where((t) {
+    final now = DateTime.now();
+    // P2-1：「结束重复」（repeatUntil = 昨天）后，重复任务不再属于「重复」分区，
+    // 回落到日期分区——此前弹窗承诺「今天起不再出现」，首页却仍把它留在重复区。
+    // 口径统一为 [Task.isRepeatEnded]，与首页 / 分享卡片 / 拖拽落点共用。
+    bool inRepeat(Task t) => t.isRepeating && !t.isRepeatEnded(now);
+
+    final stillRepeating = _tasks.where((t) => !t.done && inRepeat(t)).length;
+    final overdue = _tasks.where((t) {
+      if (t.done || inRepeat(t)) return false;
+      return (dayDiff(t.dueDate) ?? 0) < 0;
+    }).length;
+    final today = _tasks.where((t) {
+      if (t.done || inRepeat(t)) return false;
+      return dayDiff(t.dueDate) == 0 || t.dueDate == null;
+    }).length;
+    final future = _tasks.where((t) {
+      if (t.done || inRepeat(t)) return false;
       final d = dayDiff(t.dueDate);
       return d != null && d > 0;
     }).length;
-    final repeat = _tasks.where((t) => t.isRepeating && !t.done).length;
     final done = _tasks.where((t) => t.done).length;
     return {
       'overdue': overdue,
       'today': today,
       'future': future,
-      'repeat': repeat,
+      'repeat': stillRepeating,
       'done': done,
     };
   }
@@ -1341,8 +1496,13 @@ class TaskProvider extends ChangeNotifier {
       return DateTime(due.year, due.month, due.day).difference(today).inDays;
     }
 
-    // 未完成 + 非重复，按截止日期切分为 逾期 / 今天 / 未来。
-    final active = _tasks.where((t) => !t.done && !t.isRepeating).toList();
+    final now = DateTime.now();
+    // P2-1 / F6：重复分区口径统一为「仍在循环期内」（[Task.isRepeatEnded]），
+    // 「结束重复」后的任务回落到日期分区，与 [sectionCounts] 完全一致。
+    bool inRepeat(Task t) => t.isRepeating && !t.isRepeatEnded(now);
+
+    // 未完成 + 非（仍在循环的）重复任务，按截止日期切分为 逾期 / 今天 / 未来。
+    final active = _tasks.where((t) => !t.done && !inRepeat(t)).toList();
     final overdue = active
         .where((t) => (dayDiff(t.dueDate) ?? 0) < 0)
         .toList()
@@ -1382,7 +1542,7 @@ class TaskProvider extends ChangeNotifier {
         return a.dueDate!.compareTo(b.dueDate!);
       });
     // 重复任务单独成段，按提醒时刻升序（置顶优先，其次 order 优先）。
-    final repeat = _tasks.where((t) => t.isRepeating && !t.done).toList()
+    final repeat = _tasks.where((t) => !t.done && inRepeat(t)).toList()
       ..sort((a, b) {
         final p = _comparePinned(a, b);
         if (p != 0) return p;
@@ -1426,7 +1586,8 @@ class TaskProvider extends ChangeNotifier {
   /// 与 [homeTasks] 的分组口径一致，供新建任务落点与拖拽写回 order 使用。
   String _sectionNameOf(Task t) {
     if (t.done) return 'done';
-    if (t.isRepeating) return 'repeat';
+    // P2-1：已结束的重复任务回落到日期分区，与 [homeTasks] / [sectionCounts] 同源。
+    if (t.isRepeating && !t.isRepeatEnded(DateTime.now())) return 'repeat';
     final d = _dayDiff(t.dueDate);
     if (d == null) return 'today';
     if (d < 0) return 'overdue';
@@ -1480,6 +1641,8 @@ class TaskProvider extends ChangeNotifier {
     _tasks[i] = cur.copyWith(
       status: s,
       completedAt: s == TaskStatus.done ? DateTime.now() : null,
+      // F7：完成/取消完成同步维护 occurrence 级完成历史。
+      doneDates: _withDoneDate(cur, s == TaskStatus.done, DateTime.now()),
     );
     if (_tasks[i].isRepeating) {
       _rescheduleRepeatOnCompletion(_tasks[i]);
@@ -1517,6 +1680,8 @@ class TaskProvider extends ChangeNotifier {
     _tasks[i] = _tasks[i].copyWith(
       status: willDone ? TaskStatus.done : TaskStatus.todo,
       completedAt: willDone ? DateTime.now() : null,
+      // F7：完成/取消完成同步维护 occurrence 级完成历史。
+      doneDates: _withDoneDate(_tasks[i], willDone, DateTime.now()),
     );
     // 重复任务完成/取消完成：重排重复提醒。当天已完成则跳过今日（不弹今天提醒），
     // 否则照常挂今日；同一通知 id 覆盖掉旧闹钟。
@@ -1542,6 +1707,70 @@ class TaskProvider extends ChangeNotifier {
   static String _ymd(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  /// 在 [t.doneDates] 中加入 / 移除 [day]（date-only），保持升序去重。
+  /// F7：occurrence 级完成历史的唯一写入口，供完成态切换与循环日「标记完成」共用。
+  static List<String> _withDoneDate(Task t, bool done, DateTime day) {
+    final key = _ymd(DateTime(day.year, day.month, day.day));
+    final set = <String>{...t.doneDates};
+    if (done) {
+      set.add(key);
+    } else {
+      set.remove(key);
+    }
+    final out = set.toList()..sort();
+    return out;
+  }
+
+  /// F1：把任务在某个循环日标记为完成（occurrence 级）。
+  ///
+  /// 此前「未来循环日预览 → 标记完成」走的是 `updateTask(copyWith(status: done))`，
+  /// 而 `_applyTaskUpdate` 会强制回填旧的 status / completedAt，写入被静默丢弃、
+  /// 界面毫无反应——该功能 100% 无效。这里提供显式入口，走与 [toggleDone] 一致的
+  /// 完成态 + 重排链路：
+  /// - 无论哪一天，都把该日记入 [Task.doneDates]（完成历史不被午夜重置抹除）；
+  /// - 若 [day] 恰为今天，同步把任务置为已完成（并触发「今日已完成 → 跳过今日提醒」）。
+  void markOccurrenceDone(String taskId, DateTime day) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final cur = _tasks[i];
+    final d = DateTime(day.year, day.month, day.day);
+    if (cur.isDoneOn(d)) return; // 幂等
+    final now = DateTime.now();
+    final isToday = d.year == now.year && d.month == now.month && d.day == now.day;
+    _tasks[i] = cur.copyWith(
+      doneDates: _withDoneDate(cur, true, d),
+      status: isToday ? TaskStatus.done : cur.status,
+      completedAt: isToday ? now : cur.completedAt,
+    );
+    if (_tasks[i].isRepeating) {
+      _rescheduleRepeatOnCompletion(_tasks[i]);
+    }
+    notifyListeners();
+    _persist();
+  }
+
+  /// F1 配套：取消某循环日的完成记录（从 [Task.doneDates] 移除）。
+  /// 若 [day] 为今天且任务当前为已完成，则一并取消完成态并恢复今日提醒。
+  void unmarkOccurrenceDone(String taskId, DateTime day) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final cur = _tasks[i];
+    final d = DateTime(day.year, day.month, day.day);
+    if (!cur.doneDates.contains(_ymd(d))) return; // 幂等
+    final now = DateTime.now();
+    final isToday = d.year == now.year && d.month == now.month && d.day == now.day;
+    _tasks[i] = cur.copyWith(
+      doneDates: _withDoneDate(cur, false, d),
+      status: (isToday && cur.done) ? TaskStatus.todo : cur.status,
+      completedAt: (isToday && cur.done) ? null : cur.completedAt,
+    );
+    if (_tasks[i].isRepeating) {
+      _rescheduleRepeatOnCompletion(_tasks[i]);
+    }
+    notifyListeners();
+    _persist();
+  }
+
   /// 本次跳过：把 [day]（默认今天）追加进任务的 [Task.skipDates]。
   /// 跳过 ≠ 完成——当天不出现、不打卡、不影响连续天数；次日恢复正常。
   /// 对 interval 重复任务额外重排提醒，避免「跳过当天仍弹提醒」。
@@ -1555,8 +1784,11 @@ class TaskProvider extends ChangeNotifier {
       skipDates: [..._tasks[i].skipDates, ymd],
     );
     _tasks[i] = updated;
-    if (updated.repeat == RepeatType.interval) {
-      // interval 为一次性闹钟，取消后按新 skipDates 重排到下一个有效循环日（自动跳过今天）。
+    // P2-2：此前只有 interval 重排提醒——「每天 07:00 喝水」点「本次跳过」后
+    // 列表层生效、07:00 提醒照响，与 occurrence_sheet 的「已跳过」标记自相矛盾。
+    // 现对所有重复类型统一重排（daily/weekly/monthly 的 OS 周期闹钟会被
+    // 通知服务按新的 skipDates 重新计算首个落点）。
+    if (updated.isRepeating) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(updated);
     }
@@ -1695,14 +1927,23 @@ class TaskProvider extends ChangeNotifier {
         addTask(task);
         added++;
       } else if (overwrite) {
-        updateTask(task.copyWith(id: existing.id));
-        overwritten++;
+        // P2-20：覆盖更新必须允许写入来源方的完成态，否则「外部日历已标记完成」
+        // 的任务导回后仍显示未完成（updateTask 会强制回填旧 status/completedAt）。
+        if (_applyTaskUpdate(task.copyWith(id: existing.id),
+            allowStatusChange: true)) {
+          overwritten++;
+        }
       } else {
         skipped++;
       }
     }
     // 安全（P2-A）：导入可能带入外部 id，重算自增起点，杜绝后续新建任务 id 碰撞。
     _recomputeIdSeq();
+    // 覆盖更新走的是 `_applyTaskUpdate`（不落库），此处统一补一次持久化 + 通知。
+    if (overwritten > 0) {
+      notifyListeners();
+      _persist();
+    }
     return (added: added, skipped: skipped, overwritten: overwritten);
   }
 
@@ -1738,7 +1979,7 @@ class TaskProvider extends ChangeNotifier {
   /// **不**落库——供批量路径（[batchUpdate] / [undoBatchEdit]）循环复用后统一
   /// 落库一次，消除逐条 `_persist()` 的 N 倍写放大（全量差量写 SQLite + 小组件刷新）。
   /// 返回是否命中（未命中 = 任务不存在，调用方可据此决定是否需要通知/落库）。
-  bool _applyTaskUpdate(Task updated) {
+  bool _applyTaskUpdate(Task updated, {bool allowStatusChange = false}) {
     final i = _tasks.indexWhere((t) => t.id == updated.id);
     if (i == -1) return false;
     final old = _tasks[i];
@@ -1746,10 +1987,22 @@ class TaskProvider extends ChangeNotifier {
     final pin = updated.title == old.title
         ? old.pinyinInitials
         : Task.computePinyinInitials(updated.title);
-    _tasks[i] = updated.copyWith(
+    // F2 兜底：切换到「每隔 N 天」却没带锚点时补为今天。
+    // 编辑弹层里把「每天/每周/工作日」改成「每隔 N 天」时，原任务没有 repeatAnchor，
+    // 而 Task.copyWith 对 repeatAnchor 用 _kKeep 哨兵，显式传 null 是**真写入 null**；
+    // 锚点为 null 时 Task.repeatsOn 对任何一天都返回 false → 任务从此不循环、不提醒。
+    final anchored = (updated.repeat == RepeatType.interval &&
+            updated.repeatAnchor == null)
+        ? updated.copyWith(repeatAnchor: _dateOnly(DateTime.now()))
+        : updated;
+    _tasks[i] = anchored.copyWith(
       id: old.id,
-      status: old.status,
-      completedAt: old.completedAt,
+      // P2-20：默认强制保留旧完成态（避免 UI 层误改），但「备份/日历覆盖更新」
+      // 这类显式导入场景需要允许写入来源方的完成态，否则外部日历标记完成的任务
+      // 覆盖导回后仍显示未完成。
+      status: allowStatusChange ? anchored.status : old.status,
+      completedAt:
+          allowStatusChange ? anchored.completedAt : old.completedAt,
       focusSecTotal: old.focusSecTotal,
       order: old.order,
       pinyinInitials: pin,
@@ -1764,19 +2017,19 @@ class TaskProvider extends ChangeNotifier {
     //   之后仍可能弹、已设置的跳过日不生效）。
     // 旧判定只比 dueDate/repeat/repeatMinute/repeatInterval/repeatWeekdays/repeatAnchor，
     // 「只改提前量 / 只改每月几号 / 只设结束日期」时 remindersChanged=false，旧提醒继续响。
-    final remindersChanged = old.dueDate != updated.dueDate ||
-        old.repeat != updated.repeat ||
-        old.repeatMinute != updated.repeatMinute ||
-        old.repeatInterval != updated.repeatInterval ||
-        !_listEq(old.repeatWeekdays, updated.repeatWeekdays) ||
-        old.repeatAnchor != updated.repeatAnchor ||
-        old.reminderOffsetMin != updated.reminderOffsetMin ||
-        old.monthlyDay != updated.monthlyDay ||
-        old.monthlyWeekday != updated.monthlyWeekday ||
-        old.monthlyWeekIndex != updated.monthlyWeekIndex ||
-        old.monthlyFromEnd != updated.monthlyFromEnd ||
-        old.repeatUntil != updated.repeatUntil ||
-        !_listEq(old.skipDates, updated.skipDates);
+    final remindersChanged = old.dueDate != anchored.dueDate ||
+        old.repeat != anchored.repeat ||
+        old.repeatMinute != anchored.repeatMinute ||
+        old.repeatInterval != anchored.repeatInterval ||
+        !_listEq(old.repeatWeekdays, anchored.repeatWeekdays) ||
+        old.repeatAnchor != anchored.repeatAnchor ||
+        old.reminderOffsetMin != anchored.reminderOffsetMin ||
+        old.monthlyDay != anchored.monthlyDay ||
+        old.monthlyWeekday != anchored.monthlyWeekday ||
+        old.monthlyWeekIndex != anchored.monthlyWeekIndex ||
+        old.monthlyFromEnd != anchored.monthlyFromEnd ||
+        old.repeatUntil != anchored.repeatUntil ||
+        !_listEq(old.skipDates, anchored.skipDates);
     if (remindersChanged) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(_tasks[i]);
@@ -1892,6 +2145,15 @@ class TaskProvider extends ChangeNotifier {
     return _lastBatch;
   }
 
+  /// P2-22：从删除撤销缓冲中移除指定任务（_lastBatch 与 _lastBatchIndices 一一对应，
+  /// 必须同步删除，否则后续撤销会按下标把快照塞回错误的任务）。
+  void _dropFromUndoBuffer(String id) {
+    final k = _lastBatch.indexWhere((t) => t.id == id);
+    if (k == -1) return;
+    _lastBatch.removeAt(k);
+    if (k < _lastBatchIndices.length) _lastBatchIndices.removeAt(k);
+  }
+
   /// 删除指定 id 的任务：从任务列表移除，并移入回收站（记录删除时间）。
   /// 返回被删除的任务（用于撤销 / 提示）。
   Task? deleteTask(String id) {
@@ -1938,6 +2200,10 @@ class TaskProvider extends ChangeNotifier {
     _cancelRemindersFor(id);
     // P0-1：彻底删除时一并清理其附件目录，避免孤立文件长期占用空间。
     AttachmentService.removeDir(id);
+    // P2-22：彻底删除后必须作废删除撤销缓冲中的对应项。此前 permanentDelete /
+    // clearTrash 物理删除了附件却不清 _lastBatch，撤销窗口内先彻底删除再点撤销 →
+    // 任务复活但附件已删，详情页附件全部「文件不存在」。
+    _dropFromUndoBuffer(id);
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：彻底删除后重排
@@ -1952,6 +2218,11 @@ class TaskProvider extends ChangeNotifier {
       AttachmentService.removeDir(t.id);
     }
     _trash.clear();
+    // P2-22：清空回收站后同样作废删除撤销缓冲（附件已物理删除，不允许复活）。
+    if (_lastBatch.isNotEmpty) {
+      _lastBatch = [];
+      _lastBatchIndices = [];
+    }
     notifyListeners();
     _persist();
     NotificationService.instance.cancelTrashExpireNotice(); // P1-12：清空回收站即取消预告
@@ -2144,16 +2415,21 @@ class TaskProvider extends ChangeNotifier {
   /// occurrence 及 skipDates 边界由通知服务的 `_nextIntervalOccurrence` 自行计算）；
   /// 其余重复类型（daily/weekly/monthly，OS 原生周期重复）维持原门槛：
   /// 有截止日期且截止日期未过，逾期后自动停止。
+  /// F3：[repeatUntil] 对**所有**重复类型生效。
+  /// 此前只有 interval 分支检查它，daily / weekly / monthly 的门槛是
+  /// 「有 dueDate 且未过」，于是「结束重复」（repeatUntil=昨天）后：
+  /// 当天确实不响，但重启 App / 切一次通知开关走 _rescheduleAllActive 就死灰复燃。
+  /// 现统一在任何类型判定之前先过结束日。
   bool _shouldScheduleRepeatReminder(Task t) {
     if (!t.isRepeating || t.repeatMinute == null) return false;
-    if (t.repeat == RepeatType.interval) {
-      final u = t.repeatUntil;
-      if (u == null) return true;
-      // repeatUntil 为 yyyy-MM-dd 串；解析失败时宽松放行，
-      // 具体是否还有合法循环日由通知服务的 repeatsOn 过滤兜底。
+    // 结束日期：统一先判（interval 与其余类型共用同一口径）。
+    final u = t.repeatUntil;
+    if (u != null) {
       final until = DateTime.tryParse(u);
-      if (until == null) return true;
-      return !_dateHasPassed(until);
+      if (until != null && _dateHasPassed(until)) return false;
+    }
+    if (t.repeat == RepeatType.interval) {
+      return true;
     }
     return t.dueDate != null && !_dateHasPassed(t.dueDate!);
   }

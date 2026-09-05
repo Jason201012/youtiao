@@ -100,6 +100,16 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     // P2-4 / F1：边界校验——「顺延」语义下负数会把截止日期提前（与意图相反），
     // 超大值（如 999999 天）会让日期计算溢出到怪异的远古/远期；用 clamp 兜底。
     final days = rawDays == null ? null : rawDays.clamp(0, 3650);
+    // P2-24：「+N 天」模式下输入非法（空 / 非数字）时不应让 batchUpdate 静默通过。
+    // 旧逻辑：rawDays == null → days == null → 内部 `days != null` 判空，update 整体
+    // 跳过、用户却看到「应用成功」——> 无任何变化、也无任何提示。
+    // 现显式拒绝：弹错提示并 return，不调用 batchUpdate。
+    if (_due == _DueMode.plusDays && (rawDays == null || days == null)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入 0 - 3650 之间的天数')),
+      );
+      return;
+    }
     // 追加标签：支持逗号 / 空格分隔，去重、去空，不覆盖已有标签。
     final tags = _tagCtl.text
         .split(RegExp(r'[,，\s]+'))

@@ -291,24 +291,45 @@ class AttachmentService {
   /// 收集备份所需的附件二进制：遍历任务列表，把每个附件文件读为 base64 内联进
   /// 返回的 Map（key=taskId，value=附件列表 [{ref, data}]）。
   /// 全程本地、不联网；文件缺失的附件自动跳过，不阻断备份。
+  ///
+  /// P2-9：把「被跳过的条目数」附加在 Map 的 `__skipped` 键（不是真实 taskId），
+  /// 调用方可读取后给用户提示；该键不影响正常的备份结构，导入侧
+  /// [restoreBlobs] 会识别并忽略。
   static Future<Map<String, dynamic>> collectBlobs(List<Task> tasks) async {
     final out = <String, dynamic>{};
+    var skippedSize = 0; // 超单附件上限被跳过
+    var skippedCount = 0; // 超单任务上限 / 非法名 / 缺失文件被跳过
     for (final t in tasks) {
       if (t.attachments.isEmpty) continue;
       // 防御：DB 内的 taskId 应为白名单安全段，异常则跳过该任务避免污染备份。
-      if (!_isSafeSegment(t.id)) continue;
+      if (!_isSafeSegment(t.id)) {
+        skippedCount += t.attachments.length;
+        continue;
+      }
       final items = <Map<String, dynamic>>[];
       var count = 0;
       for (final ref in t.attachments) {
         // P2-3：单任务附件数量上限，超出停止收集（避免备份无限膨胀）。
-        if (count >= maxAttachmentsPerTask) break;
-        if (!_isSafeSegment(ref.fileName)) continue; // 文件名非法跳过（正常不会发生）
+        if (count >= maxAttachmentsPerTask) {
+          skippedCount++;
+          continue;
+        }
+        if (!_isSafeSegment(ref.fileName)) {
+          skippedCount++;
+          continue; // 文件名非法跳过（正常不会发生）
+        }
         try {
           final file = await fileFor(t.id, ref);
-          if (!await file.exists()) continue;
+          if (!await file.exists()) {
+            skippedCount++;
+            continue;
+          }
           final bytes = await file.readAsBytes();
           // P2-3：单附件体积上限，超出跳过（防 OOM / 生成超大备份），不阻断整体备份。
-          if (bytes.length > maxAttachmentBytes) continue;
+          if (bytes.length > maxAttachmentBytes) {
+            skippedSize++;
+            continue;
+          }
           items.add({
             'ref': ref.toJson(),
             'data': base64.encode(bytes),
@@ -316,46 +337,78 @@ class AttachmentService {
           count++;
         } catch (_) {
           // 单文件读取失败不阻断整体备份。
+          skippedCount++;
         }
       }
       if (items.isNotEmpty) out[t.id] = items;
     }
+    // P2-9：写回统计（独立键，导入侧会被忽略）。
+    out['__skipped'] = {
+      'oversize': skippedSize,
+      'missingOrInvalid': skippedCount,
+    };
     return out;
   }
 
   /// 从备份还原附件二进制：写入 `attachments/<taskId>/<fileName>`。
   /// [data] 为 [collectBlobs] 产出的结构（来自不可信备份文件）。
   /// 任何段非法 / 超体积 / 超数量都直接跳过或停止，绝不抛、绝不越界落盘。P1-1 / P2-3。
-  static Future<void> restoreBlobs(Map<String, dynamic>? data) async {
-    if (data == null) return;
+  ///
+  /// P2-9：跳过条目计数（oversize / missing / 非法名等）累加到 [stats]，调用方
+  /// 可在恢复完成后展示给用户。`__skipped` 键（collectBlobs 写入的统计段）会
+  /// 被识别并跳过——避免被当作真实 taskId 处理。
+  static Future<RestoreBlobsStats> restoreBlobs(Map<String, dynamic>? data) async {
+    final stats = RestoreBlobsStats();
+    if (data == null) return stats;
     var totalBytes = 0;
     for (final entry in data.entries) {
       final taskId = entry.key;
+      // P2-9：忽略统计段。
+      if (taskId == '__skipped') continue;
       final list = entry.value;
       if (list is! List) continue;
       // P1-1：taskId 来自不可信备份，先做白名单净化；非法直接跳过该任务。
-      if (!_isSafeSegment(taskId)) continue;
+      if (!_isSafeSegment(taskId)) {
+        stats.skipped++;
+        continue;
+      }
       final dir = await dirFor(taskId);
       var count = 0;
       for (final item in list) {
-        if (item is! Map) continue;
-        if (count >= maxAttachmentsPerTask) continue; // P2-3：单任务数量上限
+        if (item is! Map) {
+          stats.skipped++;
+          continue;
+        }
+        if (count >= maxAttachmentsPerTask) {
+          stats.skipped++;
+          continue; // P2-3：单任务数量上限
+        }
         final refJson = item['ref'];
         final dataB64 = item['data'];
-        if (refJson is! Map || dataB64 is! String) continue;
+        if (refJson is! Map || dataB64 is! String) {
+          stats.skipped++;
+          continue;
+        }
         try {
           final ref = AttachmentRef.fromJson(Map<String, dynamic>.from(refJson));
           // P1-1：fileName 来自不可信备份，净化 + 前缀断言（不安全跳过，不落盘）。
-          if (!_isSafeSegment(ref.fileName)) continue;
+          if (!_isSafeSegment(ref.fileName)) {
+            stats.skipped++;
+            continue;
+          }
           final bytes = base64.decode(dataB64);
           // P2-3：单附件体积上限，超出跳过（防存储被恶意备份耗尽）。
           if (bytes.length > maxAttachmentBytes) {
+            stats.oversize++;
             count++;
             continue;
           }
           totalBytes += bytes.length;
           // P2-3：整体反序列化体积上限，超出停止后续还原（避免耗尽存储）。
-          if (totalBytes > maxRestoreAttachmentsBytes) break;
+          if (totalBytes > maxRestoreAttachmentsBytes) {
+            stats.truncated = true;
+            break;
+          }
           final file = _safeFileFor(dir, ref.fileName);
           final tmp = File('${file.path}.tmp');
           await tmp.writeAsBytes(bytes, flush: true);
@@ -363,16 +416,18 @@ class AttachmentService {
           count++;
         } catch (_) {
           // 单文件还原失败跳过，不破坏其余附件 / 任务。
+          stats.skipped++;
         }
       }
     }
+    return stats;
   }
 
-  /// P0-2：全量扫描附件目录，返回每个 taskId 目录下的全部文件清单。
-  /// key 为 taskId；`_staging` 下的 session 残留以 taskId='' 单列。
-  /// 纯文件 IO，不读取任务元数据；大目录分块异步遍历，避免卡 UI。
-  /// 沿用 [_isSafeSegment] 白名单防护：非白名单目录直接跳过，不越界读取。
-  static Future<Map<String, List<AttachmentFileEntry>>> scanAll() async {
+/// P0-2：全量扫描附件目录，返回每个 taskId 目录下的全部文件清单。
+/// key 为 taskId；`_staging` 下的 session 残留以 taskId='' 单列。
+/// 纯文件 IO，不读取任务元数据；大目录分块异步遍历，避免卡 UI。
+/// 沿用 [_isSafeSegment] 白名单防护：非白名单目录直接跳过，不越界读取。
+static Future<Map<String, List<AttachmentFileEntry>>> scanAll() async {
     final base = await _base();
     final root = Directory('${base.path}/$_attachmentsDirName');
     final map = <String, List<AttachmentFileEntry>>{};
@@ -559,6 +614,58 @@ class AttachmentService {
 
   static int _randomInt(int min, int max) =>
       min + Random().nextInt(max - min + 1);
+}
+
+/// P2-9：附件恢复统计。
+///
+/// 区分三类跳过原因：
+/// - `oversize`：单附件超过 [maxAttachmentBytes]，仅跳过该条、不算入整批；
+/// - `skipped`：非法 / 缺失 / 解析失败 等其它原因；
+/// - `truncated`：整体反序列化体积超过 [maxRestoreAttachmentsBytes]，触发了整批提前终止。
+class RestoreBlobsStats {
+  int oversize = 0;
+  int skipped = 0;
+  bool truncated = false;
+  int get total => oversize + skipped;
+  bool get hasSkipped => total > 0 || truncated;
+
+  /// 给 UI 用的简短文案（中文）。无跳过时返回 null。
+  String? summary() {
+    if (!hasSkipped) return null;
+    final parts = <String>[];
+    if (oversize > 0) parts.add('$oversize 个附件因单文件过大被跳过');
+    if (skipped > 0) parts.add('$skipped 个附件因缺失 / 非法被跳过');
+    if (truncated) parts.add('剩余附件因备份过大被截断');
+    return '附件恢复：${parts.join('；')}';
+  }
+}
+
+/// P2-9：附件收集统计（collectBlobs 返回的 Map 中 `__skipped` 键结构）。
+class CollectBlobsStats {
+  final int oversize;
+  final int missingOrInvalid;
+  const CollectBlobsStats({this.oversize = 0, this.missingOrInvalid = 0});
+  bool get hasSkipped => oversize > 0 || missingOrInvalid > 0;
+  String? summary() {
+    if (!hasSkipped) return null;
+    final parts = <String>[];
+    if (oversize > 0) parts.add('$oversize 个附件因单文件过大未打包');
+    if (missingOrInvalid > 0) {
+      parts.add('$missingOrInvalid 个附件因缺失 / 非法未打包');
+    }
+    return parts.join('；');
+  }
+}
+
+/// P2-9：从 collectBlobs 的 Map 中读出 [CollectBlobsStats]，无则返回零值。
+CollectBlobsStats readCollectStats(Map<String, dynamic> blobs) {
+  final raw = blobs['__skipped'];
+  if (raw is! Map) return const CollectBlobsStats();
+  int n(dynamic v) => (v is num) ? v.toInt() : 0;
+  return CollectBlobsStats(
+    oversize: n(raw['oversize']),
+    missingOrInvalid: n(raw['missingOrInvalid']),
+  );
 }
 
 /// 扫描得到的单个附件实体（仅文件 IO 信息，不含任务元数据）。

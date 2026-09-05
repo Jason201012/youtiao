@@ -63,6 +63,10 @@ class TemplateItem {
   /// 每月第几个周几的「第几」(1..5，5=最后一个)。
   final int? monthlyWeekIndex;
 
+  /// P2-5：「每月倒数第 N 天」（1=最后一天，2=倒数第二天…），与
+  /// [monthlyDay] / [monthlyWeekday] 互斥使用。
+  final int monthlyFromEnd;
+
   const TemplateItem(
     this.title,
     this.category,
@@ -77,6 +81,7 @@ class TemplateItem {
     this.monthlyDay = 1,
     this.monthlyWeekday,
     this.monthlyWeekIndex,
+    this.monthlyFromEnd = 0,
   });
 
   /// 从一条真实任务生成模板项（「另存为模板」用）。
@@ -105,6 +110,9 @@ class TemplateItem {
       monthlyDay: t.monthlyDay,
       monthlyWeekday: t.monthlyWeekday,
       monthlyWeekIndex: t.monthlyWeekIndex,
+      // P2-5：模板套用时一并带上「每月倒数第 N 天」。原实现漏掉，导致「另存为
+      // 模板 → 套用」会让倒数天数任务被错误展开成「第 N 个周几」或退化为月度 1 号。
+      monthlyFromEnd: t.monthlyFromEnd,
     );
   }
 
@@ -122,6 +130,7 @@ class TemplateItem {
         'monthlyDay': monthlyDay,
         'monthlyWeekday': monthlyWeekday,
         'monthlyWeekIndex': monthlyWeekIndex,
+        'monthlyFromEnd': monthlyFromEnd,
       };
 
   factory TemplateItem.fromJson(Map<String, dynamic> j) {
@@ -141,6 +150,7 @@ class TemplateItem {
       monthlyDay: j['monthlyDay'] as int? ?? 1,
       monthlyWeekday: j['monthlyWeekday'] as int?,
       monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
+      monthlyFromEnd: j['monthlyFromEnd'] as int? ?? 0,
     );
   }
 }
@@ -466,6 +476,8 @@ int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
       monthlyDay: item.monthlyDay,
       monthlyWeekday: item.monthlyWeekday,
       monthlyWeekIndex: item.monthlyWeekIndex,
+      // P2-5：从模板创建任务时一并带上「每月倒数第 N 天」字段。
+      monthlyFromEnd: item.monthlyFromEnd,
       tags: List.from(item.tags),
     ));
     created++;

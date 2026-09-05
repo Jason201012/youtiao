@@ -1,9 +1,14 @@
 /// 重复任务「未来 N 天预览」弹层（P0-5，纯离线）。
 ///
 /// 遍历 [Task.occurrencesBetween] 给出未来 30 天（默认）的循环命中日；
-/// 每行支持「标记完成 / 跳过一次 / 移到下一天」三种逐次操作，分别写入
-/// [Task.completedAt]（当天记录，与循环任务「当天已完成」语义同源）或 [Task.skipDates]
-/// （跳过 / 顺延均复用既有跳过逻辑，零新增存储）。
+/// 每行支持「标记完成 / 跳过一次 / 移到下一天」三种逐次操作，分别走
+/// [TaskProvider.markOccurrenceDone] / [TaskProvider.unmarkOccurrenceDone] /
+/// [TaskProvider.skipOccurrence]（三者均为 occurrence 级入口，写入
+/// [Task.doneDates] / [Task.skipDates]，避免此前 `updateTask(copyWith(status))`
+/// 被 `_applyTaskUpdate` 强制回填旧状态而丢失的 100% 无效路径）。
+///
+/// 「移到下一天」额外走 [TaskProvider.rescheduleOnceOccurrence]，把当天加入
+/// skipDates 后另建一次性副本落到 newDay，零新概念。
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
@@ -50,28 +55,67 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     if (latest != null && mounted) setState(() => _task = latest);
   }
 
-  bool _isDone(DateTime d) =>
-      _task.done && _task.completedAt != null && Task.isSameDay(_task.completedAt!, d);
+  bool _isDone(DateTime d) => _task.isDoneOn(d);
   bool _isSkipped(DateTime d) => _task.skipDates.contains(Task.ymdKey(d));
 
   void _markDone(DateTime d) {
-    widget.provider.updateTask(_task.copyWith(
-      status: TaskStatus.done,
-      completedAt: DateTime(d.year, d.month, d.day),
-    ));
+    // F1：之前 `updateTask(copyWith(status:done))` 路径被 _applyTaskUpdate 强制
+    // 回填旧 status，写入静默丢失、UI 无变化。这里走 provider 显式 occurrence
+    // 入口，等价于 toggleDone：doneDates 落点 + 重排提醒。
+    if (_isDone(d)) {
+      widget.provider.unmarkOccurrenceDone(_task.id, d);
+    } else {
+      widget.provider.markOccurrenceDone(_task.id, d);
+    }
     _refresh();
   }
 
   void _skip(DateTime d, {bool defer = false}) {
-    final key = Task.ymdKey(d);
-    if (_task.skipDates.contains(key)) return;
-    widget.provider.updateTask(_task.copyWith(skipDates: [..._task.skipDates, key]));
-    _refresh();
-    if (defer && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已移到下一天（下次将顺延一个完整周期）')),
+    // P2-2：所有重复类型都走 provider.skipOccurrence（内部已统一重排提醒），
+    // 不再用 updateTask 写 skipDates，避免 reminder 链路与列表标记脱节。
+    if (_isSkipped(d)) return;
+    if (defer) {
+      // 「移到下一天」= 把当前 occurrence 跳过 + 在新日期另落一次性副本。
+      final newDay = d.add(const Duration(days: 1));
+      widget.provider.rescheduleOnceOccurrence(
+        _task.id,
+        newDay,
+        origDay: d,
       );
+      _refresh();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '已移到 ${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}（已新建一次性副本）',
+            ),
+            action: SnackBarAction(
+              label: '撤销',
+              onPressed: () {
+                // 撤销 = 把当天的 skipDates 撤销（兜底：仍写入，但弹提示让用户知道）。
+                // 一次性副本需要单独删，这里只能简化处理：若副本标题 = 「原任务标题」
+                // 且 dueDate = newDay，则一并删除。
+                final copy = widget.provider.tasks.firstWhere(
+                  (t) =>
+                      t.title == _task.title &&
+                      t.dueDate != null &&
+                      t.dueDate!.year == newDay.year &&
+                      t.dueDate!.month == newDay.month &&
+                      t.dueDate!.day == newDay.day,
+                  orElse: () => _task,
+                );
+                if (!identical(copy, _task)) {
+                  widget.provider.permanentDelete(copy.id);
+                }
+              },
+            ),
+          ),
+        );
+      }
+      return;
     }
+    widget.provider.skipOccurrence(_task.id, day: d);
+    _refresh();
   }
 
   @override

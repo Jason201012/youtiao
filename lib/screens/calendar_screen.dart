@@ -626,6 +626,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
         builder: (_, controller) => Consumer<TaskProvider>(
           builder: (ctx2, p, _) {
             final tasks = p.tasksDueOn(date);
+            // U7：取 appColors 让暗色模式也能正确显示次要文本。
+            final ext = appColors(ctx2);
             return Column(
               children: [
                 const SizedBox(height: 10),
@@ -648,8 +650,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               color: onBg)),
                       const SizedBox(width: 8),
                       Text('到期 ${tasks.length} 个',
-                          style: const TextStyle(
-                              fontSize: 13, color: AppColors.lightMeta)),
+                          // U7：用 ext.meta 替代硬编码的 lightMeta，否则暗色
+                          // 模式下「M 月 d 日」旁的次要文本仍是浅灰、读不清。
+                          style: TextStyle(fontSize: 13, color: ext.meta)),
                     ],
                   ),
                 ),
@@ -660,12 +663,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                     children: [
                       if (tasks.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 20),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 20),
                           child: Center(
                               child: Text('当天没有到期任务',
-                                  style: TextStyle(
-                                      color: AppColors.lightMeta))),
+                                  style: TextStyle(color: ext.meta))),
                         )
                       else
                         for (final t in tasks)
@@ -707,9 +709,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                       const SizedBox(height: 2),
                                       Text(
                                         '${t.category.label}${t.dueDate != null ? " · ${DateFormat("HH:mm").format(t.dueDate!)}" : ""}',
-                                        style: const TextStyle(
-                                            fontSize: 12,
-                                            color: AppColors.lightMeta),
+                                        // U7：同上。
+                                        style: TextStyle(
+                                            fontSize: 12, color: ext.meta),
                                       ),
                                     ],
                                   ),
@@ -783,7 +785,8 @@ Widget _focusSectionForDay(BuildContext context, DateTime date, Color onBg) {
   final sessions = focus.sessionsOn(date);
   if (sessions.isEmpty) return const SizedBox.shrink();
   final ext = appColors(context);
-  final meta = AppColors.lightMeta;
+  // U7：用 ext.meta 替代硬编码的 lightMeta，暗色模式下「N 次」计数可读。
+  final meta = ext.meta;
   return Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [

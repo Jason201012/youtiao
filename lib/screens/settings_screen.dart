@@ -139,6 +139,168 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return result;
   }
 
+  /// F15：修改 / 重置自动备份口令。
+  ///
+  /// - 已存在口令：先校验旧口令，再写入新口令（防止误改导致旧加密快照永久打不开）。
+  /// - 不存在 / 选「强制重设」：跳过校验，但 UI 必须明确告知「旧加密快照永久无法解开」。
+  Future<void> _changeAutoBackupPassphrase(BuildContext ctx) async {
+    final provider = Provider.of<TaskProvider>(ctx, listen: false);
+    final hasOld = provider.hasAutoBackupPassphrase;
+    String? oldPass;
+    if (hasOld) {
+      final ctl = TextEditingController();
+      String? err;
+      final ok = await showDialog<bool>(
+        context: ctx,
+        builder: (dctx) => StatefulBuilder(
+          builder: (dctx, setLocal) => AlertDialog(
+            title: const Text('先验证当前口令'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: ctl,
+                  obscureText: true,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: '当前口令',
+                    errorText: err,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dctx).pop(false),
+                child: const Text('取消'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dctx).pop(true),
+                child: const Text('忘了旧密码'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  if (!provider.verifyAutoBackupPassphrase(ctl.text)) {
+                    setLocal(() => err = '当前口令不正确');
+                    return;
+                  }
+                  Navigator.of(dctx).pop(true);
+                },
+                child: const Text('下一步'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (ok == null) return;
+      // 走「忘了旧密码」分支：弹强提示确认强制重设。
+      if (ok == true) {
+        oldPass = null;
+      } else {
+        oldPass = ctl.text;
+        if (!provider.verifyAutoBackupPassphrase(oldPass)) return;
+      }
+      if (oldPass == null) {
+        final forced = await _confirmForceReset(ctx);
+        if (forced != true) return;
+      }
+    }
+    // 输入新口令
+    final ctlNew = TextEditingController();
+    final ctlConfirm = TextEditingController();
+    String? errNew;
+    final newPass = await showDialog<String>(
+      context: ctx,
+      builder: (dctx) => StatefulBuilder(
+        builder: (dctx, setLocal) => AlertDialog(
+          title: Text(hasOld ? '设置新口令' : '设置自动备份口令'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (oldPass == null && hasOld)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    '【强制重设】旧加密快照将永久无法解开，请确认你知道这意味着什么。',
+                    style: TextStyle(color: Colors.deepOrange),
+                  ),
+                ),
+              TextField(
+                controller: ctlNew,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: '新口令（至少 6 位）',
+                  errorText: errNew,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctlConfirm,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: '再次输入'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dctx).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final v = ctlNew.text;
+                if (v.length < 6) {
+                  setLocal(() => errNew = '新口令至少 6 位');
+                  return;
+                }
+                if (v != ctlConfirm.text) {
+                  setLocal(() => errNew = '两次输入不一致');
+                  return;
+                }
+                Navigator.of(dctx).pop(v);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (newPass == null || newPass.isEmpty) return;
+    final changed = await provider.changeAutoBackupPassphrase(
+      newPass,
+      oldPass: oldPass,
+      force: oldPass == null && hasOld,
+    );
+    if (!ctx.mounted) return;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(content: Text(changed ? '口令已更新' : '修改失败')),
+    );
+  }
+
+  Future<bool?> _confirmForceReset(BuildContext ctx) {
+    return showDialog<bool>(
+      context: ctx,
+      builder: (dctx) => AlertDialog(
+        title: const Text('强制重设口令？'),
+        content: const Text(
+          '旧口令一旦丢失，无法找回。所有历史加密快照将永久无法解开（仍可手动删掉释放空间）。'
+          '继续将清掉旧口令、写入新口令。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(dctx).pop(true),
+            child: const Text('仍要重设'),
+          ),
+        ],
+      ),
+    );
+  }
+
 /// P1-2：把空闲秒数格式化为可读文案（0→关闭）。
 String _formatIdle(int seconds) {
   if (seconds <= 0) return '关闭';
@@ -713,6 +875,22 @@ String _formatIdle(int seconds) {
                             );
                           }
                         },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // F15：补「修改 / 重置口令」入口。加密开关行只决定「是否启用」，
+                    // 不暴露口令变更路径——找不到入口的用户只能卸装清库。
+                    // 已设过口令：进入「先校验旧口令 → 设新口令」；未设：直接设。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.password,
+                        label: provider.hasAutoBackupPassphrase
+                            ? '修改 / 重置备份口令'
+                            : '设置备份口令',
+                        subtitle: provider.hasAutoBackupPassphrase
+                            ? '修改需先验证当前口令；忘记则可强清（旧加密快照永久无法解开）'
+                            : '未设置口令；可现在设置以启用加密快照',
+                        onTap: () => _changeAutoBackupPassphrase(context),
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),

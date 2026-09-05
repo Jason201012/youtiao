@@ -26,20 +26,42 @@ String _escapeIcs(String s) => s
     .replaceAll('\n', '\\n');
 
 /// 还原 iCal 属性值转义。
-String _unescapeIcs(String s) => s
-    .replaceAll('\\n', '\n')
-    .replaceAll('\\,', ',')
-    .replaceAll('\\;', ';')
-    .replaceAll('\\\\', '\\');
+///
+/// F14：原顺序为 `\\n` → `\n` 先于 `\\\\` → `\\`，会把字面 `\\\\n`
+/// （即 `\\` + 字母 n）错误解码为「`\\` + 换行」。RFC 5545 §3.3.11 规定
+/// 反斜杠先做实体替换，自身作为转义字符最后被解开——故顺序倒置：先解 `\\n`/
+/// `\\,`/`\\;`/`\\t`，最后解 `\\`。这与 RFC 一致且符合多数第三方 .ics 行为。
+String _unescapeIcs(String s) {
+  // 先解「反斜杠 + 实体」：把形如 \n / \, / \; / \t 的转义还原为原始字符。
+  final step1 = s
+      .replaceAll(r'\n', '\n')
+      .replaceAll(r'\,', ',')
+      .replaceAll(r'\;', ';')
+      .replaceAll(r'\t', '\t');
+  // 再解「反斜杠 + 反斜杠」：避免把字面 `\\\\n` 错误解码为 `\<newline`。
+  return step1.replaceAll(r'\\', '\\');
+}
 
 /// 把 DateTime 格式化为本地浮动时间 YYYYMMDDTHHMMSS（不带时区，符合 iCal 浮动时间语义）。
 String _toIcsLocalTime(DateTime d) =>
     '${d.year}${_pad2(d.month)}${_pad2(d.day)}T${_pad2(d.hour)}${_pad2(d.minute)}${_pad2(d.second)}';
 
 /// 把 yyyyMMdd（UNTIL）或 yyyyMMddTHHMMSS 解析为 DateTime；失败返回 null。
+///
+/// F14：
+/// - 行尾 `Z` 表示 UTC，按 RFC 5545 §3.3.5 用 `DateTime.utc(...)` 构造后
+///   `.toLocal()` 转本地；此前直接按本地解读，跨时区设备会把 09:00 UTC
+///   错算为本地 09:00，造成截止时间偏移数小时。
+/// - `VALUE=DATE` 形态（仅日期，无 T 时间段）已由 `digits.length < 14` 分支
+///   自动落到 00:00:00，无需特殊处理。
+/// - `TZID=...` 形态：本 App 无 IANA 时区数据库，按「本地浮动时间」处理
+///   （与导出侧的 `_toIcsLocalTime` 对称——零额外依赖）。
 DateTime? _parseIcsDateTime(String s) {
-  // 去掉可能的 Z / 时区前缀，只取数字。
-  final digits = s.replaceAll(RegExp(r'[^0-9]'), '');
+  final trimmed = s.trim();
+  // F14：行尾 Z → UTC；前缀空白与 CRLF 由 .trim() 去掉。
+  final isUtc = trimmed.toUpperCase().endsWith('Z');
+  final body = isUtc ? trimmed.substring(0, trimmed.length - 1) : trimmed;
+  final digits = body.replaceAll(RegExp(r'[^0-9]'), '');
   if (digits.length < 8) return null;
   final y = int.tryParse(digits.substring(0, 4));
   final mo = int.tryParse(digits.substring(4, 6));
@@ -52,6 +74,9 @@ DateTime? _parseIcsDateTime(String s) {
     se = int.tryParse(digits.substring(12, 14)) ?? 0;
   }
   try {
+    if (isUtc) {
+      return DateTime.utc(y, mo, d, h, mi, se).toLocal();
+    }
     return DateTime(y, mo, d, h, mi, se);
   } catch (_) {
     return null;
@@ -195,12 +220,19 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
       current = null;
       currentKind = null;
     } else if (current != null) {
+      // F14：RFC 5545 §3.1 允许属性带参数，形如 `DTSTART;VALUE=DATE:20240101` /
+      // `DTSTART;TZID=Asia/Shanghai:20240101T090000`。原本 `indexOf(':')`
+      // 直接把前半段当成 key，导致 `DTSTART;VALUE=DATE` 被误识别为完整 key
+      // 而查不到 DUE/DTSTART。修正：先以第一个 `:` 切出「name+params / value」，
+      // 再以 `;` 切出 name，作为存储 key；参数部分留作后续字段级解析用。
       final idx = line.indexOf(':');
       if (idx <= 0) continue;
-      final key = line.substring(0, idx).toUpperCase();
+      final head = line.substring(0, idx);
       final value = line.substring(idx + 1);
+      final name = head.split(';').first.toUpperCase();
+      if (name.isEmpty) continue;
       // 同一 key 可能出现多次（如多 CATEGORIES），用首个即可。
-      current.putIfAbsent(key, () => value);
+      current.putIfAbsent(name, () => value);
     }
   }
   // 3) 逐块映射为 Task。

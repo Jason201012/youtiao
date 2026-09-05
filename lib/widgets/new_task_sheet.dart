@@ -1161,6 +1161,13 @@ class _TaskSheetState extends State<TaskSheet> {
                 selected: _repeat == RepeatType.weekday,
                 onTap: () => _onRepeatChanged(RepeatType.weekday),
               ),
+              // P2-6：补「每月」chip——之前只暴露「每月重复」靠解析或编辑旧任务，
+              // 用户若从未碰过旧任务就找不到入口。
+              _PriorityChip(
+                label: '每月',
+                selected: _repeat == RepeatType.monthly,
+                onTap: () => _onRepeatChanged(RepeatType.monthly),
+              ),
             ],
           ),
           // 每周：选择星期（可多选）

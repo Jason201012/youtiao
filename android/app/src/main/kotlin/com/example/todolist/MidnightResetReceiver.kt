@@ -60,18 +60,31 @@ class MidnightResetReceiver : BroadcastReceiver() {
                         add(Calendar.DAY_OF_MONTH, 1)
                     }
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    if (am.canScheduleExactAlarms()) {
-                        am.setAlarmClock(
-                            AlarmManager.AlarmClockInfo(midnight.timeInMillis, pi),
-                            pi,
-                        )
-                    }
-                } else {
+                // F8：setAlarmClock **不需要** SCHEDULE_EXACT_ALARM 权限
+                // （Android 官方：使用 setAlarmClock / setAndAllowWhileIdle 无需申请精确闹钟权限），
+                // 而 Android 14+ 该权限默认拒绝。旧实现在此加了 canScheduleExactAlarms() 守卫
+                // 且**没有 else 降级** → Android 14+ 用户只要当天不开 App，
+                // 每日 00:00 的重复任务重置 / 回收站清理 / 小组件跨天刷新完全不发生，
+                // 核心循环名存实亡。现去掉守卫，直接排；失败再降级为非精确窗口闹钟。
+                try {
                     am.setAlarmClock(
                         AlarmManager.AlarmClockInfo(midnight.timeInMillis, pi),
                         pi,
                     )
+                } catch (se: SecurityException) {
+                    // 极少数 ROM 仍拒绝：降级为窗口闹钟，至少保证「跨天一定会被唤醒」。
+                    android.util.Log.d(
+                        "MidnightReset",
+                        "setAlarmClock 被拒绝，降级 setWindow：${se.message}",
+                    )
+                    runCatching {
+                        am.setWindow(
+                            AlarmManager.RTC_WAKEUP,
+                            midnight.timeInMillis,
+                            60_000L,
+                            pi,
+                        )
+                    }
                 }
             } catch (_: Exception) {
                 // 安排失败不应导致崩溃
@@ -430,9 +443,18 @@ class MidnightResetReceiver : BroadcastReceiver() {
     }
 
     /** 每月重复在 [y]年[m]月的目标「日」(1-28/29/30/31)；与 Dart Task._baseRepeatsOn 一致。
+     *  P2-3：补上 [monthlyFromEnd]（每月倒数第 N 天 / 最后一天）分支——Dart 侧它优先级
+     *  最高，而原生侧此前完全缺失：App 不在前台时，原生层会在**每月 1 号**误判为循环日
+     *  （monthlyDay 默认 1）并重置任务，真正的月末当天若 App 全天未开则无人重置（整月漏打卡）。
+     *  - monthlyFromEnd > 0：倒数第 N 天（1 = 当月最后一天），优先级最高；
      *  - monthlyWeekday+monthlyWeekIndex 命中：第 N 个周几（idx=5 为最后一个）；
      *  - 否则用 monthlyDay（溢出夹到当月最后一天）。 */
     private fun monthlyTargetDay(obj: JSONObject, y: Int, m: Int): Int {
+        val fromEnd = obj.optInt("monthlyFromEnd", 0)
+        if (fromEnd > 0) {
+            val dim = daysInMonth(y, m)
+            return (dim - fromEnd + 1).coerceIn(1, dim)
+        }
         val wd = obj.optInt("monthlyWeekday", -1)
         val idx = obj.optInt("monthlyWeekIndex", -1)
         if (wd in 1..7 && idx in 1..5) {

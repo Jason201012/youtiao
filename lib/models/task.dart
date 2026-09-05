@@ -198,6 +198,16 @@ class Task {
   /// 旧 JSON 无此字段时缺省为 null（向后兼容）。「结束重复」即把此字段设为昨天。
   final String? repeatUntil;
 
+  /// F7：occurrence 级完成历史（yyyy-MM-dd 列表，date-only）。
+  ///
+  /// 重复任务的完成记录此前只存在单槽 [completedAt] 里，午夜重置会把昨天（及更早）
+  /// 的完成痕迹整体抹掉，导致热力图 / 周报 / 连续打卡天数系统性失真——
+  /// 「连续 30 天完成每天喝水」在统计上只算 1 天。
+  /// 本字段按「日」沉淀完成记录，午夜重置**不清除**它（只清 status / completedAt）。
+  /// 一次性任务也会落一条，便于「完成日」口径统一（统计只读本字段 + [completedAt]）。
+  /// 旧 JSON 无此字段时缺省为空列表（向后兼容，零迁移）。
+  final List<String> doneDates;
+
   /// 每月重复的「日」(1-31)。仅当 [repeat]==[RepeatType.monthly] 且 [monthlyWeekday]==null 时有意义，
   /// 表示「每月 N 号」循环（如「每月 15 号交房租」）。溢出月份（如 31 在 2 月）自动夹到当月最后一天。
   /// 旧 JSON 无此字段时缺省为 1（向后兼容，零迁移）。
@@ -277,6 +287,7 @@ class Task {
     this.repeatAnchor,
     this.skipDates = const [],
     this.repeatUntil,
+    this.doneDates = const [],
     this.monthlyDay = 1,
     this.monthlyWeekday,
     this.monthlyWeekIndex,
@@ -315,6 +326,7 @@ class Task {
     Object? repeatAnchor = _kKeep,
     List<String>? skipDates,
     Object? repeatUntil = _kKeep,
+    List<String>? doneDates,
     int? monthlyDay,
     int? monthlyWeekday,
     int? monthlyWeekIndex,
@@ -352,6 +364,7 @@ class Task {
         skipDates: skipDates ?? this.skipDates,
         repeatUntil:
             repeatUntil == _kKeep ? this.repeatUntil : repeatUntil as String?,
+        doneDates: doneDates ?? this.doneDates,
         monthlyDay: monthlyDay ?? this.monthlyDay,
         monthlyWeekday: monthlyWeekday ?? this.monthlyWeekday,
         monthlyWeekIndex: monthlyWeekIndex ?? this.monthlyWeekIndex,
@@ -387,6 +400,7 @@ class Task {
         'repeatAnchor': repeatAnchor?.toIso8601String(),
         'skipDates': skipDates,
         'repeatUntil': repeatUntil,
+        'doneDates': doneDates,
         'monthlyDay': monthlyDay,
         'monthlyWeekday': monthlyWeekday,
         'monthlyWeekIndex': monthlyWeekIndex,
@@ -457,6 +471,7 @@ class Task {
           : DateTime.parse(j['repeatAnchor'] as String),
       skipDates: _parseSkipDates(j['skipDates']),
       repeatUntil: j['repeatUntil'] as String?,
+      doneDates: _parseSkipDates(j['doneDates']),
       monthlyDay: j['monthlyDay'] as int? ?? 1,
       monthlyWeekday: j['monthlyWeekday'] as int?,
       monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
@@ -681,6 +696,24 @@ class Task {
 
   /// 是否为「重复任务」（任意规则）。
   bool get isRepeating => repeat != RepeatType.none;
+
+  /// F7：某「日」是否已有完成记录（occurrence 级，date-only）。
+  /// 已完成的一次性任务以 [completedAt] 为准，重复任务的历史沉淀在 [doneDates]。
+  bool isDoneOn(DateTime day) {
+    if (doneDates.contains(_ymd(day))) return true;
+    return done && completedAt != null && isSameDay(completedAt!, day);
+  }
+
+  /// F3 / P2-1：重复是否已结束（[repeatUntil] 严格早于 [now] 所在日）。
+  ///
+  /// 「结束重复」把 [repeatUntil] 设为昨天，此后：首页「重复」分区不再收录它
+  /// （回落到日期分区）、提醒不再调度、午夜重置不再重置它。此前该判定只写在
+  /// interval 分支，daily/weekly/monthly 一旦重排就死灰复燃。
+  bool isRepeatEnded(DateTime now) {
+    final u = repeatUntil;
+    if (u == null) return false;
+    return DateTime(now.year, now.month, now.day).isAfter(_parseYmd(u));
+  }
 
   /// 计算标题的拼音首字母串（小写，不含空格）。如「整理」→ "zl"、「整理周会纪要」→ "zlzhjy"。
   /// 依赖 [PinyinHelper]（lpinyin），纯 Dart、无平台调用；非汉字字符（数字/英文/标点）跳过，

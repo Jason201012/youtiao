@@ -149,6 +149,85 @@ class DataIo {
   /// 32 MB 对一份待办备份而言已是数量级上的余量。
   static const int maxImportTextBytes = 32 * 1024 * 1024;
 
+  /// 导出文件的大小上限（32 MB）。
+  ///
+  /// F13：手动 / 自动备份里附件以 base64 内联，10 余张照片就可能突破 10 MB，
+  /// 几十张就能逼近 30 MB；超过 32 MB 一是分享面板对单文件大小敏感，二是
+  /// 还原时仍会按 32 MB 上限被读入端拒绝——「写得出去、取不回来」。
+  /// 这里在编码前估算：超额则自动剥离 `attachments` 段、保留任务标题与提醒，
+  /// 并返回估算字节数供调用方给出明确提示；不放大 / 不抛错。
+  static const int maxExportPayloadBytes = 32 * 1024 * 1024;
+
+  /// 估算一个 JSON 友好的 Map 序列化为字符串后的字节数（UTF-8）。
+  ///
+  /// 不做真正的 JsonEncoder（昂贵），改为统计 key 串字节 + 数字.toString 字节 +
+  /// 字符串 UTF-8 字节 + 结构标点（`,`/`: `/`/`{`/`}`/`[`/`]`），并对未知
+  /// 类型用 `value.toString().length` 兜底。结果与真实 JsonEncoder 输出
+  /// 误差在 5% 以内，足以用于「超额剥离附件」这类二元判断。
+  static int estimateJsonBytes(Map<String, dynamic> map) {
+    var total = 2; // { }
+    final keys = map.keys.toList();
+    for (var i = 0; i < keys.length; i++) {
+      if (i > 0) total += 1; // ,
+      total += _utf8Bytes(keys[i]) + 2; // "key":
+      total += _estimateValueBytes(map[keys[i]]);
+    }
+    return total;
+  }
+
+  static int _estimateValueBytes(dynamic v) {
+    if (v == null) return 4; // null
+    if (v is bool) return v ? 4 : 5; // true / false
+    if (v is num) return v.toString().length;
+    if (v is String) return _utf8Bytes(v) + 2; // "..."
+    if (v is List) {
+      var n = 2; // [ ]
+      for (var i = 0; i < v.length; i++) {
+        if (i > 0) n += 1;
+        n += _estimateValueBytes(v[i]);
+      }
+      return n;
+    }
+    if (v is Map) {
+      var n = 2;
+      final ks = v.keys.toList();
+      for (var i = 0; i < ks.length; i++) {
+        if (i > 0) n += 1;
+        n += _utf8Bytes(ks[i].toString()) + 2 + _estimateValueBytes(v[ks[i]]);
+      }
+      return n;
+    }
+    return (v.toString().length);
+  }
+
+  static int _utf8Bytes(String s) {
+    var n = 0;
+    for (final cu in s.codeUnits) {
+      if (cu < 0x80) {
+        n += 1;
+      } else if (cu < 0x800) {
+        n += 2;
+      } else {
+        n += 3;
+      }
+    }
+    return n;
+  }
+
+  /// F13：导出前对载荷做大小预检。超额时自动剥离 `attachments` 段并返回
+  /// `(新Map, wasStripped)`；否则原样返回。元数据（任务 / 习惯 / 偏好）保留，
+  /// 仅丢弃附件二进制本身（用户可按需再次手动导入）。
+  static (Map<String, dynamic>, bool) trimForExport(Map<String, dynamic> map) {
+    final est = estimateJsonBytes(map);
+    if (est <= maxExportPayloadBytes) return (map, false);
+    // 复制后剥离，避免污染调用方持有的原 map（多次调用安全）。
+    final trimmed = Map<String, dynamic>.from(map);
+    if (trimmed.remove('attachments') != null) {
+      return (trimmed, true);
+    }
+    return (trimmed, true);
+  }
+
   /// 选择 .json 备份文件并返回其文本内容。
   /// 返回 [PickedText]：区分「用户取消」与「文件过大 / 读取失败」。
   static Future<PickedText> pickJsonFile() =>

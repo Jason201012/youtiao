@@ -138,10 +138,25 @@ class UpdateChecker {
         return UpdateResult(hasUpdate: false, error: 'HTTP ${resp.statusCode}');
       }
       final Map<String, dynamic> data = jsonDecode(resp.body);
+      // F12：从 v2.8.0 起，update.json 的 ECDSA 签名升级为强约束——
+      // 远端清单若声明版本 ≥ 2.8.0（不含预发布），则 `signature` 字段必填且必须
+      // 通过内置公钥校验；缺签名 / 验签失败一律拒绝，避免「沿用未签名旧清单
+      // 蒙混过关」。v2.8.0 之前的历史版本维持「可选签名」的渐进策略。
+      final declaredVer = (data['version'] as String? ?? '').trim();
+      final declaredPre = _prerelease(declaredVer);
+      final sig = data['signature'] as String?;
+      final requireSig =
+          UpdatePolicy.isValidVersion(declaredVer) &&
+              declaredPre == null &&
+              compareVersion(declaredVer, '2.8.0') >= 0;
+      if (requireSig && (sig == null || sig.isEmpty)) {
+        return const UpdateResult(
+            hasUpdate: false,
+            error: 'v2.8.0+ 清单必须携带签名（缺失，已拒绝）');
+      }
       // C-2（更新链路签名校验）：若清单携带 `signature` 字段，则强校验其 ECDSA-P256 签名，
       // 确保清单确实来自开发者私钥、未被篡改（即便 Gitee 账户或 TLS 被攻破也无法伪造）。
       // 无签名为「旧版未签名发布」，维持现状继续（渐进式，不破坏历史 release）。
-      final sig = data['signature'] as String?;
       if (sig != null && sig.isNotEmpty) {
         final signable = Map<String, dynamic>.from(data)..remove('signature');
         final ok = _verifyUpdateSignature(

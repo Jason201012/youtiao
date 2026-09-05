@@ -215,7 +215,71 @@ class HabitProvider extends ChangeNotifier {
     }
     await _persistCheckIns();
     notifyListeners();
+    // F10：打卡后必须重排当天的习惯提醒。
+    // 此前只调 _notifyHabitsChanged()（仅重排 23:00 漏卡挽留），打卡提醒原样挂着：
+    // 习惯提醒 21:00、用户 20:00 提前打卡 → 21:00 照常弹「该打卡啦」，
+    // 与打卡事实矛盾（任务侧专门做了 skipToday，习惯侧断链）。
+    // 反向取消打卡同样要重排，把当天提醒恢复回来。
+    _rescheduleReminder(habit);
     // P2-2：打卡变动后重排挽留，避免「已补卡却在 23:00 收到陈旧挽留」。
+    _notifyHabitsChanged();
+  }
+
+  /// F10：按当前打卡状态重排某习惯的每日提醒（未设提醒 / 已归档则跳过）。
+  /// 失败静默——提醒属锦上添花，绝不因调度失败阻断打卡主流程。
+  void _rescheduleReminder(Habit habit) {
+    if (habit.archived || habit.reminderMinute == null) return;
+    NotificationService.instance
+        .scheduleHabitReminder(habit, checkedToday: isCheckedToday(habit))
+        .catchError((_) => false);
+  }
+
+  /// U2：编辑习惯（标题 / 表情 / 颜色 / 星期 / 周目标 / 归档）。
+  ///
+  /// 此前习惯一旦创建就既不能改名也不能删除（`deleteHabit` 定义后全库零调用），
+  /// 名字打错字只能让错误的习惯永远躺在列表、热力图和连续天数榜里。
+  /// 提醒时刻变更沿用 [setReminder] 的「先取消旧提醒再重挂」口径。
+  Future<void> updateHabit(
+    Habit habit, {
+    String? title,
+    String? emoji,
+    int? colorValue,
+    List<int>? weekdays,
+    int? weeklyGoal,
+    bool? archived,
+  }) async {
+    final idx = _habits.indexWhere((h) => h.id == habit.id);
+    if (idx == -1) return;
+    final updated = habit.copyWith(
+      title: (title != null && title.trim().isNotEmpty) ? title.trim() : null,
+      emoji: emoji,
+      colorValue: colorValue,
+      weekdays: weekdays,
+      weeklyGoal: weeklyGoal,
+      archived: archived,
+    );
+    _habits[idx] = updated;
+    await _persistHabits();
+    // 星期/归档变化会影响提醒落点，统一重排（未设提醒时内部跳过）。
+    if (updated.archived) {
+      await NotificationService.instance.cancelHabitReminder(updated.id);
+    } else {
+      _rescheduleReminder(updated);
+    }
+    notifyListeners();
+    _notifyHabitsChanged();
+  }
+
+  /// U3：取消指定日期的打卡记录（补卡的反操作，避免「补错卡无法撤回」）。
+  Future<void> uncheckInOnDay(Habit habit, DateTime day) async {
+    final key = CheckIn.dateKey(day);
+    final before = _checkIns.length;
+    _checkIns.removeWhere(
+        (c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == key);
+    if (_checkIns.length == before) return;
+    await _persistCheckIns();
+    notifyListeners();
+    _rescheduleReminder(habit);
     _notifyHabitsChanged();
   }
 
@@ -229,6 +293,8 @@ class HabitProvider extends ChangeNotifier {
     _checkIns.add(CheckIn.forDay(habit.id, day));
     await _persistCheckIns();
     notifyListeners();
+    // F10：补卡同样可能影响「今天」的提醒（补的就是今天），需重排。
+    _rescheduleReminder(habit);
     // P2-2：补卡同样算「打卡变动」，需重排挽留。
     _notifyHabitsChanged();
   }
