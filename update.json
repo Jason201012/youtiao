@@ -1,8 +1,8 @@
 {
-  "version": "2.8.1",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.1/app-release-2.8.1-arm64.apk",
-  "apkSha256": "cb18865c6aea4d8f2985db1adf3f6f9bb1ec16fbd539a9784d010e0c8d3847bb",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.1",
-  "releaseNotes": "v2.8.1（功能与交互审计报告 v2.8.0 修复批次）\n\n【P1 数据 / 交互正确性】\n① 循环日预览「标记完成 / 跳过一次 / 移到下一天」改走显式 occurrence 入口（markOccurrenceDone / skipOccurrence / rescheduleOnceOccurrence），修复此前写入被 _applyTaskUpdate 强制回填、界面 100% 无效的问题。\n② 应用锁触发瞬间清理根 Navigator 栈，详情页不再盖在解锁门之上。\n③ 任务完成历史（doneDates）+ 结束重复判定（isRepeatEnded）成为统计 / 分区单一事实源。\n④ 通知 id 独立段位、勿扰顺延、仅提醒一次等调度链路修复。\n\n【P2 安全 / 健壮性】\n⑤ update.json v2.8.0+ 强制携带 ECDSA-P256 签名（缺失即拒收）。\n⑥ 手动 / 自动备份 32MB 导出预检 + 超限自动剥离附件并提示；附件收集 / 还原跳过计数。\n⑦ iCal 导入按 RFC 5545 解析 VALUE=DATE / TZID / Z→UTC / 参数切分 / 转义解码顺序。\n⑧ 设置页新增「修改 / 重置备份口令」入口（旧口令校验 + 忘记强清强提示）。\n⑨ 备份偏好白名单补齐 calendar_lunar / 锁屏 / 简报 / 习惯挽留等键；手动备份写入并恢复 prefs。\n⑩ 任务解析「N 天后」tryParse + clamp、模板 monthlyFromEnd 透传、新建任务补「每月」chip、批量编辑 +N 天非法输入拒绝。\n\n【UX 交互收口】\n⑪ 今日页整行点击进详情、日历暗色模式次要文本可读、批量删除加确认对话框。\n\n测试：全量分析与构建零 error；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
-  "signature": "n2GRg/QeSvPAWM87UG2L/F1u1zxwfFj+QzVCErzcHTYfenxbxe1khBTGSFLnLsUue/xzQputkR+95IOvci1ddQ=="
+  "version": "2.8.2",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.2/app-release-2.8.2-arm64.apk",
+  "apkSha256": "d0ea492ec59f24c69b8ea04085115b8c2ee4b275e50a0dbcf6bbf65c04301ddf",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.2",
+  "releaseNotes": "v2.8.2（审计交互项 U1-U20 全量收口 + 数据安全/健壮性补强）\n\n【UX 交互收口】\n① 标签管理「新增标签」由假提示改为真实链路（唤起快速录入预填 #标签）。\n② 习惯支持编辑/删除/补卡（选过去日期补打）；习惯提醒通知加「打卡」action，点击直接打卡。\n③ 命令面板接入移动端：六个主页面顶栏均有入口，/new /trash /tags /export /backup 命令手机可用。\n④ 任务行标题不再被 80px 截断（默认整行可点进详情）；逾期顺延提示原日期并支持撤销；批量删除先确认。\n⑤ 新建/编辑任务加脏数据保护、日期一键清除、过去时间保存前警告。\n⑥ 帮助页全面重写对齐真实交互（邮箱可点复制）；引导三屏适配深色；设置「数据」拆三组。\n⑦ 今日页习惯空态可跳转；日历「回到今天」；勿扰跨天显式说明；专注/番茄设置非法输入明确报错。\n\n【数据安全 / 健壮性】\n⑧ update.json v2.8.0+ 强制 ECDSA-P256 签名校验；备份导出 32MB 预检自动剥离超大附件。\n⑨ iCal 按 RFC 5545 完整解析（VALUE=DATE / TZID / UTC / 转义顺序）；备份偏好白名单补齐；自动备份口令支持修改/重置。\n\n测试：全量分析与构建零 error；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
+  "signature": "6wBwpYJZwU+iz+zby5aJaqvbqd8QDV3x8bEGW+atzjooONuDzEsfNjBpeLPQ2YKnqgzCRsPzcM0iPDWGeSMH9w=="
 }
