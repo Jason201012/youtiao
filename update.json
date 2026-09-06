@@ -1,8 +1,8 @@
 {
-  "version": "2.8.2",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.2/app-release-2.8.2-arm64.apk",
-  "apkSha256": "d0ea492ec59f24c69b8ea04085115b8c2ee4b275e50a0dbcf6bbf65c04301ddf",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.2",
-  "releaseNotes": "v2.8.2（审计交互项 U1-U20 全量收口 + 数据安全/健壮性补强）\n\n【UX 交互收口】\n① 标签管理「新增标签」由假提示改为真实链路（唤起快速录入预填 #标签）。\n② 习惯支持编辑/删除/补卡（选过去日期补打）；习惯提醒通知加「打卡」action，点击直接打卡。\n③ 命令面板接入移动端：六个主页面顶栏均有入口，/new /trash /tags /export /backup 命令手机可用。\n④ 任务行标题不再被 80px 截断（默认整行可点进详情）；逾期顺延提示原日期并支持撤销；批量删除先确认。\n⑤ 新建/编辑任务加脏数据保护、日期一键清除、过去时间保存前警告。\n⑥ 帮助页全面重写对齐真实交互（邮箱可点复制）；引导三屏适配深色；设置「数据」拆三组。\n⑦ 今日页习惯空态可跳转；日历「回到今天」；勿扰跨天显式说明；专注/番茄设置非法输入明确报错。\n\n【数据安全 / 健壮性】\n⑧ update.json v2.8.0+ 强制 ECDSA-P256 签名校验；备份导出 32MB 预检自动剥离超大附件。\n⑨ iCal 按 RFC 5545 完整解析（VALUE=DATE / TZID / UTC / 转义顺序）；备份偏好白名单补齐；自动备份口令支持修改/重置。\n\n测试：全量分析与构建零 error；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
-  "signature": "6wBwpYJZwU+iz+zby5aJaqvbqd8QDV3x8bEGW+atzjooONuDzEsfNjBpeLPQ2YKnqgzCRsPzcM0iPDWGeSMH9w=="
+  "version": "2.8.3",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.3/app-release-2.8.3-arm64.apk",
+  "apkSha256": "2ee73dd28c761420ee681d17603330e07f9f8ff3199c17c9ad68261ded028acb",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.3",
+  "releaseNotes": "v2.8.3（v2.8.2 审计报告 F-01~F-15 全量收口，含 1 个 P0 安全修复）\n\n【安全关键 · P0】\nF-01：更新清单「2.8.0+ 强制 ECDSA-P256 签名」版本比较方向写反（≥ 写成 ≤ 反向），导致线上 2.8.2 及未来版本反而不验签；已修正为声明版本 ≥2.8.0（不含预发布）必须携带合法签名，封死「删 signature 字段绕过 C-2 验签」攻击链，并补判定矩阵单测。\n\n【提醒正确性 · P1】\nF-02：重复提醒通知 id 低位未留星期槽位宽，相邻任务互相顶掉闹钟；重排 id 布局并升级时全量重排旧段位。\nF-03：复杂「每月」重复误用系统按月循环闹钟导致日期漂移/短月漏响；月末/倒数第N天/第N个周几/31号改一次性闹钟 + 启动·回前台·午夜重算。\nF-04：快速录入「每天…」无时间生成哑重复任务；补默认提醒时刻，次日必响。\n\n【健壮性与一致性 · P2】\nF-05：删除撤销按旧索引归位错位 → 锚点定位 + 分区 order 重算。\nF-06：15 分钟跨天守护循环无异常保护 → try/catch 恒续轮询。\nF-07：简报/漏卡挽留周期闹钟烘焙陈旧文案 → 改一次性 + 投递前动态生成。\nF-08：repeatsOn 结束日期「含当日」契约脆弱 → date-only 归一化。\n\n【交互 / 加固 / 文档 · P3】\nF-09：单条右滑删除加二次确认。\nF-10：「每隔 N 天」默认 2→1，清残留脏字段。\nF-11：CSV 公式注入防护补全（新增 csv_safe.dart，覆盖前导空白/制表/回车）。\nF-12：外部调用受保护 notifyListeners → 公开 refreshAfterPrefs()。\nF-13：README/CHANGELOG 对齐实现（下载链接、特性描述、补齐 v2.8.0/1/2 条目）。\nF-14：下载重定向逐跳校验完整路径前缀 + 新增总时长熔断。\nF-15：分享流复制加增量总量熔断，超阈值即中止。\n\n测试：全量分析与构建零 error；三站发布，固定 release keystore 签名，arm64-v8a 单架构。",
+  "signature": "aaBeC0lX3SSuF/B7ZQ77RLotlapkOQFaRaFufAPAeQrYNQ3yn6jt0PHGR3NT6+hRoCPszWIhVoipluh/8LceFg=="
 }

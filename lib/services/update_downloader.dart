@@ -127,10 +127,17 @@ class UpdateDownloader {
       );
       sink = target.openWrite();
       var received = 0;
+      // F-14：总时长闸。`Stream.timeout` 是「块间空闲超时」（每收到一块就重置），
+      // 挡不住每几秒喂一点字节的慢速 drip；这里按墙钟再卡一道总上限。
+      final startedAt = DateTime.now();
       try {
         await for (final chunk
             in response.timeout(UpdatePolicy.requestTimeout)) {
           if (_cancelled) throw const ApkDownloadCancelledException();
+          if (DateTime.now().difference(startedAt) >
+              UpdatePolicy.maxDownloadDuration) {
+            throw const ApkDownloadException('下载总时长超出上限，已中止');
+          }
           sink.add(chunk);
           hashSink.add(chunk);
           received += chunk.length;

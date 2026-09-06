@@ -68,7 +68,7 @@ class _TaskSheetState extends State<TaskSheet> {
   RepeatType _repeat = RepeatType.none;
   TimeOfDay _repeatTime = const TimeOfDay(hour: 7, minute: 0);
   List<int> _repeatWeekdays = [DateTime.monday];
-  int _repeatInterval = 2;
+  int _repeatInterval = 1; // F-10：默认「每 1 天」而非「每 2 天」（与直觉一致）
   DateTime? _repeatAnchor; // interval 锚点，创建时填当天
   DateTime? _repeatUntilDate; // 重复结束日期（date-only，null = 无限循环）
 

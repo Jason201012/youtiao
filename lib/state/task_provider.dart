@@ -9,6 +9,7 @@ import 'package:todolist/services/app_log.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/csv_safe.dart';
 import 'package:todolist/services/backup_crypto.dart';
 import 'package:todolist/services/secure_window.dart';
 import 'package:todolist/services/prefs_backup.dart';
@@ -1041,16 +1042,35 @@ class TaskProvider extends ChangeNotifier {
   /// （其余类型走 OS 周期闹钟，重排代价小、一并刷新无妨）。
   void checkDailyReset() {
     final changed = _resetDailyIfNeeded();
-    if (_notificationsEnabled) _rescheduleIntervalReminders();
-    if (changed) notifyListeners();
+    if (_notificationsEnabled) _rescheduleOneShotReminders();
+    if (changed) {
+      // F-07：简报 / 习惯挽留已改为一次性闹钟（不再由系统按天重发），
+      // 跨天时必须重排，否则 App 一直挂在前台跨过 00:00 后次日就没有简报了。
+      // 钩子由 main.dart 注入，避免 TaskProvider 反向依赖 daily_briefing（会成环）。
+      onDayChanged?.call();
+      notifyListeners();
+    }
   }
 
-  /// F5：仅为 interval 重复任务重挂「下一次 occurrence」的一次性闹钟。
+  /// F-07：跨天回调（由 main.dart 注册为重排简报 / 习惯挽留）。可空，未注册时静默跳过。
+  static void Function()? onDayChanged;
+
+  /// F5 / F-03：为「一次性闹钟」类重复任务重挂下一次 occurrence。
+  ///
+  /// 覆盖两类：
+  /// - interval（每隔 N 天）：系统没有「每隔 N 天」原语，只能排一次性闹钟；
+  /// - monthly 的复杂规则（每月最后一天 / 倒数第 N 天 / 第 N 个周几 / 29~31 号）：
+  ///   目标日每月都在变或在某些月份不存在，交给系统按「号」循环会日期漂移 / 漏响
+  ///   （F-03），故同样按一次性处理。
+  ///
   /// 与 [_rescheduleAllActive] 区分：后者是全量重排（含截止提醒），代价更高，
   /// 不适合每 15 分钟跑一次；这里只补挂真正会丢的那部分。
-  void _rescheduleIntervalReminders() {
+  void _rescheduleOneShotReminders() {
     for (final t in _tasks) {
-      if (t.repeat != RepeatType.interval) continue;
+      final oneShot = t.repeat == RepeatType.interval ||
+          (t.repeat == RepeatType.monthly &&
+              NotificationService.isOneShotMonthly(t));
+      if (!oneShot) continue;
       if (!_shouldScheduleRepeatReminder(t)) continue;
       NotificationService.instance
           .scheduleRepeatReminder(t, playSound: _soundEnabled);
@@ -1063,9 +1083,19 @@ class TaskProvider extends ChangeNotifier {
     if (_midnightWatchStarted) return; // 防止 load() 重复调用叠加观察者/定时器
     _midnightWatchStarted = true;
     // 周期性检查（App 进程存活时有效）
+    //
+    // F-06 修复：循环体此前没有 try/catch，`checkDailyReset()`（内含跨天重置 +
+    // 通知重排）一旦抛出任何异常，整个 Future 立即进入错误态并被**永久**终止，
+    // 之后不再有任何 15 分钟轮询，interval / 复杂月重复的一次性闹钟静默失效，
+    // 且没有任何报错——直到用户下次冷启动。这里整体包 try/catch：
+    // 记录日志后始终返回 true，让守护活到进程结束。
     Future.doWhile(() async {
       await Future.delayed(const Duration(minutes: 15));
-      checkDailyReset();
+      try {
+        checkDailyReset();
+      } catch (e, s) {
+        AppLog.d('[守护] 周期检查异常（已忽略，继续循环）：$e\n$s');
+      }
       return true; // 持续循环直到进程退出
     });
     // 回到前台时补一次（覆盖后台被系统节流、多年未触发的边界）
@@ -1632,6 +1662,15 @@ class TaskProvider extends ChangeNotifier {
     _persist();
   }
 
+  /// F-12：对外暴露的「偏好已变更，请重建」入口。
+  ///
+  /// 备份恢复（[backup_sheet]）写回 SharedPreferences 后需要让设置面板立刻反映新值，
+  /// 此前 UI 层直接调 `Provider.of<TaskProvider>(...).notifyListeners()`——
+  /// notifyListeners 是 ChangeNotifier 的 **protected** 成员，外部调用会触发
+  /// analyzer 的 invalid_use_of_protected_member（当前能跑，但破坏封装、
+  /// 依赖框架的内部容忍）。这里给出公开方法，语义也更明确。
+  void refreshAfterPrefs() => notifyListeners();
+
   /// 把任务在 待办/已完成 之间移动（看板拖拽 / 点击切换）。
   void setStatus(String id, TaskStatus s) {
     final i = _tasks.indexWhere((t) => t.id == id);
@@ -1825,7 +1864,9 @@ class TaskProvider extends ChangeNotifier {
       id: '', // addTask 会分配新 id
       repeat: RepeatType.none,
       repeatWeekdays: const [],
-      repeatInterval: 2,
+      // F-10：一次性副本不再残留 repeatInterval=2 脏字段（repeat 已为 none，
+      // 该字段无意义，保留会让「改回重复」时莫名其妙地变成「每 2 天」）。
+      repeatInterval: 1,
       repeatMinute: null,
       repeatAnchor: null,
       skipDates: const [],
@@ -2068,7 +2109,7 @@ class TaskProvider extends ChangeNotifier {
   }
 
   // ===== 批量编辑（改前快照 + 撤销）=====
-  // 与删除撤销 [_lastBatch] / [_lastBatchIndices] 相互独立，互不覆盖。
+  // 与删除撤销 [_lastBatch] / [_lastBatchAnchors] 相互独立，互不覆盖。
   List<Task> _lastEditBatch = [];
 
   /// 撤销上一次批量编辑：把改前快照逐条写回被改写的任务。
@@ -2118,7 +2159,16 @@ class TaskProvider extends ChangeNotifier {
   // ===== 删除（移入回收站，带撤销）=====
   // 用批量撤销缓冲，使「单个删除」与「多选批量删除」共用同一套撤销逻辑。
   List<Task> _lastBatch = [];
-  List<int> _lastBatchIndices = [];
+
+  /// F-05：删除时记下的**邻居锚点**（每个被删任务一条，与 [_lastBatch] 一一对应）。
+  ///
+  /// 此前记的是删除瞬间的列表下标，撤销时按下标插回。
+  /// 问题是删除后用户可能又新增 / 删除 / 勾选 / 拖拽过，列表早已不是当时的样子——
+  /// 陈旧下标会把任务插到**错误位置**（甚至挤掉无关任务附近），且旧 order 与
+  /// 新邻居不连续，后续手动排序错乱（CHANGELOG v2.5.8 自记的「Bug5 择机延后」）。
+  /// 这里改成记「删除时紧邻的前后任务 id」（跳过同时被删的邻居），
+  /// 撤销时按 id 定位——与 [undoBatchEdit] 的「按 id 定位」口径统一。
+  List<({String? prevId, String? nextId})> _lastBatchAnchors = [];
 
   /// 批量删除指定 id 的任务：从任务列表移除，移入回收站（记录删除时间），
   /// 并取消其全部本地提醒。返回被删除的任务列表（按原始索引升序）。
@@ -2131,6 +2181,26 @@ class TaskProvider extends ChangeNotifier {
       if (i != -1) toRemove[i] = _tasks[i];
     }
     final sortedIdx = toRemove.keys.toList()..sort(); // 升序
+    // F-05：删除前先记锚点——取「左右两侧第一个不被本次删除波及」的任务 id，
+    // 这样多个相邻任务同时被删时，锚点仍指向撤销后依然存在的任务。
+    final anchors = <({String? prevId, String? nextId})>[];
+    for (final i in sortedIdx) {
+      String? prevId;
+      for (var p = i - 1; p >= 0; p--) {
+        if (!toRemove.containsKey(p)) {
+          prevId = _tasks[p].id;
+          break;
+        }
+      }
+      String? nextId;
+      for (var n = i + 1; n < _tasks.length; n++) {
+        if (!toRemove.containsKey(n)) {
+          nextId = _tasks[n].id;
+          break;
+        }
+      }
+      anchors.add((prevId: prevId, nextId: nextId));
+    }
     // 按索引降序删除，保证删除时索引依然有效
     for (final i in sortedIdx.reversed) {
       final r = _tasks.removeAt(i);
@@ -2138,20 +2208,20 @@ class TaskProvider extends ChangeNotifier {
       _trash.insert(0, r.copyWith(deletedAt: DateTime.now()));
     }
     _lastBatch = sortedIdx.map((i) => toRemove[i]!).toList(); // 升序
-    _lastBatchIndices = sortedIdx; // 升序，与 _lastBatch 一一对应
+    _lastBatchAnchors = anchors; // 升序，与 _lastBatch 一一对应
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：新入回收站后重排过期预告
     return _lastBatch;
   }
 
-  /// P2-22：从删除撤销缓冲中移除指定任务（_lastBatch 与 _lastBatchIndices 一一对应，
-  /// 必须同步删除，否则后续撤销会按下标把快照塞回错误的任务）。
+  /// P2-22：从删除撤销缓冲中移除指定任务（_lastBatch 与 [_lastBatchAnchors] 一一对应，
+  /// 必须同步删除，否则后续撤销会按错位锚点把快照塞回错误的位置）。
   void _dropFromUndoBuffer(String id) {
     final k = _lastBatch.indexWhere((t) => t.id == id);
     if (k == -1) return;
     _lastBatch.removeAt(k);
-    if (k < _lastBatchIndices.length) _lastBatchIndices.removeAt(k);
+    if (k < _lastBatchAnchors.length) _lastBatchAnchors.removeAt(k);
   }
 
   /// 删除指定 id 的任务：从任务列表移除，并移入回收站（记录删除时间）。
@@ -2164,21 +2234,67 @@ class TaskProvider extends ChangeNotifier {
   /// 多选批量删除：一次删除多个任务（移入回收站，可整体撤销）。
   void deleteTasks(List<String> ids) => _removeMany(ids);
 
-  /// 撤销上一次删除（支持批量）：从回收站取回并按原始索引归位，恢复其本地提醒。
+  /// 撤销上一次删除（支持批量）：从回收站取回，按**邻居锚点**归位，恢复其本地提醒。
+  ///
+  /// F-05 修复：不再用删除瞬间的下标（列表早已变动，陈旧下标会插错位置），改为
+  /// 按记下的前后邻居 id 定位：
+  ///  1) 前邻仍存在 → 插到它后面（最接近「原位」）；
+  ///  2) 否则后邻仍存在 → 插到它前面；
+  ///  3) 两端都不在了（邻居也被删并已彻底清除等）→ 落到所属**分区末尾**，
+  ///     比按陈旧下标乱插安全得多。
+  /// 归位后对该分区重算 [Task.order]，使手动排序重新连续（旧 order 会与邻居重叠）。
   void undoDelete() {
     if (_lastBatch.isEmpty) return;
     for (var k = 0; k < _lastBatch.length; k++) {
       final r = _lastBatch[k];
-      final idx = _lastBatchIndices[k].clamp(0, _tasks.length);
-      _tasks.insert(idx, r);
+      final anchor = k < _lastBatchAnchors.length
+          ? _lastBatchAnchors[k]
+          : (prevId: null, nextId: null);
       _trash.removeWhere((t) => t.id == r.id);
+      final at = _resolveUndoIndex(r, anchor);
+      _tasks.insert(at, r);
       _scheduleRemindersFor(r);
+      _renumberSection(_sectionNameOf(r));
     }
     _lastBatch = [];
-    _lastBatchIndices = [];
+    _lastBatchAnchors = [];
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：撤销删除后重排
+  }
+
+  /// F-05：按邻居锚点解析撤销插入位置（见 [undoDelete] 的三档兜底）。
+  int _resolveUndoIndex(Task r, ({String? prevId, String? nextId}) anchor) {
+    final prevId = anchor.prevId;
+    if (prevId != null) {
+      final i = _tasks.indexWhere((t) => t.id == prevId);
+      if (i != -1) return i + 1;
+    }
+    final nextId = anchor.nextId;
+    if (nextId != null) {
+      final i = _tasks.indexWhere((t) => t.id == nextId);
+      if (i != -1) return i;
+    }
+    // 两端锚点都失效：落所属分区末尾（分区内最后一个任务的后面）；
+    // 分区里一个任务都没有时插到列表末尾。
+    final section = _sectionNameOf(r);
+    for (var i = _tasks.length - 1; i >= 0; i--) {
+      if (_sectionNameOf(_tasks[i]) == section) return i + 1;
+    }
+    return _tasks.length;
+  }
+
+  /// F-05：把某分区内任务的 [Task.order] 按当前显示顺序重算为 1,2,3…，
+  /// 供撤销归位 / 外部批量改动后消除 order 空洞与重复，保证手动排序语义稳定。
+  void _renumberSection(String section) {
+    final list = homeTasks[section];
+    if (list == null || list.isEmpty) return;
+    for (var i = 0; i < list.length; i++) {
+      final idx = _tasks.indexWhere((x) => x.id == list[i].id);
+      if (idx != -1) {
+        _tasks[idx] = _tasks[idx].copyWith(order: (i + 1).toDouble());
+      }
+    }
   }
 
   /// 从回收站恢复任务到任务列表（清除 deletedAt，放回顶部），并恢复其本地提醒。
@@ -2221,7 +2337,7 @@ class TaskProvider extends ChangeNotifier {
     // P2-22：清空回收站后同样作废删除撤销缓冲（附件已物理删除，不允许复活）。
     if (_lastBatch.isNotEmpty) {
       _lastBatch = [];
-      _lastBatchIndices = [];
+      _lastBatchAnchors = [];
     }
     notifyListeners();
     _persist();
@@ -2375,15 +2491,7 @@ class TaskProvider extends ChangeNotifier {
       p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
   static String _catLabel(Category c) =>
       c == Category.work ? '工作' : c == Category.life ? '生活' : '学习';
-  static String _esc(String s) {
-    final v = s.replaceAll('"', '""');
-    // S11 修复：CSV 公式注入防护。以 = + - @ 开头的单元格在 Excel/WPS 中会被当作公式执行
-    // （如任务名为 "=HYPERLINK(...)" 时）。前置单引号强制按文本处理（OWASP CSV Injection 惯例）。
-    if (v.isNotEmpty && const ['=', '+', '-', '@'].contains(v[0])) {
-      return "'$v";
-    }
-    return v;
-  }
+  static String _esc(String s) => csvCell(s);
 
   /// P1-10：从任务附件派生「附件：a.jpg(1.2MB), b.m4a(34KB)」摘要文本。
   /// [enabled] 为 false 或任务无附件时返回空串；超长截断省略，避免单元格过大。

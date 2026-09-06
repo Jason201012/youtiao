@@ -4,6 +4,7 @@ import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/checkin.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/csv_safe.dart';
 
 /// 习惯 / 打卡的状态层：管理习惯列表、每日打卡记录、连续天数统计与持久化。
 ///
@@ -524,15 +525,7 @@ class HabitProvider extends ChangeNotifier {
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   static String _fmtMinute(int m) =>
       '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
-  static String _esc(String s) {
-    final v = s.replaceAll('"', '""');
-    // S11 修复：CSV 公式注入防护。以 = + - @ 开头的单元格在 Excel/WPS 中会被当作公式执行。
-    // 前置单引号强制按文本处理（OWASP CSV Injection 惯例）。
-    if (v.isNotEmpty && const ['=', '+', '-', '@'].contains(v[0])) {
-      return "'$v";
-    }
-    return v;
-  }
+  static String _esc(String s) => csvCell(s);
 
   Future<void> _persistHabits() async {
     try {

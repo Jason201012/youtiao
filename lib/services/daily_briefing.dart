@@ -168,10 +168,15 @@ DailyBrief buildMorningBriefFromState(
 /// 故按 [NotificationService.nextBriefingTime] 算出的**投递时刻**聚合，
 /// 保证「周二 07:30 送达的晨报」用的是周二的口径，而非排程当下（周一）的口径。
 ///
-/// 已知残留限制：通知以 `matchDateTimeComponents=time` 每日重复，同一份文案会按天重发；
-/// 若用户连续多日不打开 App（不触发启动 / 回到前台重排），第二日起内容仍会滞后。
-/// 彻底解决需在原生侧每日重烘焙（同 TodayWidgetProvider 直读 youtiao.db 的套路），
-/// 改动较大且会让简报口径在 Kotlin / Dart 两边各存一份，暂不实施。
+/// F-07 修复（原「已知残留限制」）：通知曾以 `matchDateTimeComponents=time` 每日重复，
+/// 同一份烘焙文案会按天重发，用户连续多日不开 App 时第二日起内容全部滞后
+/// （「今日完成任务 0 个」连念数日）。现 [NotificationService.scheduleBriefing]
+/// 改为**一次性闹钟**，只投递下一班，内容必然对应投递日。
+///
+/// 代价与兜底：简报不再具备「系统侧每日自循环」能力，完全依赖本函数的重排时机——
+/// 已在 `main.dart` 的启动 / `AppLifecycleState.resumed` / 设置页切换三处挂载，
+/// 另外 15 分钟守护（[TaskProvider.checkDailyReset]）在跨天时也会重排，
+/// 覆盖「App 一直挂在后台跨过 00:00」的边界。
 Future<void> rescheduleBriefings(
     TaskProvider task, FocusProvider focus, HabitProvider habit) async {
   final svc = NotificationService.instance;

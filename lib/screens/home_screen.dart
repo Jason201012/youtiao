@@ -1178,8 +1178,33 @@ class _DismissibleTask extends StatelessWidget {
           onEdit?.call();
           return false;
         }
-        // 向右滑 = 删除：允许 dismiss。
-        return true;
+        // 向右滑 = 删除。
+        // F-09 修复：右滑是**最顺手**的方向（拇指自然起手），此前却无确认直接删除，
+        // 与「批量删除有二次确认、清空回收站有二次确认」的其它破坏性操作口径不一致，
+        // 只靠 5 秒 SnackBar 兜底（容易错过）。这里补一层轻量确认，
+        // 保留滑删的顺手、去掉误触的杀伤力。
+        final name = task.title.trim();
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (d) => AlertDialog(
+            title: const Text('删除任务？'),
+            content: Text(name.isEmpty
+                ? '该任务将移入回收站（可在 5 秒内撤销）。'
+                : '「$name」将移入回收站（可在 5 秒内撤销）。'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(d, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: error),
+                onPressed: () => Navigator.pop(d, true),
+                child: const Text('删除'),
+              ),
+            ],
+          ),
+        );
+        return confirmed ?? false;
       },
       onDismissed: (_) {
         // 只有右滑（startToEnd）会走到这里。

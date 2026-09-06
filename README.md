@@ -6,7 +6,7 @@
 
 开源协议 **[MIT](LICENSE)**
 
-> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额按仓 1 GB）。发布仓依次承接：≤v2.4.0 在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**，v2.4.1~v2.7.7 在 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**，**v2.7.8 起在 [youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**。点此直达最新版 👉 [v2.7.8 下载](https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.7.8)
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额按仓 1 GB）。发布仓依次承接：≤v2.4.0 在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**，v2.4.1~v2.7.7 在 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**，**v2.7.8 起在 [youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**。点此直达最新版 👉 [v2.8.2 下载](https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.2)
 
 ## ✨ 功能特性
 
@@ -23,7 +23,7 @@
 - ✅ **多选批量删除**：长按任务进入多选模式，可一次勾选多个任务批量删除（支持撤销）
 - 🛡️ **后台提醒守护**：前台服务常驻，保证在国产 ROM（ColorOS / MIUI 等）上划掉后台后定时提醒仍能准点触发；看板页提供守护状态卡
 - 🔎 **首页筛选**：筛选芯片（全部/待办/已完成/逾期）与看板统计卡联动，点击统计卡直达对应筛选
-- 🗓️ **首页按日期分区**：「逾期 / 今天 / 未来 / 每天」四段 + 「已完成」，按截止日期真正落段（无截止归入「未来」，每日提醒任务独占「每天」），互不重叠；空分区自动隐藏，各分区标题字号统一
+- 🗓️ **首页按日期分区**：「逾期 / 今天 / 未来 / 每天」四段 + 「已完成」，按截止日期真正落段（无截止归入「今天」，每日提醒任务独占「每天」），互不重叠；空分区自动隐藏，各分区标题字号统一
 - 📅 **日历（月 / 周视图 + 拖拽改期）**：日历 Tab 支持「月视图 / 周视图」分段切换；月视图按每天完成数做热力着色，当天到期任务以条状呈现；任务条支持长按拖拽到任意日期格**松手即改期**（自动重排提醒），已完成任务灰显不可拖；点日期查看当天完成明细
 - 🕛 **每日任务 00:00 自动重置**：无需打开 App，每天午夜由系统闹钟后台将已完成的每日任务重置为未完成，真正实现「每天循环打卡」
 - 🎨 **设计**：Material 3 设计语言

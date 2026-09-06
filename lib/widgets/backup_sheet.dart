@@ -403,9 +403,11 @@ class BackupSheet {
         try {
           await applyAppPrefs(Map<String, dynamic>.from(data['prefs'] as Map));
           // 主动触发监听者刷新：偏好字段集中在 TaskProvider / ThemeProvider，
-          // notifyListeners() 强制重建即可让设置面板立刻反映新值。
+          // F-12：走 TaskProvider 公开的 refreshAfterPrefs()，不再从 UI 外部直接
+          // 调用受保护的 notifyListeners()（会触发 invalid_use_of_protected_member）。
           try {
-            Provider.of<TaskProvider>(context, listen: false).notifyListeners();
+            Provider.of<TaskProvider>(context, listen: false)
+                .refreshAfterPrefs();
           } catch (_) {}
         } catch (e) {
           failures.add('偏好（$e）');

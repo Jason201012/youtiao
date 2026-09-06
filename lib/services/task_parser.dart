@@ -111,7 +111,7 @@ class ParsedTask {
     this.tags = const [],
     this.repeat = RepeatType.none,
     this.repeatWeekdays = const [],
-    this.repeatInterval = 2,
+    this.repeatInterval = 1, // F-10：与 Task 默认一致（每 1 天）
     this.repeatMinute,
     this.monthlyDay = 1,
     this.monthlyWeekday,
@@ -550,7 +550,16 @@ class TaskParser {
       repeat: repeat,
       repeatWeekdays: repeatWeekdays,
       repeatInterval: repeatInterval,
-      repeatMinute: repeat != RepeatType.none && hour != null ? hour * 60 + (minute ?? 0) : null,
+      // F-04 修复：解析到重复规则却没写时刻时，此前 repeatMinute 为 null，
+      // 而调度层 `if (!task.isRepeating || task.repeatMinute == null) return false`
+      // 会让重复提醒**完全不排**——任务出现在「重复」分区、今天 23:59 靠一次性
+      // 截止提醒响一次，之后每天循环却永久哑火（用户以为设好了每日提醒）。
+      // 对照编辑弹层：选「每天」时时刻默认 07:00，永远不会出现 repeatMinute=null，
+      // 两条创建路径行为不一致。这里补上默认提醒时刻（与仅给日期时的默认 9 点一致），
+      // 保证「每天喝水」这类无时刻输入也能每天按时响。
+      repeatMinute: repeat != RepeatType.none
+          ? (hour != null ? hour * 60 + (minute ?? 0) : _defaultHour * 60)
+          : null,
       monthlyDay: monthlyDay,
       monthlyWeekday: monthlyWeekday,
       monthlyWeekIndex: monthlyWeekIndex,

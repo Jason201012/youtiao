@@ -7,6 +7,11 @@ import 'package:pointycastle/export.dart';
 
 import 'package:todolist/services/update_policy.dart';
 
+// F-01：compareVersion / prereleaseOf 已迁入 update_policy.dart（单一真源），
+// 此处再导出一次，保证既有 import 方（`import '.../update_checker.dart'`）无需改动。
+export 'package:todolist/services/update_policy.dart'
+    show compareVersion, prereleaseOf;
+
 /// Gitee 仓库信息。
 /// 注意：Gitee 自 2026-08 起对匿名 api/v5 访问统一返回 403，
 /// 因此「检查更新」不再调用发行版 API，改为读取仓库内的静态清单文件
@@ -46,75 +51,6 @@ class UpdateResult {
   const UpdateResult({required this.hasUpdate, this.info, this.error});
 }
 
-/// 比较两个语义化版本号。
-/// 返回 >0 表示 [b] 比 [a] 新（即 [a] 旧），<0 表示 [a] 更新，0 相等。
-/// 支持 "2.1.2" 与 "v2.2.0" 混用（自动去 v 前缀），段数不足补 0。
-///
-/// S8 修复：按 semver 正确处理预发布版本。此前对每一段先截断非数字后缀再比，
-/// 导致 "2.5.7-beta" 与 "2.5.7" 数值部分相同被判相等，装了 beta 的用户收不到
-/// 同号正式版推送。现规则：数值段相同且一方带预发布后缀、另一方为正式版时，
-/// **正式版更高**（预发布 < 正式版），符合 semver 2.0.0 规范。
-int compareVersion(String a, String b) {
-  List<int> parseVer(String v) => v
-      .replaceAll(RegExp(r'^v'), '')
-      .split('.')
-      .map((s) {
-        final digits = s.split(RegExp(r'[^0-9]')).first;
-        return int.tryParse(digits.isEmpty ? '0' : digits) ?? 0;
-      })
-      .toList();
-  final pa = parseVer(a);
-  final pb = parseVer(b);
-  final n = pa.length > pb.length ? pa.length : pb.length;
-  for (var i = 0; i < n; i++) {
-    final la = i < pa.length ? pa[i] : 0;
-    final lb = i < pb.length ? pb[i] : 0;
-    if (la != lb) return lb.compareTo(la); // b 大则 >0
-  }
-  // 数值段完全相同：比较预发布后缀。semver 规定「带预发布的版本低于同号正式版」。
-  final preA = _prerelease(a);
-  final preB = _prerelease(b);
-  if (preA == null && preB == null) return 0; // 均为正式版且数值相等
-  if (preA == null) return -1; // a 是正式版（更高），b 是预发布 → a 更新 → <0
-  if (preB == null) return 1; // b 是正式版（更高）→ b 更新 → >0
-  return _comparePrerelease(preA, preB);
-}
-
-/// 提取版本串中的预发布后缀（不含前导 '-'），如 "2.5.7-beta" → "beta"；
-/// 无预发布则返回 null（正式版）。
-String? _prerelease(String v) {
-  final cleaned = v.replaceAll(RegExp(r'^v'), '');
-  final idx = cleaned.indexOf('-');
-  if (idx < 0) return null;
-  final p = cleaned.substring(idx + 1);
-  return p.isEmpty ? null : p;
-}
-
-/// 按 semver 比较两段预发布标识符（点分、数字优先于字母、缺段者更低）。
-int _comparePrerelease(String a, String b) {
-  final aa = a.split('.');
-  final bb = b.split('.');
-  final n = aa.length > bb.length ? aa.length : bb.length;
-  for (var i = 0; i < n; i++) {
-    if (i >= aa.length) return -1; // a 较短 → a 更低
-    if (i >= bb.length) return 1; // b 较短 → b 更低
-    final x = aa[i];
-    final y = bb[i];
-    final xn = int.tryParse(x);
-    final yn = int.tryParse(y);
-    if (xn != null && yn != null) {
-      if (xn != yn) return xn.compareTo(yn);
-    } else if (xn != null) {
-      return -1; // 数字标识符 < 字母标识符（semver）
-    } else if (yn != null) {
-      return 1;
-    } else {
-      if (x != y) return x.compareTo(y);
-    }
-  }
-  return 0;
-}
-
 /// 应用内更新检测：拉取 Gitee 最新发行版并与本地版本比较。
 class UpdateChecker {
   /// 拉取 Gitee 最新发行版并判断是否比本地新。
@@ -143,12 +79,12 @@ class UpdateChecker {
       // 通过内置公钥校验；缺签名 / 验签失败一律拒绝，避免「沿用未签名旧清单
       // 蒙混过关」。v2.8.0 之前的历史版本维持「可选签名」的渐进策略。
       final declaredVer = (data['version'] as String? ?? '').trim();
-      final declaredPre = _prerelease(declaredVer);
       final sig = data['signature'] as String?;
-      final requireSig =
-          UpdatePolicy.isValidVersion(declaredVer) &&
-              declaredPre == null &&
-              compareVersion(declaredVer, '2.8.0') >= 0;
+      // F-01 修复：判定收进 [UpdatePolicy.requiresMandatorySignature] 纯函数。
+      // 原实现在调用点写 `compareVersion(declaredVer, '2.8.0') >= 0`，方向恰好颠倒
+      // （compareVersion 返回 >0 表示「参数 b 更新」），结果 2.8.2 及未来所有新版本
+      // 反而不强制签名——攻击者删掉 signature 字段即可绕过本轮刚上线的 C-2 验签。
+      final requireSig = UpdatePolicy.requiresMandatorySignature(declaredVer);
       if (requireSig && (sig == null || sig.isEmpty)) {
         return const UpdateResult(
             hasUpdate: false,

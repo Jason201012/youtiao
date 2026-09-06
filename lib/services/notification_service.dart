@@ -83,7 +83,7 @@ class NotificationService {
   ///
   /// 【通知 id 段分配表（固化，新增 id 必须避开以下区间；S10 已改为互不重叠的大区段）】
   /// - 任务一次性截止提醒：_notifyIdOf(id)            ≈ [0, ~2.1e9]（纯数字任务 id）
-  /// - 任务重复提醒：      _repeatNotifyIdOf(id, d)   ≈ [2.0e9, ~2.1e9]（独立大连段）
+  /// - 任务重复提醒：      repeatNotifyIdOf(id, d)   ≈ [1.6e9, ~1.84e9]（独立大连段，每任务 8 槽）
   /// - 专注完成通知：      777777（固定）
   /// - 专注进行中常驻：    777778（固定）
   /// - 习惯提醒：          _habitNotifyIdOf(id, d)    ≈ [1.0e9, ~1.001e9]（独立大连段）
@@ -182,14 +182,28 @@ class NotificationService {
   }
 
   /// 重复提醒使用独立 id 段，与一次性「截止提醒」（0..N）、习惯提醒（1e9+）都互不重叠，
-  /// 避免同一任务的两种提醒互相 cancel 掉。dayIndex：daily / interval 用 0；
+  /// 避免同一任务的两种提醒互相 cancel 掉。dayIndex：daily / interval / monthly 用 0；
   /// weekly / weekday 用 1..7（对应周一..周日），每个星期一个独立 id。
   ///
   /// S10 修复：原方案用 `id + 500000`，当任务自增 id 增长到 50 万后即与一次性提醒段
-  /// 重叠、互相顶掉。现统一落到 20 亿起的独立大连段，彻底消除远期碰撞。
-  static int _repeatNotifyIdOf(String id, int dayIndex) {
+  /// 重叠、互相顶掉。现统一落到独立大连段，彻底消除远期碰撞。
+  ///
+  /// F-02 修复：旧布局 `2000000000 + base%1e8 + dayIndex` 把星期槽**直接加在任务 id 低位**，
+  /// 没有为它预留位宽——任务 id 连续自增时，只要 `A + dA == B + dB` 两个任务就会拿到
+  /// 完全相同的通知 id（枚举 8..30 × 槽 0..7 有 28 组碰撞），Android 对同 id 的后一次
+  /// zonedSchedule 会**覆盖**前一次，其中一条重复提醒就此静默消失（如「任务8 每周一」
+  /// 与「任务9 每天」都算出 2000000009）。现为每个任务预留 8 个连续槽位（`slot * 8`），
+  /// 与习惯提醒 `_habitNotifyIdOf` 的 `* 10` 同思路：
+  ///
+  ///   1600000000 + (base % 30000000) * 8 + (dayIndex % 8)
+  ///
+  /// 取值区间 [1600000000, 1839999999]，既在 int32 上限（2147483647）内，
+  /// 又避开 snooze 段 [1900000000, 1909999999] 与习惯段 [1000000000, 1000999907]。
+  /// 升级后 [_purgeLegacyNotificationsIfNeeded] 会一次性清掉旧段位闹钟并全量重排。
+  static int repeatNotifyIdOf(String id, int dayIndex) {
     final base = int.tryParse(id) ?? id.hashCode;
-    return 2000000000 + (base % 100000000).abs() + (dayIndex % 8);
+    final slot = (base % 30000000).abs();
+    return 1600000000 + slot * 8 + (dayIndex % 8);
   }
 
   /// 仅比较「年月日」，忽略时分秒（用于判断 completedAt 是否为今天）。
@@ -228,9 +242,14 @@ class NotificationService {
     _initialized = true;
   }
 
-  /// 通知 id 段方案版本（S10）。升级到新段分配后用于一次性清理旧通知，
+  /// 通知 id 段方案版本（S10 = 1，F-02 = 2）。升级到新段分配后用于一次性清理旧通知，
   /// 避免旧 id 段遗留的提醒与新建提醒混淆。
-  static const int _kNotifIdScheme = 1;
+  ///
+  /// F-02：重复提醒 id 由「base + dayIndex」改为「base*8 + dayIndex」布局，
+  /// 存量用户系统里已排的旧 id 闹钟若不清理，会与新 id 并存（旧闹钟无人取消、
+  /// 永远按旧日期响）。这里把方案号 +1，init 时 cancelAll 一次，随后由
+  /// TaskProvider 的全量重排按新布局重建。
+  static const int _kNotifIdScheme = 2;
   static const String _kNotifIdSchemePref = 'notif_id_scheme';
 
   /// 仅首次（或跨版本）执行一次：清掉旧 id 段方案遗留的全部通知，随后正常重排
@@ -597,7 +616,7 @@ class NotificationService {
               ? when.add(const Duration(days: 1))
               : (when.isAfter(now) ? when : when.add(const Duration(days: 1)));
           await _plugin.zonedSchedule(
-            _repeatNotifyIdOf(task.id, 0),
+            repeatNotifyIdOf(task.id, 0),
             task.repeatSummary,
             task.title.isNotEmpty ? task.title : '无标题任务',
             when,
@@ -622,7 +641,7 @@ class NotificationService {
           for (final wd in weeklyDays) {
             final when = nextWeekday(wd);
             await _plugin.zonedSchedule(
-              _repeatNotifyIdOf(task.id, wd),
+              repeatNotifyIdOf(task.id, wd),
               task.repeatSummary,
               task.title,
               when,
@@ -647,7 +666,7 @@ class NotificationService {
           }
           final when = next.isAfter(now) ? next : next.add(const Duration(days: 1));
           await _plugin.zonedSchedule(
-            _repeatNotifyIdOf(task.id, 0),
+            repeatNotifyIdOf(task.id, 0),
             task.repeatSummary,
             task.title.isNotEmpty ? task.title : '无标题任务',
             when,
@@ -668,8 +687,16 @@ class NotificationService {
             AppLog.d('[通知] 未调度 monthly 提醒 id=${task.id}：缺提醒时间');
             return false;
           }
+          // F-03 修复：复杂月规则**不能**交给系统按「号」循环。
+          // matchDateTimeComponents=dayOfMonthAndTime 会让系统之后每个月在首次那个「号」上
+          // 重复，而「每月最后一天 / 倒数第 N 天 / 第 N 个周几 / 每月 31 号」的目标日
+          // 每月都在变（或在该月根本不存在）→ 次月起日期漂移、短月整月漏响。
+          // 这里改为一次性闹钟（与 interval 同套路），由 App 启动 / 回前台 /
+          // 午夜重置 / 15 分钟守护重新计算下一次落点。
+          // 仅「每月固定 X 号且 X ≤ 28」这种每部都有、且号不变的情形保留系统月循环。
+          final useSystemMonthlyLoop = !isOneShotMonthly(task);
           await _plugin.zonedSchedule(
-            _repeatNotifyIdOf(task.id, 0),
+            repeatNotifyIdOf(task.id, 0),
             task.repeatSummary,
             task.title.isNotEmpty ? task.title : '无标题任务',
             when,
@@ -678,11 +705,12 @@ class NotificationService {
             androidScheduleMode: mode,
             uiLocalNotificationDateInterpretation:
                 UILocalNotificationDateInterpretation.absoluteTime,
-            matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
+            matchDateTimeComponents:
+                useSystemMonthlyLoop ? DateTimeComponents.dayOfMonthAndTime : null,
           );
           AppLog.d('[通知] 已调度重复提醒(monthly) id=${task.id} '
               '${task.repeatSummary} @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-              '(skipToday=$skipToday)');
+              '(skipToday=$skipToday, 系统月循环=$useSystemMonthlyLoop)');
           return true;
 
         case RepeatType.none:
@@ -694,6 +722,18 @@ class NotificationService {
       return false;
     }
   }
+
+  /// F-03：月重复是否为「复杂规则」——目标日每月都会变，或在某些月份根本不存在。
+  ///
+  /// 命中时不能交给系统 `dayOfMonthAndTime` 循环（会被钉死在首次那个「号」上），
+  /// 必须像 interval 一样排一次性闹钟并在启动 / 回前台 / 午夜 / 守护周期重算：
+  /// - `monthlyFromEnd > 0`：每月最后一天 / 倒数第 N 天（月末日随月份漂移）；
+  /// - `monthlyWeekday != null`：第 N 个周几 / 最后一个周几（日期每月不同）；
+  /// - `monthlyDay > 28`：29/30/31 号在部分月份不存在（2 月、小月会漏响或漂移）。
+  static bool isOneShotMonthly(Task task) =>
+      task.monthlyFromEnd > 0 ||
+      task.monthlyWeekday != null ||
+      task.monthlyDay > 28;
 
   /// F3：重复是否已结束（[Task.repeatUntil] 严格早于今天）。
   /// 与 [Task.isRepeatEnded] 同一口径，此处独立实现以避免 service 反向依赖 Provider。
@@ -750,7 +790,13 @@ class NotificationService {
         DateTime(candidate.year, candidate.month, candidate.day),
         DateTime(now.year, now.month, now.day),
       );
-      if (candidate.isAfter(now) && !(skipToday && isToday)) return candidate;
+      // F-03：顺带尊重 skipDates / repeatUntil——一次性闹钟排下去就不会再算，
+      // 若落点恰是被跳过的一天（或已超结束日），这一次会白响。
+      final hit = task.repeatsOn(
+          DateTime(candidate.year, candidate.month, candidate.day));
+      if (candidate.isAfter(now) && !(skipToday && isToday) && hit) {
+        return candidate;
+      }
       mo += 1;
       if (mo > 12) {
         mo = 1;
@@ -759,7 +805,14 @@ class NotificationService {
     }
     // 极端兜底（正常 3 步内必命中）：返回两个月后的目标日。
     final d = targetDay(y, mo);
-    return tz.TZDateTime(loc, y, mo, d, hh, mm);
+    final fallback = tz.TZDateTime(loc, y, mo, d, hh, mm);
+    // F-03：三个月内都命中不了（skipDates 密集 / 已临近 repeatUntil）→ 本次不提醒，
+    // 与 interval 的 S11 口径一致，宁可不响也不在错误的日期响。
+    if (!task.repeatsOn(
+        DateTime(fallback.year, fallback.month, fallback.day))) {
+      return null;
+    }
+    return fallback;
   }
 
   /// 计算 interval 任务下一次 occurrence 的「日期+时刻」（date-only 锚点 + N 天步进）。
@@ -819,7 +872,7 @@ class NotificationService {
   /// 按任务 id 取消全部「重复提醒」通知（daily 用 dayIndex=0；weekly/weekday 用 1..7）。
   Future<void> cancelRepeatReminder(String id) async {
     for (var d = 0; d <= 7; d++) {
-      await _plugin.cancel(_repeatNotifyIdOf(id, d));
+      await _plugin.cancel(repeatNotifyIdOf(id, d));
     }
   }
 
@@ -1081,6 +1134,14 @@ class NotificationService {
   /// false 为晨间「今日待办」。文案由调用方在排程时烘焙进 [title]/[body]。
   /// 复用同一固定 id（[briefingEveningNotifyId]/[briefingMorningNotifyId]），
   /// 修改时间后重新调用即覆盖旧通知（与习惯每日提醒同模式）。
+  ///
+  /// F-07 修复：此前以 `matchDateTimeComponents=time` 让系统每天重复，而 title/body
+  /// 是**排程那一刻烘焙**的（系统闹钟到点时 App 未必在内存、没机会重算）。用户连续
+  /// 几天不打开 App 时，第二天起每天弹出的其实是「排程那天」的旧数据——
+  /// 「今日完成任务 0 个」会连着念好几天。现改为**一次性闹钟**：只投递下一班，
+  /// 内容必然对应投递日；下一次的简报由「启动 / 回到前台 / 数据变动」的重排重建
+  /// （`rescheduleBriefings` 已挂在这些时机上）。代价是长期不开 App 时不再连续推送，
+  /// 但「不推」永远优于「推错的口径」。
   Future<bool> scheduleBriefing(
     bool evening,
     int hour,
@@ -1126,7 +1187,7 @@ class NotificationService {
         androidScheduleMode: mode,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: DateTimeComponents.time,
+        // F-07：不再让系统按天重复（旧文案会连日重发），改为一次性投递下一班。
       );
       AppLog.d('[通知] 已调度${evening ? "晚间" : "晨间"}简报 -> $when (id=$id)');
       return true;
@@ -1141,8 +1202,10 @@ class NotificationService {
   Future<void> cancelBriefing(bool evening) =>
       _plugin.cancel(evening ? briefingEveningNotifyId : briefingMorningNotifyId);
 
-  /// P1-7：调度「习惯漏卡挽留」通知——每天 [HabitNudge.nudgeMinute]（23:00）
-  /// 重复触发一条本地通知（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
+  /// P1-7：调度「习惯漏卡挽留」通知——在下一个 [HabitNudge.nudgeMinute]（23:00）
+  /// 触发一条本地通知（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
+  /// F-07：改为**一次性**投递（不再按天重复），理由与 [scheduleBriefing] 相同——
+  /// 「今天漏了哪几个习惯」是当天口径，系统按天重发会把过期名单反复推给用户。
   ///
   /// 文案由调用方在**排程时**烘焙（[HabitNudge.text]），因为系统闹钟到点时 App
   /// 未必在内存、没有机会重算；因此 App 每次启动 / 习惯或打卡变动时都要重排。
@@ -1205,7 +1268,8 @@ class NotificationService {
         androidScheduleMode: mode,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: DateTimeComponents.time,
+        // F-07：同简报——不再按天重复（漏卡名单会过期），只投递今晚这一班；
+        // 次日的挽留由启动 / 回前台 / 打卡变动时的 rescheduleHabitNudge 重建。
       );
       AppLog.d('[通知] 已调度习惯挽留 -> $when (id=$habitNudgeNotifyId)');
       return true;

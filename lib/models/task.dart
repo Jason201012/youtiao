@@ -178,6 +178,8 @@ class Task {
   final List<int> repeatWeekdays;
 
   /// 每隔 N 天重复（N≥1）。仅当 [repeat]==[RepeatType.interval] 时有意义。
+  /// F-10：默认由 2 改为 1——选「每隔 N 天」时初始显示「每 1 天」（即每天起步），
+  /// 与多数人的直觉一致；步进器范围本就允许 1..30。
   final int repeatInterval;
 
   /// 重复提醒时间，单位「自 00:00 起的分钟数」(0-1439)。
@@ -282,7 +284,7 @@ class Task {
     this.deletedAt,
     this.repeat = RepeatType.none,
     this.repeatWeekdays = const [],
-    this.repeatInterval = 2,
+    this.repeatInterval = 1,
     this.repeatMinute,
     this.repeatAnchor,
     this.skipDates = const [],
@@ -464,7 +466,7 @@ class Task {
           : DateTime.parse(j['deletedAt'] as String),
       repeat: repeat,
       repeatWeekdays: weekdays,
-      repeatInterval: j['repeatInterval'] as int? ?? 2,
+      repeatInterval: j['repeatInterval'] as int? ?? 1,
       repeatMinute: j['repeatMinute'] as int? ?? j['dailyReminderMinute'] as int?,
       repeatAnchor: j['repeatAnchor'] == null
           ? null
@@ -542,13 +544,20 @@ class Task {
   ///  2) [skipDates]（跳过日期）：命中当天的「跳过一次」则当天不出现、不打卡。
   /// 与 android/.../MidnightResetReceiver.kt 的 isRecurrenceToday 保持两侧同步。
   bool repeatsOn(DateTime day) {
+    // F-08 修复：把「date-only」契约收进函数内部。
+    // 此前直接用传入的 [day] 与零点日期比较，若调用方传了带时分的 DateTime.now()，
+    // 「结束日当天 00:00 之后」就会被误判为已结束，与注释承诺的「含当日」矛盾
+    // （[isRepeatEnded] 内部做了归一化，这里却没有，属"靠调用方约定维持的正确"）。
+    // 与 android/.../MidnightResetReceiver.kt 的 isRecurrenceToday（按 yyyy-MM-dd 判定）
+    // 口径一致。
+    final d = DateTime(day.year, day.month, day.day);
     // B2：结束日期（含当日仍生效，故用 isAfter 排除次日及之后）。
     final u = repeatUntil;
-    if (u != null && day.isAfter(_parseYmd(u))) return false;
+    if (u != null && d.isAfter(_parseYmd(u))) return false;
     // 原 switch 逻辑原样搬入 _baseRepeatsOn，避免散改进多个分支。
-    if (!_baseRepeatsOn(day)) return false;
+    if (!_baseRepeatsOn(d)) return false;
     // B1：跳过一次（今天在 skipDates 列表里 → 不出现、不打卡、不影响连续天数）。
-    return !skipDates.contains(_ymd(day));
+    return !skipDates.contains(_ymd(d));
   }
 
   /// repeatsOn 的「纯规则」核心（不含 until / skip 两段通用判定），便于两侧同步维护。

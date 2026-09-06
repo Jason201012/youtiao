@@ -575,16 +575,42 @@ class MainActivity : FlutterFragmentActivity() {
         val outDir = File(getCacheDir(), "share_inbox/$sessionId")
         if (!outDir.mkdirs() && !outDir.exists()) return
         val outFile = File(outDir, safeName)
+        // F-15：边复制边累计，超过上限立即中止。
+        // 旧实现是 `input.copyTo(output)` 先整段复制、复制完才用 outFile.length() 校验
+        // （且 size 预检可被来源谎报为 -1 跳过）→ 恶意/异常来源喂一个超大流时，
+        // 会在校验生效前把缓存目录写满。这里按块累计并即时熔断。
+        var copied = 0L
+        var aborted = false
+        var opened = false
         try {
             cr.openInputStream(uri)?.use { input ->
-                outFile.outputStream().use { output -> input.copyTo(output) }
-            } ?: run {
+                opened = true
+                outFile.outputStream().use { output ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break // 0 一般表示无数据，-1 表示 EOF
+                        copied += n.toLong()
+                        if (copied > MAX_SHARE_BYTES) {
+                            aborted = true
+                            break
+                        }
+                        output.write(buf, 0, n)
+                    }
+                }
+            }
+            if (!opened) {
                 // 无法打开输入流（来源撤销授权等）：放弃。
                 return
             }
         } catch (_: Exception) {
             // 读取/写入失败：清理残留，放弃分享。
             try { outDir.deleteRecursively() } catch (_: Exception) {}
+            return
+        }
+        if (aborted) {
+            try { outDir.deleteRecursively() } catch (_: Exception) {}
+            runOnUiThread { Toast.makeText(this, "附件过大，已忽略", Toast.LENGTH_SHORT).show() }
             return
         }
         // 复制后按实际体积二次校验（未知大小时 size=-1，此处用真实落盘大小兜底）。

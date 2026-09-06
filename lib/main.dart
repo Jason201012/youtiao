@@ -546,6 +546,15 @@ void main() async {
     rescheduleHabitNudge(h,
         enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
   };
+  // F-07：简报 / 习惯挽留已改为**一次性**闹钟（不再由系统按天重发旧文案）。
+  // 若 App 一直挂在前台跨过 00:00，不会触发 resumed 事件，这里借 TaskProvider
+  // 的跨天守护回调补一次重排，保证次日仍有一班简报 / 挽留。
+  TaskProvider.onDayChanged = () {
+    if (!task.notificationsEnabled) return;
+    unawaited(rescheduleBriefings(task, focus, habit));
+    rescheduleHabitNudge(habit,
+        enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
+  };
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);
