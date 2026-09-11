@@ -14,6 +14,7 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
+import 'package:todolist/widgets/past_due_guard.dart';
 
 class BatchEditSheet {
   /// 打开批量编辑面板，返回实际更新的条数（用户取消则为 null）。
@@ -117,7 +118,9 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
         .where((s) => s.isNotEmpty)
         .toList();
 
-    final n = provider.batchUpdate(widget.ids, (t) {
+    // 把「改期 + 字段覆盖」收敛成单一 transform：预演与实际落库共用同一份口径，
+    // 不会出现「提示了但其实没事 / 没事但提示了」。
+    Task transform(Task t) {
       var nt = t;
       switch (_due) {
         case _DueMode.today:
@@ -150,7 +153,23 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
         nt = nt.copyWith(tags: merged);
       }
       return nt;
-    });
+    }
+
+    // P3-5：预演「改期后截止提醒即永久失效」的条数并提示。典型场景是「顺延到今天」
+    // 而原时刻已过——此前只有新建 / 编辑弹层有这条警告，这里补齐口径一致。
+    final targets = widget.ids.map(provider.byId).whereType<Task>().toList();
+    final dead = PastDueGuard.countDeadAfter(targets, transform, now);
+    if (dead > 0) {
+      final go = await PastDueGuard.confirm(
+        context,
+        count: dead,
+        detail: '$dead 项任务改期后的截止时刻已早于当前时刻，'
+            '保存后这些任务的提醒将不会触发。\n\n仍要改期吗？',
+      );
+      if (!go || !mounted) return;
+    }
+
+    final n = provider.batchUpdate(widget.ids, transform);
     Navigator.pop(context, n);
   }
 

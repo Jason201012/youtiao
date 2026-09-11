@@ -82,7 +82,10 @@ void _writeCanonical(dynamic v, StringBuffer sb) {
 
 void _writeJsonString(String s, StringBuffer sb) {
   sb.write('"');
-  for (final ch in s.codeUnits) {
+  // P2-2：必须按 code point（runes）而非 UTF-16 code unit 迭代。用 `s.codeUnits`
+  // 会把 emoji 的代理对拆成两个孤立代理，`utf8.encode` 阶段各自变成 U+FFFD，
+  // 与 App 侧 / Python 发版侧的字节不一致 → 本校验脚本会误报验签失败。
+  for (final ch in s.runes) {
     switch (ch) {
       case 0x22:
         sb.write(r'\"');
@@ -108,8 +111,15 @@ void _writeJsonString(String s, StringBuffer sb) {
       default:
         if (ch < 0x20) {
           sb.write('\\u${ch.toRadixString(16).padLeft(4, '0')}');
-        } else {
+        } else if (ch <= 0xFFFF) {
           sb.write(String.fromCharCode(ch));
+        } else {
+          // 非 BMP：显式展开为 UTF-16 代理对，保证 UTF-8 字节与发版侧一致。
+          final v = ch - 0x10000;
+          sb.write(String.fromCharCodes(<int>[
+            0xD800 + (v >> 10),
+            0xDC00 + (v & 0x3FF),
+          ]));
         }
     }
   }

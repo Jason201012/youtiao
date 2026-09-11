@@ -882,6 +882,15 @@ class TaskProvider extends ChangeNotifier {
 
   /// 午夜守护是否已启动（防止 [load] 被重复调用时叠加多个周期定时器 / 生命周期观察者）。
   bool _midnightWatchStarted = false;
+
+  /// P1-1：上一次执行跨天检查时所在的本地日期（yyyy-MM-dd）。
+  ///
+  /// 跨天判定必须与「列表里是否有内容发生变化」解耦：原实现把简报 / 挽留的一次性
+  /// 闹钟重排挂在 [_resetDailyIfNeeded] 的返回值上，而后者只在「恰有已完成且今天是
+  /// 循环日的重复任务被重置」时才为 true。用户若**只有一次性任务**（或今天恰好没有
+  /// 循环日重复任务），App 后台跨过 00:00 时返回值恒为 false → 不重排 → 次日简报 /
+  /// 挽留静默消失。这里改为纯日期比较：只要日边界变了就触发 [onDayChanged]。
+  String? _lastResetDay;
   Future<void> setSoundEnabled(bool v) async {
     _soundEnabled = v;
     // 重新调度所有提醒（截止 + 每日），应用新的声音设置
@@ -1001,6 +1010,9 @@ class TaskProvider extends ChangeNotifier {
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
     //  App 启动时的兜底，并在 App 前台时由 _startMidnightWatch 周期性刷新。）
     _resetDailyIfNeeded();
+    // P1-1：记录本次启动的日边界基线——启动阶段 main.dart 已显式重排过一次简报 /
+    // 挽留，这里同步基线可避免紧随其后的第一次 15 分钟守护再做一次冗余重排。
+    _lastResetDay = _ymd(DateTime.now());
     // 挂上「当天 00:00 自动重置」的午夜闹钟（不依赖 App 是否打开）。
     NotificationService.instance.armMidnightReset();
     // 启动时为已有「未完成且未过期」的任务 + 每日提醒重新调度（老任务/初始 mock 也能响）
@@ -1041,9 +1053,16 @@ class TaskProvider extends ChangeNotifier {
   /// 这里在每次回到前台 / 每 15 分钟守护周期补挂一次 interval 提醒
   /// （其余类型走 OS 周期闹钟，重排代价小、一并刷新无妨）。
   void checkDailyReset() {
+    // P1-1：先单独判定「日边界是否真的变了」，与列表内容变化解耦。
+    // 只有一次性任务的用户跨天时 _resetDailyIfNeeded() 恒为 false，旧实现因此
+    // 永不重排简报 / 挽留（次日静默断更）。这里以日期为准，与列表内容无关。
+    // 基线未知（null，未走过 load）时按「已跨天」处理——宁可多排一次，不可漏排。
+    final today = _ymd(DateTime.now());
+    final dayChanged = _lastResetDay != today;
+    _lastResetDay = today;
     final changed = _resetDailyIfNeeded();
     if (_notificationsEnabled) _rescheduleOneShotReminders();
-    if (changed) {
+    if (changed || dayChanged) {
       // F-07：简报 / 习惯挽留已改为一次性闹钟（不再由系统按天重发），
       // 跨天时必须重排，否则 App 一直挂在前台跨过 00:00 后次日就没有简报了。
       // 钩子由 main.dart 注入，避免 TaskProvider 反向依赖 daily_briefing（会成环）。
@@ -1835,6 +1854,29 @@ class TaskProvider extends ChangeNotifier {
     _persist();
   }
 
+  /// P2-1：撤销一次 [skipOccurrence]——把 [day]（默认今天）从 [Task.skipDates] 移除。
+  ///
+  /// 与 skipOccurrence 严格互逆（幂等：不在列表里则什么都不做），供「移到下一天」的
+  /// 撤销使用——原实现只删副本、不退 skipDates，撤销后原日仍显示「已跳过」，
+  /// UI 对用户说谎。方法内部同样重排提醒，避免撤销后当天提醒仍被跳过。
+  void unskipOccurrence(String taskId, {DateTime? day}) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final d = day ?? DateTime.now();
+    final ymd = _ymd(DateTime(d.year, d.month, d.day));
+    if (!_tasks[i].skipDates.contains(ymd)) return; // 未跳过，幂等
+    final updated = _tasks[i].copyWith(
+      skipDates: _tasks[i].skipDates.where((s) => s != ymd).toList(),
+    );
+    _tasks[i] = updated;
+    if (updated.isRepeating) {
+      _cancelRemindersFor(updated.id);
+      _scheduleRemindersFor(updated);
+    }
+    notifyListeners();
+    _persist();
+  }
+
   /// 结束重复：把 [Task.repeatUntil] 设为昨天，从今天起不再循环（保留历史任务不删）。
   /// 结束当天即停止出现 / 提醒 / 午夜重置。
   void endRepeat(String taskId) {
@@ -1850,13 +1892,17 @@ class TaskProvider extends ChangeNotifier {
 
   /// 仅此一次改期：跳过 [origDay]（默认今天）这一次 occurrence，并创建一条一次性副本任务，
   /// 截止时间设为 [newDay]（其余字段沿用原任务）。实现上即现有 [addTask]，无需新概念。
-  void rescheduleOnceOccurrence(
+  ///
+  /// P2-1：返回**新建的一次性副本**（无法创建时返回 null）。调用方凭返回值的 id 精确
+  /// 撤销——原实现让 UI 侧按「标题 + 日期」反查副本，同名任务 + 同一天改期时会误删
+  /// 另一个真实任务。
+  Task? rescheduleOnceOccurrence(
     String taskId,
     DateTime newDay, {
     DateTime? origDay,
   }) {
     final src = byId(taskId);
-    if (src == null) return;
+    if (src == null) return null;
     // 1) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
     skipOccurrence(taskId, day: origDay ?? DateTime.now());
     // 2) 创建一次性副本（repeat=none），dueDate 指向改期后的日期，其余沿用。
@@ -1876,7 +1922,7 @@ class TaskProvider extends ChangeNotifier {
       status: TaskStatus.todo,
       completedAt: null,
     );
-    addTask(copy);
+    return addTask(copy);
   }
 
   int _idSeq = 8;
@@ -2308,6 +2354,29 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：恢复后重排
+  }
+
+  /// P2-1：把一条**活动列表**中的任务直接移除（不进回收站）。
+  ///
+  /// 与 [permanentDelete] 的区别很关键——后者只作用于**回收站**（`_trash`），
+  /// 对活动列表里的任务是彻底的 no-op。此前 occurrence_sheet 的「移到下一天」撤销
+  /// 就是误用了 `permanentDelete(copy.id)`：副本仍在活动列表里，「撤销」形同虚设。
+  ///
+  /// 本方法用于清掉「系统自动生成、用户从未要求保留」的一次性副本——
+  /// 放进回收站反而会让用户困惑。附件目录一并清理，避免孤立文件。
+  /// 幂等：id 不存在时什么都不做。
+  void discardTask(String id) {
+    final before = _tasks.length;
+    _tasks.removeWhere((t) => t.id == id);
+    if (_tasks.length == before) return; // 不存在，幂等
+    _cancelRemindersFor(id);
+    // P0-1 一致：彻底移除时一并清理附件目录，避免孤立文件长期占用空间。
+    AttachmentService.removeDir(id);
+    // 与 permanentDelete 同口径：作废删除撤销缓冲中的对应项，避免「先撤销移除、
+    // 再点删除撤销」把已清理附件的任务复活成「文件不存在」。
+    _dropFromUndoBuffer(id);
+    notifyListeners();
+    _persist();
   }
 
   /// 在回收站中彻底删除某任务（不可恢复），并取消其本地提醒。

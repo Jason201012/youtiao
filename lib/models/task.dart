@@ -706,6 +706,30 @@ class Task {
   /// 是否为「重复任务」（任意规则）。
   bool get isRepeating => repeat != RepeatType.none;
 
+  /// P2-3：归一化**与当前形态不相容的残留字段**，返回一个新任务（纯函数、无副作用）。
+  ///
+  /// 编辑弹层里用户可以把「每隔 3 天」改回「不重复」、把截止时间清空，而底层字段
+  /// （repeatUntil / repeatInterval / reminderOffsetMin）此前会被无条件写回旧值，
+  /// 留下脏数据：污染备份导出与「未来 30 天预览」，并让 TaskProvider 的
+  /// `remindersChanged` 判定把这些无害残留误判成「提醒变了」而触发无谓重排。
+  ///
+  /// 清理规则（只清**确定不生效**的字段，不清任何会改变行为的字段）：
+  /// - [repeatUntil]：仅 [isRepeating] 时有意义（[repeatsOn] / 通知排程 / .ics 导出
+  ///   都只在重复分支读它）；
+  /// - [repeatInterval]：仅 [RepeatType.interval] 时有意义（.ics 与通知排程同）；
+  /// - [reminderOffsetMin]：无 [dueDate] 时不生效——`_scheduleRemindersFor` 根本不会
+  ///   为无截止任务挂一次性截止提醒。
+  ///
+  /// ⚠️ 刻意**不**清理 [repeatAnchor]：它对非 interval 类型完全惰性，保留旧值可让
+  /// 「每隔 N 天 → 每天 → 又改回每隔 N 天」沿用原相位锚点，而非被 null 兜底重置成当天。
+  ///
+  /// 旧数据（该字段缺省）经此方法后仍是缺省值，零迁移成本。
+  Task normalizedRepeatFields() => copyWith(
+        repeatUntil: isRepeating ? repeatUntil : null,
+        repeatInterval: repeat == RepeatType.interval ? repeatInterval : 1,
+        reminderOffsetMin: dueDate != null ? reminderOffsetMin : 0,
+      );
+
   /// F7：某「日」是否已有完成记录（occurrence 级，date-only）。
   /// 已完成的一次性任务以 [completedAt] 为准，重复任务的历史沉淀在 [doneDates]。
   bool isDoneOn(DateTime day) {

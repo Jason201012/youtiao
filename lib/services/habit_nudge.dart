@@ -47,11 +47,24 @@ class HabitNudge {
   /// [streakAfterCheckIn] 应返回「今天补打卡后」的连续天数，即
   /// `HabitProvider.currentStreak(h) + 1`。之所以要 +1：currentStreak 内部用
   /// `allowTodayGap: true`，今天没打卡时是从**昨天**往回数的，补上今天才等于它 + 1。
+  ///
+  /// P3-4：[forDay] 是漏卡口径日（默认今天），[deliversAt] 是实际投递时刻（默认即时）。
+  /// 二者不同日时（顺延跨过午夜），文案中的「今天」改写成**明确日期**——否则
+  /// 「23:00 今天未打卡」被勿扰顺延到次日 07:05 后，用户早上读到「今天还没打卡」
+  /// 会误以为特指当天而困惑。
   static HabitNudgeText text(
     List<Habit> missed, {
     required int Function(Habit habit) streakAfterCheckIn,
+    DateTime? forDay,
+    DateTime? deliversAt,
   }) {
     if (missed.isEmpty) return const HabitNudgeText.empty();
+
+    // 顺延是否跨过了口径日（同一天 = 无需改写，保持原文案口径稳定）。
+    final day = forDay ?? DateTime.now();
+    final deferred = deliversAt != null && !_sameDay(deliversAt, day);
+    final whenLabel =
+        deferred ? '${day.month}月${day.day}日' : '今天';
 
     // 单个习惯：点名 + 连续天数，最有催促力。
     if (missed.length == 1) {
@@ -60,9 +73,13 @@ class HabitNudge {
       return HabitNudgeText(
         title: '${h.emoji} ${h.title} 还没打卡',
         // n<=1 时不说「连续 1 天」，读着别扭且没信息量。
-        body: n > 1
-            ? '还差一步就连续 $n 天了，睡前补上还来得及'
-            : '今天还没打卡，睡前补上还来得及',
+        body: deferred
+            ? (n > 1
+                ? '$whenLabel漏了打卡，补上就是连续 $n 天'
+                : '$whenLabel还没打卡，现在补上还来得及')
+            : (n > 1
+                ? '还差一步就连续 $n 天了，睡前补上还来得及'
+                : '今天还没打卡，睡前补上还来得及'),
       );
     }
 
@@ -71,10 +88,17 @@ class HabitNudge {
     final names = missed.take(3).map((h) => h.title).join('、');
     final more = missed.length > 3 ? ' 等 ${missed.length} 项' : '';
     return HabitNudgeText(
-      title: '还有 ${missed.length} 个习惯没打卡',
+      // P3-4：顺延跨天时把日期放进标题，用户一眼能看到这条说的是哪一天。
+      title: deferred
+          ? '$whenLabel还有 ${missed.length} 个习惯没打卡'
+          : '还有 ${missed.length} 个习惯没打卡',
       body: '$names$more，睡前补上不中断连续记录',
     );
   }
+
+  /// 两个时刻是否落在同一本地日。
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
 }
 
 /// [HabitNudge.text] 的返回值。用不可变小类而非 record，便于断言与后续拓展。

@@ -531,11 +531,51 @@ class MainActivity : FlutterFragmentActivity() {
         val uri = i?.takeIf { it.action == Intent.ACTION_SEND }
             ?.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
         // I-05：与 [dispatchShareText] 同源的节流（键 = 来源包名 + 时窗）。
+        // 保留在主线程判定，保证「上次受理记录」的读改写顺序稳定。
         // 放在解析/复制字节流之前，被挡下的分享不做任何磁盘 IO。
-        if (isShareThrottled(callingActivity?.packageName)) return
+        val source = callingActivity?.packageName
+        if (isShareThrottled(source)) return
+        val declaredMime = i.type
+        // P3-1：整段 IO（content provider 元数据查询 + 跨进程字节流复制）挪到后台线程。
+        // 旧实现全程在主线程跑：冷启动收到分享（尤其几十 MB 的录音 / 视频）时，逐块读
+        // content provider 会阻塞 UI 线程 → 白屏甚至 ANR。这里改为后台复制 + 回主线程投递。
+        Thread {
+            val meta = copySharedStreamToCache(uri, declaredMime, source)
+            if (meta != null) {
+                // 回主线程投递：与 configureFlutterEngine 的补发路径共用同一个入口，
+                // 保证「引擎已就绪 → 直接发」「未就绪 → 挂 pending 等补发」二者互斥不重发。
+                runOnUiThread { deliverSharedUri(meta) }
+            }
+        }.start()
+    }
+
+    /// P3-1：把分享附件元数据投递给 Dart 侧，**必须在主线程调用**。
+    ///
+    /// 引擎未就绪（冷启动，通道还没注册）时先挂到 [pendingShareUriMeta]，
+    /// 由 `configureFlutterEngine` 末尾补发；已就绪则直接发。
+    /// 两条路径互斥（只在 handler 为 null 时挂 pending），不会让 Dart 侧收到两份。
+    private fun deliverSharedUri(meta: Map<String, Any>) {
+        val handler = shareUriHandler
+        if (handler == null) {
+            pendingShareUriMeta = meta
+            return
+        }
+        handler.invokeMethod("onSharedUri", meta)
+    }
+
+    /// P3-1：把分享进来的 content URI 复制到应用私有缓存目录，返回投递给 Dart 的元数据映射。
+    ///
+    /// **必须在后台线程调用**（内部全是阻塞 IO：跨进程 query + 逐块 read/write）。
+    /// 被拒绝 / 失败时返回 null，原因已通过 Toast 反馈（Toast 经 [runOnUiThread] 弹到主线程）。
+    @Suppress("DEPRECATION")
+    private fun copySharedStreamToCache(
+        uri: Uri,
+        declaredMime: String?,
+        source: String?,
+    ): Map<String, Any>? {
         // 读 content URI 的显示名 / 大小 / MIME（部分来源不返回大小，记为 -1，复制后二次校验）。
         val cr = contentResolver
-        var mimeType: String? = i.type
+        var mimeType: String? = declaredMime
         var displayName: String? = null
         var size: Long = -1
         try {
@@ -566,14 +606,14 @@ class MainActivity : FlutterFragmentActivity() {
         // 已知大小超限：直接拒绝（引用 MAX_SHARE_BYTES 与 Dart 侧 importFile 上限一致）。
         if (size > MAX_SHARE_BYTES) {
             runOnUiThread { Toast.makeText(this, "附件过大，已忽略", Toast.LENGTH_SHORT).show() }
-            return
+            return null
         }
         // 复制到应用私有缓存目录（getCacheDir == Flutter getTemporaryDirectory），离线、不联网。
         val sessionId = "${System.currentTimeMillis()}_${(Math.random() * 100000).toInt()}"
         val fallbackName = "shared_$sessionId"
         val safeName = sanitizeSharedName(displayName ?: fallbackName, fallbackName)
         val outDir = File(getCacheDir(), "share_inbox/$sessionId")
-        if (!outDir.mkdirs() && !outDir.exists()) return
+        if (!outDir.mkdirs() && !outDir.exists()) return null
         val outFile = File(outDir, safeName)
         // F-15：边复制边累计，超过上限立即中止。
         // 旧实现是 `input.copyTo(output)` 先整段复制、复制完才用 outFile.length() 校验
@@ -601,24 +641,24 @@ class MainActivity : FlutterFragmentActivity() {
             }
             if (!opened) {
                 // 无法打开输入流（来源撤销授权等）：放弃。
-                return
+                return null
             }
         } catch (_: Exception) {
             // 读取/写入失败：清理残留，放弃分享。
             try { outDir.deleteRecursively() } catch (_: Exception) {}
-            return
+            return null
         }
         if (aborted) {
             try { outDir.deleteRecursively() } catch (_: Exception) {}
             runOnUiThread { Toast.makeText(this, "附件过大，已忽略", Toast.LENGTH_SHORT).show() }
-            return
+            return null
         }
         // 复制后按实际体积二次校验（未知大小时 size=-1，此处用真实落盘大小兜底）。
         val realSize = outFile.length()
         if (realSize > MAX_SHARE_BYTES) {
             try { outDir.deleteRecursively() } catch (_: Exception) {}
             runOnUiThread { Toast.makeText(this, "附件过大，已忽略", Toast.LENGTH_SHORT).show() }
-            return
+            return null
         }
         // 复制成功：立即收回读取授权（消费完 content URI 即释放，不长期持有）。
         try {
@@ -627,8 +667,7 @@ class MainActivity : FlutterFragmentActivity() {
             // 无授权可收回时静默忽略。
         }
         // 分享来源包名（用于 Dart 侧预填层展示「来自 XX」）。
-        val source = callingActivity?.packageName
-        val meta = mapOf(
+        return mapOf(
             "localPath" to outFile.absolutePath,
             "fileName" to safeName,
             "mimeType" to (mimeType ?: ""),
@@ -636,9 +675,6 @@ class MainActivity : FlutterFragmentActivity() {
             "type" to type,
             "source" to (source ?: ""),
         )
-        // 引擎未就绪（冷启动）时 invokeMethod 会失败 → 缓存，configureFlutterEngine 末尾补发。
-        pendingShareUriMeta = meta
-        shareUriHandler?.invokeMethod("onSharedUri", meta)
     }
 
     /// P1-11：把来源提供的显示名净化为安全文件名（仅保留字母数字、点、下划线、连字符与中文，

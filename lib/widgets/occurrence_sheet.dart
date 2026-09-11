@@ -11,7 +11,6 @@
 /// skipDates 后另建一次性副本落到 newDay，零新概念。
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
-import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 
@@ -77,36 +76,31 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     if (defer) {
       // 「移到下一天」= 把当前 occurrence 跳过 + 在新日期另落一次性副本。
       final newDay = d.add(const Duration(days: 1));
-      widget.provider.rescheduleOnceOccurrence(
+      final copy = widget.provider.rescheduleOnceOccurrence(
         _task.id,
         newDay,
         origDay: d,
       );
       _refresh();
       if (context.mounted) {
+        final dayLabel =
+            '${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              '已移到 ${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}（已新建一次性副本）',
-            ),
+            content: Text('已移到 $dayLabel（已新建一次性副本）'),
             action: SnackBarAction(
               label: '撤销',
               onPressed: () {
-                // 撤销 = 把当天的 skipDates 撤销（兜底：仍写入，但弹提示让用户知道）。
-                // 一次性副本需要单独删，这里只能简化处理：若副本标题 = 「原任务标题」
-                // 且 dueDate = newDay，则一并删除。
-                final copy = widget.provider.tasks.firstWhere(
-                  (t) =>
-                      t.title == _task.title &&
-                      t.dueDate != null &&
-                      t.dueDate!.year == newDay.year &&
-                      t.dueDate!.month == newDay.month &&
-                      t.dueDate!.day == newDay.day,
-                  orElse: () => _task,
-                );
-                if (!identical(copy, _task)) {
-                  widget.provider.permanentDelete(copy.id);
+                // P2-1：撤销必须**双向**还原——① 按 service 返回的副本 id 精确移除
+                // 那座一次性副本（原实现按「标题 + 日期」反查，同名任务同一天改期时
+                // 会误删另一个真实任务；而且误用了只作用于回收站的 permanentDelete，
+                // 副本其实一直留在活动列表里，「撤销」形同虚设）；② 把原日从 skipDates
+                // 移除，否则撤销后原日仍显示「已跳过」，UI 对用户说谎。
+                if (copy != null) {
+                  widget.provider.discardTask(copy.id);
                 }
+                widget.provider.unskipOccurrence(_task.id, day: d);
+                _refresh();
               },
             ),
           ),
@@ -190,10 +184,13 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                             if (v == 'skip') _skip(d);
                             if (v == 'defer') _skip(d, defer: true);
                           },
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 'done', child: Text('标记完成')),
-                            PopupMenuItem(value: 'skip', child: Text('跳过一次')),
-                            PopupMenuItem(value: 'defer', child: Text('移到下一天')),
+                          // P3-2：文案随实例状态动态化——已完成实例此前仍标「标记完成」，
+                          // 点下去实际是取消完成，语义与行为相反。
+                          itemBuilder: (_) => [
+                            PopupMenuItem(
+                                value: 'done', child: Text(done ? '标记未完成' : '标记完成')),
+                            const PopupMenuItem(value: 'skip', child: Text('跳过一次')),
+                            const PopupMenuItem(value: 'defer', child: Text('移到下一天')),
                           ],
                         ),
                       );

@@ -1,5 +1,22 @@
 # 更新日志（Changelog）
 
+## v2.8.4（2026-09-11）
+
+### 功能与操作审计修复（依据 v2.8.3 审计报告 P1-1 / P2-1~3 / P3-1~5 全量落地）
+- **P1-1【P1】跨天重排依赖「恰有重复任务被重置」**：`TaskProvider` 新增 `_lastResetDay` 日边界基线，`checkDailyReset()` 不再以 `_resetDailyIfNeeded()` 的返回值为准——只有一次性任务的用户 App 后台跨过 00:00 时也会重排简报 / 习惯挽留，次日不再静默断更。
+- **P2-1【P2】顺延「撤销」只删副本、不退 skipDates**：`rescheduleOnceOccurrence` 返回新建的一次性副本，撤销按副本 id 精确移除（原先按「标题 + 日期」反查，同名任务同日改期会误删别人）；新增 `unskipOccurrence` 与 `skipOccurrence` 严格互逆，原日不再残留「已跳过」。顺带修掉一处静默失效——原撤销调用的 `permanentDelete` 只作用于回收站，对活动列表任务是 no-op，副本其实从未被删；新增 `discardTask` 承担活动列表的彻底移除。
+- **P2-2【P2】canonical JSON 对非 BMP 字符编码不一致**：`_writeJsonString` 改按 `runes`（code point）迭代并显式展开代理对，emoji / 生僻字不再退化成 U+FFFD；此前 releaseNotes 里一旦出现 emoji，该版本所有用户「检查更新」都会因验签字节不一致被拒收（潜伏雷）；同步修正离线校验脚本 `test/c2_verify_sign.dart` 中的同一份实现。
+- **P2-3【P2】编辑弹层脏字段残留**：新增 `Task.normalizedRepeatFields()`（纯函数）并在保存前调用——切回「不重复」清 `repeatUntil`、非 interval 清 `repeatInterval`、无截止时间清 `reminderOffsetMin`，避免污染备份导出与「未来 30 天预览」，也避免提醒重排判定被无害残留误触发；`repeatAnchor` 刻意保留（惰性字段，清掉会改变「改回每隔 N 天」的相位）。
+- **P3-1【P3】分享附件流在主线程同步复制**：`MainActivity` 把 content provider 元数据查询 + 跨进程字节流复制整段移入后台线程，冷启动收到大文件分享不再阻塞 UI（白屏 / ANR）；新增 `deliverSharedUri` 统一投递入口，保证「引擎就绪直发」与「挂 pending 等补发」互斥不重复投递。
+- **P3-2【P3】已完成实例菜单仍标「标记完成」**：改为按实例状态动态显示「标记未完成 / 标记完成」，语义与行为一致。
+- **P3-3【P3】重定向白名单分支 2 未校验 host**：`attach_file(s)` 路径前缀分支一并限定 gitee 系主机，堵掉 `https://github.com/attach_files/...` 这类组合。
+- **P3-4【P3】礼貌挽留顺延勿扰后文案时态错位**：抽出 `NotificationService.nextHabitNudgeTime`（墙钟口径，调度层与文案层同源），顺延跨天时把「今天」改写成明确日期，次日早晨不再读到「今天还没打卡」。
+- **P3-5【P3】过去时间警告仅覆盖弹层保存**：新增 `PastDueGuard`（判定 + 提示）并接入批量改期与逾期区「顺延到今天」，同一件事的提示口径统一；重复任务不参与（其提醒会再次循环触发，提示属误报）。
+
+### 说明
+- 新增 5 个回归测试文件（canonical JSON 非 BMP、挽留顺延文案、PastDueGuard 判定、occurrence 撤销幂等、重复字段归一化）；`dart analyze lib test` 零新增 error，全量测试 482 通过 / 5 预存失败（均为 HEAD 已有的历史问题，非本次回归）。
+- 全部修复保持严格离线红线：纯本地路径修复，未新增除现有 update-check 之外的任何网络调用；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。
+
 ## v2.8.3（2026-09-06）
 
 ### 安全 / 功能 / 交互审计修复（依据 v2.8.2 审计报告 F-01~F-15 全量落地）

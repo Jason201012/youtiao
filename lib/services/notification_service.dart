@@ -1202,6 +1202,38 @@ class NotificationService {
   Future<void> cancelBriefing(bool evening) =>
       _plugin.cancel(evening ? briefingEveningNotifyId : briefingMorningNotifyId);
 
+  /// P3-4：计算「习惯挽留」下一次**实际投递时刻**（已含跨天顺延与勿扰顺延）。
+  ///
+  /// 抽成静态纯函数的目的：挽留文案在**排程时**烘焙（系统闹钟到点时 App 未必在内存），
+  /// 若顺延跨越了午夜（如 23:00 的落点撞进勿扰区间被推到次日 07:05），文案里的
+  /// 「今天」在送达时就变成了谎言。文案层用本函数预知投递日，据此把「今天」改写成
+  /// 明确日期；调度层复用同一函数，两处口径不会各算一遍而漂移。
+  ///
+  /// 实现口径：全程只做**墙钟字段**运算（与 [from] 同一时区视角），不跨时区换算。
+  /// 这与原实现 `TZDateTime(loc, ...)` 的判定逐点等价（原本比较的也是同一天里的同一份
+  /// 墙钟字段），但不会把「某时区的墙钟字段」误当成「设备本地时刻」而引入漂移。
+  /// 返回值 = 目标投递时刻的墙钟字段，调度层照旧用 `TZDateTime(loc, ...)` 组装。
+  ///
+  /// [from] 便于单测注入固定时刻；默认取当前本地时间。
+  static DateTime nextHabitNudgeTime(int nudgeMinute, {DateTime? from}) {
+    final now = from ?? DateTime.now();
+    // F4：时刻可配置（自 00:00 起的分钟数，默认 23:00），不再硬编码。
+    final hh = nudgeMinute ~/ 60;
+    final mm = nudgeMinute % 60;
+    // 今天这个时刻已过就顺延到明天——与简报同一套路，避免排一个过去的时间点。
+    var when = DateTime(now.year, now.month, now.day, hh, mm);
+    final nowMinutes = now.hour * 60 + now.minute;
+    if (nowMinutes >= nudgeMinute) when = when.add(const Duration(days: 1));
+    // F4：排程前感知勿扰区间——若落点恰在勿扰时段内，按既有 dndDefer 顺延，
+    // 避免挽留撞进勿扰被静默吞掉。
+    final defer = dndDefer;
+    if (defer != null) {
+      final deferred = defer(when);
+      if (deferred != null) when = deferred;
+    }
+    return when;
+  }
+
   /// P1-7：调度「习惯漏卡挽留」通知——在下一个 [HabitNudge.nudgeMinute]（23:00）
   /// 触发一条本地通知（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
   /// F-07：改为**一次性**投递（不再按天重复），理由与 [scheduleBriefing] 相同——
@@ -1228,23 +1260,12 @@ class NotificationService {
     }
     try {
       final loc = _loc ?? tz.UTC;
-      // F4：时刻可配置（自 00:00 起的分钟数，默认 23:00），不再硬编码。
-      final hh = nudgeMinute ~/ 60;
-      final mm = nudgeMinute % 60;
       final now = tz.TZDateTime.now(loc);
-      // 今天这个时刻已过就顺延到明天——与简报同一套路，避免排一个过去的时间点。
-      var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-      when = when.isAfter(now) ? when : when.add(const Duration(days: 1));
-      // F4：排程前感知勿扰区间——若落点恰在勿扰时段内，按既有 dndDefer 顺延，
-      // 避免挽留撞进勿扰被静默吞掉。
-      if (dndDefer != null) {
-        final deferred = dndDefer!(when);
-        if (deferred != null) {
-          // dndDefer 返回普通 DateTime，需按当前时区换算回 TZDateTime 才能用于 zonedSchedule。
-          when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
-              deferred.hour, deferred.minute);
-        }
-      }
+      // P3-4：时刻口径统一走 [nextHabitNudgeTime]（跨天顺延 + 勿扰顺延），
+      // 让文案层能用同一个函数预知投递日，两处不会各算一遍而漂移。
+      final target = nextHabitNudgeTime(nudgeMinute, from: now);
+      final when = tz.TZDateTime(
+          loc, target.year, target.month, target.day, target.hour, target.minute);
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(

@@ -22,6 +22,7 @@ import 'package:todolist/screens/today_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
 import 'package:todolist/widgets/batch_edit_sheet.dart';
+import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:todolist/services/update_checker.dart';
 import 'package:todolist/services/search_index.dart';
 import 'package:todolist/widgets/update_dialog.dart';
@@ -952,6 +953,29 @@ class _PostponeButton extends StatelessWidget {
         originalDates.add(
             '${t!.dueDate!.month}月${t.dueDate!.day}日');
       }
+    }
+    // P3-5：预演改期结果——「顺延到今天」而原时刻已过时，一次性任务的截止提醒
+    // 会被排到过去时刻、**永远不会触发**。此前只有新建 / 编辑弹层有这条警告，
+    // 这里补齐口径一致（预演用的变换与 postponeTo 内部严格相同，保留原时分）。
+    final dead = PastDueGuard.countDeadAfter(
+      ids.map(provider.byId).whereType<Task>().toList(),
+      (t) {
+        final d = t.dueDate;
+        if (d == null) return t;
+        return t.copyWith(
+          dueDate: DateTime(day.year, day.month, day.day, d.hour, d.minute),
+        );
+      },
+      DateTime.now(),
+    );
+    if (dead > 0) {
+      final go = await PastDueGuard.confirm(
+        context,
+        count: dead,
+        detail: '$dead 项任务的截止时刻已早于当前时刻，'
+            '顺延后提醒将不会触发（原时刻保留）。\n\n仍要顺延吗？',
+      );
+      if (!go || !context.mounted) return;
     }
     final n = provider.postponeTo(ids, day);
     if (!context.mounted) return;

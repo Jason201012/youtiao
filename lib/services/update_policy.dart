@@ -154,7 +154,7 @@ class UpdatePolicy {
   /// 之后 302 到 github 上**任意仓库**的资产都放行，纵深防御在这里开了口子。
   /// 现在除了主机，还要求路径落在下面两类形态之一，其余一律拒绝：
   ///  1. 作者发布仓自身的路径（`/jason1012/...`，含 releases/download 与 attach_files）；
-  ///  2. 对象存储附件的固定路径形态（`/attach_file(s)/...`，Gitee CDN 专用）。
+  ///  2. 对象存储附件的固定路径形态（`/attach_file(s)/...`，**且主机为 gitee 系**）。
   /// 这样「从作者 URL 跳到 github 任意仓库资产」这条链被彻底切断
   /// （APK 实际只在 Gitee，不影响正常下载）。
   static bool isAllowedRedirectTarget(String url) {
@@ -164,11 +164,22 @@ class UpdatePolicy {
     final path = uri.path;
     // 1) 作者发布仓路径（gitee.com/jason1012/... 下的 releases / attach_files）
     if (uri.host == 'gitee.com' && path.startsWith('/jason1012/')) return true;
-    // 2) 附件对象存储直链（foruda.gitee.com/attach_file/... 等）
-    if (path.startsWith('/attach_files/') || path.startsWith('/attach_file/')) {
+    // 2) 附件对象存储直链（foruda.gitee.com/attach_file/... 等）。
+    // P3-3：此前分支 2 只校验路径前缀、**不校验主机**，主机白名单内的任意主机
+    // （github.com / githubusercontent.com）只要路径写成 `/attach_files/...` 即放行，
+    // 等于给 F-14 的纵深防御留了个组合口子（`https://github.com/attach_files/...`）。
+    // 实测附件 CDN 只会落在 gitee 系域（含 foruda.gitee.com 等子域），故一并限定主机。
+    if (_isGiteeHost(uri.host) &&
+        (path.startsWith('/attach_files/') || path.startsWith('/attach_file/'))) {
       return true;
     }
     return false;
+  }
+
+  /// 主机是否属于 gitee 系（`gitee.com` 或其子域，如 `foruda.gitee.com`）。
+  static bool _isGiteeHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'gitee.com' || h.endsWith('.gitee.com');
   }
 
   /// 发行版页面是否允许外跳（L-04）。

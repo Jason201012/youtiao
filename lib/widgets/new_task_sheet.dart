@@ -11,6 +11,7 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 
@@ -634,31 +635,17 @@ class _TaskSheetState extends State<TaskSheet> {
     // 保存成功却永不响铃——对提醒类 App 是信任级伤害）。一次性任务且截止时刻已过
     // 时，先提示「提醒不会触发」，由用户决定是否仍要保存（补录历史仍可能有意）。
     final now = DateTime.now();
-    final duePast = _repeat == RepeatType.none &&
-        _dueDate != null &&
-        _dueDate!.isBefore(now);
-    if (duePast) {
-      final continueAnyway = await showDialog<bool>(
-        context: context,
-        builder: (d) => AlertDialog(
-          title: const Text('截止时间已过'),
-          content: Text(
-            '所选截止时间（${_formatDate(_dueDate!)} ${_formatTime(_dueDate!)}）'
+    // U12 / P3-5：可设过去时间但无任何提示 = 提醒静默失效（15:00 建「今天 09:00」，
+    // 保存成功却永不响铃——对提醒类 App 是信任级伤害）。判定与弹窗统一走
+    // [PastDueGuard]，与批量改期 / 逾期区「顺延到今天」等入口保持同一口径。
+    if (_repeat == RepeatType.none && _dueDate != null && _dueDate!.isBefore(now)) {
+      final continueAnyway = await PastDueGuard.confirm(
+        context,
+        count: 1,
+        detail: '所选截止时间（${_formatDate(_dueDate!)} ${_formatTime(_dueDate!)}）'
             '已早于当前时刻，保存后提醒将不会触发。\n\n仍要保存吗？',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(d, false),
-              child: const Text('返回修改'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(d, true),
-              child: const Text('仍要保存'),
-            ),
-          ],
-        ),
       );
-      if (continueAnyway != true) return;
+      if (!continueAnyway) return;
     }
     final provider = Provider.of<TaskProvider>(context, listen: false);
     final repeatMinute =
@@ -670,6 +657,10 @@ class _TaskSheetState extends State<TaskSheet> {
     final weekdays = _repeat == RepeatType.weekly
         ? (_repeatWeekdays.isNotEmpty ? List<int>.from(_repeatWeekdays) : [DateTime.monday])
         : const <int>[];
+    // P2-3：脏字段归一化统一收在 [Task.normalizedRepeatFields]（纯函数、可单测）——
+    // 「切回不重复 / 清空截止时间」后残留的 repeatUntil / repeatInterval /
+    // reminderOffsetMin 会被清掉，避免污染备份导出与「未来 30 天预览」，
+    // 也避免 TaskProvider 的 remindersChanged 判定被无害残留误触发重排。
     if (_isEdit) {
       provider.updateTask(widget.task!.copyWith(
         title: title,
@@ -689,7 +680,7 @@ class _TaskSheetState extends State<TaskSheet> {
         reminderOffsetMin: _reminderOffsetMin,
         pinned: _pinned,
         attachments: List.from(_attachments),
-      ));
+      ).normalizedRepeatFields());
     } else {
       final created = provider.addTask(Task(
         id: '',
@@ -710,7 +701,7 @@ class _TaskSheetState extends State<TaskSheet> {
         reminderOffsetMin: _reminderOffsetMin,
         pinned: _pinned,
         attachments: List.from(_attachments),
-      ));
+      ).normalizedRepeatFields());
       // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
       // P1-11：同时提升从快速录入层继承的分享附件暂存会话。
       await AttachmentService.promoteStaging(_attachmentSession, created.id);

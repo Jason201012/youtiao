@@ -268,6 +268,15 @@ String _canonicalJson(dynamic value) {
   return sb.toString();
 }
 
+/// P2-2：规范化 JSON 的**公开只读入口**，仅供单测 / 发版自检使用。
+///
+/// 对外暴露的唯一理由：canonical 字节「与发版脚本（Python `json.dumps(...,
+/// ensure_ascii=False)`）逐字节一致」是验签能否通过的全部契约，必须有测试把它钉死
+/// （尤其是 emoji / 生僻字等非 BMP 字符——曾因按 UTF-16 code unit 迭代而被拆成
+/// 孤立代理、编码为 U+FFFD，导致含 emoji 的 releaseNotes 全量验签失败）。
+/// 业务代码请勿调用，清单校验内部已直接使用 [_canonicalJson]。
+String canonicalUpdateJson(dynamic value) => _canonicalJson(value);
+
 void _writeCanonical(dynamic v, StringBuffer sb) {
   if (v is Map) {
     sb.write('{');
@@ -300,9 +309,16 @@ void _writeCanonical(dynamic v, StringBuffer sb) {
 }
 
 /// 与 Python json.dumps 默认转义规则对齐：转义 `"` `\` 与 C0 控制字符，其余原样（UTF-8）。
+///
+/// P2-2：必须按 **code point（runes）** 而不是 UTF-16 code unit 迭代。
+/// 原实现用 `s.codeUnits`，代理对（如 🔥 = 0xD83D + 0xDD25）被拆成两个**孤立代理**
+/// 分别 `String.fromCharCode`，两者都不构成合法字符，`utf8.encode` 阶段会各自变成
+/// U+FFFD 替换字符（3 字节 EF BF BD），与发版侧 `json.dumps(ensure_ascii=False)` 输出的
+/// 真实 UTF-8 字节（F0 9F 94 A5）不一致 → canonical 字节不同 → 验签必然失败。
+/// 一旦某版 releaseNotes / name 里出现 emoji，该版本所有用户的「检查更新」都会被拒。
 void _writeJsonString(String s, StringBuffer sb) {
   sb.write('"');
-  for (final ch in s.codeUnits) {
+  for (final ch in s.runes) {
     switch (ch) {
       case 0x22:
         sb.write(r'\"');
@@ -328,8 +344,17 @@ void _writeJsonString(String s, StringBuffer sb) {
       default:
         if (ch < 0x20) {
           sb.write('\\u${ch.toRadixString(16).padLeft(4, '0')}');
-        } else {
+        } else if (ch <= 0xFFFF) {
           sb.write(String.fromCharCode(ch));
+        } else {
+          // 非 BMP（emoji / 生僻字）：显式展开为 UTF-16 代理对，不依赖
+          // String.fromCharCode 对超 BMP 入参的处理细节，保证 utf8.encode 得到
+          // 与 Python ensure_ascii=False 逐字节一致的真实 UTF-8 编码。
+          final v = ch - 0x10000;
+          sb.write(String.fromCharCodes(<int>[
+            0xD800 + (v >> 10),
+            0xDC00 + (v & 0x3FF),
+          ]));
         }
     }
   }

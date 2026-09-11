@@ -256,6 +256,11 @@ Future<void> rescheduleHabitNudge(
       // currentStreak 用 allowTodayGap：今天没打卡时是从昨天往回数，
       // 补上今天才等于它 + 1，故这里 +1 才是「补卡后的连续天数」。
       streakAfterCheckIn: (h) => habit.currentStreak(h) + 1,
+      // P3-4：把「漏卡口径日」与「实际投递时刻」一并交给文案层。挽留若因跨天 /
+      // 勿扰顺延落到次日（如 23:00 排程被推到次日 07:05），文案里的「今天」在送达时
+      // 已然说谎，需改写成明确日期。时刻口径与调度层同源（同一静态函数），不会漂移。
+      forDay: now,
+      deliversAt: NotificationService.nextHabitNudgeTime(nudgeMinute, from: now),
     );
     // 单个漏卡时带上具体 id，点击直达该习惯；多个则落习惯页由用户自己挑。
     final payload = missed.length == 1
