@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -169,6 +170,42 @@ class NotificationService {
   /// 兜底定时器触发时校验「自己是否仍是当前最新一代」，不是则静默作废。
   final Map<String, int> _deadlineGen = {};
 
+  /// F-2：每个重复任务 / 习惯预挂的「未来 occurrence」个数。
+  ///
+  /// 重复提醒 id 段为每个任务预留了 8 个连续槽位（dayIndex 0..7），
+  /// [cancelRepeatReminder] / [cancelHabitReminder] 也按 0..7 逐个取消——
+  /// 这里正好用这 8 个槽位预挂「接下来的 8 次」，让进程被杀 / 长期未打开 App 时
+  /// 仍有 8 个周期的续航（每天任务 ≈ 8 天、每周任务 ≈ 8 周、每月任务 ≈ 8 个月），
+  /// 而不是「响一次就断」（F-2 改造前 daily/weekly 靠 OS 周期循环永生，
+  /// 改造为一次性闹钟后必须自带这段续航，否则是可靠性倒退）。
+  static const int _kScheduleSlots = 8;
+
+  /// F-2：每个任务 / 习惯**当前已挂出**的落点签名，用于跳过多余重挂。
+  ///
+  /// `TaskProvider.checkDailyReset` 每 15 分钟就会为全部重复任务重挂一次；
+  /// 若落点没变（绝大多数周期内都没变），重复的 zonedSchedule 只是白白消耗
+  /// 平台通道 + 插件内部的 SharedPreferences 往返。签名一致即跳过。
+  /// 进程重启 / 批量取消后缓存自然失效并重建（见 [cancelAll] /
+  /// [_purgeLegacyNotificationsIfNeeded]）。
+  final Map<String, String> _armedSignatures = {};
+
+  /// 清空「已挂落点」缓存，强制下一次重排真正下发到系统。
+  /// 批量取消（方案升级 / 恢复备份 / 关闭总开关）后必须调用。
+  void _invalidateArmedCache() => _armedSignatures.clear();
+
+  /// F-3：勿扰顺延在落点计算里的统一入口（见 [repeatOccurrenceTimes] /
+  /// [habitOccurrenceTimes] 的 `defer` 参数）。
+  ///
+  /// 一次性闹钟的**每个**落点都独立过一遍勿扰是正确做法：不会像
+  /// `matchDateTimeComponents` 那样把顺延后的时分 / 星期写进周期分量导致漂移。
+  /// 「每天 07:00」在勿扰 23:00–08:00 下，等价于「每天 08:05 提醒」。
+  /// 未注入 [dndDefer]（如单测 / 未启用勿扰）时返回原时刻。
+  static DateTime? deferByDnd(DateTime when) {
+    final defer = dndDefer;
+    if (defer == null) return null;
+    return defer(when);
+  }
+
   /// F11：「稍后提醒（snooze）」独立 id 段。
   ///
   /// 此前 snooze 复用一次性「截止提醒」的 [_notifyIdOf]，而重复提醒的 payload
@@ -242,14 +279,20 @@ class NotificationService {
     _initialized = true;
   }
 
-  /// 通知 id 段方案版本（S10 = 1，F-02 = 2）。升级到新段分配后用于一次性清理旧通知，
+  /// 通知 id 段方案版本（S10 = 1，F-02 = 2，F-2 = 3）。升级到新段分配后用于一次性清理旧通知，
   /// 避免旧 id 段遗留的提醒与新建提醒混淆。
   ///
   /// F-02：重复提醒 id 由「base + dayIndex」改为「base*8 + dayIndex」布局，
   /// 存量用户系统里已排的旧 id 闹钟若不清理，会与新 id 并存（旧闹钟无人取消、
   /// 永远按旧日期响）。这里把方案号 +1，init 时 cancelAll 一次，随后由
   /// TaskProvider 的全量重排按新布局重建。
-  static const int _kNotifIdScheme = 2;
+  ///
+  /// F-2：重复提醒（daily / weekly / weekday / 简单 monthly）由 OS 周期闹钟
+  /// （`matchDateTimeComponents`）改为**一次性闹钟**。weekly 原先占用槽位 1..7
+  /// （每周一个 id），现在统一只用槽位 0..7 承载「接下来 8 次」，若不清理，
+  /// 存量用户系统里的 1..7 号周期闹钟会无人取消并**按周永久重复**，
+  /// 与新排的提醒重复弹出。故再次把方案号 +1，init 时 cancelAll 清空重建。
+  static const int _kNotifIdScheme = 3;
   static const String _kNotifIdSchemePref = 'notif_id_scheme';
 
   /// 仅首次（或跨版本）执行一次：清掉旧 id 段方案遗留的全部通知，随后正常重排
@@ -259,6 +302,10 @@ class NotificationService {
       final prefs = await SharedPreferences.getInstance();
       final cur = prefs.getInt(_kNotifIdSchemePref) ?? 0;
       if (cur < _kNotifIdScheme) {
+        // F-2：方案号升到 3 时，此处会连**已排的闹钟**一并取消（插件的
+        // cancelAll 会遍历 scheduled_notifications 缓存逐个 AlarmManager.cancel），
+        // 随后由全量重排按新布局重建；同时作废落点签名缓存。
+        _invalidateArmedCache();
         await _plugin.cancelAll();
         await prefs.setInt(_kNotifIdSchemePref, _kNotifIdScheme);
       }
@@ -545,19 +592,26 @@ class NotificationService {
   /// F11：单独取消某任务的「稍后提醒」通知（snooze 后任务被完成时调用）。
   Future<void> cancelSnooze(String id) => _plugin.cancel(_snoozeNotifyIdOf(id));
 
-  /// 为「重复任务」调度本地提醒：按 [Task.repeat] 规则在设定时刻重复触发
-  /// （setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。返回 true 表示已提交。
+  /// 为「重复任务」调度本地提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
+  /// 返回 true 表示已提交。
   ///
-  /// - daily：每天同一时刻（[DateTimeComponents.time]）。
-  /// - weekly / weekday：按所选星期逐个挂 [DateTimeComponents.dayOfWeekAndTime]
-  ///   （每个星期用独立 notifyId 区分）。
-  /// - interval：flutter 没有「每隔 N 天」原语，降级为「下一次 occurrence 的一次性
-  ///   setAlarmClock」；App 每次启动 / 回到前台（_rescheduleAllActive +
-  ///   checkDailyReset）会重算并重新挂上，覆盖绝大多数使用场景。
+  /// **F-2 起全部重复类型统一为「一次性闹钟 × 预挂 N 次」**，不再使用 OS 的
+  /// `matchDateTimeComponents` 周期循环。原因是系统周期循环无法表达本 App 的两条
+  /// 核心语义，形成三处可复现缺陷：
+  /// 1) 落点不消费 [Task.skipDates]：「今天 07:00 还没到，先点『本次跳过』」重排后
+  ///    落点仍是今天 07:00 → 今天照响；「今天周五跳过一次下周一」对 weekly 也无效；
+  /// 2) 落点不消费 [Task.repeatUntil]：结束日到期后只要用户长期不开 App
+  ///    （没有触发任何重排），系统周期闹钟会继续按天 / 周弹；
+  /// 3) 与 interval / 复杂 monthly 已是两套机制，重复提醒一路两种实现、维护成本高。
   ///
-  /// **当天已完成则跳过今日**：若 [Task.done] 且 [Task.completedAt] 为今天（即用户已
-  /// 提前完成），则把下一次触发挂到「今天之后的第一个循环日」，避免「提前完成仍弹提醒」。
-  /// 用同一 notifyId 重新 zonedSchedule 会覆盖掉今天尚未触发的闹钟。
+  /// 现在统一走 [_nextRepeatOccurrences]：逐日前进取「未来 + 是循环日（[Task.repeatsOn]，
+  /// 内含 repeatUntil 与 skipDates）+ 尚未完成（[Task.isDoneOn]，含 occurrence 级
+  /// doneDates）」的落点，并按 [_kScheduleSlots] 预挂接下来的 8 次，
+  /// 由 App 启动 / 回前台 / 午夜重置 / 15 分钟守护（[TaskProvider.checkDailyReset]）
+  /// 持续补挂。
+  ///
+  /// **当天已完成 / 已跳过的这次不会响**：落在今天的 occurrence 只有当它既未完成
+  /// 也未被跳过、且时刻尚未过去时才会被排上。
   Future<bool> scheduleRepeatReminder(Task task, {bool playSound = true}) async {
     if (!enabled) {
       AppLog.d('[通知] 未调度重复提醒 id=${task.id}：通知总开关关闭');
@@ -567,155 +621,67 @@ class NotificationService {
       AppLog.d('[通知] 未调度重复提醒 id=${task.id}：非重复任务或无提醒时间');
       return false;
     }
-      // F3：「结束重复」（repeatUntil）对**所有**重复类型生效，而非只有 interval。
-      // OS 周期闹钟（daily/weekly/monthly）一旦挂上就会一直响，若不在此处拦，
-      // 用户点「结束重复」后重启 App / 切一次开关就会死灰复燃。
-      if (_repeatEnded(task)) {
+    // F3：「结束重复」（repeatUntil）对**所有**重复类型生效。
+    // 结束之日不再排任何落点，并显式取消已挂的 8 个槽位（否则旧闹钟会照旧响）。
+    if (_repeatEnded(task)) {
+      await cancelRepeatReminder(task.id);
+      AppLog.d('[通知] 未调度重复提醒 id=${task.id}：重复已于 ${task.repeatUntil} 结束');
+      return false;
+    }
+    try {
+      final occurrences = _nextRepeatOccurrences(task);
+      if (occurrences.isEmpty) {
+        // 一个合法落点都没有（跳过日密集 / 已临近结束日）→ 清掉旧闹钟，宁可不响
+        // 也不在错误的日期响（与 interval 的 S11 口径一致）。
         await cancelRepeatReminder(task.id);
-        AppLog.d('[通知] 未调度重复提醒 id=${task.id}：重复已于 ${task.repeatUntil} 结束');
+        AppLog.d('[通知] 未调度重复提醒 id=${task.id}：近期无合法循环日');
         return false;
       }
-      try {
-        final loc = _loc ?? tz.UTC;
-        final m = task.repeatMinute!;
-      final hh = m ~/ 60;
-      final mm = m % 60;
-      final now = tz.TZDateTime.now(loc);
-      // 当天已完成（completedAt 为今日）→ 跳过今日这次，挂到下一个循环日。
-      final skipToday =
-          task.done && task.completedAt != null && _sameDay(task.completedAt!, DateTime.now());
-      final chId = playSound ? _chSound : _chSilent;
-      final androidDetail = AndroidNotificationDetails(
-        chId,
-        '任务提醒',
-        channelDescription: '重复任务定时提醒',
-        importance: Importance.high,
-        priority: Priority.high,
-        playSound: playSound,
-        actions: _taskActions,
-        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
-        visibility: visibility,
+      // 落点未变 → 系统里已挂的闹钟仍然正确，跳过重复的平台往返。
+      final signature = occurrences
+          .map((e) => '${e.year}-${e.month}-${e.day}T${e.hour}:${e.minute}')
+          .join('|');
+      if (_armedSignatures[task.id] == signature) return true;
+
+      final playChId = playSound ? _chSound : _chSilent;
+      final detail = NotificationDetails(
+        android: AndroidNotificationDetails(
+          playChId,
+          '任务提醒',
+          channelDescription: '重复任务定时提醒',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: playSound,
+          actions: _taskActions,
+          // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+          visibility: visibility,
+        ),
       );
-      final detail = NotificationDetails(android: androidDetail);
       final mode = await _scheduleMode;
-
-      // 计算「下一个该星期 @ hh:mm」的真实时刻。skipToday 时要求严格晚于今天。
-      tz.TZDateTime nextWeekday(int wd) {
-        final limit = skipToday ? now.add(const Duration(days: 1)) : now;
-        var candidate = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-        while (candidate.weekday != wd || !candidate.isAfter(limit)) {
-          candidate = candidate.add(const Duration(days: 1));
-        }
-        return candidate;
+      // 只取消「这次用不到」的多余槽位：落点数量变少时（新增跳过日 / 临近结束日）
+      // 旧槽位必须被真正取消，否则会在过期日期照响；而仍在范围内的槽位不需要先取消
+      // 再重排——同 id 的 zonedSchedule 会替换掉系统里既有的闹钟与插件缓存条目
+      // （见插件 saveScheduledNotification 的去重逻辑），省下一半平台往返。
+      for (var d = occurrences.length; d < _kScheduleSlots; d++) {
+        await _plugin.cancel(repeatNotifyIdOf(task.id, d));
       }
-
-      switch (task.repeat) {
-        case RepeatType.daily:
-          var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-          when = skipToday
-              ? when.add(const Duration(days: 1))
-              : (when.isAfter(now) ? when : when.add(const Duration(days: 1)));
-          await _plugin.zonedSchedule(
-            repeatNotifyIdOf(task.id, 0),
-            task.repeatSummary,
-            task.title.isNotEmpty ? task.title : '无标题任务',
-            when,
-            detail,
-            payload: '$payloadTaskPrefix${task.id}',
-            androidScheduleMode: mode,
-            uiLocalNotificationDateInterpretation:
-                UILocalNotificationDateInterpretation.absoluteTime,
-            matchDateTimeComponents: DateTimeComponents.time,
-          );
-          AppLog.d('[通知] 已调度重复提醒 id=${task.id} 每天 '
-              '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-              '(skipToday=$skipToday, 首次=$when)');
-          return true;
-
-        case RepeatType.weekday:
-        case RepeatType.weekly:
-          final weeklyDays = task.repeat == RepeatType.weekday
-              ? const [1, 2, 3, 4, 5] // 周一至周五
-              : task.repeatWeekdays.where((d) => d >= 1 && d <= 7).toList();
-          if (weeklyDays.isEmpty) return false;
-          for (final wd in weeklyDays) {
-            final when = nextWeekday(wd);
-            await _plugin.zonedSchedule(
-              repeatNotifyIdOf(task.id, wd),
-              task.repeatSummary,
-              task.title,
-              when,
-              detail,
-              payload: '$payloadTaskPrefix${task.id}',
-              androidScheduleMode: mode,
-              uiLocalNotificationDateInterpretation:
-                  UILocalNotificationDateInterpretation.absoluteTime,
-              matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
-            );
-          }
-          AppLog.d('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
-              '每周 $weeklyDays @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-              '(skipToday=$skipToday)');
-          return true;
-
-        case RepeatType.interval:
-          final next = _nextIntervalOccurrence(task, skipToday: skipToday);
-          if (next == null) {
-            AppLog.d('[通知] 未调度 interval 提醒 id=${task.id}：缺锚点');
-            return false;
-          }
-          final when = next.isAfter(now) ? next : next.add(const Duration(days: 1));
-          await _plugin.zonedSchedule(
-            repeatNotifyIdOf(task.id, 0),
-            task.repeatSummary,
-            task.title.isNotEmpty ? task.title : '无标题任务',
-            when,
-            detail,
-            payload: '$payloadTaskPrefix${task.id}',
-            androidScheduleMode: mode,
-            uiLocalNotificationDateInterpretation:
-                UILocalNotificationDateInterpretation.absoluteTime,
-          );
-          AppLog.d('[通知] 已调度重复提醒(interval) id=${task.id} 下次 '
-              '${when.year}-${when.month}-${when.day} ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-              '(skipToday=$skipToday)');
-          return true;
-
-        case RepeatType.monthly:
-          final when = _nextMonthlyOccurrence(task, skipToday: skipToday);
-          if (when == null) {
-            AppLog.d('[通知] 未调度 monthly 提醒 id=${task.id}：缺提醒时间');
-            return false;
-          }
-          // F-03 修复：复杂月规则**不能**交给系统按「号」循环。
-          // matchDateTimeComponents=dayOfMonthAndTime 会让系统之后每个月在首次那个「号」上
-          // 重复，而「每月最后一天 / 倒数第 N 天 / 第 N 个周几 / 每月 31 号」的目标日
-          // 每月都在变（或在该月根本不存在）→ 次月起日期漂移、短月整月漏响。
-          // 这里改为一次性闹钟（与 interval 同套路），由 App 启动 / 回前台 /
-          // 午夜重置 / 15 分钟守护重新计算下一次落点。
-          // 仅「每月固定 X 号且 X ≤ 28」这种每部都有、且号不变的情形保留系统月循环。
-          final useSystemMonthlyLoop = !isOneShotMonthly(task);
-          await _plugin.zonedSchedule(
-            repeatNotifyIdOf(task.id, 0),
-            task.repeatSummary,
-            task.title.isNotEmpty ? task.title : '无标题任务',
-            when,
-            detail,
-            payload: '$payloadTaskPrefix${task.id}',
-            androidScheduleMode: mode,
-            uiLocalNotificationDateInterpretation:
-                UILocalNotificationDateInterpretation.absoluteTime,
-            matchDateTimeComponents:
-                useSystemMonthlyLoop ? DateTimeComponents.dayOfMonthAndTime : null,
-          );
-          AppLog.d('[通知] 已调度重复提醒(monthly) id=${task.id} '
-              '${task.repeatSummary} @ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-              '(skipToday=$skipToday, 系统月循环=$useSystemMonthlyLoop)');
-          return true;
-
-        case RepeatType.none:
-          return false;
+      for (var i = 0; i < occurrences.length; i++) {
+        await _plugin.zonedSchedule(
+          repeatNotifyIdOf(task.id, i),
+          task.repeatSummary,
+          task.title.isNotEmpty ? task.title : '无标题任务',
+          occurrences[i],
+          detail,
+          payload: '$payloadTaskPrefix${task.id}',
+          androidScheduleMode: mode,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+        );
       }
+      _armedSignatures[task.id] = signature;
+      AppLog.d('[通知] 已调度重复提醒 id=${task.id} ${task.repeatSummary} '
+          '共 ${occurrences.length} 次，首次=${occurrences.first}');
+      return true;
     } catch (e, s) {
       AppLog.d('[通知] 重复提醒调度失败 id=${task.id}: $e');
       AppLog.d('$s');
@@ -723,17 +689,64 @@ class NotificationService {
     }
   }
 
-  /// F-03：月重复是否为「复杂规则」——目标日每月都会变，或在某些月份根本不存在。
+  /// F-2：计算重复任务接下来的 [count] 个投递时刻（已含勿扰顺延）。
   ///
-  /// 命中时不能交给系统 `dayOfMonthAndTime` 循环（会被钉死在首次那个「号」上），
-  /// 必须像 interval 一样排一次性闹钟并在启动 / 回前台 / 午夜 / 守护周期重算：
-  /// - `monthlyFromEnd > 0`：每月最后一天 / 倒数第 N 天（月末日随月份漂移）；
-  /// - `monthlyWeekday != null`：第 N 个周几 / 最后一个周几（日期每月不同）；
-  /// - `monthlyDay > 28`：29/30/31 号在部分月份不存在（2 月、小月会漏响或漂移）。
-  static bool isOneShotMonthly(Task task) =>
-      task.monthlyFromEnd > 0 ||
-      task.monthlyWeekday != null ||
-      task.monthlyDay > 28;
+  /// 逐日前进而非按周期跳：这样 [Task.repeatsOn]（repeatUntil + skipDates +
+  /// 各重复类型的当日命中判定）与 [Task.isDoneOn]（occurrence 级完成历史）都能被
+  /// 完整消费，`interval` / `monthly` 的各种边界也无需另写一套。
+  /// 上限 400 天，既覆盖「每隔 N 天」的最大步进与密集跳过日，也杜绝死循环。
+  List<tz.TZDateTime> _nextRepeatOccurrences(
+    Task task, {
+    int count = _kScheduleSlots,
+  }) {
+    final loc = _loc ?? tz.UTC;
+    final nowTz = tz.TZDateTime.now(loc);
+    // 全部计算在「墙钟」空间完成后再贴回 loc 时区：既让纯函数可单测，
+    // 也避免设备时区 ≠ loc 时按 epoch 比较产生的错位（见 [repeatOccurrenceTimes]）。
+    final nowWall = DateTime(nowTz.year, nowTz.month, nowTz.day, nowTz.hour,
+        nowTz.minute, nowTz.second);
+    return repeatOccurrenceTimes(task, now: nowWall, count: count)
+        .map((d) => tz.TZDateTime(loc, d.year, d.month, d.day, d.hour, d.minute))
+        .toList();
+  }
+
+  /// F-2：重复任务「接下来该响的落点」的**纯计算**（墙钟语义，无时区依赖）。
+  ///
+  /// 与 [_nextRepeatOccurrences] 共用同一份逻辑，只是把时区与「现在」抽成参数，
+  /// 供回归测试直接钉死以下契约（v2.8.4 审计报告 F-1 / F-2 的核心）：
+  /// 1) 落点必须满足 [Task.repeatsOn] —— 因此 `skipDates`（本次跳过 / 提前跳过
+  ///    未来某个星期）与 `repeatUntil`（结束日后不再响）都会被真正消费；
+  /// 2) 落点必须不是 [Task.isDoneOn] 的那一天 —— 因此「今天已完成」与
+  ///    「未来循环日被预标记完成」（F-10）都不会再响；
+  /// 3) 落点必须严格晚于 [now]，不会补弹已经过去的时刻。
+  ///
+  /// [defer] 为勿扰顺延钩子（缺省取当前注入的 [dndDefer]），**逐落点独立施加**：
+  /// 一次性闹钟不存在「把顺延后的时分写进周期分量」的漂移问题。
+  @visibleForTesting
+  static List<DateTime> repeatOccurrenceTimes(
+    Task task, {
+    required DateTime now,
+    int count = _kScheduleSlots,
+    DateTime? Function(DateTime)? defer,
+  }) {
+    final out = <DateTime>[];
+    final m = task.repeatMinute;
+    if (m == null || count <= 0) return out;
+    final hh = m ~/ 60;
+    final mm = m % 60;
+    final apply = defer ?? deferByDnd;
+    var cursor = DateTime(now.year, now.month, now.day, hh, mm);
+    for (var i = 0; i < 400 && out.length < count; i++) {
+      if (cursor.isAfter(now)) {
+        final day = DateTime(cursor.year, cursor.month, cursor.day);
+        if (task.repeatsOn(day) && !task.isDoneOn(day)) {
+          out.add(apply(cursor) ?? cursor);
+        }
+      }
+      cursor = DateTime(cursor.year, cursor.month, cursor.day + 1, hh, mm);
+    }
+    return out;
+  }
 
   /// F3：重复是否已结束（[Task.repeatUntil] 严格早于今天）。
   /// 与 [Task.isRepeatEnded] 同一口径，此处独立实现以避免 service 反向依赖 Provider。
@@ -752,6 +765,12 @@ class NotificationService {
   /// 「每月 N 号」模式用 [Task.monthlyDay]（溢出夹到当月最后一天）；
   /// 「第 N 个周几 / 最后一个周几」模式用 [Task.monthlyWeekday]+[Task.monthlyWeekIndex]；
   /// 「每月最后一天 / 倒数第 N 天」用 [Task.monthlyFromEnd]（P1-9，优先级最高）。
+  ///
+  /// F-2：月重复原先区分为「简单（固定 X 号且 X ≤ 28，交给系统
+  /// `dayOfMonthAndTime` 循环）」与「复杂（一次性）」。统一为
+  /// [_nextRepeatOccurrences] 后，**所有** monthly 都走一次性落点，
+  /// 本方法保留作为对照参考，生产路径不再调用。
+  // ignore: unused_element
   tz.TZDateTime? _nextMonthlyOccurrence(Task task, {bool skipToday = false}) {
     if (task.repeatMinute == null) return null;
     final loc = _loc ?? tz.UTC;
@@ -815,8 +834,12 @@ class NotificationService {
     return fallback;
   }
 
-  /// 计算 interval 任务下一次 occurrence 的「日期+时刻」（date-only 锚点 + N 天步进）。
-  /// [skipToday] 为 true 且下一次 occurrence 恰为今天时，再往后跳一个周期（跳过今天）。
+  /// 计算 interval 任务下一次 occurrence 的「日期+时刻」。
+  ///
+  /// F-2：本方法原先是 interval 专用的一次性落点算法（含 F4「必须包含今天」与
+  /// S11「找不到合法循环日就不排」两处修复）。统一为 [_nextRepeatOccurrences] 后
+  /// 保留此实现作为对照参考，生产路径不再调用（`unused_element` 由本注释说明）。
+  // ignore: unused_element
   tz.TZDateTime? _nextIntervalOccurrence(Task task, {bool skipToday = false}) {
     final a = task.repeatAnchor;
     if (a == null || task.repeatMinute == null) return null;
@@ -869,9 +892,13 @@ class NotificationService {
     return candidate;
   }
 
-  /// 按任务 id 取消全部「重复提醒」通知（daily 用 dayIndex=0；weekly/weekday 用 1..7）。
+  /// 按任务 id 取消全部「重复提醒」通知。
+  /// F-2 起 0..7 号槽位承载「接下来 8 次」一次性落点（不再按星期分槽），
+  /// 故这里逐个取消 0..7 即可覆盖全部已挂落点；同时作废落点签名缓存，
+  /// 使下一次 [scheduleRepeatReminder] 一定会重新下发。
   Future<void> cancelRepeatReminder(String id) async {
-    for (var d = 0; d <= 7; d++) {
+    _armedSignatures.remove(id);
+    for (var d = 0; d < _kScheduleSlots; d++) {
       await _plugin.cancel(repeatNotifyIdOf(id, d));
     }
   }
@@ -895,11 +922,16 @@ class NotificationService {
   }
 
   /// 为习惯调度每日打卡提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
-  /// [checkedToday] 为 true（今天已打卡）且提醒时刻尚未到来时，跳过今日这一次，
-  /// 挂到下一个循环日，避免「已完成仍弹提醒」。返回 true 表示已提交。
+  /// [checkedToday] 为 true（今天已打卡）则跳过今日这一次，挂到下一个循环日，
+  /// 避免「已完成仍弹提醒」。返回 true 表示已提交。
   ///
-  /// - [weekdays] 为空：每天同一时刻（[DateTimeComponents.time]）。
-  /// - [weekdays] 非空：按所选星期逐个挂 [DateTimeComponents.dayOfWeekAndTime]。
+  /// F-2 / F-3：与 [scheduleRepeatReminder] 统一为「一次性闹钟 × 预挂 N 次」，
+  /// 并逐落点过一次勿扰顺延。此前习惯用 OS 周期闹钟（`DateTimeComponents.time` /
+  /// `dayOfWeekAndTime`），勿扰顺延根本没接入（F-3：用户设了 23:00–08:00 勿扰，
+  /// 「每天 7:00 起床打卡」照常在勿扰窗口内响，且每天复现）；而不接入的原因正是
+  /// 顺延会把「顺延后的时分 / 星期」写进周期分量，导致后续每天漂移
+  /// （周习惯 23:30 顺延到次日 08:05 时，星期分量都会跑偏）。
+  /// 改成一次性落点后，每个落点各自独立顺延，语义与一次性提醒完全一致。
   Future<bool> scheduleHabitReminder(Habit habit, {bool checkedToday = false}) async {
     if (!enabled) {
       AppLog.d('[通知] 未调度习惯提醒 id=${habit.id}：通知总开关关闭');
@@ -910,81 +942,59 @@ class NotificationService {
       return false;
     }
     try {
-      final loc = _loc ?? tz.UTC;
-      final m = habit.reminderMinute!;
-      final hh = m ~/ 60;
-      final mm = m % 60;
-      final now = tz.TZDateTime.now(loc);
-      final chId = _chSound; // 习惯提醒统一用有声渠道，引起注意
-      final androidDetail = AndroidNotificationDetails(
-        chId,
-        '习惯提醒',
-        channelDescription: '每日习惯打卡提醒',
-        importance: Importance.high,
-        priority: Priority.high,
-        playSound: true,
-        actions: [
-          AndroidNotificationAction(snoozeActionId, '稍后提醒'),
-          // U3：习惯提醒补「打卡」action——此前「完成」只处理任务，习惯只能进 App
-          // 手动打卡；赶路/开会时点一下即可打卡，不打断当前场景。
-          AndroidNotificationAction(habitCheckInActionId, '打卡'),
-        ],
-        // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
-        visibility: visibility,
-      );
-      final detail = NotificationDetails(android: androidDetail);
+      final occurrences = _nextHabitOccurrences(habit, checkedToday: checkedToday);
+      if (occurrences.isEmpty) {
+        // 一个合法落点都没有（理论不可达：reminderMinute 已非空）→ 清掉已挂闹钟，
+        // 避免残留旧槽位在错误日期继续响。
+        await cancelHabitReminder(habit.id);
+        AppLog.d('[通知] 未调度习惯提醒 id=${habit.id}：近期无合法打卡日');
+        return false;
+      }
+      final signature = occurrences
+          .map((e) => '${e.year}-${e.month}-${e.day}T${e.hour}:${e.minute}')
+          .join('|');
+      if (_armedSignatures['habit:${habit.id}'] == signature) return true;
+
       final mode = await _scheduleMode;
       final body = '${habit.emoji} ${habit.title} · 该打卡啦';
-      final skipToday = checkedToday;
-
-      if (habit.weekdays.isEmpty) {
-        var when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-        when = skipToday
-            ? when.add(const Duration(days: 1))
-            : (when.isAfter(now) ? when : when.add(const Duration(days: 1)));
+      final detail = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _chSound, // 习惯提醒统一用有声渠道，引起注意
+          '习惯提醒',
+          channelDescription: '每日习惯打卡提醒',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: true,
+          actions: [
+            AndroidNotificationAction(snoozeActionId, '稍后提醒'),
+            // U3：习惯提醒补「打卡」action——此前「完成」只处理任务，习惯只能进 App
+            // 手动打卡；赶路/开会时点一下即可打卡，不打断当前场景。
+            AndroidNotificationAction(habitCheckInActionId, '打卡'),
+          ],
+          // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
+          visibility: visibility,
+        ),
+      );
+      // 只取消「这次用不到」的多余槽位（同 [scheduleRepeatReminder] 的理由）。
+      for (var d = occurrences.length; d < _kScheduleSlots; d++) {
+        await _plugin.cancel(_habitNotifyIdOf(habit.id, d));
+      }
+      for (var i = 0; i < occurrences.length; i++) {
         await _plugin.zonedSchedule(
-          _habitNotifyIdOf(habit.id, 0),
+          _habitNotifyIdOf(habit.id, i),
           '习惯打卡',
           body,
-          when,
+          occurrences[i],
           detail,
           payload: '$payloadHabitPrefix${habit.id}',
           androidScheduleMode: mode,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
-          matchDateTimeComponents: DateTimeComponents.time,
-        );
-        AppLog.d('[通知] 已调度习惯提醒 id=${habit.id} 每天 '
-            '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-            '(skipToday=$skipToday, 首次=$when)');
-        return true;
-      }
-
-      for (final wd in habit.weekdays) {
-        // 计算「下一个该星期 @ hh:mm」的真实时刻。
-        // skipToday（今天已打卡）时从「明天」起找，避免今天恰为提醒星期且时刻未过时
-        // 仍弹今日提醒（与 daily 分支、任务 weekly 分支的 limit 模式保持一致）。
-        var candidate = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-        if (skipToday) candidate = candidate.add(const Duration(days: 1));
-        while (candidate.weekday != wd || !candidate.isAfter(now)) {
-          candidate = candidate.add(const Duration(days: 1));
-        }
-        await _plugin.zonedSchedule(
-          _habitNotifyIdOf(habit.id, wd),
-          '习惯打卡',
-          body,
-          candidate,
-          detail,
-          payload: '$payloadHabitPrefix${habit.id}',
-          androidScheduleMode: mode,
-          uiLocalNotificationDateInterpretation:
-              UILocalNotificationDateInterpretation.absoluteTime,
-          matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
         );
       }
-      AppLog.d('[通知] 已调度习惯提醒 id=${habit.id} 每周 ${habit.weekdays} '
-          '@ ${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} '
-          '(skipToday=$skipToday)');
+      _armedSignatures['habit:${habit.id}'] = signature;
+      AppLog.d('[通知] 已调度习惯提醒 id=${habit.id} '
+          '共 ${occurrences.length} 次，首次=${occurrences.first}');
       return true;
     } catch (e, s) {
       AppLog.d('[通知] 习惯提醒调度失败 id=${habit.id}: $e');
@@ -993,11 +1003,60 @@ class NotificationService {
     }
   }
 
-  /// 取消某习惯的全部每日提醒通知（每天用 dayIndex=0；按星期用 1..7）。
+  /// F-2：计算习惯接下来的 [count] 个投递时刻（已含勿扰顺延与「今天已打卡」跳过）。
+  /// [Habit.weekdays] 为空表示每天；非空表示按 1..7（周一..周日）筛选。
+  List<tz.TZDateTime> _nextHabitOccurrences(
+    Habit habit, {
+    bool checkedToday = false,
+    int count = _kScheduleSlots,
+  }) {
+    final loc = _loc ?? tz.UTC;
+    final nowTz = tz.TZDateTime.now(loc);
+    final nowWall = DateTime(nowTz.year, nowTz.month, nowTz.day, nowTz.hour,
+        nowTz.minute, nowTz.second);
+    return habitOccurrenceTimes(habit,
+            now: nowWall, checkedToday: checkedToday, count: count)
+        .map((d) => tz.TZDateTime(loc, d.year, d.month, d.day, d.hour, d.minute))
+        .toList();
+  }
+
+  /// F-2：习惯打卡提醒落点的**纯计算**（与 [repeatOccurrenceTimes] 同思路，
+  /// 墙钟语义、可单测）。[checkedToday] 为 true 时跳过今天这一次。
+  @visibleForTesting
+  static List<DateTime> habitOccurrenceTimes(
+    Habit habit, {
+    required DateTime now,
+    bool checkedToday = false,
+    int count = _kScheduleSlots,
+    DateTime? Function(DateTime)? defer,
+  }) {
+    final out = <DateTime>[];
+    final m = habit.reminderMinute;
+    if (m == null || count <= 0) return out;
+    final hh = m ~/ 60;
+    final mm = m % 60;
+    final weekdays = habit.weekdays.where((d) => d >= 1 && d <= 7).toSet();
+    final apply = defer ?? deferByDnd;
+    final today = DateTime(now.year, now.month, now.day);
+    var cursor = DateTime(now.year, now.month, now.day, hh, mm);
+    for (var i = 0; i < 400 && out.length < count; i++) {
+      final day = DateTime(cursor.year, cursor.month, cursor.day);
+      final weekdayHit = weekdays.isEmpty || weekdays.contains(cursor.weekday);
+      final isToday = _sameDay(day, today);
+      if (cursor.isAfter(now) && weekdayHit && !(checkedToday && isToday)) {
+        out.add(apply(cursor) ?? cursor);
+      }
+      cursor = DateTime(cursor.year, cursor.month, cursor.day + 1, hh, mm);
+    }
+    return out;
+  }
+
+  /// 取消某习惯的全部每日提醒通知（F-2 起 0..7 号槽位承载「接下来 8 次」）。
   /// 取消失败（插件未初始化 / 平台不支持）不应阻断删除习惯等主流程，故整体吞异常。
   Future<void> cancelHabitReminder(String id) async {
+    _armedSignatures.remove('habit:$id');
     try {
-      for (var d = 0; d <= 7; d++) {
+      for (var d = 0; d < _kScheduleSlots; d++) {
         await _plugin.cancel(_habitNotifyIdOf(id, d));
       }
     } catch (e) {
@@ -1108,9 +1167,12 @@ class NotificationService {
     }
   }
 
-  /// 清空所有已调度的通知（关闭总开关时调用）。
+  /// 清空所有已调度的通知（关闭总开关 / 恢复备份 / 方案升级时调用）。
+  /// F-2：同时作废「已挂落点」签名缓存——系统里的闹钟已被清空，
+  /// 若缓存还在，下一次重排会因「签名未变」而跳过，提醒就真丢了。
   Future<void> cancelAll() {
     _deadlineGen.clear();
+    _invalidateArmedCache();
     return _plugin.cancelAll();
   }
 

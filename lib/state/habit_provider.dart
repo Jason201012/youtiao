@@ -430,8 +430,10 @@ class HabitProvider extends ChangeNotifier {
 
       // 🔴 修复 Bug1（僵尸习惯提醒）：覆盖 _habits 之前，先取消**本机现有全部习惯**
       // 的每日打卡提醒。否则若本机有 H1、备份里只有 H2，恢复后 H1 从列表消失，
-      // 但它在系统 AlarmManager 里的 matchDateTimeComponents.time 永久循环打卡
-      // 提醒不会被取消，之后每天到点仍会弹一个「点进去找不到的习惯」提醒。
+      // 但它在系统 AlarmManager 里已排的提醒不会被取消，之后到点仍会弹一个
+      // 「点进去找不到的习惯」提醒。
+      // （F-2 起习惯提醒也是「一次性闹钟 × 预挂 8 次」，不再由系统周期分量永久循环，
+      //  但要挂的槽位依然存在，故这一步取消仍然必要且必须放在覆盖之前。）
       // 对比 TaskProvider.restoreFromJson 的做法（先整体 cancelAll 再重排），
       // 习惯侧此前漏掉了这一步，现补上。
       final oldIds = _habits.map((h) => h.id).toList();

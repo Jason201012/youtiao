@@ -527,10 +527,11 @@ class TaskParser {
       }
       due = candidate;
     }
-    // 有重复规则但没写日期：沿用编辑弹层的约定，把截止时间落在当天 23:59
-    if (repeat != RepeatType.none && due == null) {
-      due = DateTime(base.year, base.month, base.day, 23, 59);
-    }
+    // F-4/F-5：**不再**为「有重复规则但没写日期」的输入补一个「当天 23:59」的截止时间。
+    // 旧约定把 dueDate 复用为「重复窗口」，制造了一串连带缺陷：创建次日即被判定为
+    // 「已过期」（提醒门槛失灵 / 每日重置失效）、改期副本被钉在 23:59、结束后掉进
+    // 「逾期」分区永久残留。重复规则本身（repeat / repeatMinute / repeatUntil）
+    // 已足以表达「什么时候提醒、重复到哪天」，截止时间留给用户显式输入。
 
     // ── 7. 剩余文字即标题 ──────────────────────────────────────
     final buf = StringBuffer();

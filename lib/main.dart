@@ -555,6 +555,13 @@ void main() async {
     rescheduleHabitNudge(habit,
         enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
   };
+  // F-2：习惯打卡提醒与任务重复提醒统一改为**一次性**闹钟（预挂接下来 8 次），
+  // 需在每次 15 分钟守护周期补挂，否则预挂的几次响完后会静默断档。
+  // 通知服务内部有「落点签名」缓存，落点未变时不会真的重复下发。
+  TaskProvider.onGuardTick = () {
+    if (!task.notificationsEnabled) return;
+    unawaited(habit.scheduleAllReminders());
+  };
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);

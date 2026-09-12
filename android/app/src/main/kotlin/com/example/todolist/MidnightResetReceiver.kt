@@ -335,7 +335,13 @@ class MidnightResetReceiver : BroadcastReceiver() {
     }
 
     /** 判断该任务 JSON 是否应在今天被重置：已完成的重复任务，今天是其循环日，
-     *  且上次完成早于今天、未过截止日（与 Dart TaskProvider._resetDailyIfNeeded 一致）。 */
+     *  且上次完成早于今天（与 Dart TaskProvider._resetDailyIfNeeded 一致）。
+     *
+     *  F-1 连带：此前这里额外要求 `dueDate == null || dueDate >= today`，
+     *  而 Dart 侧录入重复任务时会把截止日钉成「创建当天 23:59」——创建次日该条件
+     *  恒为 false，于是「每天喝水」第二天起**永远不会被重置回未完成**（App 不开时
+     *  由本接收器负责重置，这一条同样失效）。重复任务是否继续循环只由 repeatUntil
+     *  与 skipDates（见 [isRecurrenceToday]）决定，Dart 侧已同步去掉该门槛。 */
     private fun shouldResetTask(obj: JSONObject): Boolean {
         val repeat = parseRepeat(obj)
         if (repeat == RepeatMode.NONE) return false
@@ -343,8 +349,6 @@ class MidnightResetReceiver : BroadcastReceiver() {
         val done = obj.optBoolean("done", false)
         if (status != "done" && !done) return false
         val today = todayStr()
-        val dueDate = datePart(obj.opt("dueDate"))
-        if (dueDate != null && dueDate < today) return false
         if (!isRecurrenceToday(obj, repeat, today)) return false
         val compDate = datePart(obj.opt("completedAt"))
         return compDate == null || compDate < today
@@ -401,7 +405,7 @@ class MidnightResetReceiver : BroadcastReceiver() {
                 val anchor = datePart(obj.opt("repeatAnchor")) ?: return false
                 val diff = dayDiff(anchor, today)
                 if (diff < 0) return false
-                val n = obj.optInt("repeatInterval", 2).coerceAtLeast(1)
+                val n = obj.optInt("repeatInterval", 1).coerceAtLeast(1)
                 return diff % n == 0L
             }
             RepeatMode.MONTHLY -> {

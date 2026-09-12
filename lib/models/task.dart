@@ -330,8 +330,11 @@ class Task {
     Object? repeatUntil = _kKeep,
     List<String>? doneDates,
     int? monthlyDay,
-    int? monthlyWeekday,
-    int? monthlyWeekIndex,
+    // F-9：monthlyWeekday / monthlyWeekIndex 也必须能「显式清空」。
+    // 二者此前用 `monthlyWeekday ?? this.monthlyWeekday`，传 null 会被当成「保留旧值」，
+    // 于是「第 N 个周几」永远改不回「固定几号」模式（旧规则清不掉，会盖住 monthlyDay）。
+    Object? monthlyWeekday = _kKeep,
+    Object? monthlyWeekIndex = _kKeep,
     int? monthlyFromEnd,
     String? note,
     List<String>? tags,
@@ -368,8 +371,12 @@ class Task {
             repeatUntil == _kKeep ? this.repeatUntil : repeatUntil as String?,
         doneDates: doneDates ?? this.doneDates,
         monthlyDay: monthlyDay ?? this.monthlyDay,
-        monthlyWeekday: monthlyWeekday ?? this.monthlyWeekday,
-        monthlyWeekIndex: monthlyWeekIndex ?? this.monthlyWeekIndex,
+        monthlyWeekday: monthlyWeekday == _kKeep
+            ? this.monthlyWeekday
+            : monthlyWeekday as int?,
+        monthlyWeekIndex: monthlyWeekIndex == _kKeep
+            ? this.monthlyWeekIndex
+            : monthlyWeekIndex as int?,
         monthlyFromEnd: monthlyFromEnd ?? this.monthlyFromEnd,
         note: note ?? this.note,
         tags: tags ?? this.tags,
@@ -436,7 +443,8 @@ class Task {
     }
     final wdRaw = j['repeatWeekdays'];
     final List<int> weekdays = wdRaw is List
-        ? wdRaw.whereType<int>().toList()
+        ? (wdRaw.whereType<int>().where((d) => d >= 1 && d <= 7).toSet().toList()
+          ..sort())
         : const <int>[];
     final tagsRaw = j['tags'];
     final List<String> tags = tagsRaw is List
@@ -466,23 +474,31 @@ class Task {
           : DateTime.parse(j['deletedAt'] as String),
       repeat: repeat,
       repeatWeekdays: weekdays,
-      repeatInterval: j['repeatInterval'] as int? ?? 1,
-      repeatMinute: j['repeatMinute'] as int? ?? j['dailyReminderMinute'] as int?,
+      // F-8：数值字段统一范围夹取。备份是显式的「不可信输入」入口（可被手改 /
+      // 来自他人 / 传输损坏），越界值此前被原样接受：
+      // - repeatMinute=9999 → 卡片显示成「每天 166:39」这类不存在的时刻；
+      // - monthlyWeekday=9 → _monthlyNthWeekday 永不命中，任务成为
+      //   「永不出现、永不提醒」的哑任务，用户几乎无法自查；
+      // - repeatInterval=0 / 负数 → 调度侧除零或死循环风险。
+      // 夹取口径与 UI 层取值边界（弹层步进器 / 选择器）完全对齐。
+      repeatInterval: _clampInt(j['repeatInterval'], 1, 365, 1),
+      repeatMinute: _clampIntOrNull(
+          j['repeatMinute'] ?? j['dailyReminderMinute'], 0, 1439),
       repeatAnchor: j['repeatAnchor'] == null
           ? null
           : DateTime.parse(j['repeatAnchor'] as String),
       skipDates: _parseSkipDates(j['skipDates']),
       repeatUntil: j['repeatUntil'] as String?,
       doneDates: _parseSkipDates(j['doneDates']),
-      monthlyDay: j['monthlyDay'] as int? ?? 1,
-      monthlyWeekday: j['monthlyWeekday'] as int?,
-      monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
-      monthlyFromEnd: j['monthlyFromEnd'] as int? ?? 0,
+      monthlyDay: _clampInt(j['monthlyDay'], 1, 31, 1),
+      monthlyWeekday: _clampIntOrNull(j['monthlyWeekday'], 1, 7),
+      monthlyWeekIndex: _clampIntOrNull(j['monthlyWeekIndex'], 1, 5),
+      monthlyFromEnd: _clampInt(j['monthlyFromEnd'], 0, 31, 0),
       note: j['note'] as String? ?? '',
       tags: tags,
-      focusSecTotal: j['focusSecTotal'] as int? ?? 0,
+      focusSecTotal: _clampInt(j['focusSecTotal'], 0, 1 << 40, 0),
       order: (j['order'] as num?)?.toDouble() ?? 0.0,
-      reminderOffsetMin: j['reminderOffsetMin'] as int? ?? 0,
+      reminderOffsetMin: _clampInt(j['reminderOffsetMin'], 0, 7 * 24 * 60, 0),
       pinned: j['pinned'] as bool? ?? false,
       pinyinInitials: j['pinyinInitials'] as String? ?? '',
       updatedAt: j['updatedAt'] == null
@@ -639,6 +655,51 @@ class Task {
     return raw.whereType<String>().toList();
   }
 
+  /// F-8：把一个 JSON 数值夹取到 [min, max]；非数值或越界返回 null。
+  /// 供「可空 + 有合法区间」的字段使用（repeatMinute / monthlyWeekday / …）。
+  static int? _clampIntOrNull(dynamic v, int min, int max) {
+    if (v is! num) return null;
+    final n = v.toInt();
+    if (n < min || n > max) return null;
+    return n;
+  }
+
+  /// F-8：把一个 JSON 数值夹取到 [min, max]；非数值或越界回退 [fallback]。
+  static int _clampInt(dynamic v, int min, int max, int fallback) =>
+      _clampIntOrNull(v, min, max) ?? fallback;
+
+  /// F-7：历史日期列表（[doneDates] / [skipDates]）的滚动保留窗口（天）。
+  ///
+  /// 二者此前只增不清、无上限：一个使用数年的「每天」任务会累积上千条字符串，
+  /// 全部内联在该任务 JSON 里，而每次勾选都要整库全量序列化 → 写放大。
+  /// 统计侧只会回溯「本期 / 本月 / 连续段 / 近 7 日」这些有界窗口，
+  /// 保留 ~400 天（> 一年热力图）足够，且对 streak 的语义无影响。
+  static const int historyRetentionDays = 400;
+
+  /// F-7：把 date-only 串列表裁剪到「最近 [keepDays] 天（含今天）」，去重并升序。
+  /// 返回 null 表示无需改动（调用方可跳过写回，避免无谓的 copyWith 与落盘）。
+  static List<String>? pruneHistory(
+    List<String> dates,
+    DateTime now, {
+    int keepDays = historyRetentionDays,
+  }) {
+    if (dates.isEmpty) return null;
+    final today = DateTime(now.year, now.month, now.day);
+    final cutoff = _ymd(today.subtract(Duration(days: keepDays)));
+    final kept = <String>{};
+    var changed = false;
+    for (final s in dates) {
+      // 长度校验顺带丢掉形态非法的脏串（历史版本 / 手改备份可能写入）。
+      if (s.length == 10 && s.compareTo(cutoff) >= 0) {
+        if (!kept.add(s)) changed = true; // 原有重复项 → 需要写回
+      } else {
+        changed = true; // 过期项 / 脏串 → 需要写回
+      }
+    }
+    if (!changed) return null;
+    return kept.toList()..sort();
+  }
+
   /// 未来 N 天内「循环命中」的日期序列（date-only，含 [start] 当日）。
   /// 纯函数、无副作用，便于单测；命中判定复用 [repeatsOn]（已含 repeatUntil / skipDates）。
   /// [days] 扫描窗口（默认 30 天）；[limit] 返回条数上限（默认 60，防止每隔1天等极端规则下列表过长）。
@@ -719,16 +780,27 @@ class Task {
   /// - [repeatInterval]：仅 [RepeatType.interval] 时有意义（.ics 与通知排程同）；
   /// - [reminderOffsetMin]：无 [dueDate] 时不生效——`_scheduleRemindersFor` 根本不会
   ///   为无截止任务挂一次性截止提醒。
+  /// - F-6/F-9：月内规则（[monthlyDay] / [monthlyWeekday] / [monthlyWeekIndex] /
+  ///   [monthlyFromEnd]）仅在 [RepeatType.monthly] 时有意义。切到其它重复类型后残留
+  ///   会污染「未来 30 天预览」与备份导出，并让「每月 15 号 → 每天 → 又改回每月」
+  ///   意外沿用 15 号（用户预期是回到默认的 1 号）。
   ///
   /// ⚠️ 刻意**不**清理 [repeatAnchor]：它对非 interval 类型完全惰性，保留旧值可让
   /// 「每隔 N 天 → 每天 → 又改回每隔 N 天」沿用原相位锚点，而非被 null 兜底重置成当天。
   ///
   /// 旧数据（该字段缺省）经此方法后仍是缺省值，零迁移成本。
-  Task normalizedRepeatFields() => copyWith(
-        repeatUntil: isRepeating ? repeatUntil : null,
-        repeatInterval: repeat == RepeatType.interval ? repeatInterval : 1,
-        reminderOffsetMin: dueDate != null ? reminderOffsetMin : 0,
-      );
+  Task normalizedRepeatFields() {
+    final isMonthly = repeat == RepeatType.monthly;
+    return copyWith(
+      repeatUntil: isRepeating ? repeatUntil : null,
+      repeatInterval: repeat == RepeatType.interval ? repeatInterval : 1,
+      reminderOffsetMin: dueDate != null ? reminderOffsetMin : 0,
+      monthlyDay: isMonthly ? monthlyDay : 1,
+      monthlyWeekday: isMonthly ? monthlyWeekday : null,
+      monthlyWeekIndex: isMonthly ? monthlyWeekIndex : null,
+      monthlyFromEnd: isMonthly ? monthlyFromEnd : 0,
+    );
+  }
 
   /// F7：某「日」是否已有完成记录（occurrence 级，date-only）。
   /// 已完成的一次性任务以 [completedAt] 为准，重复任务的历史沉淀在 [doneDates]。

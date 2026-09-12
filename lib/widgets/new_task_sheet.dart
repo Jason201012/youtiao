@@ -15,6 +15,13 @@ import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 
+/// F-6：每月重复的「月内规则」三种互斥模式，与 [TaskParser] 能解析出的形态一一对应。
+/// - [day]：固定几号（1..31，溢出月份自动夹到当月最后一天）；
+/// - [nthWeekday]：第 N 个周几（第 1~4 个 / 最后一个）；
+/// - [fromEnd]：倒数第 N 天（1 = 每月最后一天）。
+/// 优先级与 [Task._baseRepeatsOn] 一致：fromEnd > nthWeekday > day。
+enum _MonthlyMode { day, nthWeekday, fromEnd }
+
 /// 新建 / 编辑任务弹层（M3 底部 sheet）。
 /// 传入 [task] 为编辑模式（预填并调用 updateTask），否则为新建模式（调用 addTask）。
 class TaskSheet extends StatefulWidget {
@@ -73,6 +80,16 @@ class _TaskSheetState extends State<TaskSheet> {
   DateTime? _repeatAnchor; // interval 锚点，创建时填当天
   DateTime? _repeatUntilDate; // 重复结束日期（date-only，null = 无限循环）
 
+  /// F-6：每月重复的月内规则状态。
+  /// 此前弹层选「每月」只能得到「每月 1 号」（[Task.monthlyDay] 默认值），界面上
+  /// 既看不到「1 号」也没法改成别的日子；快速录入建的「每月 15 号 / 最后一个周日 /
+  /// 每月最后一天」进编辑弹层后同样看不见、改不了（只能靠 copyWith 传 null 侥幸不丢）。
+  _MonthlyMode _monthlyMode = _MonthlyMode.day;
+  int _monthlyDay = 1; // 1..31
+  int _monthlyWeekday = DateTime.monday; // 1..7（周一..周日）
+  int _monthlyWeekIndex = 1; // 1..4 = 第 N 个；5 = 最后一个
+  int _monthlyFromEnd = 1; // 1 = 每月最后一天
+
   /// 提醒提前量（分钟）：一次性截止提醒在截止前该分钟数触发（0 = 准时）。
   /// 仅对「不重复」且有截止时间的任务有意义。
   int _reminderOffsetMin = 0;
@@ -91,6 +108,7 @@ class _TaskSheetState extends State<TaskSheet> {
   bool _basePinned = false;
   int _basePriority = 1; // 1=medium（构造默认）
   int _baseCategory = 0; // 0=work（构造默认）
+  String _baseMonthly = ''; // F-6：月内规则基线（见 [_monthlySignature]）
 
   /// 是否置顶/星标：置顶任务在所属分区内固定排最前。仅编辑模式可切换。
   bool _pinned = false;
@@ -139,6 +157,22 @@ class _TaskSheetState extends State<TaskSheet> {
           : const TimeOfDay(hour: 7, minute: 0);
       _repeatUntilDate =
           t.repeatUntil != null ? DateTime.parse(t.repeatUntil!) : null;
+      // F-6：月内规则预填——按 [Task._baseRepeatsOn] 的优先级（fromEnd > nthWeekday >
+      // day）反推当前处于哪种模式，使「每月 15 号 / 最后一个周日 / 每月最后一天」
+      // 这类任务在弹层里可见、可改。
+      if (t.repeat == RepeatType.monthly) {
+        _monthlyDay = t.monthlyDay;
+        if (t.monthlyFromEnd > 0) {
+          _monthlyMode = _MonthlyMode.fromEnd;
+          _monthlyFromEnd = t.monthlyFromEnd;
+        } else if (t.monthlyWeekday != null && t.monthlyWeekIndex != null) {
+          _monthlyMode = _MonthlyMode.nthWeekday;
+          _monthlyWeekday = t.monthlyWeekday!;
+          _monthlyWeekIndex = t.monthlyWeekIndex!;
+        } else {
+          _monthlyMode = _MonthlyMode.day;
+        }
+      }
       _noteController.text = t.note;
       _subtasks = t.subtasks.map((s) => s.copyWith()).toList();
       _tags = List.from(t.tags);
@@ -160,7 +194,12 @@ class _TaskSheetState extends State<TaskSheet> {
     _basePinned = _pinned;
     _basePriority = _priority.index;
     _baseCategory = _category.index;
+    _baseMonthly = _monthlySignature;
   }
+
+  /// F-6：月内规则的签名，用于脏数据比较（四种字段任一变化即视为已改动）。
+  String get _monthlySignature =>
+      '${_monthlyMode.name}|$_monthlyDay|$_monthlyWeekday|$_monthlyWeekIndex|$_monthlyFromEnd';
 
   /// U11：是否有未保存的实质改动（相对进入时的基线）。
   bool get _isDirty {
@@ -169,6 +208,7 @@ class _TaskSheetState extends State<TaskSheet> {
     if (_dueDate != _baseDue) return true;
     if (_startDate != _baseStart) return true;
     if (_repeat != _baseRepeat) return true;
+    if (_monthlySignature != _baseMonthly) return true;
     if (_pinned != _basePinned) return true;
     if (_priority.index != _basePriority) return true;
     if (_category.index != _baseCategory) return true;
@@ -240,6 +280,54 @@ class _TaskSheetState extends State<TaskSheet> {
   String _formatTimeOfDay(TimeOfDay t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
+  /// 星期序号（1=周一 … 7=周日）→ 中文单字，供「每月第 N 个周几」选择器使用。
+  static String _weekdayName(int wd) =>
+      const ['一', '二', '三', '四', '五', '六', '日'][(wd - 1).clamp(0, 6)];
+
+  /// F-6：通用步进器行（提炼自「每隔 N 天」原有实现，视觉语言保持一致）。
+  /// 内部调 [setState] 后用 [onChanged] 写回调用方字段，故调用方只需赋值。
+  Widget _repeatStepper({
+    required String prefix,
+    required String suffix,
+    required int value,
+    required int min,
+    required int max,
+    required ValueChanged<int> onChanged,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final ext = appColors(context);
+    Widget roundBtn(IconData icon, int next) => IconButton(
+          onPressed: () => setState(() => onChanged(next.clamp(min, max))),
+          icon: Icon(icon, size: 18, color: scheme.onSurface),
+          style: IconButton.styleFrom(
+            backgroundColor: ext.chip,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            padding: const EdgeInsets.all(8),
+          ),
+        );
+    return Row(
+      children: [
+        Text(prefix, style: TextStyle(color: ext.meta, fontSize: 15)),
+        roundBtn(Symbols.remove, value - 1),
+        Container(
+          width: 36,
+          alignment: Alignment.center,
+          child: Text('$value',
+              style: TextStyle(
+                  color: scheme.onSurface,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600)),
+        ),
+        roundBtn(Symbols.add, value + 1),
+        Expanded(
+          child: Text(suffix,
+              style: TextStyle(color: ext.meta, fontSize: 15),
+              overflow: TextOverflow.ellipsis),
+        ),
+      ],
+    );
+  }
+
   Future<void> _pickDate() async {
     final now = DateTime.now();
     final picked = await showDatePicker(
@@ -249,34 +337,24 @@ class _TaskSheetState extends State<TaskSheet> {
       lastDate: now.add(const Duration(days: 365 * 5)),
     );
     if (picked != null) {
-      // 重复任务：截止时间固定为所选日期 23:59（作为重复窗口结束日）；否则保留既有时间或默认 09:00。
-      final int h;
-      final int m;
-      if (_repeat != RepeatType.none) {
-        h = 23;
-        m = 59;
-      } else {
-        h = _dueDate?.hour ?? 9;
-        m = _dueDate?.minute ?? 0;
-      }
+      // F-4/F-5：重复任务不再把截止时间钉成所选日期 23:59。
+      // 旧约定把 dueDate 当成「重复窗口结束日」复用，制造了一串连带缺陷：
+      // 次日即「已过期」（提醒门槛失灵）、改期副本钉在 23:59、结束后掉进逾期分区。
+      // 重复是否继续、何时结束统一由「结束日期」（repeatUntil）表达，
+      // 截止时间恢复其本义（用户真正想要的时刻）。
+      final int h = _dueDate?.hour ?? 9;
+      final int m = _dueDate?.minute ?? 0;
       setState(() => _dueDate = DateTime(picked.year, picked.month, picked.day, h, m));
     }
   }
 
-  /// 重复规则变化：从「不重复」切到某种重复时，若没有截止日期则默认设为今天 23:59
-  /// （作为重复窗口的结束日，与原「每天」行为一致）。切回「不重复」则保持截止日期不变。
+  /// 重复规则变化。F-4/F-5：**不再**顺手把 [Task.dueDate] 钉成「当天 23:59」——
+  /// 该约定是把 dueDate 复用为「重复窗口」的历史包袱，会造成「次日即过期 → 提醒永久
+  /// 静默」「改期副本 23:59 提醒」「结束后落入逾期分区」三处连带缺陷。
+  /// 重复任务是否继续、何时结束由 [_repeatUntilDate]（→ `repeatUntil`）表达，
+  /// 提醒时刻由 [_repeatTime]（→ `repeatMinute`）表达，与截止时间互不干扰。
   void _onRepeatChanged(RepeatType v) {
-    setState(() {
-      _repeat = v;
-      if (v != RepeatType.none) {
-        final now = DateTime.now();
-        if (_dueDate == null) {
-          _dueDate = DateTime(now.year, now.month, now.day, 23, 59);
-        } else {
-          _dueDate = DateTime(_dueDate!.year, _dueDate!.month, _dueDate!.day, 23, 59);
-        }
-      }
-    });
+    setState(() => _repeat = v);
   }
 
   /// 选择开始日期：默认今天；保留既有时间或默认 09:00。
@@ -657,10 +735,29 @@ class _TaskSheetState extends State<TaskSheet> {
     final weekdays = _repeat == RepeatType.weekly
         ? (_repeatWeekdays.isNotEmpty ? List<int>.from(_repeatWeekdays) : [DateTime.monday])
         : const <int>[];
-    // P2-3：脏字段归一化统一收在 [Task.normalizedRepeatFields]（纯函数、可单测）——
-    // 「切回不重复 / 清空截止时间」后残留的 repeatUntil / repeatInterval /
-    // reminderOffsetMin 会被清掉，避免污染备份导出与「未来 30 天预览」，
-    // 也避免 TaskProvider 的 remindersChanged 判定被无害残留误触发重排。
+    // F-6：月内规则显式回传（两种保存路径都要传全四个字段）。
+    // 编辑路径尤其要让「从『第 N 个周几 / 倒数第 N 天』改回『固定几号』」能清空旧规则——
+    // [Task.copyWith] 的 monthlyWeekday / monthlyWeekIndex 已改用 _kKeep 哨兵
+    // （F-9），显式传 null 才会真正清空，否则旧规则会盖住 monthlyDay。
+    final monthlyDay = _repeat == RepeatType.monthly && _monthlyMode == _MonthlyMode.day
+        ? _monthlyDay
+        : 1;
+    final monthlyWeekday =
+        _repeat == RepeatType.monthly && _monthlyMode == _MonthlyMode.nthWeekday
+            ? _monthlyWeekday
+            : null;
+    final monthlyWeekIndex =
+        _repeat == RepeatType.monthly && _monthlyMode == _MonthlyMode.nthWeekday
+            ? _monthlyWeekIndex
+            : null;
+    final monthlyFromEnd =
+        _repeat == RepeatType.monthly && _monthlyMode == _MonthlyMode.fromEnd
+            ? _monthlyFromEnd
+            : 0;
+    // P2-3 / F-6：脏字段归一化统一收在 [Task.normalizedRepeatFields]（纯函数、可单测）——
+    // 「切回不重复 / 切到其它重复类型 / 清空截止时间」后残留的 repeatUntil /
+    // repeatInterval / reminderOffsetMin / 月内规则会被清掉，避免污染备份导出与
+    // 「未来 30 天预览」，也避免 TaskProvider 的 remindersChanged 判定被无害残留误触发重排。
     if (_isEdit) {
       provider.updateTask(widget.task!.copyWith(
         title: title,
@@ -674,6 +771,10 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
         repeatUntil: _repeatUntilDate != null ? _ymd(_repeatUntilDate!) : null,
+        monthlyDay: monthlyDay,
+        monthlyWeekday: monthlyWeekday,
+        monthlyWeekIndex: monthlyWeekIndex,
+        monthlyFromEnd: monthlyFromEnd,
         note: _noteController.text.trim(),
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
@@ -695,6 +796,10 @@ class _TaskSheetState extends State<TaskSheet> {
         repeatMinute: repeatMinute,
         repeatAnchor: anchor,
         repeatUntil: _repeatUntilDate != null ? _ymd(_repeatUntilDate!) : null,
+        monthlyDay: monthlyDay,
+        monthlyWeekday: monthlyWeekday,
+        monthlyWeekIndex: monthlyWeekIndex,
+        monthlyFromEnd: monthlyFromEnd,
         note: _noteController.text.trim(),
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
@@ -1315,41 +1420,89 @@ class _TaskSheetState extends State<TaskSheet> {
           // 每隔 N 天：间隔步进
           if (_repeat == RepeatType.interval) ...[
             const SizedBox(height: 12),
-            Row(
+            _repeatStepper(
+              prefix: '每',
+              suffix: '天',
+              value: _repeatInterval,
+              min: 1,
+              max: 30,
+              onChanged: (v) => _repeatInterval = v,
+            ),
+          ],
+          // F-6：每月：月内规则（固定几号 / 第 N 个周几 / 倒数第 N 天）。
+          // 此前弹层选「每月」既看不到、也改不了月内规则，只能得到「每月 1 号」，
+          // 而解析器本就能表达「每月 15 号 / 每月最后一个周日 / 每月最后一天」，
+          // 两条创建路径能力不对等。
+          if (_repeat == RepeatType.monthly) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
               children: [
-                Text('每', style: TextStyle(color: ext.meta, fontSize: 15)),
-                IconButton(
-                  onPressed: () => setState(
-                      () => _repeatInterval = (_repeatInterval - 1).clamp(1, 30)),
-                  icon: Icon(Symbols.remove, size: 18, color: scheme.onSurface),
-                  style: IconButton.styleFrom(
-                    backgroundColor: ext.chip,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    padding: const EdgeInsets.all(8),
-                  ),
+                _PriorityChip(
+                  label: '每月几号',
+                  selected: _monthlyMode == _MonthlyMode.day,
+                  onTap: () => setState(() => _monthlyMode = _MonthlyMode.day),
                 ),
-                Container(
-                  width: 36,
-                  alignment: Alignment.center,
-                  child: Text('$_repeatInterval',
-                      style: TextStyle(
-                          color: scheme.onSurface,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600)),
+                _PriorityChip(
+                  label: '第几个周几',
+                  selected: _monthlyMode == _MonthlyMode.nthWeekday,
+                  onTap: () =>
+                      setState(() => _monthlyMode = _MonthlyMode.nthWeekday),
                 ),
-                IconButton(
-                  onPressed: () => setState(
-                      () => _repeatInterval = (_repeatInterval + 1).clamp(1, 30)),
-                  icon: Icon(Symbols.add, size: 18, color: scheme.onSurface),
-                  style: IconButton.styleFrom(
-                    backgroundColor: ext.chip,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    padding: const EdgeInsets.all(8),
-                  ),
+                _PriorityChip(
+                  label: '倒数第几天',
+                  selected: _monthlyMode == _MonthlyMode.fromEnd,
+                  onTap: () => setState(() => _monthlyMode = _MonthlyMode.fromEnd),
                 ),
-                Text('天', style: TextStyle(color: ext.meta, fontSize: 15)),
               ],
             ),
+            const SizedBox(height: 8),
+            if (_monthlyMode == _MonthlyMode.day)
+              _repeatStepper(
+                prefix: '每月',
+                suffix: '号（小月自动顺延到月末）',
+                value: _monthlyDay,
+                min: 1,
+                max: 31,
+                onChanged: (v) => _monthlyDay = v,
+              ),
+            if (_monthlyMode == _MonthlyMode.nthWeekday) ...[
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final idx in const [1, 2, 3, 4, 5])
+                    _PriorityChip(
+                      label: idx == 5 ? '最后' : '第 $idx 个',
+                      selected: _monthlyWeekIndex == idx,
+                      onTap: () => setState(() => _monthlyWeekIndex = idx),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (var d = 1; d <= 7; d++)
+                    _PriorityChip(
+                      label: '周${_weekdayName(d)}',
+                      selected: _monthlyWeekday == d,
+                      onTap: () => setState(() => _monthlyWeekday = d),
+                    ),
+                ],
+              ),
+            ],
+            if (_monthlyMode == _MonthlyMode.fromEnd)
+              _repeatStepper(
+                prefix: '倒数第',
+                suffix: _monthlyFromEnd == 1 ? '天（即每月最后一天）' : '天',
+                value: _monthlyFromEnd,
+                min: 1,
+                max: 10,
+                onChanged: (v) => _monthlyFromEnd = v,
+              ),
           ],
           const SizedBox(height: 12),
           // 提醒时间（任意重复类型都有）

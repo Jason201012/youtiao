@@ -458,16 +458,29 @@ class HomeScreenState extends State<HomeScreen> {
         final tasks = provider.tasks;
 
         // —— 首页分区口径（按日期切分）——
-        // 1) 未完成 + 非每日提醒的任务，按截止日期分成「逾期 / 今天 / 未来」三段；
+        // 1) 未完成 + 非（仍在循环的）重复任务，按截止日期分成「逾期 / 今天 / 未来」三段；
         //    无截止日期的任务归入「今天」（视为当天就要做，且始终跟随当前日期，跨天自动顺延到第二天）。
-        // 2) 未完成 + 开启每日提醒的任务单独归入「每天」，不参与日期切分（它每天都要做）。
+        // 2) 未完成 + 仍在循环的重复任务单独归入「每天」，不参与日期切分（它每天都要做）。
         // 3) 已完成的任务统一进「已完成」，不按日期切分。
         // 四类互不重叠，任何一个任务在首页只会出现在一个板块里。
-        final active = tasks.where((t) => !t.done && !t.isRepeating).toList();
+        //
+        // F-5：口径与 TaskProvider.homeTasks / sectionCounts / _sectionNameOf 严格对齐。
+        // 此前这里用「isRepeating」一刀切，导致两处偏差：
+        // ① 已「结束重复」或自然到期的任务仍被留在「每天」板块里永远赖着不走
+        //    （用户点「结束重复」的本意是让它干净退场，弹窗也承诺「今天起不再出现」）；
+        // ② 同一任务在首页与分享卡片 / 拖拽落点被分到不同板块。
+        // 现统一按 [Task.isRepeatEnded] 判定是否仍在循环，并把已结束重复任务的
+        // 那个过期占位截止日中性化（[endRepeat] 已直接清空；自然到期在判定层处理），
+        // 使其回落到「今天」而不是「逾期」。
+        final now = DateTime.now();
+        bool inRepeat(Task t) => t.isRepeating && !t.isRepeatEnded(now);
+        DateTime? effectiveDue(Task t) =>
+            (t.isRepeating && !inRepeat(t)) ? null : t.dueDate;
+        final active = tasks.where((t) => !t.done && !inRepeat(t)).toList();
 
         // 逾期：截止日期早于今天，按截止时间升序（拖得最久的排最前，优先处理）
         final overdue = active
-            .where((t) => (_dueDayDiff(t.dueDate) ?? 0) < 0)
+            .where((t) => (_dueDayDiff(effectiveDue(t)) ?? 0) < 0)
             .toList()
           ..sort((a, b) {
             final p = _comparePinned(a, b);
@@ -477,7 +490,8 @@ class HomeScreenState extends State<HomeScreen> {
 
         // 今天：截止日期就是今天，或没有截止日期（无截止视为当天，始终跟随当前日期，跨天自动顺延）。
         final today = active
-            .where((t) => _dueDayDiff(t.dueDate) == 0 || t.dueDate == null)
+            .where((t) =>
+                _dueDayDiff(effectiveDue(t)) == 0 || effectiveDue(t) == null)
             .toList()
           ..sort((a, b) {
             final p = _comparePinned(a, b);
@@ -491,7 +505,7 @@ class HomeScreenState extends State<HomeScreen> {
 
         // 未来：仅含截止日期在今天之后的任务（无截止已归入「今天」）。
         final future = active.where((t) {
-          final d = _dueDayDiff(t.dueDate);
+          final d = _dueDayDiff(effectiveDue(t));
           return d != null && d > 0;
         }).toList()
           ..sort((a, b) {
@@ -500,8 +514,8 @@ class HomeScreenState extends State<HomeScreen> {
             return a.dueDate!.compareTo(b.dueDate!);
           });
 
-        // 重复：重复任务（所有规则），按提醒时刻升序（未设时刻的排最后）
-        final repeat = tasks.where((t) => t.isRepeating && !t.done).toList()
+        // 重复：仍在循环期内的重复任务，按提醒时刻升序（未设时刻的排最后）
+        final repeat = tasks.where((t) => inRepeat(t) && !t.done).toList()
           ..sort((a, b) {
             final p = _comparePinned(a, b);
             if (p != 0) return p;

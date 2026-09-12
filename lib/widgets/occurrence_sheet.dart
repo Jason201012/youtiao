@@ -57,6 +57,12 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
   bool _isDone(DateTime d) => _task.isDoneOn(d);
   bool _isSkipped(DateTime d) => _task.skipDates.contains(Task.ymdKey(d));
 
+  /// F-10：今天的 date-only 值，用于区分「未来循环日」（只可跳过 / 改期）。
+  DateTime get _today {
+    final n = DateTime.now();
+    return DateTime(n.year, n.month, n.day);
+  }
+
   void _markDone(DateTime d) {
     // F1：之前 `updateTask(copyWith(status:done))` 路径被 _applyTaskUpdate 强制
     // 回填旧 status，写入静默丢失、UI 无变化。这里走 provider 显式 occurrence
@@ -152,6 +158,13 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                       final done = _isDone(d);
                       final skipped = _isSkipped(d);
                       final wd = weekdayNames[(d.weekday - 1).clamp(0, 6)];
+                      // F-10：未来循环日**不允许**「标记完成」（预打卡）——那样
+                      // 列表显示「已完成」而当天提醒照样响，语义自相矛盾。
+                      // 未来日期只提供「跳过一次 / 移到下一天」（都不涉及完成态）。
+                      // 例外：该日若**已经**被标记完成（旧版本遗留的预打卡数据），
+                      // 仍允许「标记未完成」把脏数据清掉，否则用户无从撤销。
+                      final isFuture = d.isAfter(_today);
+                      final canToggleDone = !isFuture || done;
                       // U16：完成态原硬编码 Colors.green，深色主题下刺眼且与
                       // App 语义色脱节；改主色（与全局完成勾选一致）。
                       final doneColor = Theme.of(context).colorScheme.primary;
@@ -172,7 +185,13 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                           '${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} 周$wd',
                         ),
                         subtitle: Text(
-                          done ? '已完成' : skipped ? '已跳过' : '待处理',
+                          done
+                              ? '已完成'
+                              : skipped
+                                  ? '已跳过'
+                                  : isFuture
+                                      ? '待处理（未来只可跳过 / 改期）'
+                                      : '待处理',
                           style: TextStyle(
                             color:
                                 done ? doneColor : skipped ? Colors.grey : null,
@@ -187,8 +206,10 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                           // P3-2：文案随实例状态动态化——已完成实例此前仍标「标记完成」，
                           // 点下去实际是取消完成，语义与行为相反。
                           itemBuilder: (_) => [
-                            PopupMenuItem(
-                                value: 'done', child: Text(done ? '标记未完成' : '标记完成')),
+                            if (canToggleDone)
+                              PopupMenuItem(
+                                  value: 'done',
+                                  child: Text(done ? '标记未完成' : '标记完成')),
                             const PopupMenuItem(value: 'skip', child: Text('跳过一次')),
                             const PopupMenuItem(value: 'defer', child: Text('移到下一天')),
                           ],
