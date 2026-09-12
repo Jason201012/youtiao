@@ -349,12 +349,17 @@ void main() {
 
   // ─────────────────────────────────────────────────────────────
   group('F-4 改期副本使用原重复的提醒时刻', () {
-    test('「移到下一天」副本时刻取 repeatMinute，而非被钉成 23:59 的 dueDate', () async {
+    test('「仅此一次改期」副本时刻取 repeatMinute，而非被钉成 23:59 的 dueDate', () async {
       // 旧实现取 src.dueDate（重复任务的 dueDate 被录入侧钉成「创建当天 23:59」），
       // 于是「把今天 7 点这件事挪到明天」实际得到「明天 23:59」。
+      // F-2（v2.8.5 审计）后源任务改用「每周一」：目标日 2026-09-13 是周日、
+      // 不是循环日 → 仍建一次性副本（daily 改到明天会被防撞合并进原循环，
+      // 该分支由 v285_audit_fix_test 的 F-2 组钉死）。
       final created = DateTime(2026, 9, 10);
       final p = await _buildWith([
         _task(
+          repeat: RepeatType.weekly,
+          weekdays: const [DateTime.monday],
           due: DateTime(created.year, created.month, created.day, 23, 59),
           skipDates: const [],
         ),

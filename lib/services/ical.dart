@@ -173,6 +173,10 @@ String? _toRrule(Task t) {
 class IcsImportResult {
   final List<Task> tasks;
   final int simplifiedRepeat;
+  /// F-10（v2.8.5 审计）：重复规则**已映射**、但含未支持成分（COUNT / 间隔>1 的
+  /// WEEKLY·MONTHLY / DAILY 带 BYDAY / 带序数前缀的 BYDAY 等）被部分简化的条数。
+  /// 此前这类「看似导入成功、实则丢了细节」的条目完全静默。
+  final int partialRepeat;
   final int failed;
   final String report;
   /// P2-4：是否因超过单批解析上限（[parseIcs] 的 [maxItems]）被截断。
@@ -184,6 +188,7 @@ class IcsImportResult {
   const IcsImportResult({
     required this.tasks,
     required this.simplifiedRepeat,
+    this.partialRepeat = 0,
     required this.failed,
     required this.report,
     this.truncated = false,
@@ -242,6 +247,7 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   // [TaskProvider.importDedup] 的 UID 去重；第三方 .ics 往往无 UID → null。
   final uids = <String?>[];
   var simplified = 0;
+  var partial = 0;
   var failed = 0;
   var truncated = false;
   for (final b in blocks) {
@@ -256,6 +262,12 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
         if (task.repeat == RepeatType.none && b['RRULE'] != null) {
           // 原本有 RRULE 但被降级为一次性 → 计入「简化」。
           simplified++;
+        } else if (task.repeat != RepeatType.none &&
+            b['RRULE'] != null &&
+            _rruleHasUnsupportedParts(b['RRULE']!)) {
+          // F-10（v2.8.5 审计）：规则已映射、但部分细节未保留 → 计入「部分简化」，
+          // 不再静默（此前如 `FREQ=WEEKLY;INTERVAL=2` 会变成每周，无任何提示）。
+          partial++;
         }
         tasks.add(task);
         // 同步收集该块的原始 UID（可能是 null），保持与 tasks 平行。
@@ -269,16 +281,42 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   }
   final report = '成功解析 ${tasks.length} 条'
       '${simplified > 0 ? '（其中 $simplified 条复杂重复已简化为一次性）' : ''}'
+      '${partial > 0 ? '（$partial 条重复规则部分保留，间隔/次数等细节未支持）' : ''}'
       '${failed > 0 ? '，跳过 $failed 条' : ''}'
       '${truncated ? '，已截断（最多 $maxItems 条，请分批导入）' : ''}';
   return IcsImportResult(
     tasks: tasks,
     simplifiedRepeat: simplified,
+    partialRepeat: partial,
     failed: failed,
     report: report,
     truncated: truncated,
     uids: uids,
   );
+}
+
+/// F-10（v2.8.5 审计）：判断一条**已被映射**的 RRULE 是否含未支持成分
+/// （这些成分会被静默丢弃，故导入时单独计数提示）：
+/// - `COUNT=`：出现次数上限未保留（任务会无限循环）；
+/// - WEEKLY / MONTHLY 带 `INTERVAL>1`：App 的每周 / 每月模型无「每 N 周/月」概念；
+/// - DAILY 带 `BYDAY`：本应「仅某些天」，现被映射为每天；
+/// - BYDAY 带序数前缀（如 `2MO` / `-1FR`）：WEEKLY 下「第 N 个周几」无法表达。
+bool _rruleHasUnsupportedParts(String rrule) {
+  final map = <String, String>{};
+  for (final part in rrule.toUpperCase().split(';')) {
+    final kv = part.split('=');
+    if (kv.length == 2) map[kv[0]] = kv[1];
+  }
+  if (map.containsKey('COUNT')) return true;
+  final freq = map['FREQ'] ?? '';
+  final interval = int.tryParse(map['INTERVAL'] ?? '') ?? 1;
+  if ((freq == 'WEEKLY' || freq == 'MONTHLY') && interval > 1) return true;
+  final byday = map['BYDAY'];
+  if (freq == 'DAILY' && byday != null && byday.isNotEmpty) return true;
+  if (freq == 'WEEKLY' && byday != null && RegExp(r'^-?\d').hasMatch(byday)) {
+    return true;
+  }
+  return false;
 }
 
 /// 展开折叠行：前一行为 `KEY:VALUE`，后续以空格/Tab 开头的行是续行。

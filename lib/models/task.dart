@@ -23,6 +23,13 @@ extension PriorityLabel on Priority {
 
 enum Category { work, life, study }
 
+/// F-7（v2.8.5 审计）：重复任务「未写时刻」时的默认提醒时刻（07:00，自 00:00 起分钟数）。
+///
+/// 编辑弹层（new_task_sheet）与自然语言快速录入（task_parser）**必须共用这一常量**：
+/// 此前弹层默认 07:00、解析器补 09:00，同样输入「每天」两条创建路径响铃时刻不同。
+/// 从根上杜绝再次漂移——改默认值只改这里。
+const int kDefaultRepeatMinute = 7 * 60;
+
 /// 重复规则：控制任务在哪些天「循环出现 / 提醒」。
 /// - none：一次性任务（不重复）
 /// - daily：每天
@@ -488,7 +495,12 @@ class Task {
           ? null
           : DateTime.parse(j['repeatAnchor'] as String),
       skipDates: _parseSkipDates(j['skipDates']),
-      repeatUntil: j['repeatUntil'] as String?,
+      // F-8（v2.8.5 审计）：repeatUntil 合法性校验。非法串（旧版本/手改备份）此前
+      // 被原样接受，repeatsOn 内 _parseYmd 回退 1970 → isRepeatEnded 恒真，
+      // 任务被悄悄当成「早已结束」（不再循环、不再提醒、掉出重复分区），用户
+      // 无从知晓。这里对格式非法的串统一**清空**（视为无限循环）——比「视为
+      // 已结束」更安全：最坏情况是多循环/多提醒，而不是静默杀死仍在用的任务。
+      repeatUntil: _sanitizeRepeatUntil(j['repeatUntil']),
       doneDates: _parseSkipDates(j['doneDates']),
       monthlyDay: _clampInt(j['monthlyDay'], 1, 31, 1),
       monthlyWeekday: _clampIntOrNull(j['monthlyWeekday'], 1, 7),
@@ -653,6 +665,23 @@ class Task {
   static List<String> _parseSkipDates(dynamic raw) {
     if (raw is! List) return const <String>[];
     return raw.whereType<String>().toList();
+  }
+
+  /// F-8（v2.8.5 审计）：校验 [repeatUntil] 是否为合法的 yyyy-MM-dd 串。
+  /// 合法原样返回；null / 非串 / 长度不对 / 数值越界等非法形态返回 null
+  /// （由 [Task.fromJson] 兜底为「无限循环」，不再经 _parseYmd 回退 1970 被
+  /// 悄悄判定为「早已结束」）。注意 `DateTime(y,m,d)` 会把 2 月 30 日归一化到
+  /// 3 月，这里只做「字段可解析」校验，宽容此类软性错误。
+  static String? _sanitizeRepeatUntil(dynamic v) {
+    if (v is! String || v.length != 10) return null;
+    final parts = v.split('-');
+    if (parts.length != 3) return null;
+    final y = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    final d = int.tryParse(parts[2]);
+    if (y == null || m == null || d == null) return null;
+    if (y < 1970 || y > 9999 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return v;
   }
 
   /// F-8：把一个 JSON 数值夹取到 [min, max]；非数值或越界返回 null。

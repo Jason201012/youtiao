@@ -182,7 +182,7 @@ const Map<String, int> _weekdayMap = {
 /// 小写中文数字 → 数值（供「倒数第N天」的中文写法使用，P1-9）
 const Map<String, int> _cnSmallNum = {'一': 1, '二': 2, '三': 3};
 
-/// 无显式时间时，截止时刻默认落在早上 9 点
+/// 无显式时间时，截止时刻默认落在早上 9 点（仅对一次性任务 / 已给日期的场景生效）。
 const int _defaultHour = 9;
 
 /// 单个日期词的正则片段。
@@ -555,11 +555,12 @@ class TaskParser {
       // 而调度层 `if (!task.isRepeating || task.repeatMinute == null) return false`
       // 会让重复提醒**完全不排**——任务出现在「重复」分区、今天 23:59 靠一次性
       // 截止提醒响一次，之后每天循环却永久哑火（用户以为设好了每日提醒）。
-      // 对照编辑弹层：选「每天」时时刻默认 07:00，永远不会出现 repeatMinute=null，
-      // 两条创建路径行为不一致。这里补上默认提醒时刻（与仅给日期时的默认 9 点一致），
-      // 保证「每天喝水」这类无时刻输入也能每天按时响。
+      // F-7（v2.8.5 审计）：**未写时刻**时的默认值统一取共享常量
+      // [kDefaultRepeatMinute]（07:00），与编辑弹层（new_task_sheet）完全一致——
+      // 此前这里补的是 9 点，同样输入「每天」两条创建路径响铃时刻不同。
+      // 用户**写了时刻**（如「每天 8:30」）时仍严格采用解析到的时刻（回归钉死）。
       repeatMinute: repeat != RepeatType.none
-          ? (hour != null ? hour * 60 + (minute ?? 0) : _defaultHour * 60)
+          ? (hour != null ? hour * 60 + (minute ?? 0) : kDefaultRepeatMinute)
           : null,
       monthlyDay: monthlyDay,
       monthlyWeekday: monthlyWeekday,

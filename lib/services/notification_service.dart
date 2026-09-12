@@ -722,6 +722,8 @@ class NotificationService {
   ///
   /// [defer] 为勿扰顺延钩子（缺省取当前注入的 [dndDefer]），**逐落点独立施加**：
   /// 一次性闹钟不存在「把顺延后的时分写进周期分量」的漂移问题。
+  ///
+  /// F-11（v2.8.5 审计）：扫描窗按规则自适应——见函数体内 [scanLimit] 的说明。
   @visibleForTesting
   static List<DateTime> repeatOccurrenceTimes(
     Task task, {
@@ -736,7 +738,17 @@ class NotificationService {
     final mm = m % 60;
     final apply = defer ?? deferByDnd;
     var cursor = DateTime(now.year, now.month, now.day, hh, mm);
-    for (var i = 0; i < 400 && out.length < count; i++) {
+    // F-11（v2.8.5 审计）：扫描窗长度按规则自适应。固定 400 天窗在「每隔 365 天」
+    // 这类大间隔任务下凑不齐 8 个预挂落点（400 / 365 ≈ 1 个），只能依赖
+    // 15 分钟守护 / 启动 / 跨天重置补挂，长期不开 App 第 2 次提醒即缺失。
+    // interval 时窗口下限抬到「count × 间隔 + 60 天余量」（余量留给密集
+    // skipDates / repeatUntil 边界）；其余规则落点密度远高于 400 天窗
+    // （daily≈8 天、weekly≈8 周、monthly≈8 个月），维持 400 不变。
+    final step = task.repeat == RepeatType.interval
+        ? (task.repeatInterval < 1 ? 1 : task.repeatInterval)
+        : 1;
+    final scanLimit = step > 1 ? (count * step + 60) : 400;
+    for (var i = 0; i < scanLimit && out.length < count; i++) {
       if (cursor.isAfter(now)) {
         final day = DateTime(cursor.year, cursor.month, cursor.day);
         if (task.repeatsOn(day) && !task.isDoneOn(day)) {
@@ -744,6 +756,12 @@ class NotificationService {
         }
       }
       cursor = DateTime(cursor.year, cursor.month, cursor.day + 1, hh, mm);
+    }
+    if (out.length < count) {
+      // 窗口内凑不满预挂槽位（临近结束日 / 跳过日密集 / 大间隔超窗），留一条
+      // debug 日志便于排查「第 N 次提醒缺失」类问题；不影响正常调度。
+      AppLog.d('[通知] 重复落点扫描窗（$scanLimit 天）内只找到 '
+          '${out.length}/$count 个落点 id=${task.id}（临近结束日或跳过日密集）');
     }
     return out;
   }
@@ -760,137 +778,11 @@ class NotificationService {
     return today.isAfter(DateTime(until.year, until.month, until.day));
   }
 
-  /// 计算 monthly 任务下一次 occurrence 的「日期+时刻」。
-  /// 优先本月目标日；若已过（或 skipToday 且恰为今天）则顺延到下一月。
-  /// 「每月 N 号」模式用 [Task.monthlyDay]（溢出夹到当月最后一天）；
-  /// 「第 N 个周几 / 最后一个周几」模式用 [Task.monthlyWeekday]+[Task.monthlyWeekIndex]；
-  /// 「每月最后一天 / 倒数第 N 天」用 [Task.monthlyFromEnd]（P1-9，优先级最高）。
-  ///
-  /// F-2：月重复原先区分为「简单（固定 X 号且 X ≤ 28，交给系统
-  /// `dayOfMonthAndTime` 循环）」与「复杂（一次性）」。统一为
-  /// [_nextRepeatOccurrences] 后，**所有** monthly 都走一次性落点，
-  /// 本方法保留作为对照参考，生产路径不再调用。
-  // ignore: unused_element
-  tz.TZDateTime? _nextMonthlyOccurrence(Task task, {bool skipToday = false}) {
-    if (task.repeatMinute == null) return null;
-    final loc = _loc ?? tz.UTC;
-    final m = task.repeatMinute!;
-    final hh = m ~/ 60;
-    final mm = m % 60;
-    final now = tz.TZDateTime.now(loc);
-
-    int targetDay(int y, int mo) {
-      // 倒数第 N 天（P1-9）语义最明确，优先于其余两种模式
-      if (task.monthlyFromEnd > 0) {
-        final dim = DateTime(y, mo + 1, 0).day;
-        return (dim - task.monthlyFromEnd + 1).clamp(1, dim);
-      }
-      if (task.monthlyWeekday != null && task.monthlyWeekIndex != null) {
-        var d = 1;
-        while (DateTime(y, mo, d).weekday != task.monthlyWeekday) {
-          d++;
-          if (d > 31) return 1; // 安全兜底，理论不可达
-        }
-        d += (task.monthlyWeekIndex! - 1) * 7;
-        final dim = DateTime(y, mo + 1, 0).day;
-        if (d > dim) d -= 7; // 「最后一个」时第 5 个不存在则回退到第 4 个
-        return d;
-      }
-      final dim = DateTime(y, mo + 1, 0).day;
-      return task.monthlyDay.clamp(1, dim);
-    }
-
-    var y = now.year;
-    var mo = now.month;
-    for (var step = 0; step < 3; step++) {
-      final d = targetDay(y, mo);
-      final candidate = tz.TZDateTime(loc, y, mo, d, hh, mm);
-      final isToday = _sameDay(
-        DateTime(candidate.year, candidate.month, candidate.day),
-        DateTime(now.year, now.month, now.day),
-      );
-      // F-03：顺带尊重 skipDates / repeatUntil——一次性闹钟排下去就不会再算，
-      // 若落点恰是被跳过的一天（或已超结束日），这一次会白响。
-      final hit = task.repeatsOn(
-          DateTime(candidate.year, candidate.month, candidate.day));
-      if (candidate.isAfter(now) && !(skipToday && isToday) && hit) {
-        return candidate;
-      }
-      mo += 1;
-      if (mo > 12) {
-        mo = 1;
-        y += 1;
-      }
-    }
-    // 极端兜底（正常 3 步内必命中）：返回两个月后的目标日。
-    final d = targetDay(y, mo);
-    final fallback = tz.TZDateTime(loc, y, mo, d, hh, mm);
-    // F-03：三个月内都命中不了（skipDates 密集 / 已临近 repeatUntil）→ 本次不提醒，
-    // 与 interval 的 S11 口径一致，宁可不响也不在错误的日期响。
-    if (!task.repeatsOn(
-        DateTime(fallback.year, fallback.month, fallback.day))) {
-      return null;
-    }
-    return fallback;
-  }
-
-  /// 计算 interval 任务下一次 occurrence 的「日期+时刻」。
-  ///
-  /// F-2：本方法原先是 interval 专用的一次性落点算法（含 F4「必须包含今天」与
-  /// S11「找不到合法循环日就不排」两处修复）。统一为 [_nextRepeatOccurrences] 后
-  /// 保留此实现作为对照参考，生产路径不再调用（`unused_element` 由本注释说明）。
-  // ignore: unused_element
-  tz.TZDateTime? _nextIntervalOccurrence(Task task, {bool skipToday = false}) {
-    final a = task.repeatAnchor;
-    if (a == null || task.repeatMinute == null) return null;
-    final loc = _loc ?? tz.UTC;
-    final n = task.repeatInterval < 1 ? 1 : task.repeatInterval;
-    final m = task.repeatMinute!;
-    final now = tz.TZDateTime.now(loc);
-    final today = DateTime(now.year, now.month, now.day);
-    final ad = DateTime(a.year, a.month, a.day);
-    final diff = today.difference(ad).inDays;
-    tz.TZDateTime at(DateTime date) =>
-        tz.TZDateTime(loc, date.year, date.month, date.day, m ~/ 60, m % 60);
-
-    // F4：「下一次 occurrence」必须包含**今天**。
-    // 旧实现无条件 +1 个周期（(k+1)*n），当 diff % n == 0（今天恰为循环日）时
-    // 结果永远 ≥ 明天；而首页今日分区 / 桌面小组件 / 晨报都以 repeatsOn 判定，
-    // 把锚点当天算作循环日——于是「UI 显示今天该做，闹钟却排在 N 天后」。
-    // 这里先判「今天是否为循环日 + 时刻未过 + 未被要求跳过」，命中即挂今天。
-    final DateTime occDate;
-    if (diff < 0) {
-      occDate = ad; // 锚点在未来：首个 occurrence 即锚点日
-    } else {
-      final base = ad.add(Duration(days: (diff ~/ n) * n));
-      final todayIsOccurrence = diff % n == 0;
-      final notYetPassed = !at(base).isBefore(now);
-      if (todayIsOccurrence && notYetPassed && !skipToday) {
-        occDate = base;
-      } else {
-        occDate = ad.add(Duration(days: ((diff ~/ n) + 1) * n));
-      }
-    }
-    var result = at(occDate);
-    // 尊重 skipDates / repeatUntil：若算出的下次 occurrence 落在「跳过日」或「已超结束日」，
-    // 顺延到下一个真正命中的循环日（上限 60 次防死循环，覆盖最极端间隔）。
-    var guard = 0;
-    var candidate = result;
-    while (guard < 60 &&
-        !task.repeatsOn(
-            DateTime(candidate.year, candidate.month, candidate.day))) {
-      final next = candidate.add(const Duration(days: 1));
-      candidate = tz.TZDateTime(loc, next.year, next.month, next.day, m ~/ 60, m % 60);
-      guard++;
-    }
-    // S11 修复：60 次仍未找到合法的循环日（跳过日密集 / 临近结束日期），
-    // 不再返回一个不满足条件的候选日期去照常调度，而是本次不提醒（返回 null）。
-    if (!task.repeatsOn(
-        DateTime(candidate.year, candidate.month, candidate.day))) {
-      return null;
-    }
-    return candidate;
-  }
+  // F-9（v2.8.5 审计）：旧「逐落点递推」实现 `_nextMonthlyOccurrence` /
+  // `_nextIntervalOccurrence`（约 120 行，以 `// ignore: unused_element` 压制
+  // 告警的对照参考代码）已删除——v2.8.5 统一为 [repeatOccurrenceTimes] 的
+  // 「扫描窗口内取前 8 个命中」后，生产路径零调用，留在生产文件里只会让后人
+  // 误调用到与现实现不一致的旧路径。如需对照历史行为，git 历史中可查。
 
   /// 按任务 id 取消全部「重复提醒」通知。
   /// F-2 起 0..7 号槽位承载「接下来 8 次」一次性落点（不再按星期分槽），

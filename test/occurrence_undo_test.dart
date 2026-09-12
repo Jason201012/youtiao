@@ -37,6 +37,7 @@ Task mk(
   String? title,
   DateTime? due,
   RepeatType repeat = RepeatType.none,
+  List<int> weekdays = const [],
 }) =>
     Task(
       id: id,
@@ -45,6 +46,7 @@ Task mk(
       category: Category.work,
       dueDate: due,
       repeat: repeat,
+      repeatWeekdays: weekdays,
       repeatMinute: repeat == RepeatType.none ? null : 450,
     );
 
@@ -95,12 +97,19 @@ void main() {
     });
 
     test('rescheduleOnceOccurrence 返回副本 id，撤销可精确双还原', () async {
+      // F-2（v2.8.5 审计）：源任务改为「每周五」——2026-09-11 是周五，改期目标日
+      // 9/12（周六）不是循环日，仍会建副本（daily 改期到明天会被防撞判定合并，
+      // 见 v285_audit_fix_test 的 F-2 组）。
       final p = await buildWith([
-        mk('1', title: '同名任务', repeat: RepeatType.daily, due: DateTime(2026, 9, 11, 9, 0)),
+        mk('1',
+            title: '同名任务',
+            repeat: RepeatType.weekly,
+            weekdays: const [DateTime.friday],
+            due: DateTime(2026, 9, 11, 9, 0)),
         // 同名 + 同一天的另一条任务：旧实现按「标题 + 日期」反查副本会误删它。
         mk('2', title: '同名任务', due: DateTime(2026, 9, 12, 9, 0)),
       ]);
-      final newDay = origDay.add(const Duration(days: 1));
+      final newDay = origDay.add(const Duration(days: 1)); // 周六，非循环日
 
       final copy = p.rescheduleOnceOccurrence('1', newDay, origDay: origDay);
       expect(copy, isNotNull);

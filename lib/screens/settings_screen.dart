@@ -591,7 +591,35 @@ String _formatIdle(int seconds) {
                             // U19：勿扰起止倒挂（如 22:00-7:00）在本 App 有明确定义
                             // ——表示「跨天勿扰」（22:00 到次日 7:00）。此前静默接受且
                             // 无任何说明，用户误以为设置未生效。这里显式提示语义。
-                            if (provider.dndStartHour >=
+                            // F-6（v2.8.5 审计）：原提示条件为 `>=`，把「起止相等」
+                            // 也当成跨天展示「全天不提醒」——而 isDndHour 对相等
+                            // 的真实行为是**不抑制任何提醒**（勿扰完全失效），
+                            // 提示与行为相反。现拆成两个互斥分支，各自说真话。
+                            if (provider.dndStartHour ==
+                                provider.dndEndHour) ...[
+                              const SizedBox(height: 6),
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 4),
+                                child: Row(
+                                  children: [
+                                    Icon(Symbols.warning_amber,
+                                        size: 14,
+                                        color: appColors(context).meta),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        '开始与结束时间相同，勿扰不会抑制任何提醒'
+                                        '（请把两端错开至少 1 小时）',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: appColors(context).meta),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ] else if (provider.dndStartHour >
                                 provider.dndEndHour) ...[
                               const SizedBox(height: 6),
                               Padding(

@@ -364,8 +364,12 @@ class ExportSheet {
     final extra = result.simplifiedRepeat > 0
         ? '（${result.simplifiedRepeat} 条复杂重复已简化为一次性）'
         : '';
+    // F-10（v2.8.5 审计）：已映射但细节部分丢失的规则单独提示，不再静默。
+    final partial = result.partialRepeat > 0
+        ? '（${result.partialRepeat} 条重复规则部分保留，间隔/次数细节未支持）'
+        : '';
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('iCal 导入完成：${parts.join('，')}$extra')),
+      SnackBar(content: Text('iCal 导入完成：${parts.join('，')}$extra$partial')),
     );
   }
 

@@ -17,6 +17,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/task_template_sheet.dart';
 import 'package:todolist/widgets/occurrence_sheet.dart';
+import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:todolist/models/attachment.dart';
 import 'package:todolist/services/attachment_service.dart';
@@ -324,27 +325,39 @@ class TaskDetailScreen extends StatelessWidget {
                       ),
                       OutlinedButton.icon(
                         onPressed: () async {
-                          final ok = await showDialog<bool>(
+                          // F-3（v2.8.5 审计）：旧文案承诺「今天起不再出现」，实际任务
+                          // 却因 dueDate 被清空落进首页「今天」分区（说谎式 UI）。
+                          // 改为双动作：结果与用户意图直接对齐——
+                          // 「结束并标记完成」= 停止循环 + 计入今日完成，落「已完成」区；
+                          // 「结束并保留待办」= 停止循环 + 保留在今天待办中，由用户处置。
+                          final action = await showDialog<String>(
                             context: context,
                             builder: (c) => AlertDialog(
                               title: const Text('结束重复'),
                               content: const Text(
-                                  '将停止该任务在此之后的循环（今天起不再出现），历史不受影响。'),
+                                  '将停止该任务在此之后的循环，历史不受影响。'),
                               actions: [
                                 TextButton(
-                                  onPressed: () => Navigator.pop(c, false),
+                                  onPressed: () => Navigator.pop(c, 'cancel'),
                                   child: const Text('取消'),
                                 ),
+                                TextButton(
+                                  onPressed: () => Navigator.pop(c, 'keep'),
+                                  child: const Text('结束并保留待办'),
+                                ),
                                 FilledButton(
-                                  onPressed: () => Navigator.pop(c, true),
-                                  child: const Text('结束'),
+                                  onPressed: () => Navigator.pop(c, 'done'),
+                                  child: const Text('结束并标记完成'),
                                 ),
                               ],
                             ),
                           );
-                          if (ok == true) {
+                          if (action == 'keep') {
                             provider.endRepeat(task.id);
-                            Navigator.pop(context);
+                            if (context.mounted) Navigator.pop(context);
+                          } else if (action == 'done') {
+                            provider.endRepeat(task.id, markDone: true);
+                            if (context.mounted) Navigator.pop(context);
                           }
                         },
                         icon: const Icon(Symbols.event_busy, size: 18),
@@ -361,8 +374,34 @@ class TaskDetailScreen extends StatelessWidget {
                                 DateTime.now().add(const Duration(days: 365)),
                           );
                           if (picked != null) {
+                            // F-2（v2.8.5 审计）：目标日副本提醒时刻已过 → 提前预演提示
+                            // 「提醒不会触发」，与新建/编辑弹层、批量顺延的
+                            // [PastDueGuard] 口径一致（此前该入口是少数没接上的入口）。
+                            // 改期到今天且原 repeatMinute 时刻已过时，副本不会响。
+                            final src = provider.byId(task.id);
+                            final hhmm = src?.repeatMinute;
+                            final h = hhmm != null
+                                ? hhmm ~/ 60
+                                : (src?.dueDate?.hour ?? 9);
+                            final m = hhmm != null
+                                ? hhmm % 60
+                                : (src?.dueDate?.minute ?? 0);
+                            final when = DateTime(
+                                picked.year, picked.month, picked.day, h, m);
+                            if (when.isBefore(DateTime.now())) {
+                              final ok = await PastDueGuard.confirm(
+                                context,
+                                count: 1,
+                                detail:
+                                    '目标日（${picked.month}/${picked.day} '
+                                    '${h.toString().padLeft(2, '0')}:'
+                                    '${m.toString().padLeft(2, '0')}）的提醒时刻'
+                                    '已早于当前时刻，改期后提醒将不会触发。\n\n仍要改期吗？',
+                              );
+                              if (!ok) return;
+                            }
                             provider.rescheduleOnceOccurrence(task.id, picked);
-                            Navigator.pop(context);
+                            if (context.mounted) Navigator.pop(context);
                           }
                         },
                         icon: const Icon(Symbols.edit_calendar, size: 18),

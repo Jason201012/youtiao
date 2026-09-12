@@ -1,6 +1,7 @@
 package com.example.todolist
 
 import android.app.AlarmManager
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ContentValues
@@ -11,6 +12,7 @@ import android.database.sqlite.SQLiteException
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.Calendar
 
 /**
@@ -272,11 +274,14 @@ class MidnightResetReceiver : BroadcastReceiver() {
 
     /** 直接打开 SQLite 清理 [trash] 表：删除 deletedAt（JSON data 内）早于保留期的条目。
      * 与 Dart TaskProvider._cleanupTrashIfNeeded 一致；保留期天数由 [retentionDays] 传入，
-     * 负数表示「永不自动清理」。data 列存完整 Task JSON，deletedAt 为 ISO 时间戳。 */
-    private fun cleanupTrashSqlite(dbPath: String, retentionDays: Int) {
-        if (retentionDays < 0) return // 永不自动清理
+     * 负数表示「永不自动清理」。data 列存完整 Task JSON，deletedAt 为 ISO 时间戳。
+     * F-5（v2.8.5 审计）：返回被清理的 id 列表，交由 [cleanupExpiredTrashResources]
+     * 补齐 Dart 侧到期即销毁的其余动作（删附件目录、取消通知）——原生路径此前只删
+     * 库记录，产生孤儿附件目录，与 Dart 侧口径不一致。 */
+    private fun cleanupTrashSqlite(dbPath: String, retentionDays: Int): List<String> {
+        if (retentionDays < 0) return emptyList() // 永不自动清理
         // S10 修复：经 withGuardDb 打开，带 WAL + busy_timeout + SQLITE_BUSY 重试与失败日志。
-        withGuardDb(dbPath) { db ->
+        return withGuardDb(dbPath) { db ->
             val cutoff = Calendar.getInstance().apply {
                 add(Calendar.DAY_OF_MONTH, -retentionDays)
             }
@@ -304,6 +309,55 @@ class MidnightResetReceiver : BroadcastReceiver() {
             if (expired.isNotEmpty()) {
                 debugLog("回收站自动清理：删除 ${expired.size} 条过期条目（保留 ${retentionDays} 天）")
             }
+            expired
+        } ?: emptyList()
+    }
+
+    /**
+     * F-5（v2.8.5 审计）：对原生路径清理掉的过期回收站任务，补齐与 Dart 侧
+     * TaskProvider._cleanupTrashIfNeeded 一致的「到期即销毁」其余两件事。
+     * 双端口径注释（防再次漂移，改动时必须两侧同步）：
+     *  1) 附件目录：`attachments/<taskId>/` 整目录递归删除（目录名与 Dart
+     *     AttachmentService 的 `_attachmentsDirName = "attachments"` 一致）。
+     *     Dart 的 `getApplicationDocumentsDirectory()` 在 Android 上实际返回
+     *     **`dataDir/app_flutter`**（path_provider 2.x，`dataDir` 即
+     *     `applicationInfo.dataDir`，与 `filesDir` 是兄弟目录），故两个候选根
+     *     都尝试删除，幂等。
+     *  2) 通知 id 段（与 Dart NotificationService 完全一致，均为 int32）：
+     *     - 一次性截止提醒 = 任务数字 id 本身；
+     *     - 重复提醒 = 1600000000 + (id % 30000000) * 8 + 0..7；
+     *     - 稍后提醒(snooze) = 1900000000 + id % 10000000。
+     *     任务入回收站时 Dart 已按同段取消过，这里兜底清掉展示态残留。
+     * 全部失败仅记日志，不阻断清理主流程。
+     */
+    private fun cleanupExpiredTrashResources(context: Context, ids: List<String>) {
+        val nm = runCatching {
+            context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        }.getOrNull()
+        // 附件根目录候选（path_provider 在 Android 的文档目录是 dataDir/app_flutter，
+        // 与 filesDir 是兄弟目录；保留 filesDir 直下作为兜底路径，两处幂等清理）：
+        val attachmentRoots = listOf(
+            File(File(context.applicationInfo.dataDir, "app_flutter"), "attachments"),
+            File(context.filesDir, "attachments"),
+        )
+        for (id in ids) {
+            // 1) 附件目录
+            for (root in attachmentRoots) {
+                runCatching {
+                    val dir = File(root, id)
+                    if (dir.exists()) dir.deleteRecursively()
+                }.onFailure { debugLog("清理附件目录失败 id=$id: ${it.message}") }
+            }
+            // 2) 通知（仅取消展示态；非数字 id 走过 Dart hashCode 映射，原生无法复现，跳过）
+            if (nm == null) continue
+            runCatching {
+                val base = id.toLongOrNull() ?: return@runCatching
+                if (base < 0 || base > Int.MAX_VALUE) return@runCatching
+                nm.cancel(base.toInt())
+                val slot = (base % 30000000).toInt()
+                for (d in 0 until 8) nm.cancel(1600000000 + slot * 8 + d)
+                nm.cancel((1900000000 + (base % 10000000)).toInt())
+            }.onFailure { debugLog("取消残留通知失败 id=$id: ${it.message}") }
         }
     }
 

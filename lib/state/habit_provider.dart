@@ -336,11 +336,23 @@ class HabitProvider extends ChangeNotifier {
   }
 
   /// 某习惯当前连续打卡天数（今天未打卡则从昨天起算，避免「还没打卡就显断」）。
-  int currentStreak(Habit habit) =>
-      _streakFor(_datesOf(habit), allowTodayGap: true);
+  ///
+  /// F-4（v2.8.5 审计）：[Habit.weekdays] 非空（每周部分天打卡）的习惯按
+  /// 「计划打卡日序列」计算——计划外的休息日不再被当成「断签」。旧实现按
+  /// 自然日逐天回退，「每周一/三/五」在周五打完回退到周四即断，连续天数恒 ≤ 1，
+  /// 「连续 N 天」类成就对非每日习惯几乎不可达。weekdays 为空（每天）维持原口径。
+  int currentStreak(Habit habit) {
+    final wd = habit.weekdays.where((d) => d >= 1 && d <= 7).toSet();
+    if (wd.isEmpty) return _streakFor(_datesOf(habit), allowTodayGap: true);
+    return _plannedStreakFor(_datesOf(habit), wd, allowTodayGap: true);
+  }
 
-  /// 某习惯历史最长连续打卡天数。
-  int longestStreak(Habit habit) => _streakFor(_datesOf(habit), longest: true);
+  /// 某习惯历史最长连续打卡天数。口径同 [currentStreak]（F-4：感知 weekdays）。
+  int longestStreak(Habit habit) {
+    final wd = habit.weekdays.where((d) => d >= 1 && d <= 7).toSet();
+    if (wd.isEmpty) return _streakFor(_datesOf(habit), longest: true);
+    return _plannedStreakFor(_datesOf(habit), wd, longest: true);
+  }
 
   // ===== 跨习惯整体统计（成就解锁用）=====
 
@@ -390,6 +402,59 @@ class HabitProvider extends ChangeNotifier {
     int streak = 0;
     while (dates.contains(cursor)) {
       streak++;
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
+  /// F-4（v2.8.5 审计）：按「计划打卡日序列」计算连续天数，
+  /// 供 [weekdays] 非空（每周部分天打卡）的习惯专用。
+  ///
+  /// 与自然日口径 [_streakFor] 的差异：计划外的日子（休息日）对连续性**中性**，
+  /// 只有「计划日缺卡」才断签。计划日序列 = `weekdays` 命中的星期，从今天（或
+  /// 最早打卡日）逐自然日回退/前进筛选得到。
+  ///
+  /// - [longest]=true：从最早打卡日扫到今天，连续的「已打卡计划日」构成 run；
+  /// - 否则：从今天往回走计划日序列，[allowTodayGap]=true 时「今天是计划日但
+  ///   尚未打卡」不算断（与每天习惯的当天空缺容忍一致）。
+  static int _plannedStreakFor(
+    Set<DateTime> dates,
+    Set<int> weekdays, {
+    bool longest = false,
+    bool allowTodayGap = false,
+  }) {
+    if (dates.isEmpty || weekdays.isEmpty) return 0;
+    bool isPlanned(DateTime d) => weekdays.contains(d.weekday);
+    final earliest =
+        dates.reduce((a, b) => a.isBefore(b) ? a : b);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    if (longest) {
+      int best = 0;
+      int run = 0;
+      for (var d = earliest; !d.isAfter(today); d = d.add(const Duration(days: 1))) {
+        if (!isPlanned(d)) continue; // 计划外休息日：中性，不打断 run
+        if (dates.contains(d)) {
+          run++;
+          if (run > best) best = run;
+        } else {
+          run = 0; // 计划日缺卡 → 断签
+        }
+      }
+      return best;
+    }
+    var cursor = today;
+    // 今天的空缺容忍：今天是计划日但尚未打卡 → 从上一个计划日起算。
+    if (isPlanned(cursor) && !dates.contains(cursor) && allowTodayGap) {
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    int streak = 0;
+    // 回退下界为最早打卡日：再往前不可能有打卡记录（防御性，避免脏 weekdays 死循环）。
+    while (!cursor.isBefore(earliest)) {
+      if (isPlanned(cursor)) {
+        if (!dates.contains(cursor)) break;
+        streak++;
+      }
       cursor = cursor.subtract(const Duration(days: 1));
     }
     return streak;

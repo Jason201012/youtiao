@@ -74,7 +74,10 @@ class _TaskSheetState extends State<TaskSheet> {
 
   /// 重复规则与提醒时刻 / 星期 / 间隔。
   RepeatType _repeat = RepeatType.none;
-  TimeOfDay _repeatTime = const TimeOfDay(hour: 7, minute: 0);
+  // F-7（v2.8.5 审计）：默认提醒时刻统一取共享常量 [kDefaultRepeatMinute]（07:00），
+  // 与自然语言快速录入（task_parser）共用同一来源，杜绝两条创建路径默认值漂移。
+  TimeOfDay _repeatTime = const TimeOfDay(
+      hour: kDefaultRepeatMinute ~/ 60, minute: kDefaultRepeatMinute % 60);
   List<int> _repeatWeekdays = [DateTime.monday];
   int _repeatInterval = 1; // F-10：默认「每 1 天」而非「每 2 天」（与直觉一致）
   DateTime? _repeatAnchor; // interval 锚点，创建时填当天
@@ -154,7 +157,9 @@ class _TaskSheetState extends State<TaskSheet> {
       _reminderOffsetMin = t.reminderOffsetMin;
       _repeatTime = t.repeatMinute != null
           ? TimeOfDay(hour: t.repeatMinute! ~/ 60, minute: t.repeatMinute! % 60)
-          : const TimeOfDay(hour: 7, minute: 0);
+          : const TimeOfDay(
+              hour: kDefaultRepeatMinute ~/ 60,
+              minute: kDefaultRepeatMinute % 60);
       _repeatUntilDate =
           t.repeatUntil != null ? DateTime.parse(t.repeatUntil!) : null;
       // F-6：月内规则预填——按 [Task._baseRepeatsOn] 的优先级（fromEnd > nthWeekday >
@@ -1294,7 +1299,11 @@ class _TaskSheetState extends State<TaskSheet> {
               ),
             ),
           ),
-          // 重复任务：开启后截止时间固定为截止日期 23:59，不再单独选择。
+          // 一次性任务：显示「截止时间」与「提醒提前量」。
+          // F-9（v2.8.5 审计）：旧注释「重复任务：截止时间固定为 23:59」已过时——
+          // 该 23:59 约定在 v2.8.5（F-4/F-5）废除。重复任务不显示本区块：
+          // 其提醒由「重复提醒时刻」（repeatMinute）驱动，且 F-1 起调度层
+          // 不再为重复任务挂一次性截止提醒，截止时间与其提醒完全解耦。
           if (_repeat == RepeatType.none) ...[
             const SizedBox(height: 18),
             _SectionLabel('截止时间'),

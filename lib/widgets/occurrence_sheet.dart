@@ -81,6 +81,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     if (_isSkipped(d)) return;
     if (defer) {
       // 「移到下一天」= 把当前 occurrence 跳过 + 在新日期另落一次性副本。
+      // F-2（v2.8.5 审计）：若 newDay 本身就是循环日，provider 只会 skip 本次、
+      // **不建副本**（返回 null）——否则目标日循环提醒 + 副本一次性提醒双响，
+      // 且循环完成后副本仍挂着。文案与撤销动作据此分支。
       final newDay = d.add(const Duration(days: 1));
       final copy = widget.provider.rescheduleOnceOccurrence(
         _task.id,
@@ -93,7 +96,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
             '${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('已移到 $dayLabel（已新建一次性副本）'),
+            content: Text(copy == null
+                ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
+                : '已移到 $dayLabel（已新建一次性副本）'),
             action: SnackBarAction(
               label: '撤销',
               onPressed: () {

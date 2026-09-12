@@ -101,7 +101,9 @@ class TaskProvider extends ChangeNotifier {
 
   // ===== 勿扰时段（本地时间，小时 0-23）=====
   /// 勿扰开始/结束小时；[dndEnabled]=false 时表示不启用勿扰。
-  /// 一次性提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹（重复/习惯提醒不动）。
+  /// 提醒若落在勿扰区间，自动顺延到时段结束 + 5 分钟再弹。
+  /// v2.8.5（F-3）起重复 / 习惯提醒同样逐落点感知勿扰（此前注释称
+  /// 「重复/习惯提醒不动」已过时——现在任何落点撞进区间都会被顺延）。
   static const String _kDndEnabled = 'dnd_enabled';
   static const String _kDndStart = 'dnd_start';
   static const String _kDndEnd = 'dnd_end';
@@ -965,6 +967,11 @@ class TaskProvider extends ChangeNotifier {
       // 日后即便任务库被清空也不再复活示例。
       await prefs.setBool(_kSeeded, true);
     }
+    // F-8（v2.8.5 审计）：interval 任务缺 repeatAnchor 的自愈（详见
+    // [_healRepeatAnchors]）。一次性写回数据库，之后不再反复触发。
+    if (_healRepeatAnchors()) {
+      await _persist();
+    }
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
     _soundEnabled = prefs.getBool(_kSound) ?? true;
     _backgroundGuard = prefs.getBool(_kGuard) ?? true;
@@ -1190,6 +1197,29 @@ class TaskProvider extends ChangeNotifier {
     } catch (e, s) {
       AppLog.d('TaskProvider 持久化失败（变更仅存于内存，重启将回退）：$e\n$s');
     }
+  }
+
+  /// F-8（v2.8.5 审计）：interval 任务缺 [Task.repeatAnchor] 的自愈。
+  ///
+  /// 此前锚点缺失（旧备份 / 手改数据库）时任务仍带着「每隔 N 天」标签出现在
+  /// 列表，但 [Task._baseRepeatsOn] 对 anchor==null 恒返回 false——永远不是
+  /// 循环日、永远不提醒的「哑循环」，且无任何异常提示、无修复入口。
+  /// 这里补锚点为「今天」（date-only，无 createdAt 字段可用，取当日使循环
+  /// 从载入当天重新起算），并返回是否有修复、由调用方统一落库。
+  /// 只在 load / 覆盖恢复时执行（一次性自愈 + 持久化），避免每次解析都漂移。
+  bool _healRepeatAnchors() {
+    var changed = false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    for (var i = 0; i < _tasks.length; i++) {
+      final t = _tasks[i];
+      if (t.repeat == RepeatType.interval && t.repeatAnchor == null) {
+        _tasks[i] = t.copyWith(repeatAnchor: today);
+        changed = true;
+        AppLog.d('[F-8] interval 任务缺锚点已补为今天：id=${t.id} "${t.title}"');
+      }
+    }
+    return changed;
   }
 
   /// 载入后重算自增 id 起点，避免新任务 id 与已有（含回收站）冲突。
@@ -1922,16 +1952,24 @@ class TaskProvider extends ChangeNotifier {
   /// 的占位（不是真实截止日），保留它会让这条已退场的任务立刻以 `d < 0` 掉进
   /// 「逾期」分区**永久残留**——用户点「结束重复」的本意是干净退场，
   /// 结果每天在逾期列表里看到一个陈旧条目，必须再手动完成或删除。
-  void endRepeat(String taskId) {
+  ///
+  /// F-3（v2.8.5 审计）：[markDone]=true 时（弹窗「结束并标记完成」动作），
+  /// 结束的同时把任务置为已完成并计入今天的完成历史——任务直接落「已完成」分区，
+  /// 而不是因 dueDate 被清空而落进「今天」分区还要用户再手动完成一次。
+  /// 默认 false（「结束并保留待办」：任务留在「今天」分区由用户处置）。
+  void endRepeat(String taskId, {bool markDone = false}) {
     final i = _tasks.indexWhere((t) => t.id == taskId);
     if (i == -1) return;
     final yesterday = DateTime.now().subtract(const Duration(days: 1));
-    final updated = _tasks[i].copyWith(
+    final now = DateTime.now();
+    _tasks[i] = _tasks[i].copyWith(
       repeatUntil: _ymd(yesterday),
       dueDate: null,
+      status: markDone ? TaskStatus.done : null,
+      completedAt: markDone ? now : null,
+      doneDates: markDone ? _withDoneDate(_tasks[i], true, now) : null,
     );
-    _tasks[i] = updated;
-    _cancelRemindersFor(updated.id);
+    _cancelRemindersFor(_tasks[i].id);
     notifyListeners();
     _persist();
   }
@@ -1939,9 +1977,13 @@ class TaskProvider extends ChangeNotifier {
   /// 仅此一次改期：跳过 [origDay]（默认今天）这一次 occurrence，并创建一条一次性副本任务，
   /// 截止时间设为 [newDay]（其余字段沿用原任务）。实现上即现有 [addTask]，无需新概念。
   ///
-  /// P2-1：返回**新建的一次性副本**（无法创建时返回 null）。调用方凭返回值的 id 精确
-  /// 撤销——原实现让 UI 侧按「标题 + 日期」反查副本，同名任务 + 同一天改期时会误删
-  /// 另一个真实任务。
+  /// P2-1：返回**新建的一次性副本**；调用方凭返回值的 id 精确撤销。
+  ///
+  /// F-2（v2.8.5 审计）：当 [newDay] **本身就是该任务的循环日**（且 ≠ [origDay]）时，
+  /// 该日的 occurrence 已由原循环覆盖——此时**不再另建副本**、仅跳过 [origDay]，
+  /// 返回 null。此前 daily 任务「移到下一天」会把副本落到明天，而明天同时是循环日：
+  /// 目标日循环提醒 + 副本一次性提醒双响，且循环任务完成后副本仍以未完成姿态挂着
+  /// （「改期」变「复制」）。目标日若已被用户显式跳过（在 skipDates 里），仍照常建副本。
   Task? rescheduleOnceOccurrence(
     String taskId,
     DateTime newDay, {
@@ -1949,9 +1991,16 @@ class TaskProvider extends ChangeNotifier {
   }) {
     final src = byId(taskId);
     if (src == null) return null;
-    // 1) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
-    skipOccurrence(taskId, day: origDay ?? DateTime.now());
-    // 2) 创建一次性副本（repeat=none），dueDate 指向改期后的日期，其余沿用。
+    final orig = origDay ?? DateTime.now();
+    final origDay0 = DateTime(orig.year, orig.month, orig.day);
+    final target = DateTime(newDay.year, newDay.month, newDay.day);
+    // 1) 防撞（F-2）：目标日是循环日 → 仅 skip 本次，交由原循环覆盖。
+    final coveredByLoop =
+        !target.isAtSameMomentAs(origDay0) && src.repeatsOn(target);
+    // 2) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
+    skipOccurrence(taskId, day: origDay0);
+    if (coveredByLoop) return null;
+    // 3) 创建一次性副本（repeat=none），dueDate 指向改期后的日期，其余沿用。
     // F-4：副本的提醒时刻必须优先取「该重复原本的提醒时刻」[Task.repeatMinute]，
     // 回退才用 dueDate。此前只取 `src.dueDate`，而重复任务的 dueDate 被录入侧钉成
     // 「创建当天 23:59」→「把今天 7 点这件事挪到明天」实际得到「明天 23:59 提醒」。
@@ -2523,6 +2572,9 @@ class TaskProvider extends ChangeNotifier {
           .map((t) =>
               t.copyWith(pinyinInitials: Task.computePinyinInitials(t.title)))
           .toList());
+    // F-8（v2.8.5 审计）：覆盖恢复同样自愈 interval 缺锚点（下方 _persist 落库，
+    // 与 load() 的自愈口径一致）。
+    _healRepeatAnchors();
     if (includeTrash) {
       _trash
         ..clear()
@@ -2682,16 +2734,29 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 为单个任务调度其全部本地提醒（截止提醒 + 重复提醒）。
-  /// 重复提醒只在「截止日期未过（interval 除外，见
-  /// [shouldScheduleRepeatReminder]）」时才调度，逾期后自动停止。
+  /// 重复提醒只在「重复未结束」时才调度（见 [shouldScheduleRepeatReminder]）。
+  ///
+  /// F-1（v2.8.5 审计）：两类提醒**互斥**——重复任务的提醒只由
+  /// [NotificationService.scheduleRepeatReminder] 负责（结束由 repeatUntil 表达），
+  /// 不再因其残留的 dueDate 额外挂一条用户不可见、改不了的一次性「截止提醒」
+  /// （此前同一任务会在循环提醒之外再多挂一条同标题通知，到 dueDate 当天双响）。
   void _scheduleRemindersFor(Task t) {
-    if (t.dueDate != null) {
+    if (shouldScheduleDeadlineReminder(t)) {
       NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
     }
     if (shouldScheduleRepeatReminder(t)) {
       NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
     }
   }
+
+  /// F-1（v2.8.5 审计）：是否应挂「一次性截止提醒」。
+  ///
+  /// 唯一判据：有 dueDate 且**非重复任务**。重复任务即便带 dueDate 也返回 false
+  /// ——其提醒由 [shouldScheduleRepeatReminder] 的重复链路负责，二者互斥。
+  /// 暴露为 `@visibleForTesting` 便于回归测试钉死「重复任务不得产生截止提醒」。
+  @visibleForTesting
+  static bool shouldScheduleDeadlineReminder(Task t) =>
+      t.dueDate != null && !t.isRepeating;
 
   /// 取消单个任务的全部本地提醒（截止提醒 + 重复提醒）。
   void _cancelRemindersFor(String id) {
@@ -2712,8 +2777,10 @@ class TaskProvider extends ChangeNotifier {
   /// 非重复任务完成态变更后：取消 / 恢复其一次性「截止时间提醒」。
   /// - 完成（含提前完成）：取消已调度的截止提醒，避免到期后仍弹出。
   /// - 取消完成：若截止时间未过，恢复调度。
-  /// 重复任务不在此处理——其整体截止提醒仍有效（只是当天完成由
-  /// [_rescheduleRepeatOnCompletion] 跳过今日重复提醒），故直接跳过。
+  /// 重复任务不在此处理——F-1（v2.8.5 审计）起重复任务的提醒**只**由
+  /// [shouldScheduleRepeatReminder] 的重复链路负责（与其截止提醒互斥），
+  /// 当天完成由 [scheduleRepeatReminder] 内部依据 done/completedAt 跳过今日落点，
+  /// 故直接跳过。
   void _reconcileDeadlineOnCompletion(Task t) {
     if (t.isRepeating) return;
     if (t.done) {
@@ -2728,7 +2795,15 @@ class TaskProvider extends ChangeNotifier {
   void _rescheduleAllActive() {
     final now = DateTime.now();
     for (final t in _tasks) {
-      if (!t.done && t.dueDate != null && t.dueDate!.isAfter(now)) {
+      // F-1（v2.8.5 审计）：调度互斥——重复任务不再挂一次性截止提醒；
+      // 存量用户的系统里可能仍挂着升级前的「双响」截止闹钟，这里顺手幂等取消。
+      if (t.isRepeating && t.dueDate != null) {
+        NotificationService.instance.cancel(t.id);
+      }
+      if (!t.done &&
+          !t.isRepeating &&
+          t.dueDate != null &&
+          t.dueDate!.isAfter(now)) {
         NotificationService.instance.scheduleForTask(t, playSound: _soundEnabled);
       }
       // P1-2：门槛统一收口到 [shouldScheduleRepeatReminder]——interval 重复提醒
