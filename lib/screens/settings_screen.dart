@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
+import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
@@ -60,7 +61,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '2.8.7');
+      if (mounted) setState(() => _version = '2.8.8');
     }
   }
 
@@ -321,7 +322,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   /// P2-3：提醒时区候选（IANA id, 展示名）。'' = 跟随设备时区（默认）。
-  /// 刻意不做全量时区列表——常用时区 + 跟随系统已覆盖绝大多数场景，保持 UI 极简。
+  /// 常用时区 + 下方「自定义 IANA 时区」入口（P3-3）覆盖绝大多数场景，保持 UI 极简。
   static const List<(String, String)> _tzOptions = [
     ('', '跟随系统（推荐）'),
     ('Asia/Shanghai', '北京时间（Asia/Shanghai）'),
@@ -335,6 +336,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ('UTC', '协调世界时（UTC）'),
   ];
 
+  /// P3-3（v2.8.7 审计）：自定义时区入口的哨兵返回值（区别于候选 id 与 null=取消）。
+  static const String _kCustomTzSentinel = '__custom_tz__';
+
   /// P2-3：行内展示文案（'' → 跟随系统；其余取候选名，未知 id 原样展示）。
   static String _tzLabel(String v) {
     if (v.isEmpty) return '跟随系统';
@@ -346,8 +350,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// P2-3：选择提醒时区并立即生效——重解析时区、作废落点缓存后整体重排，
   /// 否则已挂的闹钟仍按旧时区响。
+  ///
+  /// P2-2（v2.8.7 审计）：重排对齐 onDayChanged 全量入口——除任务提醒外，
+  /// 简报晨/晚两条、习惯挽留、回收站预告都是按**旧时区**烘焙的一次性闹钟，
+  /// 须一并重排，避免切换后当日按旧时区错时响一次。
+  /// P3-3（v2.8.7 审计）：候选清单外支持手动输入 IANA 时区（tz.getLocation 校验）；
+  /// 切换后 SnackBar 反馈「已生效、已重排」。
   Future<void> _pickTimezone(BuildContext ctx, TaskProvider p) async {
-    final picked = await showDialog<String>(
+    var picked = await showDialog<String>(
       context: ctx,
       builder: (d) => AlertDialog(
         title: const Text('提醒时区'),
@@ -355,14 +365,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           width: double.maxFinite,
           child: ListView(
             shrinkWrap: true,
-            children: _tzOptions
-                .map((o) => RadioListTile<String>(
-                      title: Text(o.$2),
-                      value: o.$1,
-                      groupValue: _tzOverride,
-                      onChanged: (v) => Navigator.pop(d, v),
-                    ))
-                .toList(),
+            children: [
+              ..._tzOptions.map((o) => RadioListTile<String>(
+                    title: Text(o.$2),
+                    value: o.$1,
+                    groupValue: _tzOverride,
+                    onChanged: (v) => Navigator.pop(d, v),
+                  )),
+              const Divider(height: 1),
+              // P3-3：底层 tz.getLocation 支持任意 IANA id，固定清单外的时区
+              // （如 Asia/Kolkata、Europe/Moscow）从这里手动输入。
+              ListTile(
+                leading: const Icon(Symbols.edit),
+                title: const Text('自定义 IANA 时区…'),
+                subtitle: _isCustomTz
+                    ? Text('当前：$_tzOverride')
+                    : null,
+                onTap: () => Navigator.pop(d, _kCustomTzSentinel),
+              ),
+            ],
           ),
         ),
         actions: [
@@ -373,10 +394,85 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+    if (picked == _kCustomTzSentinel) {
+      picked = await _promptCustomTimezone(ctx);
+    }
     if (picked == null) return;
-    await NotificationService.setTimezoneOverride(picked);
+    final value = picked; // 局部非空副本：picked 曾被重赋值，闭包内无法类型提升
+    await NotificationService.setTimezoneOverride(value);
+    // P2-2：任务提醒 + 简报 / 挽留 / 回收站预告全量重排。
     p.rescheduleAllNotifications();
-    if (mounted) setState(() => _tzOverride = picked);
+    await rescheduleFixedTimeReminders(
+      p,
+      Provider.of<FocusProvider>(ctx, listen: false),
+      Provider.of<HabitProvider>(ctx, listen: false),
+    );
+    if (mounted) setState(() => _tzOverride = value);
+    // P3-3：生效反馈——让用户知道全量重排已发生、结果如何。
+    if (mounted) {
+      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+        content: Text(value.isEmpty
+            ? '提醒时区已恢复跟随系统，全部提醒已重排'
+            : '提醒时区已切换为「${_tzLabel(value)}」，全部提醒已按新时区重排'),
+      ));
+    }
+  }
+
+  /// P3-3：当前是否为「清单外的自定义时区」（用于行内与弹层展示当前值）。
+  bool get _isCustomTz =>
+      _tzOverride.isNotEmpty && !_tzOptions.any((o) => o.$1 == _tzOverride);
+
+  /// P3-3：手动输入 IANA 时区名；保存前用 tz.getLocation 校验，非法留在弹层提示。
+  Future<String?> _promptCustomTimezone(BuildContext ctx) async {
+    final ctrl = TextEditingController(
+        // 仅预填「清单外的当前值」；清单内 id / 跟随系统不预填，避免误导。
+        text: _isCustomTz ? _tzOverride : '');
+    final result = await showDialog<String>(
+      context: ctx,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setLocal) {
+          String? error;
+          void submit() {
+            final v = ctrl.text.trim();
+            if (v.isEmpty) {
+              setLocal(() => error = '时区名不能为空');
+              return;
+            }
+            try {
+              tz.getLocation(v); // 合法性校验：IANA 时区库必须能解析
+              Navigator.pop(d, v);
+            } catch (_) {
+              setLocal(() => error = '无法识别的时区名，请输入有效的 IANA 时区');
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('自定义提醒时区'),
+            content: TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: 'IANA 时区名，如 Asia/Kolkata、Europe/Moscow',
+                errorText: error,
+                border: const OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => submit(),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(d),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: submit,
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    return result;
   }
 
 /// P1-2：把空闲秒数格式化为可读文案（0→关闭）。
@@ -618,11 +714,14 @@ String _formatIdle(int seconds) {
                     const SizedBox(height: AppColors.contentGap),
                     // P2-3（v2.8.6 审计）：提醒时区。默认跟随设备；此前调度硬编码
                     // 北京时间，设备在其它时区时提醒早/晚数小时甚至排到「前一天」。
+                    // P3-1（v2.8.7 审计）：行内说明能力边界——只管提醒触发时刻，
+                    // 不改变任务完成 / 重置 / 统计的日期口径。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(
                         icon: Symbols.public,
                         label: '提醒时区',
                         value: _tzLabel(_tzOverride),
+                        subtitle: '仅改变提醒触发时刻，任务完成与统计仍按设备日期',
                         onTap: () => _pickTimezone(context, provider),
                       ),
                     ),

@@ -99,6 +99,19 @@ class HelpScreen extends StatelessWidget {
                           '桌面端也可按 Ctrl/Cmd + P。',
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // P3-1（v2.8.7 审计）：说明「提醒时区」的能力边界。
+                    _FaqTile(
+                      question: '「提醒时区」是什么？会影响任务日期吗？',
+                      answer:
+                          '设置 → 通知提醒 → 提醒时区：可把提醒固定为某个时区'
+                          '（如常驻海外时仍按北京时间提醒），除常用清单外还支持'
+                          '手动输入任意 IANA 时区名。\n'
+                          '注意边界：它**只改变提醒的触发时刻**；任务的完成状态、'
+                          '跨天重置与统计口径仍按设备本地日期计算。两者在时区差异'
+                          '较大时可能出现「提醒已按北京时间响、但任务当日尚未重置」'
+                          '的边界现象，属预期行为。',
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
                     _FaqTile(
                       question: '专注 / 习惯 / 统计在哪？',
                       answer:

@@ -276,3 +276,28 @@ Future<void> rescheduleHabitNudge(
     AppLog.d('[HabitNudge] 重排失败：$e');
   }
 }
+
+/// P2-2（v2.8.7 审计）：重排全部「触发时刻在排程时按当前提醒时区烘焙」的
+/// 固定时刻提醒——早晚简报 × 2、习惯漏卡挽留、回收站过期预告。这些都是
+/// 一次性闹钟（F-07），切换提醒时区后若只重排任务提醒，它们的已挂落点仍按
+/// 旧时区计算，要等下次「启动 / 跨天钩子」才重建——期间会按旧时区错时响一次，
+/// 「时区立即生效」对常驻提醒落空。本函数与 onDayChanged 的全量重排入口对齐。
+///
+/// 各开关关闭时对应分支自动转为取消（与 [rescheduleBriefings] /
+/// [rescheduleHabitNudge] / [NotificationService.scheduleTrashExpireNotice]
+/// 的关闭语义一致），可在任意开关组合下安全调用。
+/// 调用点：设置页切换提醒时区（settings_screen）、备份恢复完成后（backup_sheet）。
+Future<void> rescheduleFixedTimeReminders(
+    TaskProvider task, FocusProvider focus, HabitProvider habit) async {
+  try {
+    await rescheduleBriefings(task, focus, habit);
+    await rescheduleHabitNudge(habit,
+        enabled: task.habitNudgeEnabled, nudgeMinute: task.habitNudgeMinute);
+    // 回收站过期预告：列表为空时内部自动取消残留，与「重排」语义一致。
+    await NotificationService.instance
+        .scheduleTrashExpireNotice(task.trashExpiringTomorrow)
+        .catchError((_) {});
+  } catch (e) {
+    AppLog.d('[DailyBriefing] 固定时刻提醒重排失败：$e');
+  }
+}

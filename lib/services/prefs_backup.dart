@@ -63,6 +63,11 @@ const List<String> _backedUpPrefKeys = <String>[
   'habit_nudge_minute',
   // 归档标签 / 自动备份口令关闭后的清理用标记
   'archived_tags',
+  // P2-1（v2.8.7 审计）：提醒时区覆盖（v2.8.7 新增偏好键）。与 P2-12 同型——
+  // 新键漏入白名单会让「备份 / 换机恢复后设置静默回到跟随系统」，且用户不可自察。
+  // 恢复侧配套：applyAppPrefs 写回后必须调 NotificationService.reloadTimezoneOverride()
+  // 重解析内存时区并全量重排（见 backup_sheet 恢复流程），否则仅落盘、本轮不生效。
+  'reminder_timezone_override',
 ];
 
 /// 读取白名单内的偏好键，返回可被 JSON 序列化的 `{key: value}` 映射。

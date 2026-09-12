@@ -9,6 +9,8 @@ import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/backup_validator.dart';
 import 'package:todolist/services/backup_crypto.dart';
+import 'package:todolist/services/daily_briefing.dart';
+import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/prefs_backup.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -413,6 +415,20 @@ class BackupSheet {
           failures.add('偏好（$e）');
         }
       }
+      // P2-1/P2-2（v2.8.7 审计）：恢复后重建通知。
+      // ① restoreFromJson 内部的 cancelAll 会把任务提醒之外的简报 / 挽留 /
+      //    回收站预告 / 习惯打卡闹钟一并清空（原流程只重排任务提醒）；
+      // ② 恢复的偏好可能携带「提醒时区」覆盖——applyAppPrefs 只写回
+      //    SharedPreferences，NotificationService 内存时区不会自动刷新，
+      //    不重解析则本轮会话仍按旧时区调度，时区设置形同静默丢失。
+      // 因此先重解析时区，再按恢复后的数据全量重排（含习惯打卡闹钟）。
+      try {
+        await NotificationService.reloadTimezoneOverride();
+      } catch (_) {}
+      await rescheduleFixedTimeReminders(provider, focusProvider, habitProvider);
+      try {
+        await habitProvider.scheduleAllReminders();
+      } catch (_) {}
 
       if (context.mounted) {
         if (failures.isEmpty) {
@@ -648,6 +664,17 @@ class BackupSheet {
           failures.add('偏好设置（$e）');
         }
       }
+      // P2-1/P2-2（v2.8.7 审计）：与 _doRestore 同口径——restoreFromJson 的
+      // cancelAll 清空了简报/挽留/回收站预告/习惯打卡闹钟；且恢复的偏好可能
+      // 携带「提醒时区」覆盖，须先重解析内存时区再全量重排，否则本轮会话
+      // 仍按旧时区调度（设置形同静默丢失）。
+      try {
+        await NotificationService.reloadTimezoneOverride();
+      } catch (_) {}
+      await rescheduleFixedTimeReminders(provider, focusProvider, habitProvider);
+      try {
+        await habitProvider.scheduleAllReminders();
+      } catch (_) {}
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

@@ -191,16 +191,28 @@ class NotificationService {
 
   /// 清空「已挂落点」缓存，强制下一次重排真正下发到系统。
   /// 批量取消（方案升级 / 恢复备份 / 关闭总开关）后必须调用。
-  void _invalidateArmedCache() => _armedSignatures.clear();
+  ///
+  /// P3-2（v2.8.7 审计）：落点内容缓存 [_occurrenceMemo] 与 armed 签名**同生共死**，
+  /// 统一在此一并失效——此前仅「勿扰变更 / 时区变更」两条路径清 memo，而
+  /// 「方案升级 / 恢复备份 cancelAll」等路径只清 armed：同一天内 armed 已清、
+  /// memo 未清时，scheduleRepeatReminder 会命中当日 memo，返回「首次计算之后
+  /// 当前时刻已过」的落点，绕过 repeatOccurrenceTimes「落点必须严格晚于 now」
+  /// 的契约，把过去时刻交给 zonedSchedule（Android 立即补弹或抛异常被吞）。
+  /// 绑定后两条缓存同进同出，调用方无须（也不再需要）单独清 memo。
+  void _invalidateArmedCache() {
+    _armedSignatures.clear();
+    _occurrenceMemo.clear();
+  }
 
   /// P3-3（v2.8.6 审计）：落点**计算结果**的内容签名缓存。
   ///
   /// 15 分钟守护每轮都会为每个重复任务 / 习惯重算「接下来 8 次落点」
   /// （≤400 天逐日扫描）；而落点只随「规则内容 + 当日 + 勿扰顺延输入」变化。
   /// 缓存命中时直接复用上一轮结果，跳过整段扫描——千级任务可省每轮数万次
-  /// 日期判断（电量 / CPU）。签名见 [_repeatContentSig] / 习惯处的内联签名；
-  /// 跨天、内容变更、勿扰设置变更（[clearOccurrenceMemo]）、时区变更
-  /// （[setTimezoneOverride]）都会使缓存失效。
+  /// 日期判断（电量 / CPU）。签名见 [_repeatContentSig] / 习惯处的内联签名。
+  /// 失效路径（P3-2 起与 armed 签名绑定，同生共死）：跨天、内容变更、
+  /// 勿扰设置变更（[clearOccurrenceMemo]）、批量取消 / 时区变更
+  /// （[_invalidateArmedCache] / [setTimezoneOverride]）。
   final Map<String, (String, List<DateTime>)> _occurrenceMemo = {};
 
   /// P3-3：外部使落点内容缓存失效（勿扰时段设置变更时由 TaskProvider 调用）。
@@ -362,19 +374,33 @@ class NotificationService {
 
   /// P2-3：设置提醒时区覆盖并立即生效。
   /// 重解析时区、作废落点签名与内容缓存；调用方负责随后触发一次全量重排
-  /// （[TaskProvider.rescheduleAllNotifications]），否则已挂闹钟仍按旧时区响。
+  /// （[TaskProvider.rescheduleAllNotifications] + 简报/挽留/回收站预告，
+  /// 见 daily_briefing.rescheduleFixedTimeReminders），否则已挂闹钟仍按旧时区响。
   static Future<void> setTimezoneOverride(String v) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kTzOverridePref, v);
     } catch (_) {}
+    await _applyTimezoneOverride();
+  }
+
+  /// P2-1（v2.8.7 审计）：从 SharedPreferences **重读**时区覆盖并立即生效。
+  /// 恢复备份 / 换机还原后调用——applyAppPrefs 只把键写回 SharedPreferences，
+  /// 内存 [_loc] 不会自动刷新，不重解析则本轮会话仍按旧时区调度，
+  /// 「提醒时区」偏好等于静默丢失（与 P2-12「新偏好未入白名单」同型的恢复侧配套）。
+  /// 与 [setTimezoneOverride] 的区别：不回写偏好键，只做「重解析 + 缓存失效」；
+  /// 调用方随后应触发一次全量重排。
+  static Future<void> reloadTimezoneOverride() => _applyTimezoneOverride();
+
+  /// P2-3 / P2-1 共用：按当前偏好重解析时区并作废落点相关缓存。
+  static Future<void> _applyTimezoneOverride() async {
     final inst = instance;
     try {
       inst._loc = await inst._resolveLocation();
       tz.setLocalLocation(inst._loc!);
     } catch (_) {}
+    // P3-2：armed 签名与落点内容缓存一并失效（见 _invalidateArmedCache 注释）。
     inst._invalidateArmedCache();
-    inst._occurrenceMemo.clear();
   }
 
   /// 通知 id 段方案版本（S10 = 1，F-02 = 2，F-2 = 3）。升级到新段分配后用于一次性清理旧通知，

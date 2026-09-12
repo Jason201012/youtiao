@@ -1,5 +1,58 @@
 # 更新日志（Changelog）
 
+## v2.8.7（2026-09-12）
+
+### 功能与操作审计修复（依据 v2.8.6 审计报告 P1-1 / P2-1~4 / P3-1~3 全量落地）
+- **P1-1【P1】首页拖拽排序双基准**：首页五分区直接消费 `TaskProvider.homeTasks`（`pinned → order → 日期` 三级）同一份序列，删除 home_screen 本地排序；拖拽仅在 `filter==all && 无标签筛选` 下开启，UI `dragIndex` 与 `reorderTasks` 共享索引空间，`newIndex` 按 ReorderableListView「移除后下标」语义对齐——拖错任务 / 排序回跳不再可能。
+- **P2-1【P2】编辑弹层脏检测漏提醒字段**：`_isDirty` 基线补齐 `repeatTime / repeatWeekdays / repeatInterval / repeatUntil / reminderOffsetMin` 五组字段，离开弹层不再静默丢弃改动。
+- **P2-2【P2】改期副本完成历史双算**：`rescheduleOnceOccurrence` 显式 `doneDates: const []`，顺延不再把原日完成记录带到新副本、重复计入统计。
+- **P2-3【P2】提醒时区硬编码**：调度时区改为「设置页覆盖 > 原生 `getTimeZoneId` > 偏移扫描兜底 > UTC」四级解析；设置页新增「提醒时区」，变更后经 `rescheduleAllNotifications` 全量重排。
+- **P2-4【P2】换口令后旧加密快照残留**：`changeAutoBackupPassphrase` 把旧口令快照改名 `.stale.enc.json`，`listAutoBackups` 跳过 stale 项，按日期自然滚动淘汰；UI 明示失效份数。
+- **P3-1【P3】习惯通知 id `String.hashCode` 跨引擎不稳定**：改自实现 FNV-1a；`_kNotifIdScheme` 3→4，升级首启 `cancelAll` 后全量重建（存量用户首次启动会重建全部提醒）。
+- **P3-2【P3】更新重定向端口白名单缺口**：`_isHttpsAllowedHost` 补 `uri.port != 443` 拒绝，显式端口与省略端口口径一致。
+- **P3-3【P3】15 分钟守护全量扫描开销**：新增落点内容缓存 `_occurrenceMemo`（`_repeatContentSig` 签名），守护轮复用上一轮落点，千级任务省去逐日重扫；勿扰 / 时区变更时失效。
+
+### 说明
+- 新增 `test/v286_audit_fix_test.dart`（9 用例）；`dart analyze lib test` 零新增 error；全量测试 553 通过 / 5 预存失败（历史基线），零回归。
+- 全部修复保持严格离线红线：纯本地路径，未新增除现有 update-check 之外的任何网络调用；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，release keystore 签名，arm64-v8a 单架构。
+
+## v2.8.6（2026-09-12）
+
+### 功能与操作审计修复（依据 v2.8.5 审计报告 F-1~F-11，10/11 落地）
+- **F-1【P2】调度互斥**：新增 `shouldScheduleDeadlineReminder` 判定——重复任务不再同时挂一次性截止提醒；`_rescheduleAllActive` 幂等 cancel 清理存量「双响」闹钟。
+- **F-2【P2】改期副本撞循环日**：`rescheduleOnceOccurrence` 对「daily 改到明天」等与循环落点重合的场景只 skip 不建副本；task_detail 改期接入 PastDueGuard。
+- **F-3【P2】`endRepeat(markDone:)` 双动作弹窗**：结束重复时可同时完成当日实例，消除语义歧义。
+- **F-4【P2】习惯 streak 口径**：`_plannedStreakFor` 按 weekdays 计划日计算连续天数，非计划日不再断签。
+- **F-5【P2】原生回收站清理残留**：到期清理补删附件目录（`dataDir/app_flutter/attachments`），并按 id 段取消对应通知。
+- **F-6【P3】勿扰起止相等的提示分支**：起止相同视为全天不限制并在 UI 明示。
+- **F-7【P3】默认提醒时刻统一**：抽共享常量 `kDefaultRepeatMinute = 07:00`，快速录入与编辑弹层两条路径对齐（v2.8.3 F-04 残留闭环）。
+- **F-8【P3】非法 `repeatUntil` 自愈**：清空非法值 + `_healRepeatAnchors` 补齐 interval 缺失锚点。
+- **F-9【P3】删除 120 行不可达死算法**。
+- **F-10【P3】（核对后仅部分成立）**：`ical.dart` 早已解析 DAILY/WEEKLY/MONTHLY 并对降级计数，本轮仅补 `partialRepeat` 部分保留计数。
+- **F-11【P3】interval 扫描窗自适应**：按间隔与锚点动态调整逐日扫描窗口，避免长间隔漏算。
+
+### 说明
+- 新增 `test/v285_audit_fix_test.dart`（约 20 用例）；`occurrence_undo` / `repeat_reminder_fix` 旧用例按 F-2 新语义改造；全量测试 544 通过 / 5 预存失败，零回归。
+
+## v2.8.5（2026-09-12）
+
+### 功能与操作审计修复（依据 v2.8.4 审计报告 F-1~F-11 全量落地）
+- **F-1【P1】调度门槛只由 `repeatUntil` 决定**：删除「dueDate 未过」多余分支，修复 P1 级「静默丢提醒」。
+- **F-2【P1】重复提醒全改「一次性闹钟 × 预挂 8 次」**：新增纯函数 `repeatOccurrenceTimes` / `habitOccurrenceTimes`（消费 `repeatsOn` + `isDoneOn`），复杂每月规则与系统月循环漂移一并根治。
+- **F-3【P2】勿扰顺延接入重复 / 习惯提醒**。
+- **F-4【P2】改期副本取 `repeatMinute`**，不再丢失提醒时刻。
+- **F-5【P2】`endRepeat` 清 `dueDate`** + `_effectiveDue` 中性化 + home_screen 分区口径改 `isRepeatEnded`。
+- **F-6【P2】补每月「月内第 N 个周几」规则 UI**。
+- **F-7【P2】`Task.pruneHistory` 400 天滚动窗口**，完成历史不再无限膨胀。
+- **F-8【P2】`fromJson` 数值范围夹取**，畸形备份数据不再越界。
+- **F-9【P3】`monthlyWeekday/monthlyWeekIndex` 改 `_kKeep` 哨兵**，与「未设置」语义区分。
+- **F-10【P3】未来循环日禁「标记完成」**。
+- **F-11【P3】恢复备份后清理附件孤儿**。
+- **配套**：新增 `_armedSignatures` 落点签名缓存（15 分钟守护稳态零平台往返）；`_kNotifIdScheme` 2→3；解除「选重复即钉 dueDate=当天 23:59」的旧约定（`new_task_sheet` + `task_parser`）。
+
+### 说明
+- 新增 `test/repeat_reminder_fix_test.dart`（38 条）；`dart analyze lib` 零新增 error；全量测试 520 通过 / 5 预存失败，零回归。
+
 ## v2.8.4（2026-09-11）
 
 ### 功能与操作审计修复（依据 v2.8.3 审计报告 P1-1 / P2-1~3 / P3-1~5 全量落地）
