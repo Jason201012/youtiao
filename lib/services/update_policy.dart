@@ -127,11 +127,17 @@ class UpdatePolicy {
     return false;
   }
 
-  /// 基础校验：必须是 https、长度受限、主机在白名单内。
+  /// 基础校验：必须是 https、长度受限、主机在白名单内、端口为 443（缺省）。
   static bool _isHttpsAllowedHost(String url) {
     if (url.isEmpty || url.length > maxUrlChars) return false;
     final uri = Uri.tryParse(url);
     if (uri == null || uri.scheme != 'https') return false;
+    // P3-2（v2.8.6 审计）：白名单此前只比较主机名不带端口，
+    // `https://gitee.com:9999/...` 会被判定为作者仓路径放行（首跳
+    // isAllowedApkUrl 的 startsWith 前缀天然挡住带端口 URL，此洞仅在
+    // 重定向逐跳分支暴露）。作为纵深防御最后一环，强制端口必须为 443
+    // （Uri.port 在未显式写端口时按 scheme 返回 443，显式 :443 也放行）。
+    if (uri.port != 443) return false;
     return isAllowedHost(uri.host);
   }
 

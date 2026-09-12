@@ -87,7 +87,7 @@ class NotificationService {
   /// - 任务重复提醒：      repeatNotifyIdOf(id, d)   ≈ [1.6e9, ~1.84e9]（独立大连段，每任务 8 槽）
   /// - 专注完成通知：      777777（固定）
   /// - 专注进行中常驻：    777778（固定）
-  /// - 习惯提醒：          _habitNotifyIdOf(id, d)    ≈ [1.0e9, ~1.001e9]（独立大连段）
+  /// - 习惯提醒：          habitNotifyIdOf(id, d)    ≈ [1.0e9, ~1.001e9]（独立大连段）
   /// - 定时测试系统闹钟：  _kTestTimerId = 999999（固定）
   /// - 定时测试应用内延迟：_kTestTimerId + 1 = 1000000（固定）
   /// - 即时测试通知：      1200000 + ms%100000     = [1200000, 1299999]（见 [showTest]）
@@ -193,6 +193,38 @@ class NotificationService {
   /// 批量取消（方案升级 / 恢复备份 / 关闭总开关）后必须调用。
   void _invalidateArmedCache() => _armedSignatures.clear();
 
+  /// P3-3（v2.8.6 审计）：落点**计算结果**的内容签名缓存。
+  ///
+  /// 15 分钟守护每轮都会为每个重复任务 / 习惯重算「接下来 8 次落点」
+  /// （≤400 天逐日扫描）；而落点只随「规则内容 + 当日 + 勿扰顺延输入」变化。
+  /// 缓存命中时直接复用上一轮结果，跳过整段扫描——千级任务可省每轮数万次
+  /// 日期判断（电量 / CPU）。签名见 [_repeatContentSig] / 习惯处的内联签名；
+  /// 跨天、内容变更、勿扰设置变更（[clearOccurrenceMemo]）、时区变更
+  /// （[setTimezoneOverride]）都会使缓存失效。
+  final Map<String, (String, List<DateTime>)> _occurrenceMemo = {};
+
+  /// P3-3：外部使落点内容缓存失效（勿扰时段设置变更时由 TaskProvider 调用）。
+  void clearOccurrenceMemo() => _occurrenceMemo.clear();
+
+  /// P3-3：重复任务落点的内容签名（只含会影响「未来落点序列」的字段）。
+  /// 标题 / 颜色 / 置顶等展示字段变化**不应**触发重算，故刻意不纳入。
+  static String _repeatContentSig(Task t) => [
+        t.repeatMinute,
+        t.repeat.index,
+        t.repeatInterval,
+        t.repeatWeekdays.join(','),
+        t.repeatAnchor?.toIso8601String() ?? '',
+        t.repeatUntil ?? '',
+        t.skipDates.join(','),
+        t.doneDates.join(','),
+        t.done,
+        t.completedAt?.toIso8601String() ?? '',
+        t.monthlyDay,
+        t.monthlyWeekday,
+        t.monthlyWeekIndex,
+        t.monthlyFromEnd,
+      ].join('|');
+
   /// F-3：勿扰顺延在落点计算里的统一入口（见 [repeatOccurrenceTimes] /
   /// [habitOccurrenceTimes] 的 `defer` 参数）。
   ///
@@ -230,7 +262,7 @@ class NotificationService {
   /// 完全相同的通知 id（枚举 8..30 × 槽 0..7 有 28 组碰撞），Android 对同 id 的后一次
   /// zonedSchedule 会**覆盖**前一次，其中一条重复提醒就此静默消失（如「任务8 每周一」
   /// 与「任务9 每天」都算出 2000000009）。现为每个任务预留 8 个连续槽位（`slot * 8`），
-  /// 与习惯提醒 `_habitNotifyIdOf` 的 `* 10` 同思路：
+  /// 与习惯提醒 [habitNotifyIdOf] 的 `* 10` 同思路：
   ///
   ///   1600000000 + (base % 30000000) * 8 + (dayIndex % 8)
   ///
@@ -256,7 +288,7 @@ class NotificationService {
     if (_initialized) return;
     tz_data.initializeTimeZones();
     try {
-      _loc = tz.getLocation('Asia/Shanghai');
+      _loc = await _resolveLocation();
       tz.setLocalLocation(_loc!);
     } catch (e) {
       // 极端情况下拿不到时区数据也不应让 App 崩溃，回退 UTC 并打日志。
@@ -279,6 +311,72 @@ class NotificationService {
     _initialized = true;
   }
 
+  /// P2-3（v2.8.6 审计）：提醒时区覆盖偏好（SharedPreferences 键）。
+  /// '' = 跟随设备（默认）；非空 = IANA 时区名（如 'Asia/Shanghai'，设置页选择）。
+  static const String _kTzOverridePref = 'reminder_timezone_override';
+
+  /// P2-3：解析提醒调度应使用的时区。
+  ///
+  /// 优先级：用户显式覆盖（设置页）> 设备时区（经原生通道取 IANA id）>
+  /// 按设备当前 UTC 偏移在时区库中匹配（通道不可用时的离线兜底）> UTC。
+  /// 此前硬编码 `Asia/Shanghai`：设备在其它时区（出差 / 旅行 / 海外常驻）时，
+  /// 「每天 07:00」的提醒会早/晚数小时甚至被排到本地前一天。
+  Future<tz.Location> _resolveLocation() async {
+    String? override;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      override = prefs.getString(_kTzOverridePref);
+    } catch (_) {}
+    if (override != null && override.isNotEmpty) {
+      try {
+        return tz.getLocation(override);
+      } catch (_) {}
+    }
+    try {
+      final id = await _exactAlarmChannel.invokeMethod<String>('getTimeZoneId');
+      if (id != null && id.isNotEmpty) return tz.getLocation(id);
+    } catch (_) {}
+    // 离线兜底：与设备当前 UTC 偏移一致的首个时区。无 DST 信息可靠性稍弱，
+    // 但只在新装设备拿不到通道 id 的极端场景出现；中国时区设备会命中
+    // Asia/Shanghai 等同偏移时区，行为与旧版一致。
+    try {
+      final now = DateTime.now();
+      final off = now.timeZoneOffset;
+      for (final name in tz.timeZoneDatabase.locations.keys) {
+        final l = tz.getLocation(name);
+        if (tz.TZDateTime.from(now, l).timeZoneOffset == off) return l;
+      }
+    } catch (_) {}
+    return tz.UTC;
+  }
+
+  /// P2-3：读取提醒时区覆盖（'' = 跟随系统）。设置页展示用。
+  static Future<String> getTimezoneOverride() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_kTzOverridePref) ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// P2-3：设置提醒时区覆盖并立即生效。
+  /// 重解析时区、作废落点签名与内容缓存；调用方负责随后触发一次全量重排
+  /// （[TaskProvider.rescheduleAllNotifications]），否则已挂闹钟仍按旧时区响。
+  static Future<void> setTimezoneOverride(String v) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kTzOverridePref, v);
+    } catch (_) {}
+    final inst = instance;
+    try {
+      inst._loc = await inst._resolveLocation();
+      tz.setLocalLocation(inst._loc!);
+    } catch (_) {}
+    inst._invalidateArmedCache();
+    inst._occurrenceMemo.clear();
+  }
+
   /// 通知 id 段方案版本（S10 = 1，F-02 = 2，F-2 = 3）。升级到新段分配后用于一次性清理旧通知，
   /// 避免旧 id 段遗留的提醒与新建提醒混淆。
   ///
@@ -292,7 +390,12 @@ class NotificationService {
   /// （每周一个 id），现在统一只用槽位 0..7 承载「接下来 8 次」，若不清理，
   /// 存量用户系统里的 1..7 号周期闹钟会无人取消并**按周永久重复**，
   /// 与新排的提醒重复弹出。故再次把方案号 +1，init 时 cancelAll 清空重建。
-  static const int _kNotifIdScheme = 3;
+  ///
+  /// P3-1（v2.8.6 审计）：习惯槽位映射由 `String.hashCode` 换为自实现 FNV-1a
+  /// （跨引擎版本稳定）。存量用户系统里已按旧映射排好的习惯闹钟，新映射下
+  /// cancel 不到（id 不再对上），会按旧日期照响——与 F-02/F-2 同理，把方案号
+  /// +1，init 时 cancelAll 清空，随后由启动全量重排按新映射重建。
+  static const int _kNotifIdScheme = 4;
   static const String _kNotifIdSchemePref = 'notif_id_scheme';
 
   /// 仅首次（或跨版本）执行一次：清掉旧 id 段方案遗留的全部通知，随后正常重排
@@ -705,7 +808,22 @@ class NotificationService {
     // 也避免设备时区 ≠ loc 时按 epoch 比较产生的错位（见 [repeatOccurrenceTimes]）。
     final nowWall = DateTime(nowTz.year, nowTz.month, nowTz.day, nowTz.hour,
         nowTz.minute, nowTz.second);
-    return repeatOccurrenceTimes(task, now: nowWall, count: count)
+    // P3-3：内容签名（当日 + 规则字段）未变 → 复用上一轮扫描结果。
+    final key = 'task:${task.id}';
+    final sig = '${nowWall.year}-${nowWall.month}-${nowWall.day}'
+        '|${_repeatContentSig(task)}';
+    final cached = _occurrenceMemo[key];
+    if (cached != null && cached.$1 == sig) {
+      return cached.$2
+          .map((d) =>
+              tz.TZDateTime(loc, d.year, d.month, d.day, d.hour, d.minute))
+          .toList();
+    }
+    final wall =
+        repeatOccurrenceTimes(task, now: nowWall, count: count);
+    if (_occurrenceMemo.length > 1024) _occurrenceMemo.clear(); // 防泄漏
+    _occurrenceMemo[key] = (sig, wall);
+    return wall
         .map((d) => tz.TZDateTime(loc, d.year, d.month, d.day, d.hour, d.minute))
         .toList();
   }
@@ -798,8 +916,24 @@ class NotificationService {
   /// 习惯 id 是毫秒时间戳字符串（13 位，约 1.7e12），**不能**像任务 id 那样直接
   /// int.tryParse——通知插件要求 id 落在 int32 范围内，否则抛
   /// `Invalid argument (id): must fit within the size of a 32-bit integer`。
-  /// 这里把 id 折叠到 10 万个槽位（习惯数量为个位数，碰撞可忽略）。
-  static int _habitSlotOf(String id) => (id.hashCode & 0x7fffffff) % 100000;
+  /// 这里把 id 折叠到 10 万个槽位。
+  ///
+  /// P3-1（v2.8.6 审计）：不再依赖 [String.hashCode]——它跨 Dart 引擎版本
+  /// **不保证稳定**（升级后映射漂移会让旧闹钟失去对应的 cancel 入口），且碰撞的
+  /// 两个习惯会共享同一通知 id 段互相顶掉提醒。改用自实现 FNV-1a 32 位哈希：
+  /// 结果跨版本 / 跨平台确定，分布质量与 hashCode 相当（习惯数量为个位数，
+  /// 10 万槽位碰撞概率可忽略）。
+  static int _habitSlotOf(String id) {
+    var h = 0x811c9dc5; // FNV-1a offset basis
+    for (final c in id.codeUnits) {
+      // UTF-16 码元拆成两个 8 位输入，保持与逐字节 FNV 等价的分布。
+      h ^= c & 0xff;
+      h = (h * 0x01000193) & 0xffffffff;
+      h ^= (c >> 8) & 0xff;
+      h = (h * 0x01000193) & 0xffffffff;
+    }
+    return h % 100000;
+  }
 
   /// 习惯提醒使用独立的 id 段（10 亿起 + 槽位*10 + 星期索引），与任务的
   /// 「截止提醒 / 重复提醒」区分开，避免互相 cancel 掉。dayIndex：每天提醒用 0；
@@ -808,7 +942,8 @@ class NotificationService {
   /// S10 修复：原方案落在 80 万段，虽与一次性段（0..N）实测不冲突，但与新迁到
   /// 20 亿段的重复提醒保持清晰的大段隔离，杜绝任何远期碰撞。
   /// schedule / cancel 必须走同一函数，否则删除习惯时取消会错位。
-  static int _habitNotifyIdOf(String id, int dayIndex) {
+  /// P3-1：转公开——与 [repeatNotifyIdOf] 对称，并供回归测试断言确定性。
+  static int habitNotifyIdOf(String id, int dayIndex) {
     final s = _habitSlotOf(id);
     return 1000000000 + s * 10 + (dayIndex % 8);
   }
@@ -869,11 +1004,11 @@ class NotificationService {
       );
       // 只取消「这次用不到」的多余槽位（同 [scheduleRepeatReminder] 的理由）。
       for (var d = occurrences.length; d < _kScheduleSlots; d++) {
-        await _plugin.cancel(_habitNotifyIdOf(habit.id, d));
+        await _plugin.cancel(habitNotifyIdOf(habit.id, d));
       }
       for (var i = 0; i < occurrences.length; i++) {
         await _plugin.zonedSchedule(
-          _habitNotifyIdOf(habit.id, i),
+          habitNotifyIdOf(habit.id, i),
           '习惯打卡',
           body,
           occurrences[i],
@@ -906,8 +1041,25 @@ class NotificationService {
     final nowTz = tz.TZDateTime.now(loc);
     final nowWall = DateTime(nowTz.year, nowTz.month, nowTz.day, nowTz.hour,
         nowTz.minute, nowTz.second);
-    return habitOccurrenceTimes(habit,
-            now: nowWall, checkedToday: checkedToday, count: count)
+    // P3-3：与任务重复落点同思路的内容缓存（当日 + 打卡态 + 规则字段）。
+    // 打卡 / 取消打卡会改变 checkedToday → 签名变化 → 重算，不会缓存到旧态。
+    final key = 'habit:${habit.id}';
+    final sig = [
+      nowWall.year, nowWall.month, nowWall.day, checkedToday,
+      habit.reminderMinute, habit.weekdays.join(','), habit.archived,
+    ].join('|');
+    final cached = _occurrenceMemo[key];
+    if (cached != null && cached.$1 == sig) {
+      return cached.$2
+          .map((d) =>
+              tz.TZDateTime(loc, d.year, d.month, d.day, d.hour, d.minute))
+          .toList();
+    }
+    final wall = habitOccurrenceTimes(habit,
+        now: nowWall, checkedToday: checkedToday, count: count);
+    if (_occurrenceMemo.length > 1024) _occurrenceMemo.clear(); // 防泄漏
+    _occurrenceMemo[key] = (sig, wall);
+    return wall
         .map((d) => tz.TZDateTime(loc, d.year, d.month, d.day, d.hour, d.minute))
         .toList();
   }
@@ -949,7 +1101,7 @@ class NotificationService {
     _armedSignatures.remove('habit:$id');
     try {
       for (var d = 0; d < _kScheduleSlots; d++) {
-        await _plugin.cancel(_habitNotifyIdOf(id, d));
+        await _plugin.cancel(habitNotifyIdOf(id, d));
       }
     } catch (e) {
       AppLog.d('[通知] 取消习惯提醒失败 id=$id: $e');
@@ -1040,7 +1192,7 @@ class NotificationService {
     );
     try {
       await _plugin.zonedSchedule(
-        _habitNotifyIdOf(habit.id, 0),
+        habitNotifyIdOf(habit.id, 0),
         '习惯打卡',
         '${habit.emoji} ${habit.title} · 该打卡啦',
         when,
@@ -1375,7 +1527,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        _habitNotifyIdOf(habit.id, 0),
+        habitNotifyIdOf(habit.id, 0),
         '已打卡 ✓',
         '${habit.emoji} ${habit.title}',
         detail,

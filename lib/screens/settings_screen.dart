@@ -36,10 +36,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // （之前写死 '1.0.0'，导致 pubspec 已是 1.8.3 时界面仍显示旧值）。
   String _version = '';
 
+  // P2-3（v2.8.6 审计）：提醒时区覆盖（'' = 跟随系统）。仅用于展示当前值，
+  // 持久化在 NotificationService 侧（SharedPreferences）。
+  String _tzOverride = '';
+
   @override
   void initState() {
     super.initState();
     _loadVersion();
+    _loadTimezone();
+  }
+
+  Future<void> _loadTimezone() async {
+    final v = await NotificationService.getTimezoneOverride();
+    if (mounted) setState(() => _tzOverride = v);
   }
 
   Future<void> _loadVersion() async {
@@ -50,7 +60,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '2.8.2');
+      if (mounted) setState(() => _version = '2.8.7');
     }
   }
 
@@ -269,14 +279,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     if (newPass == null || newPass.isEmpty) return;
+    // P2-4：返回 -1 = 失败；否则为被标记失效的旧口令快照数。
     final changed = await provider.changeAutoBackupPassphrase(
       newPass,
       oldPass: oldPass,
       force: oldPass == null && hasOld,
     );
     if (!ctx.mounted) return;
+    final msg = changed < 0
+        ? '修改失败'
+        : changed > 0
+            ? '口令已更新；$changed 份旧口令加密快照已标记失效，将在 7 天内滚动清除'
+            : '口令已更新';
     ScaffoldMessenger.of(ctx).showSnackBar(
-      SnackBar(content: Text(changed ? '口令已更新' : '修改失败')),
+      SnackBar(content: Text(msg)),
     );
   }
 
@@ -302,6 +318,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  /// P2-3：提醒时区候选（IANA id, 展示名）。'' = 跟随设备时区（默认）。
+  /// 刻意不做全量时区列表——常用时区 + 跟随系统已覆盖绝大多数场景，保持 UI 极简。
+  static const List<(String, String)> _tzOptions = [
+    ('', '跟随系统（推荐）'),
+    ('Asia/Shanghai', '北京时间（Asia/Shanghai）'),
+    ('Asia/Tokyo', '东京（Asia/Tokyo）'),
+    ('Asia/Singapore', '新加坡（Asia/Singapore）'),
+    ('Europe/London', '伦敦（Europe/London）'),
+    ('Europe/Berlin', '柏林（Europe/Berlin）'),
+    ('America/New_York', '纽约（America/New_York）'),
+    ('America/Los_Angeles', '洛杉矶（America/Los_Angeles）'),
+    ('Australia/Sydney', '悉尼（Australia/Sydney）'),
+    ('UTC', '协调世界时（UTC）'),
+  ];
+
+  /// P2-3：行内展示文案（'' → 跟随系统；其余取候选名，未知 id 原样展示）。
+  static String _tzLabel(String v) {
+    if (v.isEmpty) return '跟随系统';
+    for (final (id, name) in _tzOptions) {
+      if (id == v) return name;
+    }
+    return v;
+  }
+
+  /// P2-3：选择提醒时区并立即生效——重解析时区、作废落点缓存后整体重排，
+  /// 否则已挂的闹钟仍按旧时区响。
+  Future<void> _pickTimezone(BuildContext ctx, TaskProvider p) async {
+    final picked = await showDialog<String>(
+      context: ctx,
+      builder: (d) => AlertDialog(
+        title: const Text('提醒时区'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: _tzOptions
+                .map((o) => RadioListTile<String>(
+                      title: Text(o.$2),
+                      value: o.$1,
+                      groupValue: _tzOverride,
+                      onChanged: (v) => Navigator.pop(d, v),
+                    ))
+                .toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+    await NotificationService.setTimezoneOverride(picked);
+    p.rescheduleAllNotifications();
+    if (mounted) setState(() => _tzOverride = picked);
   }
 
 /// P1-2：把空闲秒数格式化为可读文案（0→关闭）。
@@ -538,6 +613,17 @@ String _formatIdle(int seconds) {
                           );
                           if (picked != null) provider.setSnoozeMinutes(picked);
                         },
+                      ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P2-3（v2.8.6 审计）：提醒时区。默认跟随设备；此前调度硬编码
+                    // 北京时间，设备在其它时区时提醒早/晚数小时甚至排到「前一天」。
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.public,
+                        label: '提醒时区',
+                        value: _tzLabel(_tzOverride),
+                        onTap: () => _pickTimezone(context, provider),
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),

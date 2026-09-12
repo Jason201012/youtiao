@@ -126,6 +126,9 @@ class TaskProvider extends ChangeNotifier {
     // P2-5'：勿扰时段/开关变更后必须重排已调度通知。
     // 此前只有「通知开关 / 声音开关」会重排，导致「周一排的周三 23:30 提醒，
     // 周二才开勿扰 22:00-07:00」时旧闹钟照常深夜弹出；反向关闭也恢复不了顺延。
+    // P3-3：落点内容缓存里冻结了按旧勿扰窗口顺延的结果，必须一并清掉，
+    // 否则缓存命中会让「新勿扰窗口」在当日剩余时间里不被消费。
+    NotificationService.instance.clearOccurrenceMemo();
     if (_notificationsEnabled) _rescheduleAllActive();
   }
 
@@ -397,18 +400,22 @@ class TaskProvider extends ChangeNotifier {
 
   /// F15：修改 / 重设自动备份口令。
   ///
-  /// - 记得旧口令：[oldPass] 传入并校验通过后才写入新口令（返回 false = 旧口令不对）。
+  /// - 记得旧口令：[oldPass] 传入并校验通过后才写入新口令（返回 -1 = 旧口令不对）。
   /// - 忘记旧口令：[oldPass] 传 null（或 [force]=true）强制重设——调用方必须在 UI 上
   ///   明示后果：**历史加密快照将永远无法解开**，本操作只保证此后的快照可用新口令打开。
   /// - 同时清掉 legacy 明文副本（若仍残留），避免换口令后旧明文仍躺在 shared_prefs。
-  Future<bool> changeAutoBackupPassphrase(
+  ///
+  /// P2-4（v2.8.6 审计）：换口令成功后，把 `backup/auto/` 里旧口令加密的快照
+  /// 统一改名标记为 stale（见 [_markStaleEncryptedBackups]）。
+  /// 返回值：-1 = 修改失败；否则 = 被标记的旧加密快照数（0 = 没有旧快照）。
+  Future<int> changeAutoBackupPassphrase(
     String newPass, {
     String? oldPass,
     bool force = false,
   }) async {
-    if (newPass.isEmpty) return false;
+    if (newPass.isEmpty) return -1;
     if (!force) {
-      if (oldPass == null || !verifyAutoBackupPassphrase(oldPass)) return false;
+      if (oldPass == null || !verifyAutoBackupPassphrase(oldPass)) return -1;
     }
     await setAutoBackupPassphrase(newPass);
     try {
@@ -417,7 +424,39 @@ class TaskProvider extends ChangeNotifier {
     } catch (_) {
       // 明文副本清理失败不阻断换口令主流程。
     }
-    return true;
+    // P2-4：旧加密快照无法再用新口令解开。改名标记后恢复面板不再展示，
+    // 滚动保留按日期自然淘汰，避免用户对着「废快照」反复试错口令。
+    return _markStaleEncryptedBackups();
+  }
+
+  /// P2-4：把 `backup/auto/` 下所有 `.enc.json` 加密快照改名为
+  /// `<日期>.stale.enc.json`（日期部分保持不变）。
+  ///
+  /// - 恢复面板（[listAutoBackups]）跳过 stale 文件——它们已不可用当前口令解开；
+  /// - 滚动保留（[_rotateAutoBackups]）仍按文件名日期把它们当最旧的一批淘汰，
+  ///   约 7 天内自然清完，无需立即删除（保留文件本体，万一用户找回旧口令仍可手工解）。
+  /// 返回成功改名的文件数；失败逐文件静默，不阻断换口令主流程。
+  Future<int> _markStaleEncryptedBackups() async {
+    var n = 0;
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final base = Directory('${dir.path}/backup/auto');
+      if (!await base.exists()) return 0;
+      for (final f in base.listSync().whereType<File>().toList()) {
+        final name = _autoBackupName(f);
+        if (!name.endsWith('.enc.json') || name.contains('.stale.')) continue;
+        try {
+          final newPath =
+              '${f.path.substring(0, f.path.length - '.enc.json'.length)}'
+              '.stale.enc.json';
+          await f.rename(newPath);
+          n++;
+        } catch (_) {}
+      }
+    } catch (e) {
+      AppLog.d('标记旧口令快照失败（忽略）：$e');
+    }
+    return n;
   }
 
   /// 开关自动备份加密。开启时若尚无口令则拒绝（返回 false），由 UI 引导先设口令。
@@ -719,7 +758,11 @@ class TaskProvider extends ChangeNotifier {
       final files = base
           .listSync()
           .whereType<File>()
-          .where((f) => f.path.endsWith('.json'))
+          // P2-4：`*.stale.enc.json` 是换口令后已不可解的旧口令快照标记，
+          // 不再出现在恢复面板（滚动保留会按日期自然淘汰）。
+          .where((f) =>
+              f.path.endsWith('.json') &&
+              !_autoBackupName(f).contains('.stale.'))
           .toList();
       files.sort((a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
       final out = <AutoBackupEntry>[];
@@ -2030,6 +2073,12 @@ class TaskProvider extends ChangeNotifier {
       ),
       status: TaskStatus.todo,
       completedAt: null,
+      // P2-2（v2.8.6 审计）：副本必须清空 occurrence 级完成历史。此前 copyWith
+      // 默认沿用原任务的 doneDates → 「每天喝水」改期后副本带着 [9/1, 9/2]，
+      // 与原任务完全一致，completionDayCounts 把同样的完成记录算两遍
+      // （热力图 / 周报 / streak 系统性虚增，且用户无法自察）。
+      // 一次性任务的完成历史由 completedAt 表达，这里清空不影响统计口径。
+      doneDates: const [],
     );
     return addTask(copy);
   }
@@ -2812,6 +2861,15 @@ class TaskProvider extends ChangeNotifier {
         NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);
       }
     }
+  }
+
+  /// P2-3（v2.8.6 审计）：设置页修改「提醒时区」后的公开重排入口。
+  /// 时区变化会平移全部已挂落点，必须整体重排；习惯打卡提醒不在本 Provider
+  /// 管辖内，经 [onGuardTick] 回调（main.dart 注入的 habit.scheduleAllReminders）补挂。
+  void rescheduleAllNotifications() {
+    if (!_notificationsEnabled) return;
+    _rescheduleAllActive();
+    onGuardTick?.call();
   }
 
   /// 列表内容是否相等（[List] 默认 == 比较引用，重复星期 / 跳过日期需按内容比较）。

@@ -31,27 +31,9 @@ import 'package:todolist/widgets/update_dialog.dart';
 /// 「逾期 / 今天 / 未来 / 每天 / 已完成」必须完全一致，避免视觉层级混乱。
 const double _sectionTitleFontSize = 20;
 
-/// 计算截止日期相对「今天」的天数差（只比较年月日，忽略时分秒）。
-///
-/// 返回值：负数 = 逾期，0 = 今天，正数 = 未来，null = 没有截止日期。
-/// 与任务行右侧的日期标签（task_row.dart 的 _dueLabel）采用同一套按天比较口径。
-int? _dueDayDiff(DateTime? due) {
-  if (due == null) return null;
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  return DateTime(due.year, due.month, due.day).difference(today).inDays;
-}
-
 /// 1=周一 … 7=周日 → 中文单字（搜索习惯频率文案用）。
 String _wdLabel(int w) =>
     ['一', '二', '三', '四', '五', '六', '日'][(w - 1).clamp(0, 6)];
-
-/// 置顶排序比较器：置顶(pinned=true)任务始终排在前（降序），其余保持传入顺序相对不变。
-/// 用作各分区 sort 的第一关键字，使置顶语义优先于手动 order / 截止时间。
-int _comparePinned(Task a, Task b) {
-  if (a.pinned == b.pinned) return 0;
-  return a.pinned ? -1 : 1;
-}
 
 class HomeScreen extends StatefulWidget {
   /// 搜索态变化回调：用于让宿主 Scaffold 在搜索时隐藏「新增任务」FAB。
@@ -472,63 +454,20 @@ class HomeScreenState extends State<HomeScreen> {
         // 现统一按 [Task.isRepeatEnded] 判定是否仍在循环，并把已结束重复任务的
         // 那个过期占位截止日中性化（[endRepeat] 已直接清空；自然到期在判定层处理），
         // 使其回落到「今天」而不是「逾期」。
-        final now = DateTime.now();
-        bool inRepeat(Task t) => t.isRepeating && !t.isRepeatEnded(now);
-        DateTime? effectiveDue(Task t) =>
-            (t.isRepeating && !inRepeat(t)) ? null : t.dueDate;
-        final active = tasks.where((t) => !t.done && !inRepeat(t)).toList();
-
-        // 逾期：截止日期早于今天，按截止时间升序（拖得最久的排最前，优先处理）
-        final overdue = active
-            .where((t) => (_dueDayDiff(effectiveDue(t)) ?? 0) < 0)
-            .toList()
-          ..sort((a, b) {
-            final p = _comparePinned(a, b);
-            if (p != 0) return p;
-            return a.dueDate!.compareTo(b.dueDate!);
-          });
-
-        // 今天：截止日期就是今天，或没有截止日期（无截止视为当天，始终跟随当前日期，跨天自动顺延）。
-        final today = active
-            .where((t) =>
-                _dueDayDiff(effectiveDue(t)) == 0 || effectiveDue(t) == null)
-            .toList()
-          ..sort((a, b) {
-            final p = _comparePinned(a, b);
-            if (p != 0) return p;
-            // 无截止日期的排到今天列表末尾，不破坏有日期任务的按时排序
-            if (a.dueDate == null && b.dueDate == null) return 0;
-            if (a.dueDate == null) return 1;
-            if (b.dueDate == null) return -1;
-            return a.dueDate!.compareTo(b.dueDate!);
-          });
-
-        // 未来：仅含截止日期在今天之后的任务（无截止已归入「今天」）。
-        final future = active.where((t) {
-          final d = _dueDayDiff(effectiveDue(t));
-          return d != null && d > 0;
-        }).toList()
-          ..sort((a, b) {
-            final p = _comparePinned(a, b);
-            if (p != 0) return p;
-            return a.dueDate!.compareTo(b.dueDate!);
-          });
-
-        // 重复：仍在循环期内的重复任务，按提醒时刻升序（未设时刻的排最后）
-        final repeat = tasks.where((t) => inRepeat(t) && !t.done).toList()
-          ..sort((a, b) {
-            final p = _comparePinned(a, b);
-            if (p != 0) return p;
-            return (a.repeatMinute ?? 24 * 60)
-                .compareTo(b.repeatMinute ?? 24 * 60);
-          });
-
-        final done = tasks.where((t) => t.done).toList()
-          ..sort((a, b) {
-            final p = _comparePinned(a, b);
-            if (p != 0) return p;
-            return a.order.compareTo(b.order);
-          });
+        // P1-1（v2.8.6 审计）：五个分区直接复用 [TaskProvider.homeTasks] 的同一份
+        // 序列（pinned → order → 日期 三级排序）。此前这里本地重排「只看 pinned +
+        // 日期」，与 [TaskProvider.reorderTasks] 写回的 order 基准脱节：
+        // ① 拖拽改好的顺序在页面重建后立刻被日期排序打回（手动排序承诺失效）；
+        // ② 两套排序基准 → UI 序列与 provider 序列错位，拖拽会作用到「视觉相邻、
+        //    逻辑不同」的任务上，并反复污染同分区所有任务的 order。
+        // 现在 UI 与 reorderTasks 共享同一索引空间，上述问题一并消除；
+        // 分享长图等 homeTasks 消费方看到的顺序也与首页完全一致。
+        final home = provider.homeTasks;
+        final overdue = home['overdue'] ?? const <Task>[];
+        final today = home['today'] ?? const <Task>[];
+        final future = home['future'] ?? const <Task>[];
+        final repeat = home['repeat'] ?? const <Task>[];
+        final done = home['done'] ?? const <Task>[];
 
         final filter = provider.taskFilter;
         final filtered = switch (filter) {

@@ -107,6 +107,13 @@ class MainActivity : FlutterFragmentActivity() {
                             }
                         }
                     }
+                    "getTimeZoneId" -> {
+                        // P2-3（v2.8.6 审计）：设备 IANA 时区 id（如 Asia/Shanghai）。
+                        // 此前通知调度把时区硬编码为北京时间，设备在其它时区时提醒
+                        // 早/晚数小时甚至排到「前一天」。Dart 侧优先用这里的真实
+                        // 设备时区解析 tz.Location，离线、无新增依赖。
+                        result.success(java.util.TimeZone.getDefault().id)
+                    }
                     else -> result.notImplemented()
                 }
             }

@@ -112,6 +112,13 @@ class _TaskSheetState extends State<TaskSheet> {
   int _basePriority = 1; // 1=medium（构造默认）
   int _baseCategory = 0; // 0=work（构造默认）
   String _baseMonthly = ''; // F-6：月内规则基线（见 [_monthlySignature]）
+  // P2-1（v2.8.6 审计）：提醒类字段基线——此前 _isDirty 不比较这 5 组字段，
+  // 只改提醒时刻 / 每周几 / 间隔 / 结束日期 / 提前量后点 ✕ 直接静默关闭丢改动。
+  TimeOfDay _baseRepeatTime = const TimeOfDay(hour: 7, minute: 0);
+  List<int> _baseRepeatWeekdays = const [];
+  int _baseRepeatInterval = 1;
+  DateTime? _baseRepeatUntil;
+  int _baseReminderOffset = 0;
 
   /// 是否置顶/星标：置顶任务在所属分区内固定排最前。仅编辑模式可切换。
   bool _pinned = false;
@@ -200,6 +207,12 @@ class _TaskSheetState extends State<TaskSheet> {
     _basePriority = _priority.index;
     _baseCategory = _category.index;
     _baseMonthly = _monthlySignature;
+    // P2-1：提醒类字段基线（与上方 U11 同一批快照，未改动即视为干净）。
+    _baseRepeatTime = _repeatTime;
+    _baseRepeatWeekdays = List<int>.from(_repeatWeekdays);
+    _baseRepeatInterval = _repeatInterval;
+    _baseRepeatUntil = _repeatUntilDate;
+    _baseReminderOffset = _reminderOffsetMin;
   }
 
   /// F-6：月内规则的签名，用于脏数据比较（四种字段任一变化即视为已改动）。
@@ -223,7 +236,23 @@ class _TaskSheetState extends State<TaskSheet> {
     }
     if (_subtasks.length != _baseSubtasks.length) return true;
     if (_attachments.length != _baseAttachments.length) return true;
+    // P2-1（v2.8.6 审计）：提醒类字段纳入脏判定。TimeOfDay / DateTime 已实现
+    // 按值 ==；weekdays 用逐元素比较（与 TaskProvider._listEq 同口径）。
+    if (_repeatTime != _baseRepeatTime) return true;
+    if (_repeatInterval != _baseRepeatInterval) return true;
+    if (_repeatUntilDate != _baseRepeatUntil) return true;
+    if (_reminderOffsetMin != _baseReminderOffset) return true;
+    if (!_intsEqual(_repeatWeekdays, _baseRepeatWeekdays)) return true;
     return false;
+  }
+
+  /// P2-1：int 列表按内容比较（空表与空表相等、长度不同即不等）。
+  static bool _intsEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   /// U11：统一关闭入口——有未保存改动时先弹确认，避免长备注/子任务误丢。
