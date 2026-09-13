@@ -148,6 +148,15 @@ class _KanbanBoardState extends State<KanbanBoard> {
   /// 标签泳道上限，超出部分折叠到「其他」。
   static const int _maxTagLanes = 8;
 
+  /// 分类 / 标签（横向滚动）模式下每条泳道的固定宽度（逻辑像素）。
+  ///
+  /// 这两类泳道位于 `SingleChildScrollView(horizontal)` 内、宽度约束无界，而泳道头的
+  /// `Row + Spacer()` 与卡片内 `Expanded(child: Text)` 都要求**有界宽度**——不给固定宽度
+  /// 就会在 debug 抛「RenderFlex children have non-zero flex but incoming width constraints
+  /// are unbounded」，release 下则静默降级（`Spacer` 塌成 0、卡片按内容自适应）。
+  /// 220 在常见手机宽度（360~430dp）下约同屏可见 1.5~2 列，横向滚动手感正常。
+  static const double _scrollLaneWidth = 220;
+
   /// 分类 / 标签泳道的强调色循环调色板。
   static const List<Color> _lanePalette = [
     Color(0xFF3B82F6), // blue
@@ -206,17 +215,36 @@ class _KanbanBoardState extends State<KanbanBoard> {
         ),
     ];
 
-    // 「状态」模式沿用双列等宽铺满；分类 / 标签模式列数可变，横向滚动。
+    // 「状态」模式：双列等宽铺满。
+    //
+    // 必须用 [Expanded] 给每条泳道分配**有界宽度**：泳道头的 `Row + Spacer()` 与卡片内的
+    // `Expanded(child: Text)` 都要求父级提供有界宽度，而 Row 给「非 flex 子项」的约束是
+    // `BoxConstraints(maxHeight: h)`（maxWidth 无界）。此前两条泳道作为普通子项直接塞进
+    // Row，拿到无界宽度 → debug 下必然抛
+    // 「RenderFlex children have non-zero flex but incoming width constraints are
+    // unbounded」；release 无断言，`RenderFlex._computeSizes` 首轮 `canFlex && flex > 0`
+    // 判定使无界时的 flex 子项被当非 flex 处理，于是 `Spacer` 静默塌成 0、卡片宽度按内容
+    // 自适应 —— 注释里承诺的「双列等宽铺满」其实从未实现。加 `Expanded` 后两列各占一半
+    // 宽度，注释与实现一致。
+    //
+    // 分类 / 标签模式列数可变，仍走横向滚动：该模式下泳道处于**无界宽度视口**内（`Expanded`
+    // 在此同样非法），故改给每条泳道**固定宽度** [_scrollLaneWidth] —— 既满足上面同一个
+    // 「有界宽度」前提，又保留「列数可变 + 横向滚动」的既有交互。
     final lanesView = _mode == KanbanGroupMode.status
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: laneWidgets,
+            children: [
+              for (final w in laneWidgets) Expanded(child: w),
+            ],
           )
         : SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: laneWidgets,
+              children: [
+                for (final w in laneWidgets)
+                  SizedBox(width: _scrollLaneWidth, child: w),
+              ],
             ),
           );
 
