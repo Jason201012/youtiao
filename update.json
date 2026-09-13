@@ -1,8 +1,8 @@
 {
-  "version": "2.8.8",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.8/app-release-2.8.8-arm64.apk",
-  "apkSha256": "a7f379757f1be3d0ed4fd12fdd0f22c4b71e9a935d20de6200ec204726e365dc",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.8",
-  "releaseNotes": "v2.8.8（依据 v2.8.8 功能与操作审计报告：P2×2 / P3×4）\n\n【备份与恢复 · P2】\n① P2-1：修复换机 / 恢复备份后「提醒时区」设置静默丢失（回退为跟随系统）的问题——时区设置现随偏好一同备份与恢复，恢复完成立即按新时区重排全部提醒。\n② 配套修复：恢复备份此前会把早晚简报、习惯挽留、回收站预告、习惯打卡提醒一并清空且不再重建（重启前静默失效）——现在恢复完成后按恢复后的数据自动全部重建。\n\n【提醒时区 · P2】\n③ P2-2：切换「提醒时区」后，早晚简报、习惯挽留、回收站预告此前仍按旧时区响一次（要等下次启动 / 跨天才重建）——现在切换立即全量重排，时区切换真正即时生效。\n\n【体验与文档 · P3】\n④ P3-1：帮助页与设置行补充说明「提醒时区」的能力边界：仅改变提醒触发时刻，任务完成、跨天重置与统计口径仍按设备本地日期计算。\n⑤ P3-3：设置页「提醒时区」新增自定义入口——支持输入任意 IANA 时区名（自动校验有效性），不再局限于常用清单；切换成功后增加「已按新时区重排」反馈。\n⑥ P3-2 / P3-4：修复极低概率下「恢复备份 / 方案升级后，重复提醒按已过时刻补弹」的缓存失效不同步；CHANGELOG 补齐 v2.8.5 / v2.8.6 / v2.8.8 版本记录。\n\n新增 5 条回归测试（备份白名单往返、时区重解析生效、简报/挽留/回收站预告全量重排、通知总开关取消语义）；全量测试 558 通过（5 项为历史预存失败）；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
-  "signature": "dtUniO5PtsqPxS1QacbFQQ/VYagJx1hqcZgDZbxQt4cJxc0mS7OS5AgDixVEuGxBuEt/V1H1jfvhXLoRnoXtPQ=="
+  "version": "2.8.9",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.9/app-release-2.8.9-arm64.apk",
+  "apkSha256": "f8bdf36c087f4ce54ef8c6edc693e496039d5ef4842e630607afe86b1cc2f5b2",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.9",
+  "releaseNotes": "v2.8.9（依据 v2.8.8 功能与操作审计报告：P2×2 / P3×3）\n\n【备份与恢复 · P2】\n① P2-1：修复手动「从备份恢复」后，本会话内偏好设置不生效的问题——恢复完成时，免打扰时段、延后时长、回收站保留期、专注与周目标、自动备份开关、早晚简报与习惯挽留时刻等现在会立即按备份内容生效，不再需要重启 App。\n\n【重复任务 · P2】\n② P2-2：「跳过一次」现在可以撤销了。详情页点「本次跳过」后会弹出「撤销」提示；「未来 30 天预览」里已跳过的日子也不再消失（此前会直接从列表中隐身、无法找回），而是显示为「已跳过」，菜单中提供「撤销跳过」，列表标题也会标注「含 N 个已跳过」。\n\n【日历 · P3】\n③ P3-1：把任务拖到过去的日期时，会先提示「截止时间已过，改期后提醒将不会触发」，确认后才改期（与其他入口口径一致）。\n④ P3-2：重复任务不再允许在日历上拖拽改期——此前会显示「已改期至 X」，但当天照常循环、提醒时刻并未改变（假成功）；现在长按会提示到详情页使用「仅此一次改期」。\n\n【看板 · P3】\n⑤ P3-3：「标签」分组下，带多个标签的任务此前会在每个命中的标签泳道各出现一次，导致泳道计数之和大于实际任务数；现在每个任务只归入一个泳道，计数准确可加。\n\n新增 9 条回归测试；全量测试 567 通过（5 项为历史预存失败）；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
+  "signature": "MR+kfrnyDeBDI2S2I9/6/gIQPFr4Koja0RNYzCVmalc3pCXrnDpRIW/E2mvyiuiQFRcYoMUVrz1Z3P+Pgsj2Ag=="
 }
