@@ -317,8 +317,28 @@ class TaskDetailScreen extends StatelessWidget {
                     children: [
                       OutlinedButton.icon(
                         onPressed: () {
+                          // P2-2（v2.8.8 审计）：本次跳过此前点击即关页、无确认亦无撤销，
+                          // 误触后当天该次循环彻底消失（列表不出现、提醒不响）且当天
+                          // 无法恢复，只能等 occurrence 滚动过期被清掉——对纯本地无云端的
+                          // 待办应用是一条明确的交互死路。这里补 SnackBar 撤销入口
+                          // （unskipOccurrence 与 skipOccurrence 严格互逆、同样重排提醒）。
+                          // 先取 messenger：pop 之后本页 context 已失效，须在 pop 前捕获。
+                          final messenger = ScaffoldMessenger.of(context);
                           provider.skipOccurrence(task.id);
                           Navigator.pop(context);
+                          messenger
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(
+                              SnackBar(
+                                content: const Text('已跳过今天这一次'),
+                                duration: const Duration(seconds: 5),
+                                action: SnackBarAction(
+                                  label: '撤销',
+                                  onPressed: () =>
+                                      provider.unskipOccurrence(task.id),
+                                ),
+                              ),
+                            );
                         },
                         icon: const Icon(Symbols.skip_next, size: 18),
                         label: const Text('本次跳过'),

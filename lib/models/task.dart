@@ -579,13 +579,22 @@ class Task {
     // 与 android/.../MidnightResetReceiver.kt 的 isRecurrenceToday（按 yyyy-MM-dd 判定）
     // 口径一致。
     final d = DateTime(day.year, day.month, day.day);
+    // B1：跳过一次（今天在 skipDates 列表里 → 不出现、不打卡、不影响连续天数）。
+    return _repeatsOnIgnoringSkip(d) && !skipDates.contains(_ymd(d));
+  }
+
+  /// [repeatsOn] 的「纯日历」判定：重复规则 + 结束日期，**不含** [skipDates]。
+  ///
+  /// P2-2（v2.8.8 审计）：把 skip 一段拆出来，供「未来循环日预览」复用——已跳过的
+  /// 日子必须仍然可见，否则用户在 UI 上没有任何「撤销跳过」的入口（跳过是不可逆死路）。
+  /// 与 [repeatsOn] 共用同一份规则与结束日期判定，避免两处口径漂移。
+  bool _repeatsOnIgnoringSkip(DateTime day) {
+    final d = DateTime(day.year, day.month, day.day);
     // B2：结束日期（含当日仍生效，故用 isAfter 排除次日及之后）。
     final u = repeatUntil;
     if (u != null && d.isAfter(_parseYmd(u))) return false;
     // 原 switch 逻辑原样搬入 _baseRepeatsOn，避免散改进多个分支。
-    if (!_baseRepeatsOn(d)) return false;
-    // B1：跳过一次（今天在 skipDates 列表里 → 不出现、不打卡、不影响连续天数）。
-    return !skipDates.contains(_ymd(d));
+    return _baseRepeatsOn(d);
   }
 
   /// repeatsOn 的「纯规则」核心（不含 until / skip 两段通用判定），便于两侧同步维护。
@@ -738,6 +747,27 @@ class Task {
     for (var i = 0; i < days && out.length < limit; i++) {
       final d = DateTime(s.year, s.month, s.day + i);
       if (repeatsOn(d)) out.add(d);
+    }
+    return out;
+  }
+
+  /// 与 [occurrencesBetween] 同窗口，但**保留**已跳过的日子（`skipDates` 命中项）。
+  ///
+  /// P2-2（v2.8.8 审计）：[occurrencesBetween] 复用 [repeatsOn]，而 [repeatsOn] 会
+  /// 排除 `skipDates` —— 于是「未来循环日预览」里的已跳过行永远渲染不出来
+  /// （`_isSkipped` 恒为 false、`已跳过` 文案与撤销入口均为不可达死代码），用户
+  /// 跳过某一天后在 UI 上彻底看不到它，也就无从撤销。这里给出「不排除跳过」的窗口，
+  /// 让预览列表能显示「已跳过」并提供撤销；其余判定与 [occurrencesBetween] 完全一致。
+  List<DateTime> occurrencesBetweenIncludingSkipped(
+    DateTime start, {
+    int days = 30,
+    int limit = 60,
+  }) {
+    final out = <DateTime>[];
+    final s = DateTime(start.year, start.month, start.day);
+    for (var i = 0; i < days && out.length < limit; i++) {
+      final d = DateTime(s.year, s.month, s.day + i);
+      if (_repeatsOnIgnoringSkip(d)) out.add(d);
     }
     return out;
   }

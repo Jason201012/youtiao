@@ -259,6 +259,12 @@ class BackupSheet {
     BuildContext context,
     bool includeTrash,
   ) async {
+    // P2-1（v2.8.8 审计）：偏好类 Provider 必须在首个 await 之前捕获——恢复偏好后
+    // 需要重读它们的内存态（与 [_restoreFromAutoBackup] 同口径），跨异步间隙不得
+    // 再使用 BuildContext。
+    final themeProvider = context.read<ThemeProvider>();
+    final appLockProvider = context.read<AppLockProvider>();
+    final onboardingProvider = context.read<OnboardingProvider>();
     // L-09：先做大小预检再读入，超限直接提示，避免超大文件把 App 读到 OOM。
     final picked = await DataIo.pickJsonFile();
     if (picked.cancelled) return;
@@ -396,21 +402,30 @@ class BackupSheet {
         }
       }
       // P2-19：恢复偏好（仅当备份含 prefs 字段；老备份无则保持现有偏好不动）。
-      // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences；
-      // 内存态由各 Provider 在下一次 build 时通过自身的 getter 读取最新值。
-      // 不在此处强 reload——多数 Provider 的 getter 已直接读 SharedPreferences
-      // （如 [TaskProvider.themeFollowSystem] 等），无须 reload 即可生效；
-      // 一次性重启最稳妥，但用户期望「恢复完立即看到效果」，由它们的 getter 兜底。
+      // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences。
+      //
+      // P2-1（v2.8.8 审计）：写回 prefs ≠ 内存生效。TaskProvider 的
+      // dndEnabled / dndStartHour / dndEndHour / snoozeMinutes / trashRetentionDays /
+      // focusGoalMinutes / weeklyGoalCount / autoBackupEnabled / appLockIdleSeconds /
+      // calendarLunar / lockScreenPrivate / screenSecurityEnabled / allowExternalLinks /
+      // briefingMorning* / briefingEvening* / habitNudge* 等**全部是 load() 从 prefs
+      // 读入的内存字段**，getter 直接返回内存值——原实现只调 refreshAfterPrefs()
+      // （= notifyListeners 纯刷新 UI），恢复的偏好本会话不生效：设置页仍显示旧值
+      // （用户误以为恢复失败）、实际行为仍按旧值运行（免打扰 / 延后时长 / 回收站
+      // 保留期 / 早晚简报与习惯挽留时刻 / 自动备份开关），且
+      // rescheduleFixedTimeReminders() 会用旧时刻把简报与挽留重排一遍，直到下次
+      // 重启才生效。这里补齐与自动备份还原路径完全一致的重载，使恢复即时生效。
+      // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
+      // 改用 refreshEnabled() 仅刷新开关、不触发锁。
       if (data['prefs'] is Map) {
         try {
           await applyAppPrefs(Map<String, dynamic>.from(data['prefs'] as Map));
-          // 主动触发监听者刷新：偏好字段集中在 TaskProvider / ThemeProvider，
-          // F-12：走 TaskProvider 公开的 refreshAfterPrefs()，不再从 UI 外部直接
-          // 调用受保护的 notifyListeners()（会触发 invalid_use_of_protected_member）。
-          try {
-            Provider.of<TaskProvider>(context, listen: false)
-                .refreshAfterPrefs();
-          } catch (_) {}
+          await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
+          await focusProvider.load();
+          await habitProvider.load();
+          await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
+          await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
+          await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
         } catch (e) {
           failures.add('偏好（$e）');
         }

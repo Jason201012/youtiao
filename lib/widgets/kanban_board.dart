@@ -7,7 +7,121 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 
 /// 看板分组模式（本地 UI 状态，不污染任务数据）。
-enum _BoardGroupMode { status, category, tag }
+enum KanbanGroupMode { status, category, tag }
+
+/// 分类泳道的中文名。
+String _catLabel(Category c) =>
+    c == Category.work ? '工作' : c == Category.life ? '生活' : '学习';
+
+/// 泳道分组结果（纯数据，不含颜色 / BuildContext 依赖）。
+///
+/// P3-3（v2.8.8 审计）：把分组口径从 `State` 私有方法抽成纯函数，使分组结果可被单测
+/// 直接钉死。看板泳道位于横向滚动视口中（宽度约束无界），其内部 `Row + Spacer /
+/// Expanded` 在 debug 断言下无法完成布局，widget 级测试无法稳定断言分组结果——
+/// 故把「分组口径」与「渲染」解耦。
+@visibleForTesting
+class KanbanLaneData {
+  final String title;
+  final List<Task> tasks;
+
+  /// 「状态」泳道的投放目标状态；其余分组模式为 null（仅展示、不可拖入）。
+  final TaskStatus? dropStatus;
+
+  /// 分类 / 标签泳道在调色板中的索引；null 表示使用语义色（状态 / 其他）。
+  final int? paletteIndex;
+
+  const KanbanLaneData(
+    this.title,
+    this.tasks, {
+    this.dropStatus,
+    this.paletteIndex,
+  });
+}
+
+/// 按 [mode] 从 [active]（调用方已滤掉回收站条目）派生泳道，列表顺序即展示顺序。
+///
+/// - `status`：待办 / 已完成，恒为两列（空列保留，作为拖拽投放目标）；
+/// - `category`：每任务只归入自身分类，空分类自动隐藏；
+/// - `tag`：P3-3（v2.8.8 审计）改为「每个任务仅归入其第一个命中的 top 标签」
+///   （按频次降序优先，顺序稳定可复现），使任意任务在整个看板中恰好出现一次、
+///   各泳道计数之和 = 实际任务数；不含任何 top 标签（含无标签）的任务归入「其他」。
+@visibleForTesting
+List<KanbanLaneData> buildKanbanLanes(
+  KanbanGroupMode mode,
+  List<Task> active, {
+  int maxTagLanes = 8,
+}) {
+  switch (mode) {
+    case KanbanGroupMode.status:
+      return [
+        KanbanLaneData(
+          '待办',
+          active.where((t) => t.status == TaskStatus.todo).toList(),
+          dropStatus: TaskStatus.todo,
+        ),
+        KanbanLaneData(
+          '已完成',
+          active.where((t) => t.status == TaskStatus.done).toList(),
+          dropStatus: TaskStatus.done,
+        ),
+      ];
+    case KanbanGroupMode.category:
+      final lanes = <KanbanLaneData>[];
+      var i = 0;
+      for (final c in Category.values) {
+        final items = active.where((t) => t.category == c).toList();
+        if (items.isEmpty) continue; // 空分组自动隐藏
+        lanes.add(KanbanLaneData(_catLabel(c), items, paletteIndex: i));
+        i++;
+      }
+      return lanes;
+    case KanbanGroupMode.tag:
+      // 统计标签频次，取前 N 个作为独立泳道，其余归入「其他」。
+      final freq = <String, int>{};
+      for (final t in active) {
+        for (final tag in t.tags) {
+          freq[tag] = (freq[tag] ?? 0) + 1;
+        }
+      }
+      final top = freq.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      final topTags =
+          top.take(maxTagLanes).map((e) => e.key).toList(growable: false);
+      // 先按频次降序建桶，保证泳道顺序稳定。
+      final buckets = <String, List<Task>>{
+        for (final tag in topTags) tag: <Task>[],
+      };
+      final others = <Task>[];
+      for (final t in active) {
+        String? assigned;
+        for (final tag in topTags) {
+          if (t.tags.contains(tag)) {
+            assigned = tag;
+            break;
+          }
+        }
+        if (assigned == null) {
+          others.add(t);
+        } else {
+          buckets[assigned]!.add(t);
+        }
+      }
+      final lanes = <KanbanLaneData>[];
+      var i = 0;
+      for (final tag in topTags) {
+        final items = buckets[tag]!;
+        // 高频标签可能已被更高频标签「吸走」全部任务，空泳道不再展示
+        // （与「分类」模式的空分组自动隐藏一致），调色板索引只对可见泳道递增。
+        if (items.isEmpty) continue;
+        lanes.add(KanbanLaneData(tag, items, paletteIndex: i));
+        i++;
+      }
+      if (others.isNotEmpty) {
+        lanes.add(KanbanLaneData('其他', others));
+      }
+      return lanes;
+  }
+}
 
 /// 单条泳道描述（标题 + 强调色 + 任务列表 + 是否可拖入改状态）。
 class _Lane {
@@ -29,7 +143,7 @@ class KanbanBoard extends StatefulWidget {
 }
 
 class _KanbanBoardState extends State<KanbanBoard> {
-  _BoardGroupMode _mode = _BoardGroupMode.status;
+  KanbanGroupMode _mode = KanbanGroupMode.status;
 
   /// 标签泳道上限，超出部分折叠到「其他」。
   static const int _maxTagLanes = 8;
@@ -46,74 +160,33 @@ class _KanbanBoardState extends State<KanbanBoard> {
     Color(0xFF22C55E), // green
   ];
 
-  static Color _colColor(BuildContext context, TaskStatus s) {
-    if (s == TaskStatus.done) return const Color(0xFF0F6E56);
-    return appColors(context).meta;
+  /// 泳道强调色：状态泳道用语义色（已完成 = 深绿、待办 = 次要色），
+  /// 分类 / 标签泳道走循环调色板，「其他」泳道用前景色。
+  Color _laneColor(KanbanLaneData lane) {
+    if (lane.dropStatus == TaskStatus.done) return const Color(0xFF0F6E56);
+    if (lane.dropStatus != null) return appColors(context).meta;
+    if (lane.paletteIndex != null) {
+      return _lanePalette[lane.paletteIndex! % _lanePalette.length];
+    }
+    return Theme.of(context).colorScheme.onBackground;
   }
 
-  static String _catLabel(Category c) =>
-      c == Category.work ? '工作' : c == Category.life ? '生活' : '学习';
-
-  /// 根据当前分组模式，从「未删除」任务中派生各泳道（自动隐藏空分组）。
+  /// 派生泳道（分组口径见 [buildKanbanLanes]，空分组自动隐藏）。
+  ///
+  /// P3-3（v2.8.8 审计）：分组口径已抽到纯函数 [buildKanbanLanes]，此处只负责
+  /// 「滤掉回收站条目 + 绑定颜色」，使分组结果可被单测直接覆盖。
   List<_Lane> _buildLanes(TaskProvider provider) {
     final active = provider.tasks.where((t) => t.deletedAt == null).toList();
-    switch (_mode) {
-      case _BoardGroupMode.status:
-        return [
-          _Lane(
-            '待办',
-            _colColor(context, TaskStatus.todo),
-            active.where((t) => t.status == TaskStatus.todo).toList(),
-            dropStatus: TaskStatus.todo,
-          ),
-          _Lane(
-            '已完成',
-            _colColor(context, TaskStatus.done),
-            active.where((t) => t.status == TaskStatus.done).toList(),
-            dropStatus: TaskStatus.done,
-          ),
-        ];
-      case _BoardGroupMode.category:
-        final lanes = <_Lane>[];
-        var i = 0;
-        for (final c in Category.values) {
-          final items = active.where((t) => t.category == c).toList();
-          if (items.isEmpty) continue; // 空分组自动隐藏
-          lanes.add(_Lane(_catLabel(c), _lanePalette[i % _lanePalette.length], items));
-          i++;
-        }
-        return lanes;
-      case _BoardGroupMode.tag:
-        // 统计标签频次，取前 N 个作为独立泳道，其余归入「其他」。
-        final freq = <String, int>{};
-        for (final t in active) {
-          for (final tag in t.tags) {
-            freq[tag] = (freq[tag] ?? 0) + 1;
-          }
-        }
-        final top = freq.entries.toList()
-          ..sort((a, b) => b.value.compareTo(a.value));
-        final topTags = top.take(_maxTagLanes).map((e) => e.key).toSet();
-        final lanes = <_Lane>[];
-        var i = 0;
-        for (final tag in topTags) {
-          final items = active.where((t) => t.tags.contains(tag)).toList();
-          lanes.add(_Lane(tag, _lanePalette[i % _lanePalette.length], items));
-          i++;
-        }
-        // 「其他」= 没有任何命中 top 标签的任务（含无标签任务）。
-        final others = active
-            .where((t) => t.tags.isEmpty || !t.tags.any(topTags.contains))
-            .toList();
-        if (others.isNotEmpty) {
-          lanes.add(_Lane(
-            '其他',
-            Theme.of(context).colorScheme.onBackground,
-            others,
-          ));
-        }
-        return lanes;
-    }
+    return [
+      for (final lane
+          in buildKanbanLanes(_mode, active, maxTagLanes: _maxTagLanes))
+        _Lane(
+          lane.title,
+          _laneColor(lane),
+          lane.tasks,
+          dropStatus: lane.dropStatus,
+        ),
+    ];
   }
 
   @override
@@ -134,7 +207,7 @@ class _KanbanBoardState extends State<KanbanBoard> {
     ];
 
     // 「状态」模式沿用双列等宽铺满；分类 / 标签模式列数可变，横向滚动。
-    final lanesView = _mode == _BoardGroupMode.status
+    final lanesView = _mode == KanbanGroupMode.status
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: laneWidgets,
@@ -157,20 +230,20 @@ class _KanbanBoardState extends State<KanbanBoard> {
               color: Theme.of(context).colorScheme.onBackground,
             )),
         const SizedBox(height: 12),
-        SegmentedButton<_BoardGroupMode>(
+        SegmentedButton<KanbanGroupMode>(
           segments: const [
             ButtonSegment(
-              value: _BoardGroupMode.status,
+              value: KanbanGroupMode.status,
               label: Text('状态'),
               icon: Icon(Symbols.dashboard, size: 18),
             ),
             ButtonSegment(
-              value: _BoardGroupMode.category,
+              value: KanbanGroupMode.category,
               label: Text('分类'),
               icon: Icon(Symbols.grid_on, size: 18),
             ),
             ButtonSegment(
-              value: _BoardGroupMode.tag,
+              value: KanbanGroupMode.tag,
               label: Text('标签'),
               icon: Icon(Symbols.sell, size: 18),
             ),

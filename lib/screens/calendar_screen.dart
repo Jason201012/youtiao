@@ -12,6 +12,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/focus_chart.dart';
+import 'package:todolist/widgets/past_due_guard.dart';
 
 /// 任务日历（月 / 周视图）：
 /// - 按任务到期日（dueDate）排布，月视图每格显示当天到期任务，周视图为 7 天列；
@@ -57,12 +58,33 @@ class _CalendarScreenState extends State<CalendarScreen> {
       setState(() => _viewDate = _viewDate.add(Duration(days: 7 * delta)));
 
   /// 把任务改期到 newDate（保留原时分），并提示。
-  void _reschedule(Task task, DateTime newDate) {
+  ///
+  /// P3-1（v2.8.8 审计）：此前直接 `updateTask(copyWith(dueDate))`、无任何判定，
+  /// 是 v2.8.4「同一件事的提示口径统一」里唯一漏网的入口——用户可静默把任务拖到
+  /// 昨天/上周，改完后任务立刻以「逾期」身份出现且没有任何提醒。现接入统一守卫
+  /// [PastDueGuard]（与新建 / 详情页改期 / 批量改期 / 逾期区顺延同口径）。
+  Future<void> _reschedule(Task task, DateTime newDate) async {
     final old = task.dueDate;
     if (old == null) return;
     final newDue =
         DateTime(newDate.year, newDate.month, newDate.day, old.hour, old.minute);
     if (_sameDay(newDue, old)) return; // 拖回原日期不处理
+
+    // 目标截止时刻（dueDate − reminderOffsetMin）已早于当前时刻 → 保存后提醒
+    // 永远不会触发，弹框让用户显式确认；取消则终止本次改期、不写库。
+    if (newDue.isBefore(DateTime.now())) {
+      final ok = await PastDueGuard.confirm(
+        context,
+        count: 1,
+        detail: '目标日（${DateFormat('M月d日').format(newDue)} '
+            '${old.hour.toString().padLeft(2, '0')}:'
+            '${old.minute.toString().padLeft(2, '0')}）的截止时刻'
+            '已早于当前时刻，改期后提醒将不会触发。\n\n仍要改期吗？',
+      );
+      if (!ok) return;
+    }
+    if (!mounted) return; // 弹框期间本页可能已被销毁
+
     final updated = task.copyWith(dueDate: newDue);
     Provider.of<TaskProvider>(context, listen: false).updateTask(updated);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -306,7 +328,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final lunar = provider.calendarLunar ? lunarLabelOf(date) : LunarLabel.empty;
 
     return DragTarget<Task>(
-      onWillAcceptWithDetails: (details) => !details.data.done,
+      // 稳定 Key（date-only）：便于自动化测试精确定位某一天的投放目标，
+      // 不参与布局与交互逻辑。
+      key: ValueKey('cal-month-cell-${date.year}-${date.month}-${date.day}'),
+      // P3-2（v2.8.8 审计）：重复任务的 dueDate 只是占位，拖拽改期是「假成功」，
+      // 故在投放侧也一并拒绝（兜底：即便有其它来源的拖拽也不放行）。
+      onWillAcceptWithDetails: (details) =>
+          !details.data.done && !details.data.isRepeating,
       onAcceptWithDetails: (details) => _reschedule(details.data, date),
       builder: (ctx, candidate, rejected) => GestureDetector(
         onTap: () => _openDay(provider, date),
@@ -434,6 +462,32 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
 
     if (task.done) return child; // 已完成不可拖拽改期
+
+    // P3-2（v2.8.8 审计）：重复任务的提醒 / 循环由 repeatMinute / repeatUntil /
+    // skipDates 表达，dueDate 自 v2.8.5 起已不再被录入侧钉为「创建当天 23:59」，
+    // 语义上只是占位。此前日历仍允许把它拖到任意日期并写 dueDate：用户看到
+    // 「已改期至 X」的 SnackBar 以为生效，实际当天照常循环、提醒时刻不变——假成功；
+    // 且这条被拖出的占位 dueDate 在「结束重复」后会重新参与日期分区，让任务显示在
+    // 错误日期。故禁用拖拽，长按给出正确路径提示（详情页「仅此一次改期」）。
+    if (task.isRepeating) {
+      return GestureDetector(
+        // translucent（而非 opaque）：本层只「加」一个长按识别器，且让指针继续穿透，
+        // 使外层日期格的 onTap（打开当天详情）不被吞掉——opaque 会把点击截留在此处，
+        // 让重复任务卡片失去原有的「点一下看当天」行为。
+        behavior: HitTestBehavior.translucent,
+        onLongPress: () {
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(
+              const SnackBar(
+                content: Text('重复任务不支持拖拽改期，请在详情页使用「仅此一次改期」'),
+                duration: Duration(seconds: 3),
+              ),
+            );
+        },
+        child: child,
+      );
+    }
 
     return LongPressDraggable<Task>(
       data: task,
@@ -582,7 +636,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final isToday = _sameDay(d, today);
     final track = isDark ? AppColors.darkTrack : AppColors.lightTrack;
     return DragTarget<Task>(
-      onWillAcceptWithDetails: (details) => !details.data.done,
+      // P3-2（v2.8.8 审计）：重复任务的 dueDate 只是占位，拖拽改期是「假成功」，
+      // 故在投放侧也一并拒绝（兜底：即便有其它来源的拖拽也不放行）。
+      onWillAcceptWithDetails: (details) =>
+          !details.data.done && !details.data.isRepeating,
       onAcceptWithDetails: (details) => _reschedule(details.data, d),
       builder: (ctx, candidate, rejected) => Container(
         width: 132,

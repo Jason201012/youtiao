@@ -1,11 +1,13 @@
 /// 重复任务「未来 N 天预览」弹层（P0-5，纯离线）。
 ///
-/// 遍历 [Task.occurrencesBetween] 给出未来 30 天（默认）的循环命中日；
-/// 每行支持「标记完成 / 跳过一次 / 移到下一天」三种逐次操作，分别走
+/// 遍历 [Task.occurrencesBetweenIncludingSkipped] 给出未来 30 天（默认）的循环日
+/// ——**含已跳过的日子**（P2-2 v2.8.8：用 [Task.occurrencesBetween] 会把 skipDates
+/// 过滤掉，已跳过行永不渲染、撤销入口不可达）。
+/// 每行支持「标记完成 / 跳过一次 / 撤销跳过 / 移到下一天」四种逐次操作，分别走
 /// [TaskProvider.markOccurrenceDone] / [TaskProvider.unmarkOccurrenceDone] /
-/// [TaskProvider.skipOccurrence]（三者均为 occurrence 级入口，写入
+/// [TaskProvider.skipOccurrence] / [TaskProvider.unskipOccurrence]，均写入
 /// [Task.doneDates] / [Task.skipDates]，避免此前 `updateTask(copyWith(status))`
-/// 被 `_applyTaskUpdate` 强制回填旧状态而丢失的 100% 无效路径）。
+/// 被 `_applyTaskUpdate` 强制回填旧状态而丢失的 100% 无效路径。
 ///
 /// 「移到下一天」额外走 [TaskProvider.rescheduleOnceOccurrence]，把当天加入
 /// skipDates 后另建一次性副本落到 newDay，零新概念。
@@ -123,9 +125,24 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     _refresh();
   }
 
+  /// P2-2（v2.8.8 审计）：撤销某一天的跳过（与 [_skip] 严格互逆）。
+  ///
+  /// 此前 [TaskProvider.unskipOccurrence] 唯一 UI 调用点是「移到下一天」的 SnackBar
+  /// 撤销，已跳过的日子在弹层里只有「跳过一次」（幂等 no-op）与「移到下一天」，
+  /// 用户无法仅撤销跳过、只能走间接路径。这里给它一个独立入口。
+  void _unskip(DateTime d) {
+    if (!_isSkipped(d)) return; // 未跳过，幂等
+    widget.provider.unskipOccurrence(_task.id, day: d);
+    _refresh();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final occ = _task.occurrencesBetween(DateTime.now());
+    // P2-2（v2.8.8 审计）：必须用「不排除跳过」的窗口——否则 `skipDates` 命中的
+    // 日子被 `repeatsOn` 过滤掉、已跳过行永不渲染，用户跳过一次后在本弹层既看不到
+    // 也无法撤销（`skipped` 分支此前是不可达死代码）。
+    final occ = _task.occurrencesBetweenIncludingSkipped(DateTime.now());
+    final skippedCount = occ.where(_isSkipped).length;
     final weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
     return DraggableScrollableSheet(
       initialChildSize: 0.8,
@@ -141,7 +158,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-            child: Text('「${_task.title}」· 共 ${occ.length} 个循环日',
+            child: Text(
+                '「${_task.title}」· 未来 30 天共 ${occ.length} 个循环日'
+                '${skippedCount > 0 ? '（含 $skippedCount 个已跳过）' : ''}',
                 style: const TextStyle(fontSize: 13, color: Colors.grey)),
           ),
           const Divider(height: 1),
@@ -206,17 +225,32 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                           onSelected: (v) {
                             if (v == 'done') _markDone(d);
                             if (v == 'skip') _skip(d);
+                            if (v == 'unskip') _unskip(d);
                             if (v == 'defer') _skip(d, defer: true);
                           },
                           // P3-2：文案随实例状态动态化——已完成实例此前仍标「标记完成」，
                           // 点下去实际是取消完成，语义与行为相反。
+                          // P2-2（v2.8.8 审计）：已跳过的日子此前仍显示「跳过一次」
+                          // （幂等 no-op，UI 说谎）与「移到下一天」（`_skip` 首行的
+                          // `_isSkipped` 早退使其同样无效），且全程没有任何「撤销跳过」
+                          // 入口。这里按状态互斥重排菜单：
+                          // - 未跳过 → 「跳过一次 / 移到下一天」；
+                          // - 已跳过 → 「撤销跳过」（走 unskipOccurrence，内部重排提醒），
+                          //   不再展示两个必然 no-op 的项。
                           itemBuilder: (_) => [
                             if (canToggleDone)
                               PopupMenuItem(
                                   value: 'done',
                                   child: Text(done ? '标记未完成' : '标记完成')),
-                            const PopupMenuItem(value: 'skip', child: Text('跳过一次')),
-                            const PopupMenuItem(value: 'defer', child: Text('移到下一天')),
+                            if (skipped)
+                              const PopupMenuItem(
+                                  value: 'unskip', child: Text('撤销跳过'))
+                            else ...[
+                              const PopupMenuItem(
+                                  value: 'skip', child: Text('跳过一次')),
+                              const PopupMenuItem(
+                                  value: 'defer', child: Text('移到下一天')),
+                            ],
                           ],
                         ),
                       );
