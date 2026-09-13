@@ -1,8 +1,8 @@
 {
-  "version": "2.8.9",
-  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.8.9/app-release-2.8.9-arm64.apk",
-  "apkSha256": "f8bdf36c087f4ce54ef8c6edc693e496039d5ef4842e630607afe86b1cc2f5b2",
-  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.9",
-  "releaseNotes": "v2.8.9（依据 v2.8.8 功能与操作审计报告：P2×2 / P3×3）\n\n【备份与恢复 · P2】\n① P2-1：修复手动「从备份恢复」后，本会话内偏好设置不生效的问题——恢复完成时，免打扰时段、延后时长、回收站保留期、专注与周目标、自动备份开关、早晚简报与习惯挽留时刻等现在会立即按备份内容生效，不再需要重启 App。\n\n【重复任务 · P2】\n② P2-2：「跳过一次」现在可以撤销了。详情页点「本次跳过」后会弹出「撤销」提示；「未来 30 天预览」里已跳过的日子也不再消失（此前会直接从列表中隐身、无法找回），而是显示为「已跳过」，菜单中提供「撤销跳过」，列表标题也会标注「含 N 个已跳过」。\n\n【日历 · P3】\n③ P3-1：把任务拖到过去的日期时，会先提示「截止时间已过，改期后提醒将不会触发」，确认后才改期（与其他入口口径一致）。\n④ P3-2：重复任务不再允许在日历上拖拽改期——此前会显示「已改期至 X」，但当天照常循环、提醒时刻并未改变（假成功）；现在长按会提示到详情页使用「仅此一次改期」。\n\n【看板 · P3】\n⑤ P3-3：「标签」分组下，带多个标签的任务此前会在每个命中的标签泳道各出现一次，导致泳道计数之和大于实际任务数；现在每个任务只归入一个泳道，计数准确可加。\n\n新增 9 条回归测试；全量测试 567 通过（5 项为历史预存失败）；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
-  "signature": "MR+kfrnyDeBDI2S2I9/6/gIQPFr4Koja0RNYzCVmalc3pCXrnDpRIW/E2mvyiuiQFRcYoMUVrz1Z3P+Pgsj2Ag=="
+  "version": "2.9.0",
+  "apkUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/download/v2.9.0/app-release-2.9.0-arm64.apk",
+  "apkSha256": "41d8d59f3b8b6294b4b0b9c7df95d4d4c4938295f5453526b7b914506a852007",
+  "releaseUrl": "https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.9.0",
+  "releaseNotes": "v2.9.0（看板布局修复：泳道「有界宽度」）\n\n【修复 · 看板】\n① 状态模式：两条泳道此前宽度按内容自适应，泳道标题与计数紧贴、卡片宽度忽宽忽窄。现改为等宽铺满——两列各占一半，计数稳定右对齐。\n② 分类 / 标签模式：泳道改为固定宽度，列宽整齐一致，横向滚动手感不变。\n③ 上述两处同时修掉了一个隐藏问题：既有实现的泳道头（计数右对齐）与卡片标题（换行填充）都需要「有界宽度」，而此前泳道拿到的是无界宽度——在开发版会触发布局断言，在发布版则被静默降级（正是①里「计数紧贴标题、卡片忽宽忽窄」的成因）。现已从根上满足该约束。\n\n新增 4 条布局回归测试（覆盖三种分组模式）；全量测试 571 通过（5 项为历史预存失败）；三站（Gitee releases-3 + 内网 Forgejo + GitLab 8567）发布，固定 release keystore 签名，arm64-v8a 单架构。",
+  "signature": "0jcprFvFOl0MrwJ2EAkeuRtvKG+tDAj74lNKxrhn9XSYc3YD96dLg5NxwudTRRJ15bwYH7C3txJ+O9Dxd4IkQA=="
 }
