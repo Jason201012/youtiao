@@ -28,7 +28,11 @@ import 'test_helpers.dart';
 /// 修复（三种分组模式都已覆盖）：
 /// - **状态**：两条泳道套 `Expanded` → 各占一半宽度（等宽铺满）；
 /// - **分类 / 标签**：列数可变、处于横向滚动视口（`Expanded` 在此同样非法），改为给每条
-///   泳道固定宽度 `220px` → 约束有界，同时保留横向滚动。
+///   泳道**确定宽度** → 约束有界，同时保留横向滚动。
+///
+/// U4（v2.9.0 审计）补充：分类 / 标签的列宽不再恒为 220——窄屏（<600）仍是 220，
+/// 宽屏按「可用宽 / 列数」铺满并夹在 200~280（`kanbanLaneWidthFor`）。故本文件里
+/// 「220」的断言统一在**窄屏画布（400×1600）**下进行，另加一条宽屏（800×1600）用例。
 void _installMocks() {
   TestWidgetsFlutterBinding.ensureInitialized();
   useMemoryDatabase();
@@ -169,9 +173,10 @@ void main() {
         reason: '空列与有任务的列必须等宽（不能塌成 0）');
   });
 
-  testWidgets('标签模式：泳道固定 220px（有界宽度）、横向滚动保留、无布局断言',
+  testWidgets('标签模式（窄屏）：泳道 220px（有界宽度）、横向滚动保留、无布局断言',
       (tester) async {
-    tester.view.physicalSize = const Size(800, 1600);
+    // 窄屏画布：宽度 < 600 → 沿用 220 基准宽（宽屏自适应见下方 U4 用例）。
+    tester.view.physicalSize = const Size(400, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
@@ -214,7 +219,7 @@ void main() {
     expect(lanes, findsNWidgets(2));
     for (var i = 0; i < 2; i++) {
       expect(tester.getSize(lanes.at(i)).width, closeTo(220, 0.01),
-          reason: '分类 / 标签泳道必须是固定宽度（`_scrollLaneWidth`，有界宽度前提）');
+          reason: '窄屏下分类 / 标签泳道仍是 220 的确定宽度（有界宽度前提）');
     }
 
     final horizontal = tester
@@ -223,8 +228,8 @@ void main() {
     expect(horizontal, isNotEmpty, reason: '分类 / 标签模式应保留横向滚动');
   });
 
-  testWidgets('分类模式：三条泳道均为固定 220px 且无布局断言', (tester) async {
-    tester.view.physicalSize = const Size(800, 1600);
+  testWidgets('分类模式（窄屏）：三条泳道均为 220px 且无布局断言', (tester) async {
+    tester.view.physicalSize = const Size(400, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
@@ -264,6 +269,51 @@ void main() {
     expect(lanes, findsNWidgets(3));
     for (var i = 0; i < 3; i++) {
       expect(tester.getSize(lanes.at(i)).width, closeTo(220, 0.01));
+    }
+  });
+
+  testWidgets('U4：宽屏（≥600）泳道按可用宽铺满，单列夹在 200~280', (tester) async {
+    tester.view.physicalSize = const Size(800, 1600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final provider = await _seed(tester, const [
+      Task(
+        id: 'c1',
+        title: '工作任务',
+        priority: Priority.high,
+        category: Category.work,
+      ),
+      Task(
+        id: 'c2',
+        title: '生活任务',
+        priority: Priority.medium,
+        category: Category.life,
+      ),
+      Task(
+        id: 'c3',
+        title: '学习任务',
+        priority: Priority.low,
+        category: Category.study,
+      ),
+    ]);
+
+    await tester.pumpWidget(_board(provider));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('分类'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+
+    final expected = kanbanLaneWidthFor(800, 3);
+    expect(expected, greaterThan(220),
+        reason: '宽屏列宽必须比窄屏基准更宽（U4 的存在意义）');
+    final lanes = find.byType(DragTarget<Task>);
+    expect(lanes, findsNWidgets(3));
+    for (var i = 0; i < 3; i++) {
+      expect(tester.getSize(lanes.at(i)).width, closeTo(expected, 0.01),
+          reason: '宽屏列宽应等于 kanbanLaneWidthFor(可用宽, 列数)');
     }
   });
 }

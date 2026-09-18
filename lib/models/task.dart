@@ -583,6 +583,29 @@ class Task {
     return _repeatsOnIgnoringSkip(d) && !skipDates.contains(_ymd(d));
   }
 
+  /// 「纯日历」判定的**公开只读入口**（不含 [skipDates]，其余与 [repeatsOn] 一致）。
+  ///
+  /// P3-2（v2.9.0 审计）：occurrence 预览的「今天是否仍是循环日」判定需要忽略跳过
+  /// ——已跳过的日子必须仍然可见（否则撤销入口不可达，v2.8.8 P2-2 定的口径），
+  /// 而 `occurrencesBetween` 会被 `repeatsOn` 的 skip 段滤掉。此前该判定只在模型内部
+  /// 可达，UI 侧无法复用，只能借助整段窗口列表绕行；这里开放为公开方法。
+  bool occursOnIgnoringSkip(DateTime day) => _repeatsOnIgnoringSkip(day);
+
+  /// U3（v2.9.0 审计）：是否为「已结束重复」的退场任务——重复规则字段仍在
+  /// （[isRepeating] 为 true）但 [repeatUntil] 已早于今天，即不会再产生任何循环日。
+  ///
+  /// [TaskProvider.endRepeat] 保留 [repeat] 字段、只用 `repeatUntil=昨天` 表达退场，
+  /// 于是卡片此前仍按重复样式显示（如「每天 07:00 至 09/17」），而任务其实已被清空
+  /// dueDate 落进「今天」分区且不再提醒——用户会误以为「结束重复」是删除。此派生标记
+  /// 供 UI 打一次性角标「已结束重复」，零 schema 变更（纯推导，旧数据自动生效）。
+  bool get repeatEnded {
+    if (!isRepeating) return false;
+    final u = repeatUntil;
+    if (u == null) return false;
+    final now = DateTime.now();
+    return _parseYmd(u).isBefore(DateTime(now.year, now.month, now.day));
+  }
+
   /// [repeatsOn] 的「纯日历」判定：重复规则 + 结束日期，**不含** [skipDates]。
   ///
   /// P2-2（v2.8.8 审计）：把 skip 一段拆出来，供「未来循环日预览」复用——已跳过的

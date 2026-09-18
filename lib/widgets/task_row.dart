@@ -122,7 +122,12 @@ class TaskRow extends StatelessWidget {
     final hasSub = task.subtasks.isNotEmpty;
     final hasTag = task.tags.isNotEmpty;
     final content = Container(
-      height: (hasNote || hasSub || hasTag) ? 78 : 64,
+      // U2（v2.9.0 审计）：由「固定高度」改为「最小高度」——标题放开到 2 行后，
+      // 单行标题时的外观与原先完全一致（78/64 的最小高度 + Row 垂直居中），
+      // 长标题换行时整行自动增高，不再截断成 3~5 个字。
+      constraints: BoxConstraints(
+        minHeight: (hasNote || hasSub || hasTag) ? 78 : 64,
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
@@ -270,7 +275,9 @@ class _TitleBlock extends StatelessWidget {
             fontWeight: FontWeight.w500,
             color: titleColor,
           ),
-          maxLines: 1,
+          // U2（v2.9.0 审计）：与看板卡片对齐，统一 2 行 + 尾省略（原先列表 1 行、
+          // 看板 2 行，同一任务在两处可读信息量不一致）。
+          maxLines: 2,
           overflow: TextOverflow.ellipsis,
         ),
         if (hasNote) ...[
@@ -317,7 +324,22 @@ class _MetaInfo extends StatelessWidget {
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
     final spans = <InlineSpan>[];
-    if (task.isRepeating && task.repeatFull.isNotEmpty) {
+    if (task.repeatEnded) {
+      // U3（v2.9.0 审计）：`endRepeat(markDone:false)` 会保留 repeat 字段、只把
+      // repeatUntil 设为昨天，于是卡片仍按重复样式渲染（「每天 07:00 至 09/17」），
+      // 而任务其实已退场并静默落进「今天」分区——用户会误以为「结束重复」是删除。
+      // 这里给出一次性角标（不可点开预览：已无未来循环日可操作）。
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: Icon(Symbols.event_busy, size: 13, color: ext.meta),
+      ));
+      spans.add(TextSpan(
+        text: ' 已结束重复',
+        style: TextStyle(
+            fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
+      ));
+      spans.add(const TextSpan(text: '  '));
+    } else if (task.isRepeating && task.repeatFull.isNotEmpty) {
       // P0-5：重复芯片可点开「未来30天预览」，便于逐次补打 / 跳过。
       void open() => OccurrenceSheet.show(
             context,

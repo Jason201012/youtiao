@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -8,6 +9,54 @@ import 'package:todolist/theme/app_theme.dart';
 
 /// 看板分组模式（本地 UI 状态，不污染任务数据）。
 enum KanbanGroupMode { status, category, tag }
+
+/// P3-4（v2.9.0 审计）：分组模式的偏好键——把「视图偏好」从页面内存态升级为持久偏好。
+const String kKanbanGroupModePrefsKey = 'kanban_group_mode';
+
+/// 分类 / 标签（横向滚动）模式下每条泳道的**基准**宽度（逻辑像素）。
+///
+/// 这两类泳道位于 `SingleChildScrollView(horizontal)` 内、宽度约束无界，而泳道头的
+/// `Row + Spacer()` 与卡片内 `Expanded(child: Text)` 都要求**有界宽度**——不给确定宽度
+/// 就会在 debug 抛「RenderFlex children have non-zero flex but incoming width constraints
+/// are unbounded」，release 下则静默降级（`Spacer` 塌成 0、卡片按内容自适应）。
+/// 220 在常见手机宽度（360~430dp）下约同屏可见 1.5~2 列，横向滚动手感正常。
+const double _scrollLaneWidth = 220;
+
+/// 泳道宽度的下 / 上限（U4：宽屏时按可用宽自适应，仍夹在此区间内）。
+const double _minLaneWidth = 200;
+const double _maxLaneWidth = 280;
+
+/// 「宽屏」判定阈值（逻辑像素）：达到即认为平板 / 折叠屏展开态 / 横屏手机，
+/// 按可用宽铺满列宽（U4）。
+const double _wideBreakpoint = 600;
+
+/// 解析持久化的分组模式名；缺失 / 非法（含旧版本写入的未知值）回退 [KanbanGroupMode.status]。
+@visibleForTesting
+KanbanGroupMode kanbanModeFromName(String? name) {
+  for (final m in KanbanGroupMode.values) {
+    if (m.name == name) return m;
+  }
+  return KanbanGroupMode.status;
+}
+
+/// U4（v2.9.0 审计）：分类 / 标签泳道的目标宽度（逻辑像素）。
+///
+/// 硬约束不变：该模式下泳道处于**无界宽度视口**内，每条泳道必须有确定宽度（原因见
+/// [_scrollLaneWidth]）。差别在于宽度不再恒为 220：
+/// - 窄屏（`available < [_wideBreakpoint]`）沿用 [_scrollLaneWidth]；
+/// - 宽屏按「可用宽 / 列数」（扣掉列间距）铺满，单列夹在 [_minLaneWidth, _maxLaneWidth]。
+///
+/// 于是平板 / 横屏下不再出现「一列 220 宽、右侧大片空白」的弱存在感；列数过多
+/// （夹取下限后总宽仍超屏）时保留横向滚动，行为与原来一致。
+@visibleForTesting
+double kanbanLaneWidthFor(double available, int laneCount) {
+  if (laneCount <= 0) return _minLaneWidth;
+  if (available.isNaN || available <= 0) return _scrollLaneWidth;
+  if (available < _wideBreakpoint) return _scrollLaneWidth;
+  const gap = 8.0; // 与 `_Column` 的 `margin.right` 对齐
+  final raw = (available - gap * (laneCount - 1)) / laneCount;
+  return raw.clamp(_minLaneWidth, _maxLaneWidth);
+}
 
 /// 分类泳道的中文名。
 String _catLabel(Category c) =>
@@ -148,14 +197,41 @@ class _KanbanBoardState extends State<KanbanBoard> {
   /// 标签泳道上限，超出部分折叠到「其他」。
   static const int _maxTagLanes = 8;
 
-  /// 分类 / 标签（横向滚动）模式下每条泳道的固定宽度（逻辑像素）。
-  ///
-  /// 这两类泳道位于 `SingleChildScrollView(horizontal)` 内、宽度约束无界，而泳道头的
-  /// `Row + Spacer()` 与卡片内 `Expanded(child: Text)` 都要求**有界宽度**——不给固定宽度
-  /// 就会在 debug 抛「RenderFlex children have non-zero flex but incoming width constraints
-  /// are unbounded」，release 下则静默降级（`Spacer` 塌成 0、卡片按内容自适应）。
-  /// 220 在常见手机宽度（360~430dp）下约同屏可见 1.5~2 列，横向滚动手感正常。
-  static const double _scrollLaneWidth = 220;
+  @override
+  void initState() {
+    super.initState();
+    _restoreMode();
+  }
+
+  /// P3-4（v2.9.0 审计）：分组模式此前是纯页面内存态（宿主为 `const KanbanBoard()`
+  /// 且位于 `SingleChildScrollView` 内，页面销毁重建即复位「状态」、滚动位置也回到顶部），
+  /// 习惯「标签」视图的用户每次进看板都要重切。改为写入 SharedPreferences 持久记忆；
+  /// 读取失败不影响看板可用性（保持默认「状态」分组）。
+  Future<void> _restoreMode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved =
+          kanbanModeFromName(prefs.getString(kKanbanGroupModePrefsKey));
+      if (!mounted || saved == _mode) return;
+      setState(() => _mode = saved);
+    } catch (_) {
+      // 偏好不可读（极端情况下插件缺失）：静默保持默认分组。
+    }
+  }
+
+  /// 切换分组模式并落盘（落盘失败不影响当次切换）。
+  void _setMode(KanbanGroupMode mode) {
+    setState(() => _mode = mode);
+    SharedPreferences.getInstance().then((prefs) async {
+      try {
+        await prefs.setString(kKanbanGroupModePrefsKey, mode.name);
+      } catch (_) {
+        // 写入失败：仅本次不记忆，不影响视图。
+      }
+    }).catchError((_) {
+      // 取实例失败：忽略。
+    });
+  }
 
   /// 分类 / 标签泳道的强调色循环调色板。
   static const List<Color> _lanePalette = [
@@ -228,8 +304,10 @@ class _KanbanBoardState extends State<KanbanBoard> {
     // 宽度，注释与实现一致。
     //
     // 分类 / 标签模式列数可变，仍走横向滚动：该模式下泳道处于**无界宽度视口**内（`Expanded`
-    // 在此同样非法），故改给每条泳道**固定宽度** [_scrollLaneWidth] —— 既满足上面同一个
-    // 「有界宽度」前提，又保留「列数可变 + 横向滚动」的既有交互。
+    // 在此同样非法），故给每条泳道**确定宽度** —— 既满足上面同一个「有界宽度」前提，
+    // 又保留「列数可变 + 横向滚动」的既有交互。
+    // U4（v2.9.0 审计）：宽度改由 [kanbanLaneWidthFor] 按可用宽自适应（宽屏铺满、
+    // 单列 200~280 封顶），窄屏仍是 220。
     final lanesView = _mode == KanbanGroupMode.status
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -237,15 +315,23 @@ class _KanbanBoardState extends State<KanbanBoard> {
               for (final w in laneWidgets) Expanded(child: w),
             ],
           )
-        : SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final w in laneWidgets)
-                  SizedBox(width: _scrollLaneWidth, child: w),
-              ],
-            ),
+        : LayoutBuilder(
+            builder: (context, constraints) {
+              final laneWidth = kanbanLaneWidthFor(
+                constraints.maxWidth,
+                laneWidgets.length,
+              );
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final w in laneWidgets)
+                      SizedBox(width: laneWidth, child: w),
+                  ],
+                ),
+              );
+            },
           );
 
     return Column(
@@ -277,7 +363,7 @@ class _KanbanBoardState extends State<KanbanBoard> {
             ),
           ],
           selected: {_mode},
-          onSelectionChanged: (s) => setState(() => _mode = s.first),
+          onSelectionChanged: (s) => _setMode(s.first),
         ),
         const SizedBox(height: 12),
         lanesView,

@@ -6,29 +6,36 @@
 ///
 /// OWASP 建议的双重处理，这里都做：
 ///  1. 转义双引号（`"` → `""`，CSV 标准转义）；
-///  2. 若**去掉前导空白 / Tab / 回车后的首个有效字符**是公式引导符，
+///  2. 若**去掉前导空白 / Tab / 回车 / 双引号后的首个有效字符**是公式引导符，
 ///     前置一个单引号强制按文本处理。
 ///
 /// F-11 修复：此前只判断 `v[0]`（首字符），`"  =1+1"`、`"\t=cmd|..."`、
 /// `"\r=..."` 这类「前导空白后接公式」的情形会被漏掉——Excel 会先吃掉空白
 /// 仍按公式解析。现在先剥掉前导空白与控制字符再判定，单引号也补在**最前面**
 /// （否则 `' \t=...` 依然可能被当作公式）。
+///
+/// P3-5（v2.9.0 审计）：判定必须在**转义前**的原始值上做，且把前导双引号一并视为
+/// 可忽略字符。此前先做 `"` → `""` 替换、再扫首个有效字符，于是 `"=evil"` 的首字符
+/// 变成了 `"`（非引导符）而不补单引号——各写出行把字段包在 `"` 里，最终落盘为
+/// `"""=evil"""` / `""=evil"`：宽容的解析器会把前导 `""` 当成「空串 + 尾随内容」，
+/// 还原出的单元格首字符又变回 `=`，公式照样执行。现在按「原始值去前导空白与引号后
+/// 的首字符」判定（单元格解析后的内容恒等于原始值，故这是唯一的正确判定面）。
 String csvCell(String raw) {
-  final v = raw.replaceAll('"', '""');
+  final escaped = raw.replaceAll('"', '""');
+  // 判定面 = 原始值（见上方说明），只剥「前导」的空白 / 控制字符 / 双引号。
   var i = 0;
-  // 只剥「前导」的空白与控制字符：Excel 解析公式时会忽略它们。
-  while (i < v.length) {
-    final c = v.codeUnitAt(i);
-    // 空格 / \t / \r / \n / \f / \v
+  while (i < raw.length) {
+    final c = raw.codeUnitAt(i);
+    // 空格 / \t / \r / \n / \f / \v / "（引号可能被解析器当作引号引导符吃掉）
     if (c == 0x20 || c == 0x09 || c == 0x0d || c == 0x0a || c == 0x0c ||
-        c == 0x0b) {
+        c == 0x0b || c == 0x22) {
       i++;
       continue;
     }
     break;
   }
-  if (i >= v.length) return v;
+  if (i >= raw.length) return escaped;
   const triggers = <int>{0x3d /* = */, 0x2b /* + */, 0x2d /* - */, 0x40 /* @ */};
-  if (triggers.contains(v.codeUnitAt(i))) return "'$v";
-  return v;
+  if (triggers.contains(raw.codeUnitAt(i))) return "'$escaped";
+  return escaped;
 }

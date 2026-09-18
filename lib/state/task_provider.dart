@@ -1893,6 +1893,9 @@ class TaskProvider extends ChangeNotifier {
   /// 完成态 + 重排链路：
   /// - 无论哪一天，都把该日记入 [Task.doneDates]（完成历史不被午夜重置抹除）；
   /// - 若 [day] 恰为今天，同步把任务置为已完成（并触发「今日已完成 → 跳过今日提醒」）。
+  /// - P3-3（v2.9.0 审计）：[day] 若已在 [Task.skipDates] 中，则**原子地撤销跳过**
+  ///   ——「跳过」与「完成」互斥，不允许同一天双态并存（否则撤销跳过之后当天仍被
+  ///   判为已完成，提醒不回弹，UI 对用户说谎）。
   void markOccurrenceDone(String taskId, DateTime day) {
     final i = _tasks.indexWhere((t) => t.id == taskId);
     if (i == -1) return;
@@ -1901,8 +1904,17 @@ class TaskProvider extends ChangeNotifier {
     if (cur.isDoneOn(d)) return; // 幂等
     final now = DateTime.now();
     final isToday = d.year == now.year && d.month == now.month && d.day == now.day;
+    // P3-3（v2.9.0 审计）：完成与跳过是**互斥**状态，这里与 skipDates 原子互斥——
+    // 命中「已跳过」的日子时一并撤销跳过（旧实现不检查 skipDates，于是同一天会同时
+    // 进入 doneDates 与 skipDates：撤销跳过后 `isDoneOn` 仍判为已完成、当次提醒不回弹，
+    // 用户会困惑「撤销了怎么还是不响」）。
+    final ymd = _ymd(d);
+    final unskipped = cur.skipDates.contains(ymd)
+        ? cur.skipDates.where((s) => s != ymd).toList()
+        : null; // null = copyWith 保留原值（未跳过，无需写回）
     _tasks[i] = cur.copyWith(
       doneDates: _withDoneDate(cur, true, d),
+      skipDates: unskipped,
       status: isToday ? TaskStatus.done : cur.status,
       completedAt: isToday ? now : cur.completedAt,
     );
@@ -2726,8 +2738,7 @@ class TaskProvider extends ChangeNotifier {
   static String _fmt(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-  static String _fmtMinute(int m) =>
-      '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
+  // （原 `_fmtMinute` 已随 CSV 列调整变为无引用死代码，本轮静态分析提示后移除。）
   static String _prioLabel(Priority p) =>
       p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
   static String _catLabel(Category c) =>

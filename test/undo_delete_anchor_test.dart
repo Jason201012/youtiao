@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'test_helpers.dart';
@@ -9,9 +11,25 @@ import 'test_helpers.dart';
 /// 旧实现记 `_lastBatchIndices`，删除后再新增/删/拖拽过的任务，按旧下标插回会错位，
 /// 且旧 order 与邻居不连续。本测试模拟「删 B → 新增 D → 撤销」场景：
 /// 若用下标归位，撤销会插到错误位置；按 id 归位应把 B 放回 A、C 之间。
+///
+/// P3-5（v2.9.0 审计）：本文件此前**无法编译**（`Task` 缺 required 的
+/// priority/category，且 `_installMocks` 未定义）——整条用例从未真正跑起来，
+/// 却被计入「5 条历史预存失败」。这里补齐构造参数与 mock 装配。
+void _installMocks() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  useMemoryDatabase();
+  SharedPreferencesStorePlatform.instance =
+      InMemorySharedPreferencesStore.empty();
+  const ch = MethodChannel('dexterous.com/flutter/local_notifications');
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(ch, (call) async => null);
+}
+
 Task _mk(String id) => Task(
       id: id,
       title: 'T$id',
+      priority: Priority.medium,
+      category: Category.work,
       status: TaskStatus.todo,
       repeat: RepeatType.none,
     );

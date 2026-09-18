@@ -330,8 +330,13 @@ class TaskDetailScreen extends StatelessWidget {
                             ..hideCurrentSnackBar()
                             ..showSnackBar(
                               SnackBar(
-                                content: const Text('已跳过今天这一次'),
-                                duration: const Duration(seconds: 5),
+                                // U1（v2.9.0 审计）：撤销窗口由 5 秒延长到 10 秒——误触后
+                                // 若先做了别的操作（弹窗 / 切页），撤销入口即消失，只能去
+                                // occurrence 预览手动撤销；文案同时给出该常驻路径，与弹层的
+                                // 「撤销跳过」入口联动（两处走同一个 unskipOccurrence）。
+                                content: const Text('已跳过今天这一次（可长按任务行的重复标签，'
+                                    '在「未来循环日预览」中撤销）'),
+                                duration: const Duration(seconds: 10),
                                 action: SnackBarAction(
                                   label: '撤销',
                                   onPressed: () =>

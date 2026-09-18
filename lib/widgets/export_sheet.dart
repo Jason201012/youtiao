@@ -231,7 +231,7 @@ class ExportSheet {
       // 1) App 私有目录留一份，供「分享」按钮兜底使用。
       final file = await DataIo.saveToAppDocs(name, content);
       // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见。
-      String msg = '已导出 iCal 到「下载」目录（可被系统日历导入）';
+      String msg = '已导出 iCal 到「下载」目录（含重复规则与提醒，可被系统日历导入）';
       try {
         await DataIo.saveToDownloads(name, content, mimeType: 'text/calendar');
       } catch (e) {
@@ -302,6 +302,10 @@ class ExportSheet {
             content: Text(
               '共解析到 ${result.tasks.length} 条任务。'
               '${result.simplifiedRepeat > 0 ? '其中 ${result.simplifiedRepeat} 条复杂重复已简化为一次性。' : ''}'
+              // P2-1（v2.9.0 审计）：提醒段的迁移结果必须如实告知——迁移不了的要
+              // 明说「提醒不迁移」，不能让它静默消失（旧实现整段忽略 AALARM/VALARM）。
+              '${result.reminderMigrated > 0 ? '其中 ${result.reminderMigrated} 条任务带提醒，已一并迁移。' : ''}'
+              '${result.reminderDropped > 0 ? '其中 ${result.reminderDropped} 条提醒格式不支持，未迁移，请导入后手动补设。' : ''}'
               '请选择重复任务的处理方式：',
             ),
             actions: [

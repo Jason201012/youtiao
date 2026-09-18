@@ -75,24 +75,34 @@ class UpdateChecker {
       }
       final Map<String, dynamic> data = jsonDecode(resp.body);
       // F12：从 v2.8.0 起，update.json 的 ECDSA 签名升级为强约束——
-      // 远端清单若声明版本 ≥ 2.8.0（不含预发布），则 `signature` 字段必填且必须
-      // 通过内置公钥校验；缺签名 / 验签失败一律拒绝，避免「沿用未签名旧清单
-      // 蒙混过关」。v2.8.0 之前的历史版本维持「可选签名」的渐进策略。
+      // 只要**本机版本**或清单自报版本达到 2.8.0（不含预发布），`signature` 字段即
+      // 必填且必须通过内置公钥校验；缺签名 / 验签失败一律拒绝，避免「沿用未签名旧清单
+      // 蒙混过关」（P3-1 起门槛以本地版本为准，见下方 requireSig 注释）。
+      // v2.8.0 之前的历史版本维持「可选签名」的渐进策略。
       final declaredVer = (data['version'] as String? ?? '').trim();
       final sig = data['signature'] as String?;
       // F-01 修复：判定收进 [UpdatePolicy.requiresMandatorySignature] 纯函数。
       // 原实现在调用点写 `compareVersion(declaredVer, '2.8.0') >= 0`，方向恰好颠倒
       // （compareVersion 返回 >0 表示「参数 b 更新」），结果 2.8.2 及未来所有新版本
       // 反而不强制签名——攻击者删掉 signature 字段即可绕过本轮刚上线的 C-2 验签。
-      final requireSig = UpdatePolicy.requiresMandatorySignature(declaredVer);
+      //
+      // P3-1（v2.9.0 审计）：门槛必须**以本地版本为准**（并与清单自报版本取并集）。
+      // 旧口径只看「清单自报的 version」，而该字段正由不可信侧提供：把 version 改小
+      // （如 2.5.0）再删掉 signature，即可让 requireSig 退化为 false 静默跳过验签
+      // （虽不会下发旧版，但**压住修复推送**使安全问题无法到达设备）。加入
+      // `requiresMandatorySignature(local)` 后，任何装在 2.8.0+ 设备上的 App 面对
+      // 缺失签名的清单一律拒绝——攻击者无法再靠自报版本把门槛降下去。
+      final requireSig = UpdatePolicy.requiresMandatorySignature(local) ||
+          UpdatePolicy.requiresMandatorySignature(declaredVer);
       if (requireSig && (sig == null || sig.isEmpty)) {
         return const UpdateResult(
             hasUpdate: false,
-            error: 'v2.8.0+ 清单必须携带签名（缺失，已拒绝）');
+            error: '本机版本 ≥ 2.8.0，更新清单必须携带签名（缺失，已拒绝）');
       }
       // C-2（更新链路签名校验）：若清单携带 `signature` 字段，则强校验其 ECDSA-P256 签名，
       // 确保清单确实来自开发者私钥、未被篡改（即便 Gitee 账户或 TLS 被攻破也无法伪造）。
-      // 无签名为「旧版未签名发布」，维持现状继续（渐进式，不破坏历史 release）。
+      // 无签名只可能在「本机与清单自报版本均低于 2.8.0 门槛」时走到这里（否则上面
+      // 已拒绝），属对历史未签名 release 的渐进兼容，不影响已升级设备的强校验。
       if (sig != null && sig.isNotEmpty) {
         final signable = Map<String, dynamic>.from(data)..remove('signature');
         final ok = _verifyUpdateSignature(

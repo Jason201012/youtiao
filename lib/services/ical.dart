@@ -5,7 +5,9 @@ import 'package:todolist/models/task.dart';
 /// 纯 Dart、UTF-8 全程，CRLF 行尾（RFC 5545 要求），零依赖，可直接单测。
 /// 与系统日历 / Outlook / Google 日历 / 滴答清单等互通的最短路径——「数据主权最后一公里」。
 ///
-/// 导出：把任务映射为 [VTODO]；导入：解析 [VTODO]（及 [VEVENT] 的 DTSTART 当 dueDate），
+/// 导出：把任务映射为 [VTODO]（DUE / CATEGORIES / RRULE / VALARM）；
+/// 导入：解析 [VTODO]（及 [VEVENT] 的 DTSTART 当 dueDate）与提醒段
+/// （RFC 5545 `VALARM` 的 TRIGGER、vCalendar 1.0 `AALARM`）→ [Task.reminderOffsetMin]，
 /// 复杂 [RRULE]（MONTHLY/YEARLY/带 COUNT 等）降级为一次性任务并在结果里计数提示。
 
 /// iCal 周几 → DateTime.weekday（1=周一 … 7=周日）。
@@ -99,8 +101,12 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     buf.writeln('BEGIN:VTODO');
     buf.writeln('UID:${t.id}@youtiao');
     buf.writeln('SUMMARY:${_escapeIcs(t.title)}');
-    if (t.dueDate != null) {
-      buf.writeln('DUE:${_toIcsLocalTime(t.dueDate!)}');
+    // P2-1（v2.9.0 审计）：重复任务的 DUE 取「今天起首个循环日 + repeatMinute」的
+    // 真实落点，而不是录入侧的占位 dueDate（常常为 null）——否则 RRULE 无起点、
+    // VALARM 也无从表达提醒时刻。
+    final due = _exportDue(t);
+    if (due != null) {
+      buf.writeln('DUE:${_toIcsLocalTime(due)}');
     }
     if (t.note.isNotEmpty) {
       buf.writeln('DESCRIPTION:${_escapeIcs(t.note)}');
@@ -126,11 +132,76 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     // 重复规则 → RRULE（含结束日期 UNTIL）。
     final rrule = _toRrule(t);
     if (rrule != null) buf.writeln(rrule);
+    // P2-1（v2.9.0 审计）：提醒段（VALARM）——此前导出侧从不写提醒，用户在系统日历 /
+    // 第三方待办里看到事件却「到点不响」，跨日历互操作时提醒信息单向静默丢失。
+    _writeAlarm(buf, t, due);
     buf.writeln('END:VTODO');
   }
   buf.writeln('END:VCALENDAR');
   // 统一 CRLF（RFC 5545）。
   return buf.toString().replaceAll('\n', '\r\n');
+}
+
+/// P2-1（v2.9.0 审计）：导出侧 `DUE` 的真实口径。
+///
+/// - 非重复任务：即 [Task.dueDate]（提醒提前量由 `VALARM` 的 TRIGGER 表达）；
+/// - 重复任务：取「今天起首个循环日」并把时刻设为 [Task.repeatMinute]（该重复的提醒
+///   时刻）。此前重复任务只写 `t.dueDate`——自 v2.8.5 起录入侧不再把它钉成
+///   「创建当天 23:59」占位，故往往为 null：第三方日历里既没有落点也没有提醒，
+///   `RRULE` 也失去锚点。
+/// - 重复任务未设 `repeatMinute`（无提醒时刻）或 366 天内已无循环日（已结束重复）时，
+///   回退旧的 `t.dueDate` 行为（可能为 null）。
+DateTime? _exportDue(Task t) {
+  if (t.repeat == RepeatType.none) return t.dueDate;
+  final hhmm = t.repeatMinute;
+  if (hhmm == null) return t.dueDate;
+  final first = _firstOccurrence(t);
+  if (first == null) return t.dueDate;
+  return DateTime(
+    first.year,
+    first.month,
+    first.day,
+    (hhmm ~/ 60).clamp(0, 23),
+    (hhmm % 60).clamp(0, 59),
+  );
+}
+
+/// 今天（含）起 366 天内的首个循环日；无则返回 null（已结束重复 / 规则失效）。
+///
+/// 复用 [Task.repeatsOn]，因此已跳过的日子会被跳过（提醒不应落在被跳过的当天）。
+DateTime? _firstOccurrence(Task t, {DateTime? from}) {
+  final n = from ?? DateTime.now();
+  final s = DateTime(n.year, n.month, n.day);
+  for (var i = 0; i < 366; i++) {
+    final d = DateTime(s.year, s.month, s.day + i);
+    if (t.repeatsOn(d)) return d;
+  }
+  return null;
+}
+
+/// P2-1（v2.9.0 审计）：把任务的提醒写成语义等价的 `VALARM` 段。
+///
+/// 语义与通知排程（notification_service `_scheduleDeadline` / 重复提醒落点）严格对齐：
+/// - 非重复任务：提醒时刻 = `DUE − reminderOffsetMin` → `TRIGGER:-PT{n}M`；
+///   `reminderOffsetMin == 0` 表示与落点同一时刻 → `TRIGGER:PT0S`（零时长，RFC 5545
+///   不允许 `-PT0M` 这类「负零」写法）；
+/// - 重复任务：提醒时刻即每个循环日的 `repeatMinute`，而 `DUE` 已落在该时刻上
+///   → `TRIGGER:PT0S`（见 [_exportDue]）；
+/// - 无落点（`due == null`）或重复任务无 `repeatMinute` → 不写该段（无提醒可迁移）。
+void _writeAlarm(StringBuffer buf, Task t, DateTime? due) {
+  if (due == null) return;
+  final int offsetMin;
+  if (t.repeat != RepeatType.none) {
+    if (t.repeatMinute == null) return;
+    offsetMin = 0;
+  } else {
+    offsetMin = t.reminderOffsetMin;
+  }
+  buf.writeln('BEGIN:VALARM');
+  buf.writeln('ACTION:DISPLAY');
+  buf.writeln('DESCRIPTION:${_escapeIcs(t.title)}');
+  buf.writeln(offsetMin > 0 ? 'TRIGGER:-PT${offsetMin}M' : 'TRIGGER:PT0S');
+  buf.writeln('END:VALARM');
 }
 
 /// 把任务重复规则映射为 RRULE 行（含 UNTIL）。无重复返回 null。
@@ -181,6 +252,11 @@ class IcsImportResult {
   final String report;
   /// P2-4：是否因超过单批解析上限（[parseIcs] 的 [maxItems]）被截断。
   final bool truncated;
+  /// P2-1（v2.9.0 审计）：**带提醒段但提醒无法迁移**的条数（`TRIGGER` 形态不可表达，
+  /// 如「晚于落点提醒」、缺少落点导致绝对时刻无从求差等）。此前这类信息完全静默，
+  /// 用户以为「同步成功」，实际第三方日历的提醒丢了。
+  final int reminderMigrated;
+  final int reminderDropped;
   /// P0-3：与 [tasks] 平行的原始 UID 列表（可能为 null，第三方 .ics 往往无 UID）。
   /// youtiao 导出的 UID 形如 `<数字id>@youtiao`，解析层已把对应任务 id 设为该数字 id，
   /// 故 [tasks] 中这些任务的 id 非空，可直接用于 [TaskProvider.importDedup] 的 UID 去重。
@@ -192,6 +268,8 @@ class IcsImportResult {
     required this.failed,
     required this.report,
     this.truncated = false,
+    this.reminderMigrated = 0,
+    this.reminderDropped = 0,
     this.uids = const [],
   });
 }
@@ -250,6 +328,8 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   var partial = 0;
   var failed = 0;
   var truncated = false;
+  var reminderMigrated = 0;
+  var reminderDropped = 0;
   for (final b in blocks) {
     // P2-4：达到单批上限即停止，剩余块不再解析，避免批量灌注 DoS。
     if (tasks.length >= maxItems) {
@@ -272,6 +352,15 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
         tasks.add(task);
         // 同步收集该块的原始 UID（可能是 null），保持与 tasks 平行。
         uids.add(b['UID']);
+        // P2-1（v2.9.0 审计）：统计提醒段的迁移结果——带提醒段但迁移不了的要如实
+        // 告知用户「提醒不迁移」，而不是让它静默消失（旧实现整段忽略）。
+        if (_hasAlarmSegment(b)) {
+          if (_parseAlarmOffsetMin(b, _blockDueDate(b)) != null) {
+            reminderMigrated++;
+          } else {
+            reminderDropped++;
+          }
+        }
       } else {
         failed++;
       }
@@ -282,6 +371,8 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   final report = '成功解析 ${tasks.length} 条'
       '${simplified > 0 ? '（其中 $simplified 条复杂重复已简化为一次性）' : ''}'
       '${partial > 0 ? '（$partial 条重复规则部分保留，间隔/次数等细节未支持）' : ''}'
+      '${reminderMigrated > 0 ? '（$reminderMigrated 条提醒已迁移）' : ''}'
+      '${reminderDropped > 0 ? '（$reminderDropped 条提醒未迁移：格式不支持）' : ''}'
       '${failed > 0 ? '，跳过 $failed 条' : ''}'
       '${truncated ? '，已截断（最多 $maxItems 条，请分批导入）' : ''}';
   return IcsImportResult(
@@ -291,8 +382,92 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
     failed: failed,
     report: report,
     truncated: truncated,
+    reminderMigrated: reminderMigrated,
+    reminderDropped: reminderDropped,
     uids: uids,
   );
+}
+
+/// P2-1（v2.9.0 审计）：块内是否含提醒段（RFC 5545 `TRIGGER` 或 vCalendar 1.0
+/// `AALARM`）。扁平解析把 `BEGIN:VALARM` 之后的属性直接挂在块上，故按属性名判定。
+bool _hasAlarmSegment(Map<String, String> b) =>
+    (b['TRIGGER']?.trim().isNotEmpty ?? false) ||
+    (b['AALARM']?.trim().isNotEmpty ?? false);
+
+/// 块的落点（`DUE` 优先，其次 `DTSTART`），无则 null。抽出来供 [_blockToTask] 与
+/// 提醒迁移统计共用，避免两处口径漂移。
+DateTime? _blockDueDate(Map<String, String> b) {
+  final due = b['DUE'] ?? b['DTSTART'];
+  return due != null ? _parseIcsDateTime(due) : null;
+}
+
+/// P2-1（v2.9.0 审计）：把块的提醒段解析为 [Task.reminderOffsetMin]（提前分钟数）。
+///
+/// 支持两种形态：
+///  1. RFC 5545 `VALARM` → `TRIGGER` 的 duration 形态（`-PT30M` / `PT1H` / `-P1DT2H`）：
+///     负值即「提前」，直接取绝对值；正值（晚于落点）本 App 无对应语义 → null；
+///  2. 绝对时刻形态（`TRIGGER;VALUE=DATE-TIME:19970317T133000Z`、vCalendar 1.0
+///     `AALARM:19970317T133000Z;...`）：与落点求差得提前量，需要落点存在。
+///
+/// 无法表达 / 缺少落点时返回 null（调用方计入「提醒未迁移」并如实提示）。
+int? _parseAlarmOffsetMin(Map<String, String> b, DateTime? due) {
+  // 1) TRIGGER：先按 duration 解析（本 App 自身的导出形态即此类）。
+  final trig = b['TRIGGER']?.trim();
+  if (trig != null && trig.isNotEmpty) {
+    final rel = _triggerDurationToOffsetMin(trig);
+    if (rel != null) return rel;
+    final abs = _parseIcsDateTime(trig);
+    final mins = _offsetFromAbsolute(abs, due);
+    if (mins != null) return mins;
+  }
+  // 2) vCalendar 1.0 AALARM：`AALARM:<触发时刻>;<时长>;...`（只取首段绝对时刻）。
+  final aal = b['AALARM']?.trim();
+  if (aal != null && aal.isNotEmpty) {
+    final abs = _parseIcsDateTime(aal.split(';').first);
+    final mins = _offsetFromAbsolute(abs, due);
+    if (mins != null) return mins;
+  }
+  return null;
+}
+
+/// 绝对触发时刻 → 相对落点的「提前分钟数」；落点缺失 / 触发晚于落点 / 超出 7 天
+/// （与 [Task.reminderOffsetMin] 的合法区间一致）返回 null。
+int? _offsetFromAbsolute(DateTime? trigger, DateTime? due) {
+  if (trigger == null || due == null) return null;
+  final mins = due.difference(trigger).inMinutes;
+  if (mins < 0 || mins > 7 * 24 * 60) return null;
+  return mins;
+}
+
+/// 解析 RFC 5545 duration（`[+-]P[nW][nD][T[nH][nM][nS]]`）为「提前分钟数」。
+///
+/// 返回正数表示**早于**落点（`-PT30M` → 30）；零时长（`PT0S`）→ 0；
+/// 「晚于落点」（`PT10M`）或格式非法 → null（本 App 只表达提前量）。
+int? _triggerDurationToOffsetMin(String raw) {
+  final s = raw.trim().toUpperCase();
+  if (s.isEmpty) return null;
+  final m = RegExp(
+          r'^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$')
+      .firstMatch(s);
+  if (m == null) return null;
+  // 「P」后面什么都没有（如 "P" / "PT"）不视为合法时长。
+  if (m.group(2) == null &&
+      m.group(3) == null &&
+      m.group(4) == null &&
+      m.group(5) == null &&
+      m.group(6) == null) {
+    return null;
+  }
+  final sign = m.group(1) == '-' ? -1 : 1;
+  final w = int.tryParse(m.group(2) ?? '') ?? 0;
+  final d = int.tryParse(m.group(3) ?? '') ?? 0;
+  final h = int.tryParse(m.group(4) ?? '') ?? 0;
+  final mi = int.tryParse(m.group(5) ?? '') ?? 0;
+  final se = int.tryParse(m.group(6) ?? '') ?? 0;
+  final seconds = sign * ((((w * 7 + d) * 24 + h) * 60 + mi) * 60 + se);
+  if (seconds > 0) return null; // 晚于落点：无法表达
+  final mins = (-seconds) ~/ 60;
+  return mins > 7 * 24 * 60 ? null : mins;
 }
 
 /// F-10（v2.8.5 审计）：判断一条**已被映射**的 RRULE 是否含未支持成分
@@ -341,9 +516,10 @@ Task? _blockToTask(Map<String, String> b) {
   if (summary == null || summary.isEmpty) return null;
   final title = _unescapeIcs(summary);
 
-  DateTime? dueDate;
-  final due = b['DUE'] ?? b['DTSTART'];
-  if (due != null) dueDate = _parseIcsDateTime(due);
+  DateTime? dueDate = _blockDueDate(b);
+  // P2-1（v2.9.0 审计）：导入侧解析提醒段（VALARM/AALARM）→ reminderOffsetMin。
+  // 无法迁移时保持 0（= 落点时刻提醒），并由 [parseIcs] 计入「提醒未迁移」如实提示。
+  final reminderOffsetMin = _parseAlarmOffsetMin(b, dueDate) ?? 0;
 
   final note = b['DESCRIPTION'] != null ? _unescapeIcs(b['DESCRIPTION']!) : '';
 
@@ -487,6 +663,8 @@ Task? _blockToTask(Map<String, String> b) {
     completedAt: completedAt,
     note: note,
     tags: tags,
+    // P2-1：提醒提前量随导入落库（无提醒段时为 0 = 落点时刻提醒）。
+    reminderOffsetMin: reminderOffsetMin,
     repeat: repeat,
     repeatWeekdays: weekdays,
     repeatInterval: interval,

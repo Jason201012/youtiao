@@ -443,7 +443,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
           if (!dense) const SizedBox(width: 6),
           Expanded(
             child: Text(task.title.isNotEmpty ? task.title : '(无标题)',
-                maxLines: 1,
+                // U2（v2.9.0 审计）：列表 / 日程视图放宽到 2 行，与任务列表、看板卡片
+                // 口径统一（原先此处与任务列表都是 1 行，长标题只剩首行）。
+                // 月视图的密集条（dense）保持 1 行：格子高度固定，2 行会溢出。
+                maxLines: dense ? 1 : 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                     fontSize: dense ? 10 : 13,

@@ -10,6 +10,8 @@ void main() {
       final t = Task(
         id: '1',
         title: 'a',
+        priority: Priority.medium,
+        category: Category.work,
         repeat: RepeatType.daily,
         repeatMinute: 450,
         repeatUntil: '2026-09-06',
@@ -26,6 +28,8 @@ void main() {
       final t = Task(
         id: '2',
         title: 'b',
+        priority: Priority.medium,
+        category: Category.work,
         repeat: RepeatType.weekly,
         repeatWeekdays: const [DateTime.sunday],
         repeatMinute: 450,

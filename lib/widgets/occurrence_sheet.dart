@@ -45,6 +45,12 @@ class _OccurrenceBody extends StatefulWidget {
 class _OccurrenceBodyState extends State<_OccurrenceBody> {
   late Task _task;
 
+  /// P3-6（v2.9.0 审计）：本弹层内「经『移到下一天』触发跳过」的日期集合
+  /// （yyyy-MM-dd）。此前该动作只有一条 4 秒 SnackBar 说明，用户错过提示就会以为
+  /// 「没移成功」，且 skipDates 里看不出这条跳过来自「移到下一天」。这里在行内留一个
+  /// 可视化痕迹（会话级即可，不新增任何持久字段）。
+  final Set<String> _deferSkipped = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -63,6 +69,32 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
   DateTime get _today {
     final n = DateTime.now();
     return DateTime(n.year, n.month, n.day);
+  }
+
+  /// P3-2（v2.9.0 审计）：该重复的提醒时刻（[Task.repeatMinute]）在今天是否已过去。
+  /// 无提醒时刻（repeatMinute 为 null）时不存在「已过」概念，恒为 false。
+  bool get _todayReminderPassed {
+    final m = _task.repeatMinute;
+    if (m == null) return false;
+    final n = DateTime.now();
+    return n.hour * 60 + n.minute > m;
+  }
+
+  /// P3-2（v2.9.0 审计）：预览窗口的起点。
+  ///
+  /// 窗口此前恒从「今天」起算（`occurrencesBetweenIncludingSkipped(DateTime.now())`），
+  /// 于是「每天 07:00」在上午 10 点打开时，今天仍排第一行、仍可「标记完成 / 移到下
+  /// 一天」，但此刻提醒早已响过（或不应再响）——文案「未来 30 天共 N 个循环日」与事实
+  /// 不符，且对今天是否仍可操作没有任何提示。
+  ///
+  /// 修正：**今天仍是循环日 + 提醒时刻已过 + 今天既未跳过也未完成** 时，窗口自明天起算；
+  /// 其余情况（已跳过 / 已完成 / 无提醒时刻）保留今天——已跳过的行必须仍可撤销
+  /// （v2.8.8 P2-2 定的口径），不能因为「提醒已过」把撤销入口藏掉。
+  DateTime get _windowStart {
+    if (!_task.occursOnIgnoringSkip(_today)) return _today;
+    if (_isSkipped(_today) || _isDone(_today)) return _today;
+    if (!_todayReminderPassed) return _today;
+    return _today.add(const Duration(days: 1));
   }
 
   void _markDone(DateTime d) {
@@ -92,12 +124,17 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
         newDay,
         origDay: d,
       );
+      // P3-6：给被跳过的这一天留一个会话级痕迹（行内文案会显示跳过来源）。
+      _deferSkipped.add(Task.ymdKey(d));
       _refresh();
       if (context.mounted) {
         final dayLabel =
             '${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
+            // P3-6（v2.9.0 审计）：原 4 秒提示错过即无痕，这里延长到 8 秒，且被跳过的
+            // 那一行本身会显示「已跳过（经『移到下一天』）」，提示不再是唯一凭据。
+            duration: const Duration(seconds: 8),
             content: Text(copy == null
                 ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
                 : '已移到 $dayLabel（已新建一次性副本）'),
@@ -113,6 +150,7 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                   widget.provider.discardTask(copy.id);
                 }
                 widget.provider.unskipOccurrence(_task.id, day: d);
+                _deferSkipped.remove(Task.ymdKey(d));
                 _refresh();
               },
             ),
@@ -133,6 +171,8 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
   void _unskip(DateTime d) {
     if (!_isSkipped(d)) return; // 未跳过，幂等
     widget.provider.unskipOccurrence(_task.id, day: d);
+    // P3-6：撤销后不再有「经『移到下一天』跳过」的痕迹。
+    _deferSkipped.remove(Task.ymdKey(d));
     _refresh();
   }
 
@@ -141,8 +181,12 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     // P2-2（v2.8.8 审计）：必须用「不排除跳过」的窗口——否则 `skipDates` 命中的
     // 日子被 `repeatsOn` 过滤掉、已跳过行永不渲染，用户跳过一次后在本弹层既看不到
     // 也无法撤销（`skipped` 分支此前是不可达死代码）。
-    final occ = _task.occurrencesBetweenIncludingSkipped(DateTime.now());
+    // P3-2（v2.9.0 审计）：起点改走 [_windowStart]——今天提醒时刻已过时不再把今天
+    // 当作可操作的循环日。
+    final start = _windowStart;
+    final occ = _task.occurrencesBetweenIncludingSkipped(start);
     final skippedCount = occ.where(_isSkipped).length;
+    final todayIgnored = start.isAfter(_today);
     final weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
     return DraggableScrollableSheet(
       initialChildSize: 0.8,
@@ -160,7 +204,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
             child: Text(
                 '「${_task.title}」· 未来 30 天共 ${occ.length} 个循环日'
-                '${skippedCount > 0 ? '（含 $skippedCount 个已跳过）' : ''}',
+                '${skippedCount > 0 ? '（含 $skippedCount 个已跳过）' : ''}'
+                // P3-2：今天提醒时刻已过时如实说明窗口口径，避免「今天怎么不见了」。
+                '${todayIgnored ? '（今天的提醒时刻已过，自明天起算）' : ''}',
                 style: const TextStyle(fontSize: 13, color: Colors.grey)),
           ),
           const Divider(height: 1),
@@ -188,10 +234,20 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                       // 例外：该日若**已经**被标记完成（旧版本遗留的预打卡数据），
                       // 仍允许「标记未完成」把脏数据清掉，否则用户无从撤销。
                       final isFuture = d.isAfter(_today);
-                      final canToggleDone = !isFuture || done;
+                      // P3-3（v2.9.0 审计）：已跳过的日子不再提供「标记完成」——两者是
+                      // 互斥状态，此前同日可先后进入 `skipDates` 与 `doneDates`（双态并存），
+                      // 撤销跳过后今天仍被 `isDoneOn` 判为已完成、提醒不回弹，用户会困惑
+                      // 「撤销了怎么还是不响」。菜单按状态互斥：已跳过 → 仅「撤销跳过」。
+                      final canToggleDone = (!isFuture || done) && !skipped;
+                      final isToday = Task.isSameDay(d, _today);
+                      // P3-6：提示这一天的跳过来自「移到下一天」。
+                      final deferred = _deferSkipped.contains(Task.ymdKey(d));
                       // U16：完成态原硬编码 Colors.green，深色主题下刺眼且与
                       // App 语义色脱节；改主色（与全局完成勾选一致）。
                       final doneColor = Theme.of(context).colorScheme.primary;
+                      // P3-2：今天若仍显示（已跳过 / 已完成 / 无提醒时刻），提醒时刻已过
+                      // 时如实标注，避免用户误以为「今天还能再操作一次」。
+                      final todayPassed = isToday && _todayReminderPassed;
                       return ListTile(
                         leading: Icon(
                           done
@@ -212,10 +268,14 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                           done
                               ? '已完成'
                               : skipped
-                                  ? '已跳过'
+                                  ? (deferred
+                                      ? '已跳过（经「移到下一天」）'
+                                      : '已跳过')
                                   : isFuture
                                       ? '待处理（未来只可跳过 / 改期）'
-                                      : '待处理',
+                                      : todayPassed
+                                          ? '待处理（提醒时刻已过）'
+                                          : '待处理',
                           style: TextStyle(
                             color:
                                 done ? doneColor : skipped ? Colors.grey : null,

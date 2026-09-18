@@ -1,5 +1,56 @@
 # 更新日志（Changelog）
 
+## v2.9.1（2026-09-18）
+
+### 功能与操作审计修复（依据《有条功能与操作审计报告（v2.9.0）》：P2-1、P3-1~P3-6、U1~U4 全量落地）
+
+#### P2-1 · 与系统日历互通：提醒段双向打通（`lib/services/ical.dart`）
+- **导出**：`VTODO` 内新增 `VALARM` 提醒段——非重复任务按 `reminderOffsetMin` 写 `TRIGGER:-PT{n}M`（`0` 表示与落点同时刻，写零时长 `PT0S`；RFC 5545 不允许 `-PT0M` 这种「负零」）；重复任务的 `DUE` 由「录入侧占位值」改为**今天起首个循环日 + `repeatMinute`** 的真实落点，配 `TRIGGER:PT0S`。此前导出既不写提醒、重复任务的 `DUE` 又常为 `null`（RRULE 无起点），导入第三方日历后「到点不响」却显示同步成功。
+- **导入**：解析 RFC 5545 `TRIGGER`（含 `-P1DT2H` 等复合时长、`PT0S`）与 vCalendar 1.0 `AALARM`（绝对时刻，与落点求差）→ 回填 `Task.reminderOffsetMin`；新增 `IcsImportResult.reminderMigrated` / `reminderDropped`，无法表达的形态（如「晚于落点才提醒」）在导入对话框与结果文案里**如实提示「提醒未迁移」**，不再静默丢失。
+
+#### P3-1 · 更新清单「强制签名」门槛改以本地版本为准（`lib/services/update_checker.dart`）
+- 旧口径只看清单自报的 `version`：把版本号改小（如 `2.5.0`）并删除 `signature`，即可让「是否强制验签」退化为否——虽不会下发旧版本，但能**压住修复推送**使安全问题无法到达设备。
+- 现判定为 `requiresMandatorySignature(本地版本) || requiresMandatorySignature(清单自报版本)`：装在 2.8.0+ 的设备遇到缺签名清单**一律拒绝**。
+
+#### P3-2 · 未来循环日预览窗口口径（`lib/models/task.dart`、`lib/widgets/occurrence_sheet.dart`）
+- 窗口此前恒从「今天」起算：上午 10 点打开「每天 07:00」的预览，今天仍排第一行且可操作，而提醒早已响过。
+- 现规则：今天仍是循环日 **且** 提醒时刻已过 **且** 今天既未跳过也未完成 → 自明天起算，并在标题注明「今天的提醒时刻已过，自明天起算」；今天已跳过 / 已完成时保留今天（撤销入口不可隐藏）。
+- 新增 `Task.occursOnIgnoringSkip`（`_repeatsOnIgnoringSkip` 的公开入口），供 UI 复用「忽略跳过」的日历判定。
+
+#### P3-3 · 跳过与完成互斥（`lib/state/task_provider.dart`、`lib/widgets/occurrence_sheet.dart`）
+- `markOccurrenceDone` 命中 `skipDates` 的日子时**原子撤销跳过**，杜绝同日同时进入 `doneDates` 与 `skipDates`（否则撤销跳过后当天仍被判为已完成、提醒不回弹，UI 等于说谎）。
+- 弹层菜单改互斥：已跳过的日期只提供「撤销跳过」，不再出现可点的「标记完成」。
+
+#### P3-4 · 看板分组模式持久化（`lib/widgets/kanban_board.dart`）
+- 分组模式（状态 / 分类 / 标签）写入 `SharedPreferences`（键 `kanban_group_mode`），宿主重建 / 重启后沿用上次选择（此前是纯页面内存态，习惯标签视图的用户每次都要重切）。读写失败均静默回退默认，不影响看板可用性。
+
+#### P3-5 · 历史 5 条测试失败归零（`test/*`、`lib/services/csv_safe.dart`）
+- `task_repeats_on_test` / `undo_delete_anchor_test` **无法编译**（`Task` 缺 required 的 `priority`/`category`、`_installMocks` 未定义）→ 补齐构造参数与 mock 装配；
+- `task_provider_test` 的 `clearSampleTasks` ×2 缺 `flutter_secure_storage` 通道 mock（`read`→null / `containsKey`→false / `readAll`→`{}`）→ 补上；
+- `csv_injection_test` 双引号断言与实现不符 → **修的是实现**：`csvCell` 的公式判定面从「转义后」改回「转义前的原始值」，且前导双引号也算可忽略字符。此前 `"=evil"` / `"=evil` 会漏拦，而写出行又把字段包在 `"` 里，宽容解析器还原出的单元格仍以 `=` 开头。断言同步更正。
+- 顺带移除 `task_provider.dart` 一处无引用的 `_fmtMinute` 死代码（静态分析提示）。
+
+#### P3-6 · 「移到下一天」的跳过痕迹（`lib/widgets/occurrence_sheet.dart`）
+- 目标日本就是循环日时只走 skip 不建副本，此前仅靠一条 4 秒 SnackBar 说明；现被跳过的那一行标注「已跳过（经「移到下一天」）」（会话级痕迹，零新增持久字段），SnackBar 时长 4s → 8s。
+
+#### U1 · 详情页「本次跳过」撤销窗口（`lib/screens/task_detail_screen.dart`）
+- 撤销气泡 5s → 10s，文案同时给出常驻路径（长按任务行的重复标签 → 「未来循环日预览」），与弹层的「撤销跳过」入口联动（两处走同一个 `unskipOccurrence`）。
+
+#### U2 · 标题显示统一为 2 行（`lib/widgets/task_row.dart`、`lib/screens/calendar_screen.dart`）
+- 任务行标题放开到 2 行，容器由固定高度改为 `minHeight`（单行标题外观与原先一致，长标题整行自动增高）；日历列表 / 日程条 2 行，月视图密集条保持 1 行（格子高度固定，2 行会溢出）。
+
+#### U3 · 「已结束重复」角标（`lib/models/task.dart`、`lib/widgets/task_row.dart`）
+- 新增派生标记 `Task.repeatEnded`（`isRepeating` 且 `repeatUntil` 早于今天，零 schema 变更）；卡片显示「已结束重复」角标，替代此前仍按重复样式渲染的「每天 07:00 至 …」，避免 `endRepeat(markDone:false)` 后被误认为已删除。
+
+#### U4 · 看板泳道宽度自适应（`lib/widgets/kanban_board.dart`）
+- 新增 `kanbanLaneWidthFor(可用宽, 列数)`：窄屏（<600dp）沿用 220；宽屏按可用宽铺满并夹在 200~280，平板 / 横屏下不再「一列 220 宽、右侧大片空白」；列数过多时仍夹到下限并保留横向滚动（「有界宽度」前提不变）。
+
+### 说明
+- **测试**：新增 `test/v290_audit_fix_test.dart`（21 用例，覆盖 iCal 提醒段导出/导入往返、`occursOnIgnoringSkip`、跳过与完成互斥、`repeatEnded`、看板模式解析、泳道宽度矩阵）；`test/kanban_lane_layout_test.dart` 因 U4 调整列宽语义，原 220 断言改用窄屏画布，并新增宽屏自适应用例。
+- **验证**：全量 `flutter test --no-pub` → **602 通过 / 0 失败**（历史 5 条预存失败全部闭环）；`dart analyze lib test` 改动文件零 error / 零 warning（仓库既有 44 条 warning 均在未触碰文件）。
+- **严格离线红线**：纯本地改动，未新增除现有 update-check 之外的任何网络调用。
+- **无破坏性机制变更**：通知 id 方案号维持 4，存量用户升级后无「首启重建提醒」类一次性动作。
+
 ## v2.9.0（2026-09-13）
 
 ### 看板布局修复（泳道「有界宽度」——修掉一处 debug 断言与一处静默降级）

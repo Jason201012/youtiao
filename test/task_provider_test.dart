@@ -9,6 +9,10 @@ import 'test_helpers.dart';
 
 /// 在 headless 测试里把 flutter_local_notifications 的 method channel 置为 no-op，
 /// 并给 shared_preferences 一个内存实现，避免删除类操作触碰真实插件而抛 MissingPluginException。
+///
+/// P3-5（v2.9.0 审计）：再补上 flutter_secure_storage 的 no-op——`load()` 会读取
+/// 安全存储（应用锁 / 加密偏好），此前 headless 下直接抛 MissingPluginException
+/// 让「clearSampleTasks 后重启不复活示例」两条用例恒失败（被计为历史预存失败）。
 void _installMocks() {
   TestWidgetsFlutterBinding.ensureInitialized();
   useMemoryDatabase();
@@ -16,6 +20,21 @@ void _installMocks() {
   const ch = MethodChannel('dexterous.com/flutter/local_notifications');
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(ch, (call) async => null);
+  // 安全存储：无存量值 → read/containsKey 返回空，readAll 返回空表。
+  const secure = MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(secure, (call) async {
+    switch (call.method) {
+      case 'read':
+        return null;
+      case 'containsKey':
+        return false;
+      case 'readAll':
+        return <String, String>{};
+      default:
+        return null;
+    }
+  });
 }
 
 /// 用受控的 Task 列表构造 Provider（绕过 load()，避免启动午夜守护定时器）。
