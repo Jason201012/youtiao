@@ -131,16 +131,15 @@ class ParsedTask {
   /// 标题是否可用（空标题不允许创建任务）
   bool get isValid => title.isNotEmpty;
 
-  /// 由「地点 + 预估时长」合成的备注正文（P1-5）。
+  /// 由「地点」合成的备注正文（P1-5）。
   ///
-  /// 刻意不新增模型字段——避免动到备份 JSON schema 与迁移逻辑，
-  /// 待未来与专注预设打通时再提升为结构化字段。
+  /// T1-1（v2.9.2 功能增强）：**不再**把预估时长拼进备注。预估此前没有模型字段可落，
+  /// 只能塞进备注文本充当「临时载体」；现在 [Task.estimateMinutes] 已是一等字段，
+  /// 继续拼备注会让同一信息在详情页出现两次（备注里的「预计45分钟」+ 结构化行）。
+  /// 地点仍留在备注：它同样没有独立字段，且属自由文本语义。
   String get composedNote {
     final parts = <String>[];
     if (location != null && location!.isNotEmpty) parts.add('@$location');
-    if (estimateMinutes != null && estimateMinutes! > 0) {
-      parts.add('预计${TaskParser.formatDuration(estimateMinutes!)}');
-    }
     return parts.join(' · ');
   }
 
@@ -166,6 +165,10 @@ class ParsedTask {
       monthlyWeekIndex: monthlyWeekIndex,
       monthlyFromEnd: monthlyFromEnd,
       reminderOffsetMin: reminderOffsetMin ?? 0,
+      // T1-1：预估时长落库为结构化字段（此前被拼进备注后即丢失，见 composedNote 注释）。
+      estimateMinutes: (estimateMinutes != null && estimateMinutes! > 0)
+          ? estimateMinutes
+          : null,
       repeatAnchor:
           repeat == RepeatType.interval ? DateTime(anchor.year, anchor.month, anchor.day) : null,
       tags: tags,

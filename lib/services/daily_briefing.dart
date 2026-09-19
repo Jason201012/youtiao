@@ -102,7 +102,8 @@ DailyBrief buildEveningBriefFromState(
   final habitDue = active.length;
   var habitDone = 0;
   for (final h in active) {
-    if (habit.isCheckedOn(h, now)) habitDone++;
+    // T1-2：达成口径——量化习惯需当日累计量达标，仅有记录不算「已达成」。
+    if (habit.isTargetMetOn(h, now)) habitDone++;
   }
   // F2：打断数据展示闭环——晚简报补一行「专注被打断 X 次」，按同一投递日聚合。
   final interrupts = focus.interruptCountOn(now);
@@ -241,9 +242,11 @@ Future<void> rescheduleHabitNudge(
       return;
     }
     final now = DateTime.now();
-    // 先算已打卡集合：只遍历一次 habits，避免 missedOn 内部反复调用 isCheckedToday。
+    // 先算已达标集合：只遍历一次 habits，避免 missedOn 内部反复调用判定函数。
+    // T1-2：口径用「达标」而非「有记录」——量化习惯只喝了 1/8 杯仍应被挽留，
+    // 否则「没喝够」永远收不到提醒，量化目标形同虚设。
     final checkedIds = habit.habits
-        .where(habit.isCheckedToday)
+        .where((h) => habit.isTargetMetOn(h, now))
         .map((h) => h.id)
         .toSet();
     final missed = HabitNudge.missedOn(habit.habits, now, checkedIds);

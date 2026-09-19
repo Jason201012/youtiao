@@ -31,8 +31,9 @@ class HabitScreen extends StatelessWidget {
     final ctx = AchievementContext.fromProviders(task, focus, habit);
 
     final total = habit.activeHabits.length;
+    // T1-2：达成口径——量化习惯要求当日累计量 ≥ 每日目标，仅有记录不算完成。
     final todayDone =
-        habit.activeHabits.where((h) => habit.isCheckedToday(h)).length;
+        habit.activeHabits.where((h) => habit.isTargetMetToday(h)).length;
 
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -105,20 +106,111 @@ String _fmtMinute(int minute) {
 
 /// 打卡并在打破历史最长连续时播放庆祝动效。
 ///
-/// 先记录「打卡前最长连续」与「是否已打卡」，toggle 后若本次是新增打卡且当前连续
+/// 先记录「打卡前最长连续」与「是否已达标」，变更后若本次是**新增达标**且当前连续
 /// 已超过此前最长，即触发全屏庆祝。供习惯列表圆圈与详情弹层共用。
+///
+/// T1-2：判定基准由「是否已打卡」改为「是否已达成当日目标」——量化习惯在喝到第 8
+/// 杯那一刻（而不是第 1 杯）才该庆祝；布尔习惯两者等价，行为不变。
 Future<void> checkInWithCelebration(
   BuildContext context,
   HabitProvider hp,
   Habit habit,
 ) async {
-  final wasChecked = hp.isCheckedToday(habit);
+  final wasMet = hp.isTargetMetToday(habit);
   final longestBefore = hp.longestStreak(habit);
   await hp.toggleCheckInToday(habit);
-  if (context.mounted && !wasChecked) {
-    final now = hp.currentStreak(habit);
-    if (now > longestBefore) showStreakCelebration(context, now);
+  await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
+}
+
+/// T1-2：量化习惯的「+1」打卡（累加 1 个单位），达标那一刻触发庆祝。
+Future<void> incrementWithCelebration(
+  BuildContext context,
+  HabitProvider hp,
+  Habit habit,
+) async {
+  final wasMet = hp.isTargetMetToday(habit);
+  final longestBefore = hp.longestStreak(habit);
+  await hp.adjustCheckInValue(habit, DateTime.now(), 1);
+  await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
+}
+
+/// 共用庆祝判定：本次由「未达标」变为「已达标」，且当前连续超过历史最长。
+Future<void> _maybeCelebrate(
+  BuildContext context,
+  HabitProvider hp,
+  Habit habit,
+  bool wasMet,
+  int longestBefore,
+) async {
+  if (!context.mounted || wasMet) return;
+  if (!hp.isTargetMetToday(habit)) return;
+  final now = hp.currentStreak(habit);
+  if (now > longestBefore) showStreakCelebration(context, now);
+}
+
+/// T1-2：通用整数输入对话框（每日目标量 / 补卡数量共用）。
+///
+/// 返回 null = 取消；否则返回夹到 [min, max] 的整数。
+Future<int?> promptHabitInt(
+  BuildContext context, {
+  required String title,
+  required int current,
+  int min = 0,
+  int max = 9999,
+  String? hint,
+}) async {
+  final ctl = TextEditingController(text: '$current');
+  final result = await showDialog<int>(
+    context: context,
+    builder: (d) => AlertDialog(
+      title: Text(title),
+      content: TextField(
+        controller: ctl,
+        autofocus: true,
+        keyboardType: TextInputType.number,
+        decoration: InputDecoration(hintText: hint ?? '请输入 $min–$max 之间的整数'),
+        onSubmitted: (v) => Navigator.pop(d, int.tryParse(v.trim()) ?? -1),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(d), child: const Text('取消')),
+        FilledButton(
+          onPressed: () => Navigator.pop(d, int.tryParse(ctl.text.trim()) ?? -1),
+          child: const Text('确定'),
+        ),
+      ],
+    ),
+  );
+  ctl.dispose();
+  if (result == null) return null;
+  if (result < min || result > max) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('请输入 $min–$max 之间的整数')),
+      );
+    }
+    return null;
   }
+  return result;
+}
+
+/// T1-2：设置「今日数量」对话框（量化习惯的长按 / 详情页「数量」入口）。
+/// 填 0 = 清空今日记录（等价于撤卡）。
+Future<void> promptHabitTodayQuantity(
+  BuildContext context,
+  HabitProvider hp,
+  Habit habit,
+) async {
+  final cur = hp.todayValue(habit);
+  final v = await promptHabitInt(
+    context,
+    title: '设置今日数量',
+    current: cur,
+    min: 0,
+    max: 9999,
+    hint: '目标 ${habit.effectiveTarget}；填 0 = 清空今日记录',
+  );
+  if (v == null) return;
+  await hp.setCheckInValue(habit, DateTime.now(), v);
 }
 
 /// 打开单习惯详情弹层（含该习惯自己的热力图、连续天数与分享入口）。
@@ -302,7 +394,11 @@ class _HabitTile extends StatelessWidget {
     final hp = context.watch<HabitProvider>();
     final ext = appColors(context);
     final primary = Theme.of(context).colorScheme.primary;
-    final checked = hp.isCheckedToday(habit);
+    final quantified = habit.isQuantified;
+    final value = hp.todayValue(habit);
+    final target = habit.effectiveTarget;
+    // T1-2：量化习惯用「达成」判定，布尔习惯等价于原「已打卡」。
+    final checked = quantified ? hp.isTargetMetToday(habit) : hp.isCheckedToday(habit);
     final streak = hp.currentStreak(habit);
     final freq = habit.weekdays.isEmpty
         ? '每天'
@@ -333,20 +429,41 @@ class _HabitTile extends StatelessWidget {
                     Text(habit.title,
                         style: const TextStyle(fontWeight: FontWeight.w600)),
                     const SizedBox(height: 4),
-                    Row(
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         StreakBadge(current: streak, accent: primary),
-                        const SizedBox(width: 8),
                         Text(freq,
                             style: TextStyle(color: ext.meta, fontSize: 12)),
-                        if (habit.weeklyGoal > 0) ...[
-                          const SizedBox(width: 8),
+                        // T1-2：量化进度芯片（今日 / 本周累计 → 目标）。
+                        if (quantified)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: checked
+                                  ? primary.withValues(alpha: 0.14)
+                                  : ext.chip,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              '今日 $value/$target',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: checked ? primary : ext.meta,
+                              ),
+                            ),
+                          ),
+                        if (habit.weeklyGoal > 0)
                           Container(
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
                               color: goalMet
-                                  ? primary.withOpacity(0.14)
+                                  ? primary.withValues(alpha: 0.14)
                                   : ext.chip,
                               borderRadius: BorderRadius.circular(8),
                             ),
@@ -357,7 +474,18 @@ class _HabitTile extends StatelessWidget {
                                   color: goalMet ? primary : ext.meta,
                                 )),
                           ),
-                        ],
+                        // T1-4：宽限日提示（仅开启时显示，避免噪音）。
+                        if (habit.graceDays > 0)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: ext.chip,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text('宽限 ${habit.graceDays} 天/周',
+                                style: TextStyle(fontSize: 11, color: ext.meta)),
+                          ),
                       ],
                     ),
                   ],
@@ -376,26 +504,81 @@ class _HabitTile extends StatelessWidget {
           )
         : const SizedBox.shrink();
 
-    // 右侧打卡圆圈：快速打卡 + 打破纪录庆祝。
-    final check = Padding(
-      padding: const EdgeInsets.only(right: 12),
-      child: GestureDetector(
-        onTap: () => checkInWithCelebration(context, hp, habit),
-        child: Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: checked ? primary : Colors.transparent,
-            border: Border.all(
-                color: checked ? primary : ext.meta, width: 2),
-          ),
-          child: checked
-              ? const Icon(Icons.check, color: Colors.white, size: 18)
-              : null,
-        ),
-      ),
-    );
+    // 右侧动作区：
+    // - 布尔习惯：勾选圆圈（点击打卡 + 打破纪录庆祝）；
+    // - 量化习惯（T1-2）：计数 pill（点开详情 / 长按设数量）+「+1」按钮
+    //   （点击累加 1，达标那一刻触发庆祝）。
+    final action = quantified
+        ? Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => showHabitDetailSheet(context, habit),
+                  onLongPress: () =>
+                      promptHabitTodayQuantity(context, hp, habit),
+                  child: Container(
+                    constraints: const BoxConstraints(minWidth: 46),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: checked ? primary : ext.chip,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '$value/$target',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: checked ? Colors.white : ext.meta,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => incrementWithCelebration(context, hp, habit),
+                  onLongPress: () =>
+                      promptHabitTodayQuantity(context, hp, habit),
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: checked ? primary.withValues(alpha: 0.16) : primary,
+                    ),
+                    child: Icon(Icons.add,
+                        size: 18,
+                        color: checked ? primary : Colors.white),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+            ),
+          )
+        : Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: GestureDetector(
+              onTap: () => checkInWithCelebration(context, hp, habit),
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: checked ? primary : Colors.transparent,
+                  border: Border.all(
+                      color: checked ? primary : ext.meta, width: 2),
+                ),
+                child: checked
+                    ? const Icon(Icons.check, color: Colors.white, size: 18)
+                    : null,
+              ),
+            ),
+          );
 
     return Container(
       decoration: BoxDecoration(
@@ -403,7 +586,7 @@ class _HabitTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppColors.cardRadius),
       ),
       child: Row(
-        children: [left, chip, check],
+        children: [left, chip, action],
       ),
     );
   }
@@ -691,6 +874,10 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   int? _reminderMinute;
   /// 每周目标打卡次数（0 = 不启用，1..14）。
   int _weeklyGoal = 0;
+  /// T1-2：每日目标量（null = 按天打卡的布尔习惯）。
+  int? _dailyTarget;
+  /// T1-4：宽限日（0..3，0 = 关闭）。
+  int _graceDays = 0;
 
   String _formatReminder() {
     if (_reminderMinute == null) return '未设置';
@@ -876,6 +1063,74 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               ),
             ],
           ),
+          // T1-2：每日目标量（量化习惯，如「每天喝 8 杯水」）。
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Text('每日目标量',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              const Spacer(),
+              TextButton(
+                onPressed: () async {
+                  final v = await promptHabitInt(
+                    context,
+                    title: '每日目标量',
+                    current: _dailyTarget ?? 1,
+                    min: 1,
+                    max: 9999,
+                    hint: '如「每天喝 8 杯水」填 8',
+                  );
+                  if (v != null) setState(() => _dailyTarget = v);
+                },
+                child: Text(
+                  _dailyTarget == null ? '关闭（按天打卡）' : '$_dailyTarget / 天',
+                  style: TextStyle(color: primary),
+                ),
+              ),
+              if (_dailyTarget != null)
+                IconButton(
+                  icon: Icon(Symbols.close, size: 18, color: ext.meta),
+                  tooltip: '关闭量化（改回按天打卡）',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => setState(() => _dailyTarget = null),
+                ),
+            ],
+          ),
+          Text(
+            _dailyTarget == null
+                ? '开启后可「+1」累加数量，达标才算完成（如喝水、阅读页数）'
+                : '打卡时按数量累加，达到 $_dailyTarget 才算当日达成',
+            style: TextStyle(fontSize: 12, color: ext.meta),
+          ),
+          // T1-4：宽限日——每周允许漏卡 N 天而不断签，降低「一次失手前功尽弃」的挫败。
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Text('宽限日',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(width: 6),
+              Text('每周允许漏卡不断签',
+                  style: TextStyle(fontSize: 12, color: ext.meta)),
+              const Spacer(),
+              IconButton(
+                onPressed: _graceDays > 0
+                    ? () => setState(() => _graceDays--)
+                    : null,
+                icon: const Icon(Symbols.remove_circle_outline),
+                visualDensity: VisualDensity.compact,
+              ),
+              Text('$_graceDays',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold)),
+              IconButton(
+                onPressed: _graceDays < 3
+                    ? () => setState(() => _graceDays++)
+                    : null,
+                icon: const Icon(Symbols.add_circle_outline),
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
           const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
@@ -891,6 +1146,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                       weekdays: _weekdays.toList(),
                       reminderMinute: _reminderMinute,
                       weeklyGoal: _weeklyGoal,
+                      dailyTarget: _dailyTarget,
+                      graceDays: _graceDays,
                     );
                 Navigator.pop(context);
               },
@@ -928,6 +1185,12 @@ class _HabitDetailSheet extends StatelessWidget {
   }
 
   /// U3：补卡——选过去某天标记打卡。补的是提醒日/错过日，不限今天。
+  ///
+  /// T1-4 补齐两处此前的死路：
+  /// 1. **撤卡**：已打卡的日期原先只弹一句「已打过卡」就结束，补错的卡无法取消
+  ///    （连续天数、热力图、周报全都被这条错误记录污染）；
+  /// 2. **改数量**：量化习惯（T1-2）补卡时可以填「那天到底做了多少」，而不是被
+  ///    硬编码记成 1 个单位。
   Future<void> _backfillCheckIn(BuildContext context, HabitProvider hp) async {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -938,24 +1201,88 @@ class _HabitDetailSheet extends StatelessWidget {
       initialDate: today.subtract(const Duration(days: 1)),
       firstDate: first.isBefore(today) ? first : today.subtract(const Duration(days: 30)),
       lastDate: today,
-      helpText: '选择要补卡的日期',
+      helpText: '选择要补卡 / 撤卡的日期',
     );
     if (picked == null) return;
-    // 幂等：已打卡则提示已存在，不重复记。
-    if (hp.isCheckedOn(habit, picked)) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(
-              '${picked.month}月${picked.day}日 已打过卡')),
+    final dayLabel = '${picked.month}月${picked.day}日';
+    final existing = hp.checkInValueOn(habit, picked);
+
+    // 已有记录 → 提供「撤销 / 改数量」，不再是一句无法操作的提示。
+    if (existing > 0) {
+      if (!context.mounted) return;
+      final action = await showDialog<String>(
+        context: context,
+        builder: (d) => AlertDialog(
+          title: Text('$dayLabel 已有打卡'),
+          content: Text(habit.isQuantified
+              ? '该日已记录 $existing 个单位（目标 ${habit.effectiveTarget}）。'
+                  '可以撤销这条记录，或修改数量。'
+              : '该日已打过卡。可以撤销它，撤销后连续天数与热力图会同步回退。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(d, 'cancel'),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(d, 'undo'),
+              child: const Text('撤销打卡'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(d, 'edit'),
+              child: const Text('修改数量'),
+            ),
+          ],
+        ),
+      );
+      if (action == 'undo') {
+        await hp.setCheckInValue(habit, picked, 0);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('已撤销 $dayLabel 的打卡')),
+          );
+        }
+      } else if (action == 'edit') {
+        if (!context.mounted) return;
+        final v = await promptHabitInt(
+          context,
+          title: '修改 $dayLabel 的数量',
+          current: existing,
+          min: 0,
+          max: 9999,
+          hint: '填 0 = 撤销该日打卡',
         );
+        if (v == null) return;
+        await hp.setCheckInValue(habit, picked, v);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(v == 0 ? '已撤销 $dayLabel 的打卡' : '已把 $dayLabel 更新为 $v')),
+          );
+        }
       }
       return;
     }
-    await hp.checkInOnDay(habit, picked);
+
+    // 无记录 → 补打。量化习惯允许填数量。
+    var value = 1;
+    if (habit.isQuantified) {
+      if (!context.mounted) return;
+      final v = await promptHabitInt(
+        context,
+        title: '补 $dayLabel 的数量',
+        current: habit.effectiveTarget,
+        min: 1,
+        max: 9999,
+        hint: '目标 ${habit.effectiveTarget}',
+      );
+      if (v == null) return;
+      value = v;
+    }
+    if (!context.mounted) return;
+    await hp.checkInOnDay(habit, picked, value: value);
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(
-            '已补 ${picked.month}月${picked.day}日 打卡（连续天数已更新）')),
+        SnackBar(
+            content: Text('已补 $dayLabel 打卡（连续天数已更新）')),
       );
     }
   }
@@ -1005,6 +1332,12 @@ class _HabitDetailSheet extends StatelessWidget {
         : '每周 ${habit.weekdays.map(_wdLabel).join(' ')}';
     final created = DateFormat('yyyy年M月d日').format(habit.createdAt);
     final isCheckedToday = hp.isCheckedToday(habit);
+    // T1-2：量化习惯的今日进度。
+    final quantified = habit.isQuantified;
+    final todayValue = hp.todayValue(habit);
+    final target = habit.effectiveTarget;
+    final metToday = hp.isTargetMetToday(habit);
+    final todayRatio = habit.progressRatioOf(todayValue);
 
     return SafeArea(
       top: false,
@@ -1058,6 +1391,21 @@ class _HabitDetailSheet extends StatelessWidget {
                         const SizedBox(height: 4),
                         Text('$freq · 创建于 $created',
                             style: TextStyle(fontSize: 12, color: ext.meta)),
+                        if (quantified)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              '每日目标 $target'
+                              '${habit.graceDays > 0 ? ' · 宽限 ${habit.graceDays} 天/周' : ''}',
+                              style: TextStyle(fontSize: 12, color: ext.meta),
+                            ),
+                          )
+                        else if (habit.graceDays > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text('宽限 ${habit.graceDays} 天/周',
+                                style: TextStyle(fontSize: 12, color: ext.meta)),
+                          ),
                         if (habit.weeklyGoal > 0)
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
@@ -1107,6 +1455,76 @@ class _HabitDetailSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
+              // T1-2：量化习惯的今日进度（累计量 / 目标 + 进度条 + 快捷操作）。
+              if (quantified) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: ext.chip,
+                    borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text('今日进度',
+                              style: TextStyle(
+                                  fontSize: 15, fontWeight: FontWeight.w700)),
+                          const Spacer(),
+                          Text(
+                            '$todayValue / $target${metToday ? ' · 已达标' : ''}',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: metToday ? primary : ext.meta,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: ext.track,
+                          borderRadius:
+                              BorderRadius.circular(AppColors.progressRadius),
+                        ),
+                        child: FractionallySizedBox(
+                          widthFactor: todayRatio,
+                          alignment: Alignment.centerLeft,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: primary,
+                              borderRadius: BorderRadius.circular(
+                                  AppColors.progressRadius),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          TextButton.icon(
+                            onPressed: () =>
+                                promptHabitTodayQuantity(context, hp, habit),
+                            icon: const Icon(Symbols.edit, size: 16),
+                            label: const Text('设置数量'),
+                          ),
+                          if (todayValue > 0)
+                            TextButton.icon(
+                              onPressed: () => hp.clearToday(habit),
+                              icon: const Icon(Symbols.undo, size: 16),
+                              label: const Text('清空今日'),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               // 单习惯热力图
               Container(
                 width: double.infinity,
@@ -1122,7 +1540,7 @@ class _HabitDetailSheet extends StatelessWidget {
                         style: TextStyle(
                             fontSize: 16, fontWeight: FontWeight.w700)),
                     const SizedBox(height: 4),
-                    Text('最近 $weeks 周',
+                    Text(quantified ? '最近 $weeks 周（颜色深浅 = 当日达成度）' : '最近 $weeks 周',
                         style: TextStyle(fontSize: 12, color: ext.meta)),
                     const SizedBox(height: 14),
                     HabitHeatmap(
@@ -1130,6 +1548,19 @@ class _HabitDetailSheet extends StatelessWidget {
                       weeks: weeks,
                       accent: primary,
                       goalMet: hp.goalMetThisWeek(habit),
+                      // T1-2：量化习惯用「当日达成度」分级着色（4 档），
+                      // 一眼能看出「哪些天只是勉强打了卡、哪些天做满了」。
+                      levelOf: quantified
+                          ? (d) {
+                              final r = habit
+                                  .progressRatioOf(hp.checkInValueOn(habit, d));
+                              if (r <= 0) return 0;
+                              if (r < 0.5) return 1;
+                              if (r < 0.75) return 2;
+                              if (r < 1.0) return 3;
+                              return 4; // 达标档（HabitHeatmap 的 steps 长度为 4）
+                            }
+                          : null,
                     ),
                   ],
                 ),
@@ -1139,16 +1570,19 @@ class _HabitDetailSheet extends StatelessWidget {
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      // U15：已打卡时点主按钮先确认再撤（见 _confirmUncheckToday），
-                      // 不再是「像状态标签却一碰就取消」的静默破坏。
-                      onPressed: isCheckedToday
-                          ? () => _confirmUncheckToday(context, hp)
-                          : () => checkInWithCelebration(context, hp, habit),
-                      icon: Icon(
-                        isCheckedToday ? Icons.check : Icons.add,
-                      ),
-                      label:
-                          Text(isCheckedToday ? '今日已打卡' : '打卡'),
+                      // T1-2：量化习惯主按钮是「+1 累加」；布尔习惯沿用
+                      // U15 的「已打卡先确认再撤」口径。
+                      onPressed: quantified
+                          ? () => incrementWithCelebration(context, hp, habit)
+                          : (isCheckedToday
+                              ? () => _confirmUncheckToday(context, hp)
+                              : () => checkInWithCelebration(context, hp, habit)),
+                      icon: Icon(quantified
+                          ? Icons.add
+                          : (isCheckedToday ? Icons.check : Icons.add)),
+                      label: Text(quantified
+                          ? (metToday ? '+1（已达标）' : '+1')
+                          : (isCheckedToday ? '今日已打卡' : '打卡')),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -1220,12 +1654,23 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
   late final Set<int> _weekdays = {...widget.habit.weekdays};
   late int _weeklyGoal = widget.habit.weeklyGoal;
   late bool _archived = widget.habit.archived;
+  // T1-4：编辑层补齐「提醒时刻 / 每日目标量 / 宽限日」三项。
+  late int? _reminderMinute = widget.habit.reminderMinute;
+  late int? _dailyTarget = widget.habit.dailyTarget;
+  late int _graceDays = widget.habit.graceDays;
   bool _saving = false;
 
   @override
   void dispose() {
     _titleCtl.dispose();
     super.dispose();
+  }
+
+  String get _reminderLabel {
+    final m = _reminderMinute;
+    if (m == null) return '未设置';
+    return '${(m ~/ 60).toString().padLeft(2, '0')}:'
+        '${(m % 60).toString().padLeft(2, '0')}';
   }
 
   Future<void> _save() async {
@@ -1243,6 +1688,11 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       weekdays: _weekdays.toList()..sort(),
       weeklyGoal: _weeklyGoal,
       archived: _archived,
+      reminderMinute: _reminderMinute,
+      clearReminder: _reminderMinute == null,
+      dailyTarget: _dailyTarget,
+      clearDailyTarget: _dailyTarget == null,
+      graceDays: _graceDays,
     );
     if (!mounted) return;
     Navigator.pop(context);
@@ -1251,8 +1701,15 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     );
   }
 
+  /// U2 + T1-4：删除习惯（含全部打卡记录），删除后提供 10 秒撤销窗口。
+  ///
+  /// 旧实现删除即永久丢失：一次误触就抹掉连续天数、热力图与全部历史打卡，
+  /// 而任务侧早就有 SnackBar 撤销。现在删除返回快照，撤销即原样放回
+  /// （含原列表位置与全部打卡记录，见 [HabitProvider.restoreHabit]）。
   Future<void> _delete() async {
     final hp = context.read<HabitProvider>();
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
@@ -1274,14 +1731,25 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       ),
     );
     if (confirmed != true) return;
-    await hp.deleteHabit(widget.habit.id);
+    final snapshot = await hp.deleteHabit(widget.habit.id);
     if (!mounted) return;
     // 关闭编辑层 + 其下的详情弹层，回到习惯列表（删除后详情已无意义）。
-    Navigator.of(context).pop();
-    Navigator.of(context).pop();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('习惯已删除')),
-    );
+    navigator.pop();
+    navigator.pop();
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(snapshot?.undoLabel ?? '习惯已删除'),
+          duration: const Duration(seconds: 10),
+          action: snapshot == null
+              ? null
+              : SnackBarAction(
+                  label: '撤销',
+                  onPressed: () => hp.restoreHabit(snapshot),
+                ),
+        ),
+      );
   }
 
   @override
@@ -1396,6 +1864,111 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
                 IconButton(
                   onPressed: _weeklyGoal < 14
                       ? () => setState(() => _weeklyGoal++)
+                      : null,
+                  icon: const Icon(Symbols.add_circle_outline),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Text('每日提醒时刻',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: () async {
+                    final cur = _reminderMinute ?? 21 * 60;
+                    final picked = await showTimePicker(
+                      context: context,
+                      initialTime:
+                          TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
+                    );
+                    if (picked != null) {
+                      setState(() =>
+                          _reminderMinute = picked.hour * 60 + picked.minute);
+                    }
+                  },
+                  icon: Icon(Symbols.alarm,
+                      size: 18,
+                      color: _reminderMinute == null
+                          ? ext.meta
+                          : Theme.of(context).colorScheme.primary),
+                  label: Text(
+                    _reminderLabel,
+                    style: TextStyle(
+                      color: _reminderMinute == null
+                          ? ext.meta
+                          : Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ),
+                if (_reminderMinute != null)
+                  IconButton(
+                    icon: Icon(Symbols.close, size: 18, color: ext.meta),
+                    tooltip: '清除提醒',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => setState(() => _reminderMinute = null),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // T1-2：每日目标量（关闭 = 按天打卡的布尔习惯）。
+            Row(
+              children: [
+                const Text('每日目标量',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const Spacer(),
+                TextButton(
+                  onPressed: () async {
+                    final v = await promptHabitInt(
+                      context,
+                      title: '每日目标量',
+                      current: _dailyTarget ?? 1,
+                      min: 1,
+                      max: 9999,
+                      hint: '如「每天喝 8 杯水」填 8',
+                    );
+                    if (v != null) setState(() => _dailyTarget = v);
+                  },
+                  child: Text(
+                    _dailyTarget == null ? '关闭（按天打卡）' : '$_dailyTarget / 天',
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.primary),
+                  ),
+                ),
+                if (_dailyTarget != null)
+                  IconButton(
+                    icon: Icon(Symbols.close, size: 18, color: ext.meta),
+                    tooltip: '关闭量化',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => setState(() => _dailyTarget = null),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // T1-4：宽限日。
+            Row(
+              children: [
+                const Text('宽限日',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(width: 6),
+                Text('每周允许漏卡不断签',
+                    style: TextStyle(fontSize: 12, color: ext.meta)),
+                const Spacer(),
+                IconButton(
+                  onPressed: _graceDays > 0
+                      ? () => setState(() => _graceDays--)
+                      : null,
+                  icon: const Icon(Symbols.remove_circle_outline),
+                  visualDensity: VisualDensity.compact,
+                ),
+                Text('$_graceDays',
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold)),
+                IconButton(
+                  onPressed: _graceDays < 3
+                      ? () => setState(() => _graceDays++)
                       : null,
                   icon: const Icon(Symbols.add_circle_outline),
                   visualDensity: VisualDensity.compact,

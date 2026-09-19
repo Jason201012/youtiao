@@ -22,6 +22,9 @@ import 'package:just_audio/just_audio.dart';
 import 'package:todolist/models/attachment.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/habit_migration.dart';
+import 'package:todolist/services/schedule_advisor.dart';
+import 'package:todolist/services/task_parser.dart';
 
 /// 识别备注中的 http(s) 链接并渲染为可点击文本（其余部分保持普通文本）。
 ///
@@ -162,6 +165,11 @@ class TaskDetailScreen extends StatelessWidget {
     // 但日后规则改成覆盖该日时会被永久静默跳过，且用户被「已跳过今天这一次」的
     // 成功文案误导（假成功）。这里据此禁用按钮并改文案。
     final canSkipToday = task.isRepeating && task.occursOnIgnoringSkip(DateTime.now());
+    // T1-1：预估 vs 实际的偏差文案（与今日排程建议共用同一 pure 函数，口径不漂移）。
+    final estimateBias = estimateBiasLabel(
+      estimatedMinutes: task.estimateMinutes,
+      actualMinutes: task.focusedMinutes,
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -299,10 +307,33 @@ class TaskDetailScreen extends StatelessWidget {
                       icon: Symbols.repeat,
                       label: '重复',
                       value: task.repeatFull),
+                // T1-1：预计时长（未设则不占位）。
+                if (task.hasEstimate)
+                  _RowItem(
+                      icon: Symbols.hourglass_bottom,
+                      label: '预计时长',
+                      value: TaskParser.formatDuration(task.estimateMinutes!)),
                 _RowItem(
                     icon: Symbols.timer,
                     label: '累计专注',
                     value: _focusLabel(task.focusSecTotal)),
+                // T1-1：预估 vs 实际的偏差提示（无预估或无专注记录时为 null）。
+                if (estimateBias != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      children: [
+                        Icon(Symbols.insights, size: 14, color: ext.meta),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            estimateBias,
+                            style: TextStyle(fontSize: 11, color: ext.meta),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
@@ -624,31 +655,77 @@ class TaskDetailScreen extends StatelessWidget {
   }
 }
 
-/// 把任务一键转为习惯（S5）。
+/// 把任务一键转为习惯（S5 / T1-3）。
 ///
-/// 逻辑：用任务标题建一条「每天」打卡的习惯（emoji 用默认✅，强调色用品牌色，
-/// 不携带提醒时间——让用户后续在习惯页自行设置提醒时机，避免误打扰）。
-/// 建完后询问是否删除原任务：选「删除」则走 deleteTask（进回收站、可撤销），
-/// 不选则保留任务（用户可同时保留任务与习惯，互不影响）。
+/// 旧实现（v2.6.2 起）只做了一件事：用任务标题建一条「每天、无提醒、无周目标」的习惯。
+/// 星期、提醒时刻、每周循环次数全部丢失，用户还得去习惯页重设一遍——等价于「手工重录
+/// 加一次点击」。T1-3 起改为按 [HabitDraft.fromTask] 的映射规则迁移：
+///
+/// - **打卡日**：`每周一/三/五` → 相同星期；`仅工作日` → 周一~周五；其余 → 每天；
+/// - **提醒时刻**：优先取重复提醒时刻，其次取截止时间的时分（「每天 09:00 交周报」的
+///   实际响铃点），两者皆无则不提醒（不擅自替用户安排打扰时间）；
+/// - **周目标**：按每周循环次数折算（每天 7 / 工作日 5 / 每周X天 X / 每隔N天 ⌈7/N⌉）；
+/// - 无法用「星期 + 周目标」表达的规则（`每隔 N 天`、`每月`）会在预览里**如实告知**
+///   折算结果，避免「转完发现提醒节奏变了」的黑箱感。
 Future<void> _convertToHabit(BuildContext context, Task task) async {
   final habit = context.read<HabitProvider>();
-  // 习惯默认「每天」打卡（weekdays 空=每天），emoji✅，品牌色，无提醒。
+  final draft = HabitDraft.fromTask(task);
   final brandColor = Theme.of(context).colorScheme.primary.value;
-  await habit.addHabit(
-    title: task.title,
+
+  // 转换预览：先让用户看清「会建成什么样的习惯」，再决定原任务去留。
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('转为习惯'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ConvertRow('名称', draft.title),
+          _ConvertRow('打卡日', draft.weekdaysLabel),
+          _ConvertRow('提醒', draft.reminderLabel),
+          _ConvertRow('周目标', draft.weeklyGoalLabel),
+          if (draft.droppedNotes.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            for (final n in draft.droppedNotes)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text('· $n',
+                    style: const TextStyle(fontSize: 12, color: Colors.orange)),
+              ),
+          ],
+          const SizedBox(height: 10),
+          const Text('原任务可选择保留（任务与习惯互不影响）或删除（移入回收站，可在设置中恢复）。',
+              style: TextStyle(fontSize: 12)),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('转为习惯'),
+        ),
+      ],
+    ),
+  );
+  if (confirm != true) return;
+
+  await habit.addHabitFromDraft(
+    draft,
     emoji: '✅',
     colorValue: brandColor,
-    weekdays: const [], // 空=每天
-    reminderMinute: null, // 不自动提醒，用户后续自行设置
   );
-
   if (!context.mounted) return;
-  // 询问是否删除原任务（默认保留，避免误删）。选「删除」才进回收站（可撤销）。
+
   final remove = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('已转为习惯'),
-      content: const Text('已把该任务创建为「每天」打卡的习惯。是否同时删除原任务？（删除后可在回收站撤销）'),
+      content: Text('已按「${draft.weekdaysLabel} · ${draft.reminderLabel}」创建习惯。'
+          '是否同时删除原任务？（删除后可在回收站恢复）'),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(ctx, false),
@@ -666,9 +743,35 @@ Future<void> _convertToHabit(BuildContext context, Task task) async {
   }
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已转为习惯（可在「习惯」页设置提醒）')),
+      const SnackBar(content: Text('已转为习惯（可在「习惯」页继续调整）')),
     );
     Navigator.pop(context);
+  }
+}
+
+/// 转换预览弹层里的一行「字段 → 值」。
+class _ConvertRow extends StatelessWidget {
+  final String label;
+  final String value;
+  const _ConvertRow(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 56,
+            child: Text(label,
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 13))),
+        ],
+      ),
+    );
   }
 }
 

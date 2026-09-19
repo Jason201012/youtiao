@@ -161,6 +161,13 @@ class Task {
   /// 是否完成：由 [status] 派生，保持对外只读语义一致。
   bool get done => status == TaskStatus.done;
 
+  /// T1-1：是否带有可用的预计时长（>0）。排程建议与偏差提示统一用这个判定，
+  /// 避免各处重复写 `estimateMinutes != null && estimateMinutes! > 0`。
+  bool get hasEstimate => estimateMinutes != null && estimateMinutes! > 0;
+
+  /// T1-1：累计专注分钟数（四舍五入）。用于与 [estimateMinutes] 比对偏差。
+  int get focusedMinutes => (focusSecTotal / 60).round();
+
   /// 是否「逾期」：统一口径（看板统计卡、首页「逾期」筛选、分享长图共用）。
   /// 规则：未完成、非重复任务，且截止日期按「天」严格早于今天
   /// （今天到点未做不算逾期）。重复任务不计逾期（v2.2.8 对齐过）。
@@ -259,6 +266,16 @@ class Task {
   /// 序列化为 `reminderOffsetMin`，旧数据缺省为 0（向后兼容）。
   final int reminderOffsetMin;
 
+  /// 预计时长（分钟，1..43200 即 30 天）。null = 未预估（零迁移）。
+  ///
+  /// T1-1：自然语言解析器（[TaskParser]）早已能识别「预计 30 分钟」并产出
+  /// `ParsedTask.estimateMinutes`，但 Task 模型此前没有该字段——解析结果在创建任务时
+  /// 即被丢弃（只塞进备注文本），用户反复输入却永远不落库。本字段把它提升为结构化真源：
+  /// 既供「今日排程建议」（[ScheduleAdvice]）做顺延预估，也供与累计专注时长
+  /// （[focusSecTotal]）比对给出「高估 / 低估」偏差提示。
+  /// 序列化为 `estimateMinutes`，旧数据缺省为 null（向后兼容，零迁移）。
+  final int? estimateMinutes;
+
   /// 是否置顶/星标：置顶任务在所属分区内固定排最前（优先于手动 [order]），
   /// 用于把高频/重要任务常驻列表顶部。序列化为 `pinned`，缺省 false（向后兼容，零迁移）。
   final bool pinned;
@@ -306,6 +323,7 @@ class Task {
     this.focusSecTotal = 0,
     this.order = 0.0,
     this.reminderOffsetMin = 0,
+    this.estimateMinutes,
     this.pinned = false,
     this.pinyinInitials = '',
     this.updatedAt,
@@ -348,6 +366,9 @@ class Task {
     int? focusSecTotal,
     double? order,
     int? reminderOffsetMin,
+    // T1-1：可空字段，必须能「显式清空」——`estimateMinutes ?? this.estimateMinutes`
+    // 会把 `copyWith(estimateMinutes: null)` 误判成「保留旧值」，用户永远删不掉预估。
+    Object? estimateMinutes = _kKeep,
     bool? pinned,
     String? pinyinInitials,
     Object? updatedAt = _kKeep,
@@ -390,6 +411,9 @@ class Task {
         focusSecTotal: focusSecTotal ?? this.focusSecTotal,
         order: order ?? this.order,
         reminderOffsetMin: reminderOffsetMin ?? this.reminderOffsetMin,
+        estimateMinutes: estimateMinutes == _kKeep
+            ? this.estimateMinutes
+            : estimateMinutes as int?,
         pinned: pinned ?? this.pinned,
         pinyinInitials: pinyinInitials ?? this.pinyinInitials,
         updatedAt: updatedAt == _kKeep ? this.updatedAt : updatedAt as DateTime?,
@@ -426,6 +450,7 @@ class Task {
         'focusSecTotal': focusSecTotal,
         'order': order,
         'reminderOffsetMin': reminderOffsetMin,
+        'estimateMinutes': estimateMinutes,
         'pinned': pinned,
         'pinyinInitials': pinyinInitials,
         'updatedAt': updatedAt?.toIso8601String(),
@@ -511,6 +536,10 @@ class Task {
       focusSecTotal: _clampInt(j['focusSecTotal'], 0, 1 << 40, 0),
       order: (j['order'] as num?)?.toDouble() ?? 0.0,
       reminderOffsetMin: _clampInt(j['reminderOffsetMin'], 0, 7 * 24 * 60, 0),
+      // T1-1：预估时长范围夹取（1..43200 分钟 = 30 天），与解析器
+      // （task_parser 的 `mins > 30 * 24 * 60` 兜底）保持同一区间；
+      // 备份是显式不可信输入，越界值（0 / 负数 / 天文数字）一律视为「无预估」。
+      estimateMinutes: _clampIntOrNull(j['estimateMinutes'], 1, 30 * 24 * 60),
       pinned: j['pinned'] as bool? ?? false,
       pinyinInitials: j['pinyinInitials'] as String? ?? '',
       updatedAt: j['updatedAt'] == null

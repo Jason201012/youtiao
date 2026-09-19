@@ -2748,6 +2748,8 @@ class TaskProvider extends ChangeNotifier {
     '子任务',
     '重复规则',
     '提醒',
+    // T1-1：预计时长列（未设预估时留空）。
+    '预计时长(分钟)',
     '累计专注(分钟)',
     // P1-10：附件清单列（开启「包含附件清单」时填充，否则整列为空）。
     '附件',
@@ -2778,6 +2780,8 @@ class TaskProvider extends ChangeNotifier {
       t.subtaskTotal == 0 ? '' : '${t.subtaskDone}/${t.subtaskTotal}',
       t.repeatSummary,
       _reminderLabel(t),
+      // T1-1：预计时长（无预估留空，保持列数对齐）。
+      t.hasEstimate ? '${t.estimateMinutes}' : '',
       t.focusSecTotal > 0 ? (t.focusSecTotal / 60).round().toString() : '',
       includeAttachments ? _attachmentSummary(t, true) : '',
     ];
@@ -2832,17 +2836,20 @@ class TaskProvider extends ChangeNotifier {
     for (final t in _tasks.where((e) => !e.done)) {
       final due = t.dueDate == null ? '' : ' ｜ 截止 ${_fmt(t.dueDate!)}';
       final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
+      // T1-1：MD 副本也带上预计时长（与 CSV/Excel 的「预计时长」列同口径）。
+      final est = t.hasEstimate ? ' ｜ 预计 ${_mdDuration(t.estimateMinutes!)}' : '';
       // P1-10：开启「包含附件清单」时，任务行后追加附件摘要。
       final att = _attachmentSummary(t, includeAttachments);
-      buf.writeln('- [ ] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
+      buf.writeln('- [ ] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep$est${att.isNotEmpty ? ' ｜ $att' : ''}');
     }
     buf.writeln('');
     buf.writeln('## 已完成（${_tasks.where((e) => e.done).length}）');
     for (final t in _tasks.where((e) => e.done)) {
       final c = t.completedAt == null ? '' : ' ｜ 完成于 ${_fmt(t.completedAt!)}';
       final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
+      final est = t.hasEstimate ? ' ｜ 预计 ${_mdDuration(t.estimateMinutes!)}' : '';
       final att = _attachmentSummary(t, includeAttachments);
-      buf.writeln('- [x] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
+      buf.writeln('- [x] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep$est${att.isNotEmpty ? ' ｜ $att' : ''}');
     }
     if (includeTrash && _trash.isNotEmpty) {
       buf.writeln('');
@@ -2861,6 +2868,14 @@ class TaskProvider extends ChangeNotifier {
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   static String _fmtMinute(int m) =>
       '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
+
+  /// T1-1：分钟数 → MD 里的可读时长（与解析器 [TaskParser.formatDuration] 同款文案）。
+  static String _mdDuration(int mins) {
+    if (mins < 60) return '$mins 分钟';
+    final h = mins ~/ 60;
+    final m = mins % 60;
+    return m == 0 ? '$h 小时' : '$h 小时 $m 分';
+  }
   static String _prioLabel(Priority p) =>
       p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
   static String _catLabel(Category c) =>

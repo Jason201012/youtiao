@@ -13,6 +13,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/services/app_nav.dart';
+import 'package:todolist/services/schedule_advisor.dart';
 import 'package:todolist/widgets/review_card.dart';
 import 'package:todolist/widgets/today_share_sheet.dart';
 
@@ -91,6 +92,15 @@ class TodayScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 12),
+                  // T1-1：今日排程建议（纯本地顺延预估，零新存储）
+                  ReviewSection(
+                    child: _ScheduleAdvisor(
+                      today: today,
+                      accent: accent,
+                      ext: ext,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   // 今日待打卡
                   ReviewSection(
                     child: _HabitList(
@@ -98,6 +108,7 @@ class TodayScreen extends StatelessWidget {
                       accent: accent,
                       ext: ext,
                       onToggle: (h) => habit.toggleCheckInToday(h),
+                      onIncrement: (h) => habit.adjustCheckInValue(h, DateTime.now(), 1),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -280,16 +291,189 @@ class _TodoTile extends StatelessWidget {
       ),
     );
   }
+}
 
-  Widget _checkbox() => Container(
-        width: 20,
-        height: 20,
-        decoration: BoxDecoration(
-          color: Colors.transparent,
-          border: Border.all(color: accent, width: 1.5),
-          borderRadius: BorderRadius.circular(6),
+/// T1-1：今日「排程建议」卡。
+///
+/// 输入只是今日未完成待办（[TodayAggregate.pendingTasks]）与当前时刻，输出由
+/// [buildScheduleAdvice] 这个纯函数算出「串行顺延」的预计起止时刻——不新增任何
+/// 存储、不发任何网络请求，符合项目「严格离线」红线。
+///
+/// 展示三条信息：① 汇总（项数 / 总时长 / 预计完成时刻）；② 每条任务的预计时段与
+/// 时长；③ 两类风险提示——「预计来不及」（超过截止时间）与「可能高估 / 低估」
+/// （与累计专注时长比对）。
+class _ScheduleAdvisor extends StatelessWidget {
+  final TodayAggregate today;
+  final Color accent;
+  final AppColorsExt ext;
+  const _ScheduleAdvisor({
+    required this.today,
+    required this.accent,
+    required this.ext,
+  });
+
+  /// 最多展示的条目数：再多用户也读不完，且会把页面拉得很长。
+  static const int _maxRows = 8;
+
+  @override
+  Widget build(BuildContext context) {
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    final meta = ext.meta;
+    final advice = buildScheduleAdvice(today.pendingTasks);
+    final rows = advice.items.take(_maxRows).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text('排程建议',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            Text('截止 → 时长 → 优先级',
+                style: TextStyle(fontSize: 11, color: meta)),
+          ],
         ),
-      );
+        const SizedBox(height: 8),
+        Text(
+          advice.summary,
+          style: TextStyle(fontSize: 12, color: meta),
+        ),
+        if (!advice.isEmpty) ...[
+          const SizedBox(height: 10),
+          for (int i = 0; i < rows.length; i++)
+            _ScheduleRow(
+              item: rows[i],
+              isLast: i == rows.length - 1,
+              accent: accent,
+              onBg: onBg,
+              meta: meta,
+            ),
+          if (advice.items.length > rows.length)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text('另有 ${advice.items.length - rows.length} 项未列出',
+                  style: TextStyle(fontSize: 11, color: meta)),
+            ),
+          if (advice.missedDueCount > 0) ...[
+            const SizedBox(height: 8),
+            _AdviceNote(
+              icon: Symbols.warning,
+              color: Colors.orange,
+              text: '${advice.missedDueCount} 项按顺延预计会超过截止时间，'
+                  '建议先处理最紧急的一项或缩短预估',
+            ),
+          ],
+          if (advice.overrunMinutes > 0) ...[
+            const SizedBox(height: 6),
+            _AdviceNote(
+              icon: Symbols.schedule,
+              color: meta,
+              text: '今天剩余时间预计不够，超出约 ${formatMinutes(advice.overrunMinutes)}',
+            ),
+          ],
+          if (advice.guessedCount > 0) ...[
+            const SizedBox(height: 6),
+            _AdviceNote(
+              icon: Symbols.info,
+              color: meta,
+              text: '${advice.guessedCount} 项未设预计时长，'
+                  '按 ${advice.defaultMinutes} 分钟估算（可在任务里填写）',
+            ),
+          ],
+        ],
+      ],
+    );
+  }
+}
+
+/// 排程建议的一行：预计时段 + 标题 + 时长 + 风险/偏差标记。
+class _ScheduleRow extends StatelessWidget {
+  final ScheduleItem item;
+  final bool isLast;
+  final Color accent;
+  final Color onBg;
+  final Color meta;
+  const _ScheduleRow({
+    required this.item,
+    required this.isLast,
+    required this.accent,
+    required this.onBg,
+    required this.meta,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bias = item.biasLabel;
+    return Padding(
+      padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(
+              item.windowLabel,
+              style: TextStyle(fontSize: 12, color: accent, fontWeight: FontWeight.w600),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.task.title.isEmpty ? '(无标题)' : item.task.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, color: onBg),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  <String>[
+                    // 未显式设预估值时加「约」，避免把占位值伪装成用户设定。
+                    '${item.explicit ? '' : '约 '}${formatMinutes(item.minutes)}',
+                    if (item.missedDue) '预计超过截止',
+                    if (bias != null) bias,
+                  ].join(' · '),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: item.missedDue ? Colors.orange : meta,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 排程建议底部的说明行（图标 + 弱化文案）。
+class _AdviceNote extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String text;
+  const _AdviceNote({
+    required this.icon,
+    required this.color,
+    required this.text,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(text, style: TextStyle(fontSize: 11, color: color)),
+        ),
+      ],
+    );
+  }
 }
 
 /// 今日待打卡。
@@ -298,11 +482,14 @@ class _HabitList extends StatelessWidget {
   final Color accent;
   final AppColorsExt ext;
   final void Function(Habit) onToggle;
+  /// T1-2：量化习惯的「+1」快速累加。
+  final void Function(Habit) onIncrement;
   const _HabitList({
     required this.today,
     required this.accent,
     required this.ext,
     required this.onToggle,
+    required this.onIncrement,
   });
 
   @override
@@ -344,6 +531,7 @@ class _HabitList extends StatelessWidget {
               onBg: onBg,
               meta: ext.meta,
               onToggle: onToggle,
+              onIncrement: onIncrement,
             ),
       ],
     );
@@ -357,6 +545,7 @@ class _HabitTile extends StatelessWidget {
   final Color onBg;
   final Color meta;
   final void Function(Habit) onToggle;
+  final void Function(Habit) onIncrement;
   const _HabitTile({
     required this.status,
     required this.isLast,
@@ -364,12 +553,17 @@ class _HabitTile extends StatelessWidget {
     required this.onBg,
     required this.meta,
     required this.onToggle,
+    required this.onIncrement,
   });
 
   @override
   Widget build(BuildContext context) {
     final canCheckIn = status.shouldCheckIn;
     final checked = status.checked;
+    final quantified = status.habit.isQuantified;
+    // T1-2：量化习惯的按钮语义是「+1 累加」（喝了再点一次），
+    // 与布尔习惯的「打卡 / 取消打卡」不同；达标后用文案与图标区分，不再改行为。
+    final met = status.met;
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
       child: Row(
@@ -377,11 +571,30 @@ class _HabitTile extends StatelessWidget {
           Text(status.habit.emoji, style: const TextStyle(fontSize: 18)),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(
-              status.habit.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 14, color: onBg),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  status.habit.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 14, color: onBg),
+                ),
+                if (quantified)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      met
+                          ? '今日 ${status.value}/${status.target} · 已达标'
+                          : '今日 ${status.value}/${status.target}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: met ? FontWeight.w600 : FontWeight.normal,
+                        color: met ? accent : meta,
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
           const SizedBox(width: 8),
@@ -390,30 +603,47 @@ class _HabitTile extends StatelessWidget {
           else
             SizedBox(
               height: 31,
-              child: checked
-                  ? OutlinedButton.icon(
-                      onPressed: () => onToggle(status.habit),
-                      icon: Icon(Symbols.check, size: 14, color: accent),
-                      label: Text('已打卡',
-                          style: TextStyle(fontSize: 12, color: accent)),
-                      style: OutlinedButton.styleFrom(
+              child: quantified
+                  ? FilledButton.icon(
+                      // 已达标后仍允许继续累加（记录超额量），只是视觉上弱化。
+                      onPressed: () => onIncrement(status.habit),
+                      icon: const Icon(Symbols.add, size: 14),
+                      label: const Text('+1', style: TextStyle(fontSize: 12)),
+                      style: FilledButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
+                        backgroundColor: met ? accent.withValues(alpha: 0.18) : null,
+                        foregroundColor: met ? accent : null,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(AppColors.chipRadius),
                         ),
-                        side: BorderSide(color: accent),
                       ),
                     )
-                  : FilledButton(
-                      onPressed: () => onToggle(status.habit),
-                      child: const Text('打卡', style: TextStyle(fontSize: 12)),
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(AppColors.chipRadius),
+                  : checked
+                      ? OutlinedButton.icon(
+                          onPressed: () => onToggle(status.habit),
+                          icon: Icon(Symbols.check, size: 14, color: accent),
+                          label: Text('已打卡',
+                              style: TextStyle(fontSize: 12, color: accent)),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius:
+                                  BorderRadius.circular(AppColors.chipRadius),
+                            ),
+                            side: BorderSide(color: accent),
+                          ),
+                        )
+                      : FilledButton(
+                          onPressed: () => onToggle(status.habit),
+                          child: const Text('打卡', style: TextStyle(fontSize: 12)),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius:
+                                  BorderRadius.circular(AppColors.chipRadius),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
             ),
         ],
       ),

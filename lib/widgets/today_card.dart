@@ -486,6 +486,13 @@ class _HabitRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final checked = status.checked;
+    // T1-2：量化习惯显示「今日 x/y」而不是「待打卡 / 已打卡」——
+    // 「喝了 3 杯但目标 8 杯」既不该显示「已打卡」，也不该显示「待打卡」。
+    final label = status.habit.isQuantified
+        ? (status.met
+            ? '已达标 ${status.value}/${status.target}'
+            : '今日 ${status.value}/${status.target}')
+        : (checked ? '已打卡' : (status.shouldCheckIn ? '待打卡' : '今天不打卡'));
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
       child: Row(
@@ -502,11 +509,13 @@ class _HabitRow extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Text(
-            checked ? '已打卡' : (status.shouldCheckIn ? '待打卡' : '今天不打卡'),
+            label,
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: checked ? accent : meta,
+              color: (checked && !status.habit.isQuantified) || status.met
+                  ? accent
+                  : meta,
             ),
           ),
         ],

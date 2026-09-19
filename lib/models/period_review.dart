@@ -29,13 +29,19 @@ extension ReviewPeriodLabel on ReviewPeriod {
 class HabitPeriodStat {
   final Habit habit;
   final int expected; // 周期内应打卡次数（仅其设定的星期）
-  final int done; // 周期内已打卡次数
+  final int done; // 周期内**达标**天数（T1-2：量化习惯需当日累计量达目标）
   final double rate; // done / expected，0..1
+
+  /// T1-2：周期内累计投入量（量化习惯为各单位之和；布尔习惯 = [done]）。
+  /// 供「这个月共喝了 240 杯」这类量化描述使用。
+  final int valueSum;
+
   const HabitPeriodStat({
     required this.habit,
     required this.expected,
     required this.done,
     required this.rate,
+    this.valueSum = 0,
   });
 }
 
@@ -333,7 +339,11 @@ class PeriodReview {
           if (h.shouldCheckInOn(from.add(Duration(days: i)))) expected++;
         }
       }
-      final done = habit.checkedDaysBetween(h, start, end).length;
+      // T1-2：习惯口径升级为「达标日」——量化习惯（每天 8 杯水）只喝 1 杯不再
+      // 计入达成，月报 / 年报的达成率因此不再被灌水失真。布尔习惯两者等价。
+      final done = habit.metDaysBetween(h, start, end).length;
+      // T1-2：量化习惯同时给出区间累计投入量（「这个月共 240 杯」）。
+      final valueSum = habit.valueBetween(h, start, end);
       habitExpected += expected;
       habitDone += done;
       habits.add(HabitPeriodStat(
@@ -341,6 +351,7 @@ class PeriodReview {
         expected: expected,
         done: done,
         rate: expected == 0 ? 0.0 : (done / expected).clamp(0.0, 1.0),
+        valueSum: valueSum,
       ));
     }
     habits.sort((a, b) => b.rate.compareTo(a.rate));

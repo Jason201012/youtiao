@@ -166,7 +166,10 @@ class WeeklyReview {
       for (int i = 0; i < 7; i++) {
         if (h.shouldCheckInOn(start.add(Duration(days: i)))) expected++;
       }
-      final checked = checkedCache.putIfAbsent(h.id, () => habit.checkedDays(h, 7));
+      // T1-2：口径用「达标日」（量化习惯需当日累计量达目标），与周报 / 月报
+      // 的统计口径保持同源，避免同一习惯在不同报表里给出不同达成率。
+      final checked =
+          checkedCache.putIfAbsent(h.id, () => habit.metDays(h, 7));
       int done = 0;
       for (int i = 0; i < 7; i++) {
         final day = start.add(Duration(days: i));

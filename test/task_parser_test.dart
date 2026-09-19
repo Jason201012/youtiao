@@ -365,12 +365,19 @@ void main() {
       expect(_p('面试 @公司').toTask().note, '@公司');
     });
 
-    test('仅时长', () {
-      expect(_p('看书 45分钟').toTask().note, '预计45分钟');
+    test('仅时长（T1-1：改落结构化字段，不再写进备注）', () {
+      final t = _p('看书 45分钟').toTask();
+      // T1-1（v2.9.2 功能增强）改口径：预估时长此前没有模型字段可落，只能拼进备注
+      // 充当「临时载体」；[Task.estimateMinutes] 落地后此处断言改为结构化字段，
+      // 备注保持干净（否则详情页会出现「备注里的预计45分钟 + 结构化行」两份重复信息）。
+      expect(t.estimateMinutes, 45);
+      expect(t.note, '');
     });
 
-    test('两者兼有以「 · 」连接', () {
-      expect(_p('面试 @公司 45分钟').toTask().note, '@公司 · 预计45分钟');
+    test('地点仍留备注，时长走字段（「 · 」不再拼接时长）', () {
+      final t = _p('面试 @公司 45分钟').toTask();
+      expect(t.note, '@公司');
+      expect(t.estimateMinutes, 45);
     });
 
     test('无地点无时长时备注为空串（不污染既有数据）', () {

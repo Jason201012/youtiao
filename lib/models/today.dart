@@ -53,8 +53,15 @@ class TodayAggregate {
 
   /// 今日习惯应打卡总数（shouldCheckIn 为 true 的数量）。
   int get habitExpected => habits.where((h) => h.shouldCheckIn).length;
-  /// 今日习惯已打卡总数（checked 为 true 的数量）。
-  int get habitDone => habits.where((h) => h.checked).length;
+  /// 今日习惯已达成总数（T1-2：量化习惯按「达标」判定，而非仅仅「有记录」）。
+  int get habitDone => habits.where((h) => h.met).length;
+
+  /// T1-2：今日量化习惯的累计量与目标量（仅统计量化习惯）。
+  /// 供今日页展示「今日 24/32 杯」这类整体进度。
+  int get habitValueToday =>
+      habits.where((h) => h.habit.isQuantified).fold(0, (a, h) => a + h.value);
+  int get habitValueTarget =>
+      habits.where((h) => h.habit.isQuantified).fold(0, (a, h) => a + h.target);
 
   /// 今日日期文案，如「8月9日 周日」。
   String get dateLabel {
@@ -107,6 +114,10 @@ class TodayAggregate {
           shouldCheckIn: h.shouldCheckInOn(today),
           checked: habit.isCheckedToday(h),
           streak: habit.currentStreak(h),
+          // T1-2：量化习惯的当日累计量与目标量（布尔习惯 value 0/1、target 1）。
+          value: habit.checkInValueOn(h, today),
+          target: h.effectiveTarget,
+          met: habit.isTargetMetOn(h, today),
         ),
     ];
 
@@ -143,14 +154,33 @@ class TodayHabitStatus {
   final Habit habit;
   /// 今天是否应打卡（按 weekday 过滤；空列表=每天）。
   final bool shouldCheckIn;
-  /// 今天是否已打卡。
+  /// 今天是否有打卡记录（量化习惯「喝了 1 杯」也算有记录）。
   final bool checked;
   /// 当前连续打卡天数。
   final int streak;
+
+  /// T1-2：今日累计量（布尔习惯为 0/1）。
+  final int value;
+
+  /// T1-2：每日目标量（布尔习惯恒为 1）。
+  final int target;
+
+  /// T1-2：今日是否**达成目标**（量化习惯需 value ≥ target）。
+  final bool met;
+
   const TodayHabitStatus({
     required this.habit,
     required this.shouldCheckIn,
     required this.checked,
     required this.streak,
+    this.value = 0,
+    this.target = 1,
+    this.met = false,
   });
+
+  /// T1-2：今日进度 0..1（量化按 值/目标；布尔按有无记录）。
+  double get progress => (value / (target <= 0 ? 1 : target)).clamp(0.0, 1.0).toDouble();
+
+  /// T1-2：量化习惯的「今日 x/y」短文案；布尔习惯返回 null（调用方走原有文案）。
+  String? get quantifiedLabel => habit.isQuantified ? '$value/$target' : null;
 }

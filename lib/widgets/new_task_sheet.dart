@@ -10,6 +10,7 @@ import 'package:todolist/models/attachment.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -97,6 +98,16 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 仅对「不重复」且有截止时间的任务有意义。
   int _reminderOffsetMin = 0;
 
+  /// T1-1：预计时长（分钟）；null = 未预估。
+  ///
+  /// 快速录入（TaskSheet.draft）里解析出的 `estimateMinutes` 会预填到这里，
+  /// 用户也可直接改/清空——两条创建路径从此共用同一个结构化字段，
+  /// 不再出现「解析出来只写进备注、编辑层看不见也改不了」的断链。
+  int? _estimateMinutes;
+
+  /// T1-1：预计时长快捷选项（分钟）。覆盖「打个电话 → 一整天」的常见粒度。
+  static const List<int> _estimatePresets = [15, 30, 45, 60, 90, 120, 240];
+
   // ===== U11：脏数据保护基线（进入编辑时的字段快照）=====
   // 旧实现点 X / 返回键直接关闭——长备注、子任务、附件全丢且无任何提示。
   // 这里记录进入时的基线，[_isDirty] 对比当前值与基线，脏了先弹确认再关。
@@ -119,6 +130,8 @@ class _TaskSheetState extends State<TaskSheet> {
   int _baseRepeatInterval = 1;
   DateTime? _baseRepeatUntil;
   int _baseReminderOffset = 0;
+  // T1-1：预计时长基线（同样纳入脏判定，避免只改时长后点 ✕ 静默丢失）。
+  int? _baseEstimate;
 
   /// 是否置顶/星标：置顶任务在所属分区内固定排最前。仅编辑模式可切换。
   bool _pinned = false;
@@ -162,6 +175,9 @@ class _TaskSheetState extends State<TaskSheet> {
       _repeatInterval = t.repeatInterval;
       _repeatAnchor = t.repeatAnchor;
       _reminderOffsetMin = t.reminderOffsetMin;
+      // T1-1：预填预计时长（快速录入解析出的值会经 draft 传进来）。
+      _estimateMinutes =
+          (t.estimateMinutes != null && t.estimateMinutes! > 0) ? t.estimateMinutes : null;
       _repeatTime = t.repeatMinute != null
           ? TimeOfDay(hour: t.repeatMinute! ~/ 60, minute: t.repeatMinute! % 60)
           : const TimeOfDay(
@@ -213,6 +229,7 @@ class _TaskSheetState extends State<TaskSheet> {
     _baseRepeatInterval = _repeatInterval;
     _baseRepeatUntil = _repeatUntilDate;
     _baseReminderOffset = _reminderOffsetMin;
+    _baseEstimate = _estimateMinutes;
   }
 
   /// F-6：月内规则的签名，用于脏数据比较（四种字段任一变化即视为已改动）。
@@ -242,6 +259,8 @@ class _TaskSheetState extends State<TaskSheet> {
     if (_repeatInterval != _baseRepeatInterval) return true;
     if (_repeatUntilDate != _baseRepeatUntil) return true;
     if (_reminderOffsetMin != _baseReminderOffset) return true;
+    // T1-1：预计时长纳入脏判定。
+    if (_estimateMinutes != _baseEstimate) return true;
     if (!_intsEqual(_repeatWeekdays, _baseRepeatWeekdays)) return true;
     return false;
   }
@@ -313,6 +332,12 @@ class _TaskSheetState extends State<TaskSheet> {
 
   String _formatTimeOfDay(TimeOfDay t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  /// T1-1：预计时长的可读文案（复用解析器的口径，保证快速录入与弹层一致）。
+  static String _formatEstimate(int? minutes) {
+    if (minutes == null || minutes <= 0) return '未设置';
+    return TaskParser.formatDuration(minutes);
+  }
 
   /// 星期序号（1=周一 … 7=周日）→ 中文单字，供「每月第 N 个周几」选择器使用。
   static String _weekdayName(int wd) =>
@@ -452,6 +477,57 @@ class _TaskSheetState extends State<TaskSheet> {
       helpText: '选择提醒时间',
     );
     if (picked != null) setState(() => _repeatTime = picked);
+  }
+
+  /// T1-1：自定义预计时长（分钟）。返回 null = 取消（不改动）；
+  /// 返回 0 = 清除；返回正整数 = 新值。
+  Future<int?> _promptEstimate(int? current) async {
+    final ctl = TextEditingController(
+        text: (current != null && current > 0) ? '$current' : '');
+    final result = await showDialog<int>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('预计时长（分钟）'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            hintText: '如 45（范围 1–43200）',
+          ),
+          onSubmitted: (v) =>
+              Navigator.pop(d, int.tryParse(v.trim()) ?? -1),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(d, 0),
+            child: const Text('清除'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(d, int.tryParse(ctl.text.trim()) ?? -1),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    ctl.dispose();
+    if (result == null) return null;
+    if (result == 0) return 0;
+    // 越界 / 非数字：提示后不改动，避免写入 0 分钟或天文数字。
+    if (result < 0 || result > 30 * 24 * 60) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请输入 1–43200 之间的分钟数')),
+        );
+      }
+      return null;
+    }
+    return result;
   }
 
   Future<void> _pickRepeatUntil() async {
@@ -813,6 +889,8 @@ class _TaskSheetState extends State<TaskSheet> {
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
         reminderOffsetMin: _reminderOffsetMin,
+        // T1-1：预计时长落库（null 会真正清空字段，见 Task.copyWith 的 _kKeep 哨兵）。
+        estimateMinutes: _estimateMinutes,
         pinned: _pinned,
         attachments: List.from(_attachments),
       ).normalizedRepeatFields());
@@ -838,6 +916,7 @@ class _TaskSheetState extends State<TaskSheet> {
         tags: List.from(_tags),
         subtasks: List.from(_subtasks),
         reminderOffsetMin: _reminderOffsetMin,
+        estimateMinutes: _estimateMinutes, // T1-1
         pinned: _pinned,
         attachments: List.from(_attachments),
       ).normalizedRepeatFields());
@@ -1327,6 +1406,53 @@ class _TaskSheetState extends State<TaskSheet> {
                 ],
               ),
             ),
+          ),
+          // T1-1：预计时长（可空）。快捷 chip + 自定义输入两条路径；
+          // 快速录入解析出的「预计 45 分钟」会预填在这里，用户可改可清。
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              _SectionLabel('预计时长'),
+              const Spacer(),
+              if (_estimateMinutes != null)
+                IconButton(
+                  onPressed: () => setState(() => _estimateMinutes = null),
+                  icon: const Icon(Symbols.close, size: 18),
+                  tooltip: '清除预计时长',
+                  visualDensity: VisualDensity.compact,
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final m in _estimatePresets)
+                _PriorityChip(
+                  label: TaskParser.formatDuration(m),
+                  selected: _estimateMinutes == m,
+                  onTap: () => setState(
+                      () => _estimateMinutes = _estimateMinutes == m ? null : m),
+                ),
+              _PriorityChip(
+                label: '自定义',
+                selected: _estimateMinutes != null &&
+                    !_estimatePresets.contains(_estimateMinutes),
+                onTap: () async {
+                  final v = await _promptEstimate(_estimateMinutes);
+                  if (v == null) return; // 取消
+                  setState(() => _estimateMinutes = v == 0 ? null : v);
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _estimateMinutes == null
+                ? '用于「今日排程建议」估算与专注偏差对比（可选）'
+                : '当前：${_formatEstimate(_estimateMinutes)}',
+            style: TextStyle(fontSize: 12, color: ext.meta),
           ),
           // 一次性任务：显示「截止时间」与「提醒提前量」。
           // F-9（v2.8.5 审计）：旧注释「重复任务：截止时间固定为 23:59」已过时——
