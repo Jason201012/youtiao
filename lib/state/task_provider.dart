@@ -1800,12 +1800,18 @@ class TaskProvider extends ChangeNotifier {
     if (i == -1) return;
     final cur = _tasks[i];
     if (cur.status == s) return;
-    _tasks[i] = cur.copyWith(
+    final now = DateTime.now();
+    var next = cur.copyWith(
       status: s,
-      completedAt: s == TaskStatus.done ? DateTime.now() : null,
+      completedAt: s == TaskStatus.done ? now : null,
       // F7：完成/取消完成同步维护 occurrence 级完成历史。
-      doneDates: _withDoneDate(cur, s == TaskStatus.done, DateTime.now()),
+      doneDates: _withDoneDate(cur, s == TaskStatus.done, now),
     );
+    // P2-1（v2.9.1 审计）：完成与跳过互斥——看板拖拽 / 点击是首页勾选之外的
+    // 另一个完成入口，此前同样只写 doneDates 不清当日 skipDates，导致同一天双双
+    // 命中（撤销跳过后 `isDoneOn` 仍判完成、提醒不回弹）。
+    if (s == TaskStatus.done) next = _clearSkipFor(next, now);
+    _tasks[i] = next;
     if (_tasks[i].isRepeating) {
       _rescheduleRepeatOnCompletion(_tasks[i]);
     } else {
@@ -1838,13 +1844,21 @@ class TaskProvider extends ChangeNotifier {
   void toggleDone(String id) {
     final i = _tasks.indexWhere((t) => t.id == id);
     if (i == -1) return;
+    final now = DateTime.now();
     final willDone = !_tasks[i].done;
-    _tasks[i] = _tasks[i].copyWith(
+    var next = _tasks[i].copyWith(
       status: willDone ? TaskStatus.done : TaskStatus.todo,
-      completedAt: willDone ? DateTime.now() : null,
+      completedAt: willDone ? now : null,
       // F7：完成/取消完成同步维护 occurrence 级完成历史。
-      doneDates: _withDoneDate(_tasks[i], willDone, DateTime.now()),
+      doneDates: _withDoneDate(_tasks[i], willDone, now),
     );
+    // P2-1（v2.9.1 审计）：完成与跳过互斥。v2.9.1 的 P3-3 只把互斥做进
+    // [markOccurrenceDone]（详情页弹层专用），而首页 / 今日页勾选走的是本方法——
+    // 「本次跳过」后再勾选完成会同时命中 doneDates 与 skipDates：撤销跳过后当天仍被
+    // `isDoneOn` 判为已完成、提醒不回弹、完成统计虚计（状态机矛盾，用户可见的 UI 说谎）。
+    // 这里与弹层同口径：勾选完成时原子移除当日的「跳过一次」。
+    if (willDone) next = _clearSkipFor(next, now);
+    _tasks[i] = next;
     // 重复任务完成/取消完成：重排重复提醒。当天已完成则跳过今日（不弹今天提醒），
     // 否则照常挂今日；同一通知 id 覆盖掉旧闹钟。
     if (_tasks[i].isRepeating) {
@@ -1885,6 +1899,36 @@ class TaskProvider extends ChangeNotifier {
     return Task.pruneHistory(out, day) ?? out;
   }
 
+  /// 「完成 / 跳过互斥」的写盘助手（P2-1 / U1-1，v2.9.1 审计）。
+  ///
+  /// [Task.skipDates] 与 [Task.doneDates] 是同一「日」上的两种互斥状态：同一天既算
+  /// 「跳过」又算「已完成」时，撤销跳过之后当天仍被 `isDoneOn` 判为已完成、提醒不回弹、
+  /// 完成统计虚计——状态机自相矛盾，且是用户可见的 UI 说谎。此前互斥只做在
+  /// [markOccurrenceDone] 一个入口（弹层专用），首页勾选（[toggleDone]）、看板拖拽
+  /// （[setStatus]）与反向的 [skipOccurrence] 全都绕过去了。
+  /// 这里把「清掉某日的 skipDates」与「清掉某日的 doneDates」各收成一个助手，
+  /// 让四个入口共用同一口径。返回新任务；无该日记录时原样返回（不触发无谓 copyWith）。
+  static Task _clearSkipFor(Task t, DateTime day) {
+    final key = _ymd(day);
+    if (!t.skipDates.contains(key)) return t;
+    final rest = t.skipDates.where((s) => s != key).toList();
+    return t.copyWith(skipDates: Task.pruneHistory(rest, day) ?? rest);
+  }
+
+  /// 见 [_clearSkipFor]：完成态撤销时清掉某日的完成记录（并复位今天的完成态）。
+  static Task _clearDoneFor(Task t, DateTime day) {
+    final key = _ymd(day);
+    if (!t.doneDates.contains(key)) return t;
+    final now = DateTime.now();
+    final isToday =
+        day.year == now.year && day.month == now.month && day.day == now.day;
+    return t.copyWith(
+      doneDates: _withDoneDate(t, false, day),
+      status: (isToday && t.done) ? TaskStatus.todo : t.status,
+      completedAt: (isToday && t.done) ? null : t.completedAt,
+    );
+  }
+
   /// F1：把任务在某个循环日标记为完成（occurrence 级）。
   ///
   /// 此前「未来循环日预览 → 标记完成」走的是 `updateTask(copyWith(status: done))`，
@@ -1908,16 +1952,13 @@ class TaskProvider extends ChangeNotifier {
     // 命中「已跳过」的日子时一并撤销跳过（旧实现不检查 skipDates，于是同一天会同时
     // 进入 doneDates 与 skipDates：撤销跳过后 `isDoneOn` 仍判为已完成、当次提醒不回弹，
     // 用户会困惑「撤销了怎么还是不响」）。
-    final ymd = _ymd(d);
-    final unskipped = cur.skipDates.contains(ymd)
-        ? cur.skipDates.where((s) => s != ymd).toList()
-        : null; // null = copyWith 保留原值（未跳过，无需写回）
-    _tasks[i] = cur.copyWith(
+    // P2-1（v2.9.1 审计）：互斥口径收进 [_clearSkipFor]，与 toggleDone / setStatus 共用。
+    final next = cur.copyWith(
       doneDates: _withDoneDate(cur, true, d),
-      skipDates: unskipped,
       status: isToday ? TaskStatus.done : cur.status,
       completedAt: isToday ? now : cur.completedAt,
     );
+    _tasks[i] = _clearSkipFor(next, d);
     if (_tasks[i].isRepeating) {
       _rescheduleRepeatOnCompletion(_tasks[i]);
     }
@@ -1958,9 +1999,13 @@ class TaskProvider extends ChangeNotifier {
     if (_tasks[i].skipDates.contains(ymd)) return; // 已跳过，幂等
     // F-7：跳过日期在其 occurrence 过去后即无用途，统一走滚动保留窗口清掉。
     final skip2 = [..._tasks[i].skipDates, ymd];
-    final updated = _tasks[i].copyWith(
+    var updated = _tasks[i].copyWith(
       skipDates: Task.pruneHistory(skip2, d) ?? skip2,
     );
+    // P2-1（v2.9.1 审计）：反方向也要互斥——跳过某日时清掉同一日的完成记录
+    // （含「今天已完成」的完成态复位）。否则「先勾完成、再点本次跳过」同一天双态并存，
+    // 与 P3-3 声称消除的症状完全相同，只是入口相反。
+    updated = _clearDoneFor(updated, DateTime(d.year, d.month, d.day));
     _tasks[i] = updated;
     // P2-2：此前只有 interval 重排提醒——「每天 07:00 喝水」点「本次跳过」后
     // 列表层生效、07:00 提醒照响，与 occurrence_sheet 的「已跳过」标记自相矛盾。
@@ -2034,6 +2079,9 @@ class TaskProvider extends ChangeNotifier {
   ///
   /// P2-1：返回**新建的一次性副本**；调用方凭返回值的 id 精确撤销。
   ///
+  /// P3-3（v2.9.1 审计）：[newDay] 与 [origDay] 为同一天（把今天改到今天）时整体
+  /// **无操作**——不跳过、不建副本，直接返回 null（旧实现会同日产生两条任务）。
+  ///
   /// F-2（v2.8.5 审计）：当 [newDay] **本身就是该任务的循环日**（且 ≠ [origDay]）时，
   /// 该日的 occurrence 已由原循环覆盖——此时**不再另建副本**、仅跳过 [origDay]，
   /// 返回 null。此前 daily 任务「移到下一天」会把副本落到明天，而明天同时是循环日：
@@ -2049,9 +2097,14 @@ class TaskProvider extends ChangeNotifier {
     final orig = origDay ?? DateTime.now();
     final origDay0 = DateTime(orig.year, orig.month, orig.day);
     final target = DateTime(newDay.year, newDay.month, newDay.day);
+    // 0) P3-3（v2.9.1 审计）：目标日 == 原日时**什么都不做**。
+    // 「仅此一次改期」的日期选择器 firstDate 即今天，用户很容易把今天选回今天。
+    // 旧实现会让 coveredByLoop 因「两日相同」恒为 false，接着 skip 掉今天、再新建一条
+    // dueDate = 今天的一次性副本——同一天出现两条任务，且副本的提醒时刻（原重复的
+    // repeatMinute）多半已过，静默不响。返回 null 由调用方给出「无需改期」反馈。
+    if (target.isAtSameMomentAs(origDay0)) return null;
     // 1) 防撞（F-2）：目标日是循环日 → 仅 skip 本次，交由原循环覆盖。
-    final coveredByLoop =
-        !target.isAtSameMomentAs(origDay0) && src.repeatsOn(target);
+    final coveredByLoop = src.repeatsOn(target);
     // 2) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
     skipOccurrence(taskId, day: origDay0);
     if (coveredByLoop) return null;
@@ -2675,17 +2728,85 @@ class TaskProvider extends ChangeNotifier {
     return AttachmentService.collectBlobs(tasks);
   }
 
-  /// 导出可读 CSV（标题,优先级,分类,截止时间,状态,完成时间,是否已删除）。
-  /// [includeTrash] 为 true 时，回收站任务也一并列出（最后一列标记为「是」）。
+  /// P2-6（v2.9.1 审计）：任务表（CSV / Excel）的**单一口径**列定义。
+  ///
+  /// 此前 CSV 与 Excel 各写一份「8 列」结构，且都缺备注、标签、子任务、开始时间、
+  /// 重复规则 / 提醒时刻、累计专注——用户把可读副本当归档 / 迁移副本用时**不可逆丢数据**
+  /// （含标签与每周重复的任务导出后这些信息静默消失），且两处列定义随时可能漂移。
+  /// 现在列与取值都收在这里，CSV 与 Excel 只负责各自的转义 / 写盘。
+  static const List<String> taskTableHeaders = <String>[
+    '标题',
+    '优先级',
+    '分类',
+    '截止时间',
+    '状态',
+    '完成时间',
+    '是否已删除',
+    '开始时间',
+    '备注',
+    '标签',
+    '子任务',
+    '重复规则',
+    '提醒',
+    '累计专注(分钟)',
+    // P1-10：附件清单列（开启「包含附件清单」时填充，否则整列为空）。
+    '附件',
+  ];
+
+  /// 任务表的**原始（未转义）**一行取值，顺序与 [taskTableHeaders] 严格一致。
+  /// [includeAttachments] 为 false 时「附件」列给出空串（保持列数对齐）。
+  static List<String> taskTableValues(
+    Task t, {
+    required bool deleted,
+    bool includeAttachments = false,
+  }) {
+    final due = t.dueDate == null ? '' : _fmt(t.dueDate!);
+    final completed = t.completedAt == null ? '' : _fmt(t.completedAt!);
+    // 备注 / 标题可能含换行：归一为空格，避免单个逻辑行在表格里被拆成多行。
+    final note = t.note.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+    return <String>[
+      t.title,
+      _prioLabel(t.priority),
+      _catLabel(t.category),
+      due,
+      t.done ? '已完成' : '未完成',
+      completed,
+      deleted ? '是' : '否',
+      t.startDate == null ? '' : _fmt(t.startDate!),
+      note,
+      t.tags.where((e) => e.isNotEmpty).join(' '),
+      t.subtaskTotal == 0 ? '' : '${t.subtaskDone}/${t.subtaskTotal}',
+      t.repeatSummary,
+      _reminderLabel(t),
+      t.focusSecTotal > 0 ? (t.focusSecTotal / 60).round().toString() : '',
+      includeAttachments ? _attachmentSummary(t, true) : '',
+    ];
+  }
+
+  /// 提醒列文案：重复任务给出每个循环日的提醒时刻；一次性任务给出相对截止的提前量。
+  static String _reminderLabel(Task t) {
+    if (t.isRepeating) {
+      final m = t.repeatMinute;
+      return m == null ? '' : _fmtMinute(m);
+    }
+    if (t.dueDate == null) return '';
+    return t.reminderOffsetMin > 0 ? '提前 ${t.reminderOffsetMin} 分钟' : '准时';
+  }
+
+  /// 导出可读 CSV（列见 [taskTableHeaders]，含备注 / 标签 / 子任务 / 提醒 / 专注等）。
+  /// [includeTrash] 为 true 时，回收站任务也一并列出（「是否已删除」列标记为「是」）。
+  ///
+  /// P2-5（v2.9.1 审计）：UTF-8 BOM 由调用方（导出弹层）在拼装整份文件时补在最前
+  /// ——见 export_sheet 的 CSV 分支（此处只负责单表内容，不重复插 BOM）。
   String exportCsv({bool includeTrash = false, bool includeAttachments = false}) {
     final buf = StringBuffer();
-    buf.writeln('标题,优先级,分类,截止时间,状态,完成时间,是否已删除,附件');
+    // 表头保持不带引号的朴素写法（与习惯 / 专注表的表头一致，也便于人眼与外部脚本读），
+    // 数据行则统一加引号并过 [csvCell] 转义。
+    buf.writeln(taskTableHeaders.join(','));
     void writeRow(Task t, bool deleted) {
-      final due = t.dueDate == null ? '' : _fmt(t.dueDate!);
-      final completed = t.completedAt == null ? '' : _fmt(t.completedAt!);
-      buf.writeln('"${_esc(t.title)}","${_prioLabel(t.priority)}",'
-          '"${_catLabel(t.category)}","$due","${t.done ? '已完成' : '未完成'}","$completed",'
-          '"${deleted ? '是' : '否'}","${_esc(_attachmentSummary(t, includeAttachments))}"');
+      final cells = taskTableValues(t,
+          deleted: deleted, includeAttachments: includeAttachments);
+      buf.writeln(cells.map((v) => '"${csvCell(v)}"').join(','));
     }
 
     for (final t in _tasks) {
@@ -2713,7 +2834,7 @@ class TaskProvider extends ChangeNotifier {
       final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
       // P1-10：开启「包含附件清单」时，任务行后追加附件摘要。
       final att = _attachmentSummary(t, includeAttachments);
-      buf.writeln('- [ ] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
+      buf.writeln('- [ ] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$due$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
     }
     buf.writeln('');
     buf.writeln('## 已完成（${_tasks.where((e) => e.done).length}）');
@@ -2721,7 +2842,7 @@ class TaskProvider extends ChangeNotifier {
       final c = t.completedAt == null ? '' : ' ｜ 完成于 ${_fmt(t.completedAt!)}';
       final rep = t.repeatFull.isNotEmpty ? ' ｜ ${t.repeatFull}' : '';
       final att = _attachmentSummary(t, includeAttachments);
-      buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
+      buf.writeln('- [x] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$c$rep${att.isNotEmpty ? ' ｜ $att' : ''}');
     }
     if (includeTrash && _trash.isNotEmpty) {
       buf.writeln('');
@@ -2729,7 +2850,7 @@ class TaskProvider extends ChangeNotifier {
       for (final t in _trash) {
         final d = t.deletedAt == null ? '' : ' ｜ 删除于 ${_fmt(t.deletedAt!)}';
         final att = _attachmentSummary(t, includeAttachments);
-        buf.writeln('- [x] ${_esc(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$d${att.isNotEmpty ? ' ｜ $att' : ''}');
+        buf.writeln('- [x] ${_mdText(t.title)} ｜ ${_prioLabel(t.priority)} / ${_catLabel(t.category)}$d${att.isNotEmpty ? ' ｜ $att' : ''}');
       }
     }
     return buf.toString();
@@ -2738,12 +2859,20 @@ class TaskProvider extends ChangeNotifier {
   static String _fmt(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-  // （原 `_fmtMinute` 已随 CSV 列调整变为无引用死代码，本轮静态分析提示后移除。）
+  static String _fmtMinute(int m) =>
+      '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
   static String _prioLabel(Priority p) =>
       p == Priority.high ? '高' : p == Priority.medium ? '中' : '低';
   static String _catLabel(Category c) =>
       c == Category.work ? '工作' : c == Category.life ? '生活' : '学习';
-  static String _esc(String s) => csvCell(s);
+
+  /// P3-10（v2.9.1 审计）：Markdown 导出**不再**复用 [csvCell]。
+  ///
+  /// csvCell 的职责是防「以 `=` `+` `-` `@` 开头的单元格被 Excel 当公式执行」，
+  /// 而 Markdown 没有公式执行面：套用它会给 `=` 开头的标题硬加 `'` 前缀、把引号
+  /// 变成 `""`，污染「可读副本」。MD 侧只做换行归一（否则一条任务会被拆成多行、
+  /// 破坏清单结构）。
+  static String _mdText(String s) => s.replaceAll(RegExp(r'[\r\n]+'), ' ');
 
   /// P1-10：从任务附件派生「附件：a.jpg(1.2MB), b.m4a(34KB)」摘要文本。
   /// [enabled] 为 false 或任务无附件时返回空串；超长截断省略，避免单元格过大。

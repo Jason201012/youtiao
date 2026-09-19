@@ -112,40 +112,35 @@ class _DownloadBodyState extends State<_DownloadBody> {
       _downloader = null;
 
       // S3 修复①：完整性校验强制化。
-      // - 清单提供了 apkSha256：比对下载文件，不一致（篡改/下载不完整）直接拒绝安装；
-      // - 清单**未**提供 apkSha256：绝不谎称"校验通过"，改为明确要求用户
-      //   二次确认（风险自担）后才允许安装。
+      // P2-7（v2.9.1 审计）：清单**未提供** apkSha256 时不再提供「仍要安装（风险自担）」
+      // 兜底——那是把完整性校验降级成一句免责声明。当前所有正式清单都由发版脚本
+      // （_finalize_*.py）写入 apkSha256，缺失只可能意味着清单被删字段 / 降级到
+      // 未签名旧清单；此时一律拒绝下载并清理半成品，改由「浏览器下载」兜底
+      // （releaseUrl 已过白名单，且用户能自行核对发布页）。
       final expected = widget.info.apkSha256?.trim();
-      final bool verified;
-      final String verifyTitle;
-      final String verifyBody;
-      if (expected != null && expected.isNotEmpty) {
-        if (actual.toLowerCase() != expected.toLowerCase()) {
-          // 校验不通过的半成品必须立即删除，避免被其它途径利用（L-10）。
-          await _deleteApkQuietly();
-          if (!mounted) return;
-          setState(() => _error = 'APK 校验失败：文件可能被篡改或下载不完整');
-          return;
-        }
-        verified = true;
-        verifyTitle = '校验通过';
-        verifyBody = 'APK 已下载并通过 SHA-256 完整性校验，是否立即安装？';
-      } else {
-        // 清单缺省校验值：任何"校验通过"的措辞都属误导，必须如实告知并二次确认。
-        verified = false;
-        verifyTitle = '未校验完整性';
-        verifyBody =
-            '本次更新清单未提供 SHA-256 校验值，无法验证来源完整性。是否仍要安装（风险自担）？';
+      if (expected == null || expected.isEmpty) {
+        await _deleteApkQuietly();
+        if (!mounted) return;
+        setState(() =>
+            _error = '更新清单缺少 SHA-256 校验值，无法验证安装包完整性（已拒绝）');
+        return;
+      }
+      if (actual.toLowerCase() != expected.toLowerCase()) {
+        // 校验不通过的半成品必须立即删除，避免被其它途径利用（L-10）。
+        await _deleteApkQuietly();
+        if (!mounted) return;
+        setState(() => _error = 'APK 校验失败：文件可能被篡改或下载不完整');
+        return;
       }
 
       if (!mounted) return;
-      // S8 修复①：校验（或明确告知未校验）后再征求用户确认，避免静默唤起安装器。
+      // S8 修复①：校验通过后再征求用户确认，避免静默唤起安装器。
       final proceed = await showDialog<bool>(
         context: context,
         barrierDismissible: false,
         builder: (ctx) => AlertDialog(
-          title: Text(verifyTitle),
-          content: Text(verifyBody),
+          title: const Text('校验通过'),
+          content: const Text('APK 已下载并通过 SHA-256 完整性校验，是否立即安装？'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -153,7 +148,7 @@ class _DownloadBodyState extends State<_DownloadBody> {
             ),
             FilledButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: Text(verified ? '立即安装' : '仍要安装'),
+              child: const Text('立即安装'),
             ),
           ],
         ),

@@ -157,6 +157,11 @@ class TaskDetailScreen extends StatelessWidget {
     final priorityColor = task.done
         ? ext.meta
         : (isDark ? task.priority.darkColor() : task.priority.lightColor());
+    // U1-1（v2.9.1 审计）：今天是否真的是该任务的循环日（忽略「已跳过」）。
+    // 非循环日点「本次跳过」会向 skipDates 塞一个当天无意义的日期——当时看不出问题，
+    // 但日后规则改成覆盖该日时会被永久静默跳过，且用户被「已跳过今天这一次」的
+    // 成功文案误导（假成功）。这里据此禁用按钮并改文案。
+    final canSkipToday = task.isRepeating && task.occursOnIgnoringSkip(DateTime.now());
 
     return Scaffold(
       appBar: AppBar(
@@ -303,7 +308,11 @@ class TaskDetailScreen extends StatelessWidget {
           ),
 
           // 重复管理（仅重复任务）：本次跳过 / 结束重复 / 仅此一次改期
-          if (task.isRepeating) ...[
+          //
+          // U1-1（v2.9.1 审计）：已「结束重复」的任务（[Task.repeatEnded] 为 true，
+          // [Task.isRepeating] 仍为 true）不再展示整块操作区——它已没有任何未来循环日，
+          // 跳过 / 改期 / 预览三者都是空操作，摆在那里只会让用户点出「假成功」。
+          if (task.isRepeating && !task.repeatEnded) ...[
             const SizedBox(height: AppColors.contentGap),
             _Card(
               child: Column(
@@ -316,37 +325,46 @@ class TaskDetailScreen extends StatelessWidget {
                     runSpacing: 8,
                     children: [
                       OutlinedButton.icon(
-                        onPressed: () {
-                          // P2-2（v2.8.8 审计）：本次跳过此前点击即关页、无确认亦无撤销，
-                          // 误触后当天该次循环彻底消失（列表不出现、提醒不响）且当天
-                          // 无法恢复，只能等 occurrence 滚动过期被清掉——对纯本地无云端的
-                          // 待办应用是一条明确的交互死路。这里补 SnackBar 撤销入口
-                          // （unskipOccurrence 与 skipOccurrence 严格互逆、同样重排提醒）。
-                          // 先取 messenger：pop 之后本页 context 已失效，须在 pop 前捕获。
-                          final messenger = ScaffoldMessenger.of(context);
-                          provider.skipOccurrence(task.id);
-                          Navigator.pop(context);
-                          messenger
-                            ..hideCurrentSnackBar()
-                            ..showSnackBar(
-                              SnackBar(
-                                // U1（v2.9.0 审计）：撤销窗口由 5 秒延长到 10 秒——误触后
-                                // 若先做了别的操作（弹窗 / 切页），撤销入口即消失，只能去
-                                // occurrence 预览手动撤销；文案同时给出该常驻路径，与弹层的
-                                // 「撤销跳过」入口联动（两处走同一个 unskipOccurrence）。
-                                content: const Text('已跳过今天这一次（可长按任务行的重复标签，'
-                                    '在「未来循环日预览」中撤销）'),
-                                duration: const Duration(seconds: 10),
-                                action: SnackBarAction(
-                                  label: '撤销',
-                                  onPressed: () =>
-                                      provider.unskipOccurrence(task.id),
-                                ),
-                              ),
-                            );
-                        },
+                        // U1-1（v2.9.1 审计）：非循环日（如「每周一」的任务在周三打开）
+                        // 时禁用并改文案——旧实现点了照样弹「已跳过今天这一次」，实际只往
+                        // skipDates 塞了一个当天无意义的日期，属假成功；而日后把规则改到
+                        // 覆盖该日时，会被这条陈旧记录永久静默跳过。
+                        onPressed: canSkipToday
+                            ? () {
+                                // P2-2（v2.8.8 审计）：本次跳过此前点击即关页、无确认亦无撤销，
+                                // 误触后当天该次循环彻底消失（列表不出现、提醒不响）且当天
+                                // 无法恢复，只能等 occurrence 滚动过期被清掉——对纯本地无云端的
+                                // 待办应用是一条明确的交互死路。这里补 SnackBar 撤销入口
+                                // （unskipOccurrence 与 skipOccurrence 严格互逆、同样重排提醒）。
+                                // 先取 messenger：pop 之后本页 context 已失效，须在 pop 前捕获。
+                                final messenger = ScaffoldMessenger.of(context);
+                                provider.skipOccurrence(task.id);
+                                Navigator.pop(context);
+                                messenger
+                                  ..hideCurrentSnackBar()
+                                  ..showSnackBar(
+                                    SnackBar(
+                                      // U1（v2.9.0 审计）：撤销窗口由 5 秒延长到 10 秒——误触后
+                                      // 若先做了别的操作（弹窗 / 切页），撤销入口即消失，只能去
+                                      // occurrence 预览手动撤销；文案同时给出该常驻路径，与弹层的
+                                      // 「撤销跳过」入口联动（两处走同一个 unskipOccurrence）。
+                                      // U3-2（v2.9.1 审计）：撤销入口在任务行的重复标签上是
+                                      // **点按**（chip 的 onTap），长按反而会进多选——原文案
+                                      // 写「长按」属指错路，这里改正。
+                                      content: const Text('已跳过今天这一次（可点按任务行的重复标签，'
+                                          '在「未来循环日预览」中撤销）'),
+                                      duration: const Duration(seconds: 10),
+                                      action: SnackBarAction(
+                                        label: '撤销',
+                                        onPressed: () =>
+                                            provider.unskipOccurrence(task.id),
+                                      ),
+                                    ),
+                                  );
+                              }
+                            : null,
                         icon: const Icon(Symbols.skip_next, size: 18),
-                        label: const Text('本次跳过'),
+                        label: Text(canSkipToday ? '本次跳过' : '今天不是循环日'),
                       ),
                       OutlinedButton.icon(
                         onPressed: () async {
@@ -390,6 +408,12 @@ class TaskDetailScreen extends StatelessWidget {
                       ),
                       OutlinedButton.icon(
                         onPressed: () async {
+                          // U2-2（v2.9.1 审计）：下面 pop 与提示都发生在 await 之后，
+                          // 而本页 pop 后 BuildContext 即失效——先（await 之前）把
+                          // Navigator / ScaffoldMessenger 取下来，避免跨异步间隙使用
+                          // BuildContext（也避免 analyzer 的 use_build_context 提示）。
+                          final navigator = Navigator.of(context);
+                          final messenger = ScaffoldMessenger.of(context);
                           final picked = await showDatePicker(
                             context: context,
                             initialDate:
@@ -399,6 +423,20 @@ class TaskDetailScreen extends StatelessWidget {
                                 DateTime.now().add(const Duration(days: 365)),
                           );
                           if (picked != null) {
+                            final dayLabel = '${picked.month}月${picked.day}日';
+                            // P3-3（v2.9.1 审计）：目标日 == 今天时 provider 为**无操作**
+                            // （旧实现会 skip 今天 + 新建一条 dueDate=今天的副本，同日出现
+                            // 两条任务且副本提醒已过、静默不响）。这里提前拦下并如实反馈。
+                            if (Task.isSameDay(picked, DateTime.now())) {
+                              if (context.mounted) navigator.pop();
+                              messenger
+                                ..hideCurrentSnackBar()
+                                ..showSnackBar(const SnackBar(
+                                  content: Text('目标日就是今天，本次改期无变化'),
+                                  duration: Duration(seconds: 4),
+                                ));
+                              return;
+                            }
                             // F-2（v2.8.5 审计）：目标日副本提醒时刻已过 → 提前预演提示
                             // 「提醒不会触发」，与新建/编辑弹层、批量顺延的
                             // [PastDueGuard] 口径一致（此前该入口是少数没接上的入口）。
@@ -425,8 +463,19 @@ class TaskDetailScreen extends StatelessWidget {
                               );
                               if (!ok) return;
                             }
-                            provider.rescheduleOnceOccurrence(task.id, picked);
-                            if (context.mounted) Navigator.pop(context);
+                            final copy =
+                                provider.rescheduleOnceOccurrence(task.id, picked);
+                            if (context.mounted) navigator.pop();
+                            messenger
+                              ..hideCurrentSnackBar()
+                              ..showSnackBar(SnackBar(
+                                // U2-2：目标日本身就是循环日时 provider 只跳过本次、
+                                // 不建副本（返回 null）——必须说清，否则用户找不到副本。
+                                content: Text(copy == null
+                                    ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
+                                    : '已改期至 $dayLabel（已新建一次性副本）'),
+                                duration: const Duration(seconds: 8),
+                              ));
                           }
                         },
                         icon: const Icon(Symbols.edit_calendar, size: 18),
@@ -542,7 +591,12 @@ class TaskDetailScreen extends StatelessWidget {
                       context: context,
                       builder: (ctx) => AlertDialog(
                         title: const Text('删除任务'),
-                        content: const Text('确认删除该任务？此操作可在任务列表滑动删除后撤销。'),
+                        // U3-1（v2.9.1 审计）：原文案「此操作可在任务列表滑动删除后撤销」
+                        // 表述绕且指错路径——详情页删除走的是 provider.deleteTask（入回收站），
+                        // 本页 pop 后**不会**展示撤销 SnackBar（那条入口在首页滑删流程里）。
+                        // 改为如实说明去向与恢复路径。
+                        content: const Text('确认删除该任务？将移入回收站，'
+                            '可在「设置 → 回收站」中恢复。'),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.pop(ctx, false),

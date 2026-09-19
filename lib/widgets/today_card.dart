@@ -648,6 +648,11 @@ String _taskTime(Task t) {
     final m = t.dueDate!.minute.toString().padLeft(2, '0');
     return '$h:$m';
   }
+  // P3-2（v2.9.1 审计）：已「结束重复」的任务（repeat 字段仍在、repeatUntil 已过）
+  // 不能再显示「每天 / 每周 一、三」这类规则文案——它会同时落进「今天 / 未来」分区并
+  // 静默不提醒，用户会以为「结束重复」没生效。U3（v2.9.0 审计）已在任务行加了
+  // 「已结束重复」角标，此处是同一口径的横向推广。
+  if (t.repeatEnded) return '已结束重复';
   if (t.isRepeating) return t.repeatSummary;
   return '全天';
 }

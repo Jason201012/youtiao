@@ -1,5 +1,102 @@
 # 更新日志（Changelog）
 
+## v2.9.2（2026-09-19）
+
+### 功能与操作审计修复（依据《有条功能与操作审计报告（v2.9.1）》：P1=0、P2×7、P3×14、U1×1、U2×4、U3×3 全量落地）
+
+#### P2-1 · 「完成」与「跳过」互斥横向推广到全部入口（`lib/state/task_provider.dart`）
+- v2.9.1 只把互斥做进详情页弹层专用的 `markOccurrenceDone`：首页 / 今日页勾选走 `toggleDone`、看板拖拽走 `setStatus`、反向的 `skipOccurrence` 全都绕过去了——同一天同时进入 `doneDates` 与 `skipDates` 后，撤销跳过当天仍被判为已完成、提醒不回弹、完成统计虚计。
+- 新增 `_clearSkipFor` / `_clearDoneFor` 两个写盘助手，四个入口共用同一口径；`markOccurrenceDone` 改为复用。
+
+#### P2-2 · iCal 转义解码改单趟左到右（`lib/services/ical.dart`）
+- 旧实现是两趟 `replaceAll`（先实体后反斜杠），无论顺序如何都会把标题里**字面**的 `\n` / `\t` / `\\` 解错（`a\nb` 往返后变成「a + 真换行 + b」）。现改为逐字符扫描、`\` 一次性消费两个字符并**不回扫**，往返完全守恒；未知转义原样保留。
+
+#### P2-3 · 日历拖拽改期的守卫漏算提醒提前量（`lib/screens/calendar_screen.dart`）
+- 注释声称比较 `dueDate − reminderOffsetMin`，实现却只比 `dueDate`：截止明日 10:15、提前 30 分钟提醒的任务，今天 10:00 拖到今天 10:15 不弹确认，保存后提醒 09:45 早已过去 → 静默丢提醒。现按提醒时刻判定，并在弹窗里带出提前量。
+
+#### P2-4 · 周重复 `BYDAY=MO..SU` 不再被误判为「仅工作日」（`lib/services/ical.dart`）
+- 旧判据「长度 ≥5 且包含周一~周五」会被 7 天全选命中，往返时周六日静默丢失。现收紧为「**恰好**等于 MO-FR」。
+
+#### P2-5 · CSV 导出补 UTF-8 BOM（`lib/services/csv_safe.dart`、`lib/widgets/export_sheet.dart`）
+- 简体中文 Windows 的 Excel / WPS 无 BOM 时按 ANSI（GBK）解码，中文全量乱码、功能形同失效。现 CSV 首部写 `U+FEFF`（`withUtf8Bom` 幂等），Markdown / JSON 不加。
+
+#### P2-6 · CSV / Excel 任务表补齐字段（`lib/state/task_provider.dart`、`lib/services/report_exporter.dart`、`lib/widgets/export_sheet.dart`）
+- 两处原来各写一份 8 列结构，都缺备注、标签、子任务、开始时间、重复规则 / 提醒时刻、累计专注——把可读副本当归档副本用时不可逆丢数据。现列与取值收进 `TaskProvider.taskTableHeaders` / `taskTableValues`（单一真源，CSV 与 Excel 共用），8 列 → 15 列；导出弹层副标题同时明示「可读副本，完整数据请用备份」。
+
+#### P2-7 · 更新链路强制签名门槛收口 + 取消「仍要安装」兜底（`lib/services/update_policy.dart`、`lib/services/update_checker.dart`、`lib/widgets/update_download_dialog.dart`）
+- 门槛退化为**无条件强制**：不再保留「本地与清单自报版本均 < 2.8.0 时可接受无签名清单」的渐进兼容尾巴，预发布形态（`2.9.0-beta`）也不再豁免。清单签名是唯一的「来源可信」锚（`apkSha256` 由同一份清单自带，只能证明文件与清单一致）。
+- 清单**缺 apkSha256** 时不再提供「仍要安装（风险自担）」路径：一律拒绝下载、删除半成品，改由「浏览器下载」兜底。
+
+#### P3-1 · 导出 `DUE` 自「提醒未过去」的首个循环日起算（`lib/services/ical.dart`）
+- 上午导出「每天 07:00」的任务会写出今天 07:00 的落点 + `TRIGGER:PT0S`，第三方日历同步后立刻补响过期提醒。现与 occurrence_sheet「今天提醒已过则自明天起算」同口径。
+
+#### P3-2 · 「已结束重复」角标横向推广（`lib/widgets/today_card.dart`、`lib/screens/today_screen.dart`、`lib/widgets/share_card.dart`）
+- 今日卡片、今日页、分享长图此前仍对已结束重复的任务显示「每天 07:00 至 …」。现统一显示「已结束重复」。
+
+#### P3-3 · 「仅此一次改期」目标日 == 原日时不再同日产生两条任务（`lib/state/task_provider.dart`、`lib/screens/task_detail_screen.dart`）
+- 旧算法因 `isAtSameMomentAs` 恒为 false，把「今天改到今天」走成「skip 今天 + 新建一条 dueDate=今天的一次性副本」，同一天两条任务且副本提醒已过、静默不响。现整体无操作并给出反馈。
+
+#### P3-4 · interval 重复跨夏令时不再漂移（`lib/models/task.dart`）
+- `difference().inDays` 是绝对时距，跨 DST 会把 7 个自然日算成 6 天 23 小时 → 相位整体错位。改用 UTC 零点求差。
+
+#### P3-5 · iCal 属性值不再被 `trim()`（`lib/services/ical.dart`）
+- RFC 5545 值内空白有意义（`SUMMARY:  foo` 的前导空格属于标题）。现结构判定仍用 trim 后的行，属性值取自原始行。
+
+#### P3-6 · `FREQ=WEEKLY` 无 `BYDAY` 以落点周几为锚（`lib/services/ical.dart`）
+- 第三方合法写法此前静默默认周一，会把「每周三」搬成「每周一」；同时合并了 `days.length==1` 与 `isNotEmpty` 的重复死分支。
+
+#### P3-7 · 秒级 `TRIGGER` 取最近分钟 + 重复提醒迁移统计如实（`lib/services/ical.dart`）
+- `-PT90S` 原向下取整为 1 分钟（少 30 秒）、`-PT30S` 变成「准点」。现四舍五入到最近分钟；重复任务的提醒由 `repeatMinute` 表达，只有提前量为 0 时才真正迁移（并回填 `repeatMinute`），非零提前量如实计入「提醒未迁移」。
+- 另修一处往返污染：`VALARM` 内的 `DESCRIPTION` 会在 VTODO 无备注时顶替成备注（导出→导入把备注污染成标题），现按 `ALARM.` 前缀隔离存放。
+
+#### P3-8 · `csvCell` 剥离集覆盖 BOM / NBSP 等 Unicode 空白（`lib/services/csv_safe.dart`）
+- `\uFEFF=evil`、`\u00A0=1+1` 这类「Unicode 空白 + 公式引导符」此前拿不到前置单引号，与「前导空白全覆盖」的注释不符。
+
+#### P3-9 · 看板泳道宽度按「列数」扣间距（`lib/widgets/kanban_board.dart`）
+- 每列都带 `margin.right: 8`（含最后一列），旧算法扣「列数 − 1」，未夹取时整行实宽 = 可用宽 + 8，宽屏下莫名其妙多出 8px 溢出与滚动条。
+
+#### P3-10 · Markdown 导出不再套用 `csvCell`（`lib/state/task_provider.dart`、`lib/state/habit_provider.dart`）
+- `csvCell` 的职责是防 Excel 公式执行，Markdown 没有该执行面：套用会给 `=` 开头的标题硬加 `'` 前缀、把引号变成 `""`，污染可读副本。
+
+#### P3-11 · 标签泳道同频时按字典序次级排序（`lib/widgets/kanban_board.dart`）
+- Dart 的 `List.sort` 非稳定排序，同频标签的先后依赖实现内部顺序，与「顺序稳定可复现」的注释不符。
+
+#### P3-12 · 更新清单拉取补最终落地主机白名单（`lib/services/update_checker.dart`）
+- 默认 `http.Client` 会自动跟随重定向且不校验目标主机，与 APK 下载器的逐跳白名单不对称；现对最终 URL 校验主机（内容签名仍为最终兜底）。
+
+#### P3-13 · 清单字段读取改为 `toString` 容错（`lib/services/update_checker.dart`）
+- `as String?` 遇到 JSON 数字（如 `"version": 2.9.2` 少了引号）会抛 TypeError，被外层 catch 兜成无上下文的错误，并绕过「缺失签名」的明确拒绝分支。
+
+#### P3-14 · 预发布版本同样强制验签（`lib/services/update_policy.dart`）
+- 长期停留在预发布版的设备此前与 P2-7 拥有同一条投毒面。
+
+#### U1-1 · 详情页「本次跳过」不再假成功（`lib/screens/task_detail_screen.dart`）
+- 非循环日点击仍弹「已跳过今天这一次」，实际只往 `skipDates` 塞了一个无效日期（日后规则覆盖该日时会永久静默跳过）。现禁用按钮并改文案「今天不是循环日」；任务已「结束重复」时整块重复管理区（跳过 / 改期 / 预览）不再展示。
+
+#### U2-1 · 首页标题不再被锁 80px（`lib/widgets/task_row.dart`）
+- 80px 是 v2.4.1 为「无界宽度」场景加的兜底，但拖拽重排默认常开 → 每行标题恒 80px，长标题只剩 ~8 字、备注 / 标签 chips 竖排堆叠。现用 `LayoutBuilder` 探真实可用宽：有界即放开 `Expanded`，仅无界 / 过窄才回退 80px。
+
+#### U2-2 · 「仅此一次改期」补结果反馈（`lib/screens/task_detail_screen.dart`）
+- 目标日恰为循环日（只跳过、不建副本）时页面静默 pop，用户找不到副本。现按返回值分支提示：同日无变化 / 循环日覆盖未建副本 / 已建一次性副本。
+
+#### U2-3 · 「无操作自动锁定」依赖联动（`lib/screens/settings_screen.dart`）
+- 应用锁未开启时该设置静默无效。现依赖未满足时禁用整行，副标题点明需先开启「应用锁」。
+
+#### U2-4 · 日历可进入任务详情（`lib/screens/calendar_screen.dart`）
+- 日期弹层里此前只有勾选框可点，整个日历模块没有到达详情页的路径。现任务行整行可点（含右侧箭头），收起弹层后推详情页。
+
+#### U3-1 · 撤销时限文案与时长统一（`lib/screens/home_screen.dart`、`lib/screens/task_detail_screen.dart`）
+- 确认框写「可在 5 秒内撤销」而 SnackBar 只有 4 秒。现统一为 5 秒；详情页删除文案改为如实说明「移入回收站，可在设置 → 回收站中恢复」。
+
+#### U3-2 · 撤销路径指引改正（`lib/screens/task_detail_screen.dart`）
+- 「长按任务行的重复标签」实际是**点按**（长按会进多选）。
+
+#### U3-3 · 开启加密备份时注明口令来源（`lib/screens/settings_screen.dart`）
+- 已设过口令时再次开启加密会静默沿用旧口令，现副标题注明「沿用已存口令」并指向「修改 / 重置备份口令」。
+
+### 质量
+- 新增 `test/v291_audit_fix_test.dart`（25 用例）钉死上述口径；全量测试 **627 项通过 / 0 失败**（基线 602 + 新增 25）；`dart analyze lib test` 零 error。
+
 ## v2.9.1（2026-09-18）
 
 ### 功能与操作审计修复（依据《有条功能与操作审计报告（v2.9.0）》：P2-1、P3-1~P3-6、U1~U4 全量落地）

@@ -61,7 +61,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '2.9.1');
+      if (mounted) setState(() => _version = '2.9.2');
     }
   }
 
@@ -1064,7 +1064,13 @@ String _formatIdle(int seconds) {
                         label: '加密本地自动备份',
                         subtitle: provider.autoBackupEncrypt
                             ? '每日快照以 AES-256-GCM 加密后落盘（.enc.json）'
-                            : '每日快照为明文 JSON；仅防误删，不防文件被拷出',
+                            // U3-3（v2.9.1 审计）：已设过口令时再次开启加密会**静默沿用**旧口令
+                            // （下面的 onSwitchChanged 只在「无口令」时才弹设置框），用户既不知道
+                            // 用过哪个口令，也不知道还需要不需要重设——开启后生成的 .enc.json
+                            // 万一解不开就只能强清。这里把「沿用已存口令」写在副标题上。
+                            : (provider.hasAutoBackupPassphrase
+                                ? '每日快照为明文 JSON；开启后沿用已存口令（需更换请用下方「修改 / 重置备份口令」）'
+                                : '每日快照为明文 JSON；仅防误删，不防文件被拷出'),
                         switchValue: provider.autoBackupEncrypt,
                         onSwitchChanged: (v) async {
                           if (v && !provider.hasAutoBackupPassphrase) {
@@ -1142,15 +1148,27 @@ String _formatIdle(int seconds) {
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     // P1-2：无操作自动锁定（仅在应用锁开启时生效）。点击弹窗选择时长。
-                    Consumer<TaskProvider>(
-                      builder: (context, provider, _) => SettingsRow(
+                    //
+                    // U2-3（v2.9.1 审计）：应用锁未开启时这一行**静默无效**（空闲计时器
+                    // 根本不会启动），而副标题只写「关闭（仅回到前台时锁定）」——语义漂移，
+                    // 用户把「无操作自动锁定」设成 1 分钟却永远不会自动锁定。现在依赖未满足
+                    // 时禁用整行（onTap = null）并在副标题点明依赖关系，不再让人白设。
+                    Consumer2<AppLockProvider, TaskProvider>(
+                      builder: (context, lock, provider, _) => SettingsRow(
                         icon: Symbols.timer,
                         label: '无操作自动锁定',
-                        subtitle: provider.appLockIdleSeconds <= 0
-                            ? '关闭（仅回到前台时锁定）'
-                            : '空闲 ${_formatIdle(provider.appLockIdleSeconds)} 后自动锁定',
-                        value: provider.appLockIdleSeconds <= 0 ? '关闭' : _formatIdle(provider.appLockIdleSeconds),
-                        onTap: () => _pickIdleLock(context, provider),
+                        subtitle: !lock.appLockEnabled
+                            ? '需要先开启上方「应用锁（生物识别）」后才会生效'
+                            : (provider.appLockIdleSeconds <= 0
+                                ? '关闭（仅回到前台时锁定）'
+                                : '空闲 ${_formatIdle(provider.appLockIdleSeconds)} 后自动锁定'),
+                        value: provider.appLockIdleSeconds <= 0
+                            ? '关闭'
+                            : _formatIdle(provider.appLockIdleSeconds),
+                        // U2-3：依赖未满足时禁用（SettingsRow 的 onTap 为 null 即不可点）。
+                        onTap: lock.appLockEnabled
+                            ? () => _pickIdleLock(context, provider)
+                            : null,
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),

@@ -23,13 +23,17 @@ class TaskRow extends StatelessWidget {
   final bool selected;
   final VoidCallback? onSelect;
 
-  /// U5：是否把标题区锁死在固定窄宽（默认否）。
+  /// U5：是否允许在「可用宽不可用」时把标题区锁成固定窄宽（默认否 = 始终放开）。
   ///
-  /// 旧实现为绕过 ReorderableListView + shrinkWrap 嵌套滚动下弹性插槽拿零宽度的
+  /// 旧实现为绕过 ReorderableListView + shrinkWrap 嵌套滚动下弹性插槽拿到零宽度的
   /// 布局 bug，把标题统一塞进 80px 固定 [SizedBox]——但该组件同样被搜索结果、
   /// 标签筛选列表复用，导致长标题只能显示 3~5 字、且进详情的点击热区只剩 80px
-  /// （点行内其它位置毫无反应）。现改为默认 [Expanded] 全宽（标题可读、热区覆盖
-  /// 整行），仅 [ReorderableListView] 场景传 true 保留 80px 兜底。
+  /// （点行内其它位置毫无反应），故 v2.9.0 起默认 [Expanded] 全宽。
+  ///
+  /// U2-1（v2.9.1 审计）：本开关不再无条件生效——真正决定宽度的是 LayoutBuilder
+  /// 探到的**可用宽**（见 build 内说明）：有界且够宽时一律放开 Expanded，仅当宽度
+  /// 无界 / 过窄（历史 bug 场景）时才用 80px 兜底。首页重排列表传 true 也只是
+  /// 「允许兜底」，不再等于「永远 80px」。
   final bool constrainTitleWidth;
 
   const TaskRow({
@@ -137,68 +141,71 @@ class TaskRow extends StatelessWidget {
             ? Border.all(color: primary.withOpacity(0.6), width: 1.5)
             : null,
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          leading,
-          if (!selecting) const SizedBox(width: 12),
-          // 标题（+ 备注预览 + 标签 + 子任务进度）。
-          // U5：默认可重排场景之外用 Expanded，标题吃满剩余宽度、长标题可见、
-          // 整块都是进详情的点击热区；仅 ReorderableListView 场景保留固定窄宽
-          // 兜底（历史原因：shrinkWrap 嵌套滚动下弹性插槽可能收到零宽度）。
-          if (constrainTitleWidth)
-            SizedBox(
-              width: 80,
-              child: _TitleBlock(
-                task: task,
-                ext: ext,
-                titleColor: titleColor,
-                hasNote: hasNote,
-                hasSub: hasSub,
-                hasTag: hasTag,
-                onTap: onTap,
-              ),
-            )
-          else
-            Expanded(
-              flex: 3,
-              child: _TitleBlock(
-                task: task,
-                ext: ext,
-                titleColor: titleColor,
-                hasNote: hasNote,
-                hasSub: hasSub,
-                hasTag: hasTag,
-                onTap: onTap,
-              ),
-            ),
-          // 截止信息 + 每日提醒标识 + 累计专注。
-          // 未完成任务：用 Expanded 包裹，MetaInfo 填满标题+按钮之间的剩余空间，
-          //   超长内容走 Text ellipsis 省略。
-          // 已完成任务：隐藏时间信息（已完成无需展示截止/提醒/专注时长），
-          //   整块不渲染，避免布局空白/溢出两难。
-          if (!task.done) ...[
-            const SizedBox(width: 12),
-            Expanded(child: _MetaInfo(task: task, ext: ext)),
-          ],
-          if (!task.done) ...[
-            const SizedBox(width: 6),
-            // 「专注」按钮：直接进入专注页并预选本任务
-            IconButton(
-              onPressed: () {
-                final focus = context.read<FocusProvider>();
-                focus.requestTask(task.id, task.title);
-              },
-              icon: Icon(Symbols.timer, size: 20, color: primary),
-              tooltip: '开始专注',
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            ),
-          ],
-        ],
+      // U2-1（v2.9.1 审计）：标题宽度不再无条件锁 80px。
+      //
+      // 80px 的由来是 v2.4.1 的「ReorderableListView + shrinkWrap 嵌套滚动下弹性插槽
+      // 收到**零宽**约束」——那是**无界**场景的兜底。但首页拖拽重排默认常开，于是每一行
+      // 都被锁成 80px：长标题只剩 ~8 字、备注 / 标签 chips 竖排堆叠把行高撑畸变，同一任务
+      // 在搜索视图（放开为 Expanded）与首页（80px）信息量不一致。
+      //
+      // 这里用 LayoutBuilder 看**真实可用宽**（它是 Row 的父级，拿到的是 Container 内缩后
+      // 的有界约束；若把它放进 Row 里则会被 Row 以「非 flex 子项」规则解成无界宽度，那正是
+      // 历史上踩过的坑）：
+      // - 宽度有界且够宽 → 放开 Expanded（标题 2 行可读、整块是进详情的热区）；
+      // - 无界 / 过窄 → 保留 80px 固定宽兜底（历史 bug 的防回归路径）。
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final boundedTitle =
+              constraints.hasBoundedWidth && constraints.maxWidth >= 240;
+          final titleBlock = _TitleBlock(
+            task: task,
+            ext: ext,
+            titleColor: titleColor,
+            hasNote: hasNote,
+            hasSub: hasSub,
+            hasTag: hasTag,
+            onTap: onTap,
+          );
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              leading,
+              if (!selecting) const SizedBox(width: 12),
+              // 标题（+ 备注预览 + 标签 + 子任务进度）。
+              // U5：默认用 Expanded，标题吃满剩余宽度、长标题可见、整块都是进详情的
+              // 点击热区；仅「重排 + 宽度不可用」时才回退固定窄宽兜底。
+              if (constrainTitleWidth && !boundedTitle)
+                SizedBox(width: 80, child: titleBlock)
+              else
+                Expanded(flex: 3, child: titleBlock),
+              // 截止信息 + 每日提醒标识 + 累计专注。
+              // 未完成任务：用 Expanded 包裹，MetaInfo 填满标题+按钮之间的剩余空间，
+              //   超长内容走 Text ellipsis 省略。
+              // 已完成任务：隐藏时间信息（已完成无需展示截止/提醒/专注时长），
+              //   整块不渲染，避免布局空白/溢出两难。
+              if (!task.done) ...[
+                const SizedBox(width: 12),
+                Expanded(child: _MetaInfo(task: task, ext: ext)),
+              ],
+              if (!task.done) ...[
+                const SizedBox(width: 6),
+                // 「专注」按钮：直接进入专注页并预选本任务
+                IconButton(
+                  onPressed: () {
+                    final focus = context.read<FocusProvider>();
+                    focus.requestTask(task.id, task.title);
+                  },
+                  icon: Icon(Symbols.timer, size: 20, color: primary),
+                  tooltip: '开始专注',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                ),
+              ],
+            ],
+          );
+        },
       ),
     );
-
     // 多选模式：整行点击切换选中
     if (selecting) {
       return GestureDetector(

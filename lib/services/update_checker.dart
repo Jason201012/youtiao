@@ -64,12 +64,28 @@ class UpdateChecker {
     }
 
     try {
-      final resp = await http
-          .get(
-            Uri.parse(_manifestUrl),
-            headers: {'User-Agent': 'youtiao-update-checker'},
-          )
-          .timeout(const Duration(seconds: 8));
+      // P3-12（v2.9.1 审计）：默认 Client 会自动跟随重定向且**不校验目标主机**，
+      // 与 APK 下载器（[UpdatePolicy.isAllowedRedirectTarget] 的逐跳白名单）不对称。
+      // 这里对「最终落地 URL」补一道主机白名单校验：清单只可能托管在作者使用的
+      // 代码托管域上，302 到其它主机即视为链路被劫持/重定向链被控。
+      // （内容签名仍是最终兜底——本道校验的价值在于「早失败、少一次不可信抓取」。）
+      final client = http.Client();
+      final http.Response resp;
+      try {
+        resp = await client
+            .get(
+              Uri.parse(_manifestUrl),
+              headers: {'User-Agent': 'youtiao-update-checker'},
+            )
+            .timeout(const Duration(seconds: 8));
+      } finally {
+        client.close();
+      }
+      final landed = resp.request?.url;
+      if (landed != null && !UpdatePolicy.isAllowedHost(landed.host)) {
+        return const UpdateResult(
+            hasUpdate: false, error: '更新清单被重定向到非白名单主机（已拒绝）');
+      }
       if (resp.statusCode != 200) {
         return UpdateResult(hasUpdate: false, error: 'HTTP ${resp.statusCode}');
       }
@@ -79,8 +95,13 @@ class UpdateChecker {
       // 必填且必须通过内置公钥校验；缺签名 / 验签失败一律拒绝，避免「沿用未签名旧清单
       // 蒙混过关」（P3-1 起门槛以本地版本为准，见下方 requireSig 注释）。
       // v2.8.0 之前的历史版本维持「可选签名」的渐进策略。
-      final declaredVer = (data['version'] as String? ?? '').trim();
-      final sig = data['signature'] as String?;
+      //
+      // P3-13（v2.9.1 审计）：字段读取一律走 [_str] 容错——`as String?` 在清单把
+      // version / signature 写成数字（JSON 里 `2.9.2` 极易被写成裸数字）时抛 TypeError，
+      // 虽被外层 catch 兜成「拒绝」，却绕过了这里「缺失签名」的明确拒绝分支，
+      // 用户只看到一句无上下文的类型错误。
+      final declaredVer = _str(data['version']).trim();
+      final sig = _str(data['signature']).trim();
       // F-01 修复：判定收进 [UpdatePolicy.requiresMandatorySignature] 纯函数。
       // 原实现在调用点写 `compareVersion(declaredVer, '2.8.0') >= 0`，方向恰好颠倒
       // （compareVersion 返回 >0 表示「参数 b 更新」），结果 2.8.2 及未来所有新版本
@@ -92,18 +113,21 @@ class UpdateChecker {
       // （虽不会下发旧版，但**压住修复推送**使安全问题无法到达设备）。加入
       // `requiresMandatorySignature(local)` 后，任何装在 2.8.0+ 设备上的 App 面对
       // 缺失签名的清单一律拒绝——攻击者无法再靠自报版本把门槛降下去。
+      //
+      // P2-7 / P3-14（v2.9.1 审计）：门槛已退化为**无条件强制**（见
+      // [UpdatePolicy.requiresMandatorySignature]）——「本地与清单自报版本均 < 2.8.0
+      // 时接受无签名清单」的渐进尾巴与「预发布形态豁免」两条路一并封死。
+      // apkSha256 由同一份清单自带，只证明「文件与清单一致」，证明不了「来源可信」，
+      // 因此清单签名是唯一可信锚：缺失即拒绝，不再提供「风险自担」的安装兜底。
       final requireSig = UpdatePolicy.requiresMandatorySignature(local) ||
           UpdatePolicy.requiresMandatorySignature(declaredVer);
-      if (requireSig && (sig == null || sig.isEmpty)) {
+      if (requireSig && sig.isEmpty) {
         return const UpdateResult(
-            hasUpdate: false,
-            error: '本机版本 ≥ 2.8.0，更新清单必须携带签名（缺失，已拒绝）');
+            hasUpdate: false, error: '更新清单必须携带签名（缺失，已拒绝）');
       }
       // C-2（更新链路签名校验）：若清单携带 `signature` 字段，则强校验其 ECDSA-P256 签名，
       // 确保清单确实来自开发者私钥、未被篡改（即便 Gitee 账户或 TLS 被攻破也无法伪造）。
-      // 无签名只可能在「本机与清单自报版本均低于 2.8.0 门槛」时走到这里（否则上面
-      // 已拒绝），属对历史未签名 release 的渐进兼容，不影响已升级设备的强校验。
-      if (sig != null && sig.isNotEmpty) {
+      if (sig.isNotEmpty) {
         final signable = Map<String, dynamic>.from(data)..remove('signature');
         final ok = _verifyUpdateSignature(
             utf8.encode(_canonicalJson(signable)), sig);
@@ -131,43 +155,43 @@ class UpdateChecker {
   ///   releaseUrl 缺省时兜底到 youtiao-releases-3（v2.7.8 起的新 APK 仓）。
   /// 解析失败（缺 version）返回 null。
   static UpdateInfo? parseManifest(Map<String, dynamic> data) {
-    final version = (data['version'] as String? ?? '').toString().trim();
+    final version = _str(data['version']).trim();
     // L-01：version 会被拼进下载文件名（`updates/app-release-v<version>.apk`），
     // 未做格式白名单时，取值为 `../../../files/x` 一类即可在应用沙箱内任意落文件。
     // 这里强制「数字.数字.数字」开头的 semver 形态，非法版本号一律拒绝整份清单。
     if (!UpdatePolicy.isValidVersion(version)) return null;
     // L-13：tag 会拼进兜底的 releaseUrl，先净化字符集再截断（防跳到非预期页面）。
-    final tag = UpdatePolicy.sanitizeTag(
-        (data['tag'] as String? ?? 'v$version').toString());
+    final rawTag = _str(data['tag']);
+    final tag = UpdatePolicy.sanitizeTag(rawTag.isEmpty ? 'v$version' : rawTag);
     // P2-7 加固：apkUrl 仅信任 https（明文 http 视为被篡改/不安全，拒绝直链）。
-    final rawUrl = data['apkUrl'] as String?;
-    final apkUrl = (rawUrl != null &&
+    final rawUrl = _str(data['apkUrl']);
+    final apkUrl = (rawUrl.isNotEmpty &&
             rawUrl.length <= UpdatePolicy.maxUrlChars &&
             rawUrl.startsWith('https://'))
         ? rawUrl
         : null;
     // P2-7 加固：apkSha256 仅接受 64 位小写十六进制；形态非法则丢弃（不信任），
-    // 避免拼接/误用畸形哈希。真正的「独立签名信任锚」为远期项——需在 App 内预置
-    // 公钥、并由发版脚本对 update.json 做签名，届时把签名校验接在这里。
-    final rawSha = data['apkSha256'] as String?;
-    final apkSha256 = (rawSha != null && _isSha256Hex(rawSha)) ? rawSha : null;
+    // 避免拼接/误用畸形哈希。真正的「独立签名信任锚」为 update.json 的 ECDSA 签名
+    // （见 [UpdateChecker.check] 的强制验签）。
+    final rawSha = _str(data['apkSha256']);
+    final apkSha256 = _isSha256Hex(rawSha) ? rawSha : null;
     // L-04：releaseUrl 会直接外跳浏览器，必须过白名单（作者发布仓的 releases 页），
     // 否则投毒清单可把用户引到钓鱼页。非法值直接丢弃，UI 侧按「无下载页」处理。
-    final rawReleaseUrl = data['releaseUrl'] as String?;
-    final releaseUrl = (rawReleaseUrl != null &&
+    final rawReleaseUrl = _str(data['releaseUrl']);
+    final releaseUrl = (rawReleaseUrl.isNotEmpty &&
             UpdatePolicy.isAllowedReleaseUrl(rawReleaseUrl))
         ? rawReleaseUrl
         : null;
     return UpdateInfo(
       tagName: tag,
       version: version,
-      releaseName: UpdatePolicy.clampShort(data['name'] as String?),
+      releaseName: UpdatePolicy.clampShort(_str(data['name'])),
       // S4 修复：以现网 update.json 的 releaseNotes 为准（不再读旧的 notes 键）。
       // L-13：截断到 8000 字，防投毒清单塞入数 MB 文本拖垮更新弹窗。
       // L-13：非空才截断；清单缺省 releaseNotes 时保持 null（消费方据此隐藏该区）。
       releaseNotes: data['releaseNotes'] == null
           ? null
-          : UpdatePolicy.clampReleaseNotes(data['releaseNotes'] as String?),
+          : UpdatePolicy.clampReleaseNotes(_str(data['releaseNotes'])),
       apkUrl: apkUrl,
       // v2.7.8：APK 仓切到 youtiao-releases-3（releases-2 附件配额已满）。
       // 优先取清单里的 releaseUrl（服务端可随时换仓而无需改 App），兜底值仅用于
@@ -177,6 +201,15 @@ class UpdateChecker {
       apkSha256: apkSha256,
     );
   }
+
+  /// P3-13（v2.9.1 审计）：清单字段的**容错读取**。
+  ///
+  /// 原实现一律 `as String?`，清单里任何字段写成 JSON 数字 / 布尔（例如 `"version": 2.9.2`
+  /// 少了引号）都会抛 TypeError，被外层 catch 兜成一句无上下文的错误——既绕过了
+  /// 「缺失签名」的明确拒绝分支，也让用户无法判断清单到底哪里坏了。统一 `toString()`
+  /// 后，形态问题交由各自的校验器（版本白名单 / base64 解码 / 哈希形态）判定并给出
+  /// 具体拒绝理由。
+  static String _str(dynamic v) => v == null ? '' : v.toString();
 
   /// P2-7：校验 apkSha256 是否为合法的 64 位小写十六进制串（SHA-256 标准形态）。
   /// 仅接受 0-9 与 a-f，拒绝大写/非十六进制/长度异常，避免被畸形哈希误导。

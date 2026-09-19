@@ -637,7 +637,14 @@ class Task {
         if (a == null) return false;
         final ad = DateTime(a.year, a.month, a.day);
         final d = DateTime(day.year, day.month, day.day);
-        final diff = d.difference(ad).inDays;
+        // P3-4（v2.9.1 审计）：按「日历日」求差，不能用本地时间的绝对时距。
+        // `d.difference(ad).inDays` 返回的是绝对时长：区间内若跨夏令时切换（某天 23 小时
+        // 或 25 小时），7 个自然日会被算成 6 天 23 小时 → inDays = 6，相位整体错位（此后
+        // 每隔 N 天的落点集体偏移一天）。中国时区无 DST 故线上未暴露，属时区健壮性缺口。
+        // 改用 UTC 零点求差：UTC 无夏令时，差值恒等于自然日数。
+        final diff = DateTime.utc(d.year, d.month, d.day)
+            .difference(DateTime.utc(ad.year, ad.month, ad.day))
+            .inDays;
         if (diff < 0) return false;
         final n = repeatInterval < 1 ? 1 : repeatInterval;
         return diff % n == 0;

@@ -1,39 +1,35 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:todolist/services/update_policy.dart';
 
-/// F-01 回归：更新清单「强制签名」门槛判定矩阵。
+/// 更新清单「强制签名」门槛判定。
 ///
-/// 设计意图（update_checker.check 注释）：声明版本 **≥ 2.8.0** 的正式版清单
-/// 必须携带合法 ECDSA 签名，缺签名 / 验签失败一律拒绝；2.8.0 之前的历史版本
-/// 维持「可选签名」渐进策略。预发布版本不参与强制。
-///
-/// 原实现把比较方向写反（`compareVersion(declared,'2.8.0') >= 0`），结果 2.8.2
-/// 与所有未来新版本反而不要求签名——攻击者删掉 signature 字段即可绕过 C-2 验签。
-/// 本测试把判定收进纯函数 [UpdatePolicy.requiresMandatorySignature] 并固化矩阵。
+/// 演进：
+/// - F-01：原实现把比较方向写反（`compareVersion(declared,'2.8.0') >= 0`），结果 2.8.2
+///   与所有未来新版本反而不要求签名——攻击者删掉 signature 字段即可绕过 C-2 验签。
+///   当时把判定收进纯函数 [UpdatePolicy.requiresMandatorySignature] 并由本文件固化矩阵。
+/// - P3-1（v2.9.0 审计）：门槛与**本地版本**取并集，避免清单自报版本被改小后降级。
+/// - P2-7 / P3-14（v2.9.1 审计）：门槛退化为**无条件强制**，两条绕过面一并封死——
+///   ① 「自报版本 < 2.8.0 时接受无签名清单」的渐进兼容尾巴；
+///   ② 「预发布形态整体豁免」。
+///   现在不论版本与形态，缺签名 / 验签失败一律拒绝（清单签名是更新链路唯一的
+///   「来源可信」锚；`apkSha256` 由同一份清单自带，只证明文件与清单一致）。
 void main() {
-  group('UpdatePolicy.requiresMandatorySignature（F-01 矩阵）', () {
-    test('2.7.x 历史版本不强制签名', () {
-      for (final v in const ['2.7.8', '2.7.9']) {
-        expect(UpdatePolicy.requiresMandatorySignature(v), isFalse,
-            reason: 'version=$v 应为可选签名');
-      }
-    });
-
-    test('2.8.0 起（含当前线上与新版本）必须签名', () {
-      for (final v in const ['2.8.0', '2.8.2', '2.9.0', '3.0.0']) {
+  group('UpdatePolicy.requiresMandatorySignature（P2-7 / P3-14：无条件强制）', () {
+    test('任何版本都强制签名（含 2.8.0 之前的历史版本）', () {
+      for (final v in const ['2.7.8', '2.7.9', '2.8.0', '2.8.2', '2.9.0', '3.0.0']) {
         expect(UpdatePolicy.requiresMandatorySignature(v), isTrue,
             reason: 'version=$v 必须携带签名');
       }
     });
 
-    test('预发布版本不参与强制（即便 >= 2.8.0）', () {
-      expect(UpdatePolicy.requiresMandatorySignature('2.9.0-beta'), isFalse);
-      expect(UpdatePolicy.requiresMandatorySignature('3.0.0-rc.1'), isFalse);
+    test('预发布版本同样强制（P3-14 关闭豁免）', () {
+      expect(UpdatePolicy.requiresMandatorySignature('2.9.0-beta'), isTrue);
+      expect(UpdatePolicy.requiresMandatorySignature('3.0.0-rc.1'), isTrue);
     });
 
-    test('形态非法的版本号不强制（交解析阶段拒绝）', () {
+    test('形态非法的版本号也返回 true（不再靠形态短路，缺签名由 check() 明确拒绝）', () {
       for (final v in const ['', 'abc', '2.8', '../../etc']) {
-        expect(UpdatePolicy.requiresMandatorySignature(v), isFalse);
+        expect(UpdatePolicy.requiresMandatorySignature(v), isTrue);
       }
     });
   });
@@ -43,8 +39,7 @@ void main() {
     test('2.8.2 比 2.8.0 更新 → 返回负值', () {
       expect(compareVersion('2.8.2', '2.8.0'), lessThan(0));
     });
-    test('「a 不早于 2.8.0」应写为 <= 0', () {
-      // 这正是 F-01 修复后的判定：requiresMandatorySignature 内部即此比较。
+    test('「a 不早于 2.8.0」应写为 <= 0（历史门槛口径，保留作对照）', () {
       expect(compareVersion('2.8.2', '2.8.0') <= 0, isTrue);
       expect(compareVersion('2.7.9', '2.8.0') <= 0, isFalse);
     });

@@ -13,6 +13,8 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/focus_chart.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+// U2-4（v2.9.1 审计）：日历日期弹层里的任务行可点进任务详情页。
+import 'package:todolist/screens/task_detail_screen.dart';
 
 /// 任务日历（月 / 周视图）：
 /// - 按任务到期日（dueDate）排布，月视图每格显示当天到期任务，周视图为 7 天列；
@@ -70,15 +72,23 @@ class _CalendarScreenState extends State<CalendarScreen> {
         DateTime(newDate.year, newDate.month, newDate.day, old.hour, old.minute);
     if (_sameDay(newDue, old)) return; // 拖回原日期不处理
 
-    // 目标截止时刻（dueDate − reminderOffsetMin）已早于当前时刻 → 保存后提醒
+    // 目标「提醒时刻」（dueDate − reminderOffsetMin）已早于当前时刻 → 保存后提醒
     // 永远不会触发，弹框让用户显式确认；取消则终止本次改期、不写库。
-    if (newDue.isBefore(DateTime.now())) {
+    //
+    // P2-3（v2.9.1 审计）：判定必须**减去提醒提前量**再比较——旧实现只比截止时刻
+    // （注释却声称比的是 `dueDate − reminderOffsetMin`，口径与注释不符）。于是
+    // 「截止明日 10:15、提前 30 分钟提醒」的任务，今天 10:00 拖到今天 10:15 时
+    // 截止时刻还没过、不弹守卫，保存后提醒时刻 09:45 早已过去 → 静默丢提醒，
+    // 与 v2.8.4「同一件事提示口径统一」及 P3-1 的承诺相悖。
+    final guardAt = newDue.subtract(Duration(minutes: task.reminderOffsetMin));
+    if (guardAt.isBefore(DateTime.now())) {
       final ok = await PastDueGuard.confirm(
         context,
         count: 1,
         detail: '目标日（${DateFormat('M月d日').format(newDue)} '
             '${old.hour.toString().padLeft(2, '0')}:'
-            '${old.minute.toString().padLeft(2, '0')}）的截止时刻'
+            '${old.minute.toString().padLeft(2, '0')}）的提醒时刻'
+            '${task.reminderOffsetMin > 0 ? '（提前 ${task.reminderOffsetMin} 分钟）' : ''}'
             '已早于当前时刻，改期后提醒将不会触发。\n\n仍要改期吗？',
       );
       if (!ok) return;
@@ -763,50 +773,76 @@ class _CalendarScreenState extends State<CalendarScreen> {
                         for (final t in tasks)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 10),
-                            child: Row(
-                              children: [
-                                SizedBox(
-                                  width: 22,
-                                  height: 22,
-                                  child: Checkbox(
-                                    value: t.done,
-                                    materialTapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                    onChanged: (v) => p.toggleDone(t.id),
+                            // U2-4（v2.9.1 审计）：整个日历模块此前**没有**任何到达
+                            // 任务详情页的路径（弹层里只有勾选框可点，点标题毫无反应），
+                            // 用户在日历上看到任务却无法查看/编辑它的备注、子任务、附件。
+                            // 现让整行可点：先收起日期弹层，再推详情页；返回即回到日历。
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: () {
+                                Navigator.pop(ctx2);
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        TaskDetailScreen(taskId: t.id),
                                   ),
-                                ),
-                                const SizedBox(width: 10),
-                                Container(
-                                    width: 10,
-                                    height: 10,
-                                    decoration: BoxDecoration(
-                                        color: _priorityColor(t.priority, isDark),
-                                        borderRadius: BorderRadius.circular(3))),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(t.title,
-                                          style: TextStyle(
-                                              fontSize: 15,
-                                              fontWeight: FontWeight.w600,
-                                              color: onBg,
-                                              decoration: t.done
-                                                  ? TextDecoration.lineThrough
-                                                  : null)),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        '${t.category.label}${t.dueDate != null ? " · ${DateFormat("HH:mm").format(t.dueDate!)}" : ""}',
-                                        // U7：同上。
-                                        style: TextStyle(
-                                            fontSize: 12, color: ext.meta),
+                                );
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4, vertical: 4),
+                                child: Row(
+                                  children: [
+                                    SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: Checkbox(
+                                        value: t.done,
+                                        materialTapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        onChanged: (v) => p.toggleDone(t.id),
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Container(
+                                        width: 10,
+                                        height: 10,
+                                        decoration: BoxDecoration(
+                                            color: _priorityColor(
+                                                t.priority, isDark),
+                                            borderRadius:
+                                                BorderRadius.circular(3))),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(t.title,
+                                              style: TextStyle(
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: onBg,
+                                                  decoration: t.done
+                                                      ? TextDecoration
+                                                          .lineThrough
+                                                      : null)),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            '${t.category.label}${t.dueDate != null ? " · ${DateFormat("HH:mm").format(t.dueDate!)}" : ""}',
+                                            // U7：同上。
+                                            style: TextStyle(
+                                                fontSize: 12, color: ext.meta),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    Icon(Symbols.chevron_right,
+                                        size: 18, color: ext.meta),
+                                  ],
                                 ),
-                              ],
+                              ),
                             ),
                           ),
                       _focusSectionForDay(context, date, onBg),

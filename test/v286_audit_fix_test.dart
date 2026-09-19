@@ -156,11 +156,17 @@ void main() {
       expect(copy!.doneDates, isEmpty,
           reason: '副本不得沿用原任务 doneDates，否则同一完成记录统计双算');
       expect(copy.completedAt, isNull);
-      // 统计口径：今天的完成仍由原任务表达，且只计 1 次。
-      expect(p.completionDayCounts[today], 1);
+      // P2-1（v2.9.1 审计）：改期把「今天这一次」整体挪到目标日，原日进 skipDates；
+      // 而完成 / 跳过是互斥状态，故今天那条完成记录必须一并撤销——否则同一天同时
+      // 「已完成」与「已跳过」（旧行为），撤销改期后当天仍被 isDoneOn 判为已完成、
+      // 完成统计虚计。
+      final src = p.byId('31')!;
+      expect(src.skipDates, contains(Task.ymdKey(today)));
+      expect(src.doneDates, contains(Task.ymdKey(lastWeek)));
+      expect(src.doneDates, isNot(contains(Task.ymdKey(today))));
+      // 统计口径：上周同日仍计 1 次；今天已随改期撤销，不再计入。
       expect(p.completionDayCounts[lastWeek], 1);
-      // 原任务完成历史不受影响。
-      expect(p.byId('31')!.doneDates.length, 2);
+      expect(p.completionDayCounts[today] ?? 0, 0);
     });
   });
 

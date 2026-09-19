@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:todolist/services/csv_safe.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/ical.dart';
 import 'package:todolist/services/report_exporter.dart';
@@ -52,7 +53,12 @@ class ExportSheet {
                 ListTile(
                   leading: const Icon(Symbols.table_chart),
                   title: const Text('导出为 CSV'),
-                  subtitle: const Text('表格格式，含任务、习惯与专注记录，可用 Excel 打开'),
+                  // P2-6（v2.9.1 审计）：CSV / Excel 是**可读副本**（列已补备注 / 标签 /
+                  // 子任务 / 开始时间 / 重复规则 / 提醒 / 累计专注，但仍不可能是完整数据：
+                  // 附件二进制、完成历史、跳过记录等都不在其中）。副标题如实说明，
+                  // 避免用户把它当归档 / 迁移副本后不可逆丢数据。
+                  subtitle: const Text('表格格式，含任务、习惯与专注记录，可用 Excel 打开'
+                      '（可读副本，完整数据请用备份）'),
                   onTap: () {
                     Navigator.pop(ctx);
                     _doExport(taskProvider, focusProvider, habitProvider, context,
@@ -72,7 +78,8 @@ class ExportSheet {
                 ListTile(
                   leading: const Icon(Symbols.grid_on),
                   title: const Text('导出为 Excel'),
-                  subtitle: const Text('表格工作簿，含任务 / 专注 / 习惯 / 打卡记录，可用 Excel / WPS 打开'),
+                  subtitle: const Text('表格工作簿，含任务 / 专注 / 习惯 / 打卡记录，'
+                      '可用 Excel / WPS 打开（可读副本，完整数据请用备份）'),
                   onTap: () {
                     Navigator.pop(ctx);
                     _doExportExcel(taskProvider, focusProvider, habitProvider,
@@ -127,7 +134,12 @@ class ExportSheet {
       final contentHabit =
           isCsv ? habitProvider.exportCsv() : habitProvider.exportMarkdown();
       // 任务 → 专注 → 习惯，依次拼接（CSV 各自带独立表头，MD 各自带独立标题）。
-      final content = '$contentTask\n$contentFocus\n$contentHabit';
+      // P2-5（v2.9.1 审计）：CSV 首部补 UTF-8 BOM（U+FEFF）。Excel / WPS 在没有 BOM
+      // 时按系统 ANSI（简体中文 Windows 即 GBK）解码，中文列名与内容**全量乱码**，
+      // 与弹层副标题「可用 Excel 打开」直接矛盾。BOM 只加在 CSV：MD / JSON 加 BOM
+      // 反而会污染正文与解析。
+      final rawContent = '$contentTask\n$contentFocus\n$contentHabit';
+      final content = isCsv ? withUtf8Bom(rawContent) : rawContent;
       final name =
           '有条-${isCsv ? 'tasks' : 'export'}-${_ts()}.${isCsv ? 'csv' : 'md'}';
       // 1) App 私有目录留一份，供「分享」按钮兜底

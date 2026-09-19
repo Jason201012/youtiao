@@ -678,6 +678,9 @@ class _HomeBlock extends StatelessWidget {
   /// 已完成显示「完成于 M月d日」，其余显示相对截止时间（今天 / 明天 / M月d日 …）。
   String _meta(Task t, String key) {
     if (key == 'repeat') {
+      // P3-2（v2.9.1 审计）：已「结束重复」的任务不再显示「每天 07:00 至 09/17」
+      // 这类已失效的规则文案（分享长图里同样会误导），与任务行 / 今日卡片同一口径。
+      if (t.repeatEnded) return '已结束重复';
       return t.repeatFull.isNotEmpty ? t.repeatFull : '重复';
     }
     if (key == 'done') {

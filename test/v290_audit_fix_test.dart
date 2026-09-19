@@ -79,14 +79,19 @@ void main() {
       expect(ics.contains('-PT0M'), isFalse);
     });
 
-    test('重复任务：DUE 落在「今天（首个循环日）+ repeatMinute」，提醒随落点触发', () {
+    test('重复任务：DUE 落在「提醒尚未过去的首个循环日 + repeatMinute」', () {
       final ics = exportIcs([mk('1', repeat: RepeatType.daily, repeatMinute: 7 * 60)]);
       final now = DateTime.now();
-      final ymd = '${now.year}'
-          '${now.month.toString().padLeft(2, '0')}'
-          '${now.day.toString().padLeft(2, '0')}';
+      // P3-1（v2.9.1 审计）：今天的 07:00 若已过，首落点必须自明天起算——否则第三方
+      // 日历同步后会立刻补响一条已过期的提醒，与 occurrence_sheet「今天提醒已过则自
+      // 明天起算」的新口径自相矛盾。
+      final slot = DateTime(now.year, now.month, now.day, 7, 0);
+      final first = slot.isAfter(now) ? now : now.add(const Duration(days: 1));
+      final ymd = '${first.year}'
+          '${first.month.toString().padLeft(2, '0')}'
+          '${first.day.toString().padLeft(2, '0')}';
       expect(ics.contains('DUE:${ymd}T070000'), isTrue,
-          reason: '重复任务的 DUE 应为首个循环日 + repeatMinute');
+          reason: '重复任务的 DUE 应为「提醒未过」的首个循环日 + repeatMinute');
       expect(ics.contains('TRIGGER:PT0S'), isTrue);
       expect(ics.contains('RRULE:FREQ=DAILY'), isTrue);
     });
@@ -237,7 +242,12 @@ void main() {
     });
 
     test('宽屏按可用宽铺满，单列夹在 200~280', () {
-      expect(kanbanLaneWidthFor(800, 3), closeTo(261.33, 0.05));
+      // P3-9（v2.9.1 审计）：每列都带 margin.right=8（含最后一列），故按「列数」扣间距。
+      // 800dp / 3 列 → (800 − 24)/3 = 258.67，整行 3×(258.67+8) = 800 正好铺满（旧算法
+      // 扣「列数 − 1」会算出 261.33，整行实际 808 —— 多出 8px 溢出并出现滚动条）。
+      expect(kanbanLaneWidthFor(800, 3), closeTo(258.67, 0.05));
+      final w = kanbanLaneWidthFor(800, 3);
+      expect(w * 3 + 8 * 3, closeTo(800, 0.05), reason: '未夹取时整行不得溢出');
       expect(kanbanLaneWidthFor(700, 2), 280);
       expect(kanbanLaneWidthFor(800, 8), 200, reason: '列数过多时夹到下限并横向滚动');
     });

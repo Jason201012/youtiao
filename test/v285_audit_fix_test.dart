@@ -180,7 +180,7 @@ void main() {
       expect(p.byId('302')!.skipDates, contains(Task.ymdKey(today)));
     });
 
-    test('改期目标日 == 原日（用户把今天改到今天）：仍建副本（原日被 skip）', () async {
+    test('改期目标日 == 原日（用户把今天改到今天）：整体无操作（P3-3 / v2.9.1）', () async {
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
       final p = TaskProvider();
@@ -190,8 +190,14 @@ void main() {
         'trash': [],
         'notifications_enabled': false,
       }));
+      final before = p.tasks.length;
       final copy = p.rescheduleOnceOccurrence('303', today, origDay: today);
-      expect(copy, isNotNull, reason: '目标日即原日时不存在「由循环覆盖」，必须落副本');
+      // P3-3（v2.9.1 审计）：原实现会「skip 今天 + 新建一条 dueDate=今天的一次性副本」，
+      // 于是同一天出现两条任务，且副本的提醒时刻（原 repeatMinute）多半已过、静默不响。
+      // 现在目标日 == 原日属**整体无操作**：不跳过、不建副本、返回 null。
+      expect(copy, isNull, reason: '目标日即原日时没有任何需要改期的东西');
+      expect(p.tasks.length, before, reason: '不得新建同日副本');
+      expect(p.byId('303')!.skipDates, isEmpty, reason: '不得把今天标记为跳过');
     });
   });
 

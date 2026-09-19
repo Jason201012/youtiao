@@ -4,8 +4,6 @@ import 'package:excel/excel.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:todolist/models/task.dart';
-import 'package:todolist/models/habit.dart';
-import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/checkin.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
@@ -46,37 +44,34 @@ class ReportExporter {
 
   static void _fillTaskSheet(
       Sheet s, TaskProvider task, bool includeTrash, bool includeAttachments) {
-    const headers = [
-      '标题',
-      '优先级',
-      '分类',
-      '截止时间',
-      '状态',
-      '完成时间',
-      '是否已删除',
-      // P1-10：附件清单列（开启「包含附件清单」时填充，否则整列为空）。
-      '附件',
-    ];
+    // P2-6（v2.9.1 审计）：列定义与取值口径统一走 [TaskProvider.taskTableHeaders] /
+    // [TaskProvider.taskTableValues]——此前 Excel 与 CSV 各写一份 8 列结构，两处都缺
+    // 备注 / 标签 / 子任务 / 开始时间 / 重复规则 / 提醒时刻 / 累计专注，用户把导出的
+    // 表格当归档副本时不可逆丢数据，且两份定义随时可能漂移。
+    const headers = TaskProvider.taskTableHeaders;
     for (var c = 0; c < headers.length; c++) {
       _set(s, 0, c, headers[c]);
     }
     var r = 1;
     void writeRow(Task t, bool deleted) {
-      _set(s, r, 0, t.title);
-      _set(s, r, 1, t.priority.label);
-      _set(s, r, 2, t.category.label);
-      _set(s, r, 3, t.dueDate == null ? '' : _fmt(t.dueDate!));
-      _set(s, r, 4, t.done ? '已完成' : '未完成');
-      _set(s, r, 5, t.completedAt == null ? '' : _fmt(t.completedAt!));
-      _set(s, r, 6, deleted ? '是' : '否');
-      // P1-10：附件清单（如 a.jpg(1.2MB), b.m4a(34KB)）；无附件则空。
-      _set(s, r, 7, includeAttachments ? _attachmentSummary(t) : '');
+      final values = TaskProvider.taskTableValues(
+        t,
+        deleted: deleted,
+        includeAttachments: includeAttachments,
+      );
+      for (var c = 0; c < values.length; c++) {
+        _set(s, r, c, values[c]);
+      }
       r++;
     }
 
-    for (final t in task.tasks) writeRow(t, false);
+    for (final t in task.tasks) {
+      writeRow(t, false);
+    }
     if (includeTrash) {
-      for (final t in task.trash) writeRow(t, true);
+      for (final t in task.trash) {
+        writeRow(t, true);
+      }
     }
   }
 
@@ -185,18 +180,6 @@ class ReportExporter {
       );
     }
     return pdf.save();
-  }
-
-  /// P1-10：从任务附件派生「附件：a.jpg(1.2MB), b.m4a(34KB)」摘要文本。
-  /// 无附件返回空串；超长截断省略，避免单元格过大。
-  static String _attachmentSummary(Task t) {
-    if (t.attachments.isEmpty) return '';
-    final parts = t.attachments
-        .map((ref) => '${ref.fileName}(${ref.sizeLabel})')
-        .toList();
-    var s = '附件：${parts.join(', ')}';
-    if (s.length > 200) s = '${s.substring(0, 197)}…';
-    return s;
   }
 
   // ===== 内部工具 =====

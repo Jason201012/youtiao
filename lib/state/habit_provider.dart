@@ -571,7 +571,7 @@ class HabitProvider extends ChangeNotifier {
     for (final h in _habits) {
       final reminder =
           h.reminderMinute == null ? '无' : _fmtMinute(h.reminderMinute!);
-      buf.writeln('- ${_esc(h.emoji)} ${_esc(h.title)} ｜ 当前连续 '
+      buf.writeln('- ${_mdText(h.emoji)} ${_mdText(h.title)} ｜ 当前连续 '
           '${currentStreak(h)} 天 · 最长 ${longestStreak(h)} 天 · 累计 '
           '${checkInCount(h)} 次 ｜ 提醒 $reminder${h.archived ? ' ｜ 已归档' : ''}');
     }
@@ -581,7 +581,7 @@ class HabitProvider extends ChangeNotifier {
       final titleById = {for (final h in _habits) h.id: h.title};
       for (final c in _checkIns) {
         final name = titleById[c.habitId] ?? c.habitId;
-        buf.writeln('- ${CheckIn.dateKey(c.date)} ｜ ${_esc(name)}');
+        buf.writeln('- ${CheckIn.dateKey(c.date)} ｜ ${_mdText(name)}');
       }
     }
     return buf.toString();
@@ -593,6 +593,11 @@ class HabitProvider extends ChangeNotifier {
   static String _fmtMinute(int m) =>
       '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
   static String _esc(String s) => csvCell(s);
+
+  /// P3-10（v2.9.1 审计）：Markdown 导出不得复用 [csvCell]（其职责是防 Excel 把
+  /// `=` / `+` / `-` / `@` 开头的单元格当公式执行），MD 无公式执行面，套用会给
+  /// 标题硬加 `'` 前缀、把引号变成 `""`，污染可读副本。这里只做换行归一。
+  static String _mdText(String s) => s.replaceAll(RegExp(r'[\r\n]+'), ' ');
 
   Future<void> _persistHabits() async {
     try {

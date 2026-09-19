@@ -29,19 +29,56 @@ String _escapeIcs(String s) => s
 
 /// 还原 iCal 属性值转义。
 ///
-/// F14：原顺序为 `\\n` → `\n` 先于 `\\\\` → `\\`，会把字面 `\\\\n`
-/// （即 `\\` + 字母 n）错误解码为「`\\` + 换行」。RFC 5545 §3.3.11 规定
-/// 反斜杠先做实体替换，自身作为转义字符最后被解开——故顺序倒置：先解 `\\n`/
-/// `\\,`/`\\;`/`\\t`，最后解 `\\`。这与 RFC 一致且符合多数第三方 .ics 行为。
+/// P2-2（v2.9.1 审计）：改为**单趟左到右解码**——旧实现是两趟 `replaceAll`，无论
+/// 顺序如何都会破坏「反斜杠 + 字母 n」这类字面序列：
+/// - 先实体后反斜杠（v2.9.1 的原实现）：`a\\nb`（转义前的原始文本是 `a` + `\` + `n` + `b`，
+///   导出为 `a\\nb`）第一趟把 `\n` 解成换行，第二趟再把剩下的 `\` 收掉 →
+///   得到「`a` + 换行 + `b`」，字面 `\n` 被静默改成真换行；
+/// - 先反斜杠后实体：`\\n` 会被先收成 `\`，再与后面的 `n` 组成假转义。
+///
+/// 唯一正确的做法是像 RFC 5545 §3.3.11 那样逐字符扫描：遇到 `\` 时**消费两个字符**
+/// 并一次性还原（`\\`→`\`、`\n`/`\N`→换行、`\t`→制表、`\,`→逗号、`\;`→分号），
+/// 绝不回扫。无法识别的转义（`\x`）原样保留（宽容第三方 .ics），末尾孤立 `\` 亦原样保留。
 String _unescapeIcs(String s) {
-  // 先解「反斜杠 + 实体」：把形如 \n / \, / \; / \t 的转义还原为原始字符。
-  final step1 = s
-      .replaceAll(r'\n', '\n')
-      .replaceAll(r'\,', ',')
-      .replaceAll(r'\;', ';')
-      .replaceAll(r'\t', '\t');
-  // 再解「反斜杠 + 反斜杠」：避免把字面 `\\\\n` 错误解码为 `\<newline`。
-  return step1.replaceAll(r'\\', '\\');
+  if (!s.contains('\\')) return s; // 无转义字符：直接返回，避开逐字符扫描
+  final sb = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    final ch = s[i];
+    if (ch != '\\') {
+      sb.write(ch);
+      continue;
+    }
+    if (i + 1 >= s.length) {
+      sb.write(ch); // 末尾孤立反斜杠：原样保留
+      break;
+    }
+    final next = s[i + 1];
+    switch (next) {
+      case '\\':
+        sb.write('\\');
+        break;
+      case 'n':
+      case 'N':
+        sb.write('\n');
+        break;
+      case 't':
+        sb.write('\t');
+        break;
+      case ',':
+        sb.write(',');
+        break;
+      case ';':
+        sb.write(';');
+        break;
+      default:
+        // 未知转义：按 RFC 属非法编码，宽处理为「原样保留两个字符」，
+        // 避免把第三方 .ics 里的内容静默吃掉。
+        sb.write(ch);
+        sb.write(next);
+    }
+    i++; // 关键：消费掉被转义的那个字符，绝不回扫
+  }
+  return sb.toString();
 }
 
 /// 把 DateTime 格式化为本地浮动时间 YYYYMMDDTHHMMSS（不带时区，符合 iCal 浮动时间语义）。
@@ -151,11 +188,21 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
 ///   `RRULE` 也失去锚点。
 /// - 重复任务未设 `repeatMinute`（无提醒时刻）或 366 天内已无循环日（已结束重复）时，
 ///   回退旧的 `t.dueDate` 行为（可能为 null）。
+///
+/// P3-1（v2.9.1 审计）：首落点自「**提醒时刻尚未过去的今天**」起算，否则自明天起算。
+/// 此前恒取「今天（若今天是循环日）」，于是上午导出「每天 07:00」这类任务时会写出
+/// 一个今天 07:00 的 DUE + `TRIGGER:PT0S`——第三方日历同步后会把这条已过期的提醒
+/// 立刻补响，与 occurrence_sheet「今天提醒已过则自明天起算」的新口径自相矛盾。
 DateTime? _exportDue(Task t) {
   if (t.repeat == RepeatType.none) return t.dueDate;
   final hhmm = t.repeatMinute;
   if (hhmm == null) return t.dueDate;
-  final first = _firstOccurrence(t);
+  final now = DateTime.now();
+  // 今天在该时刻的落点是否还没过去（PT0S 语义：提醒时刻 == DUE 时刻）。
+  final todaySlot = DateTime(now.year, now.month, now.day,
+      (hhmm ~/ 60).clamp(0, 23), (hhmm % 60).clamp(0, 59));
+  final from = todaySlot.isAfter(now) ? now : now.add(const Duration(days: 1));
+  final first = _firstOccurrence(t, from: from);
   if (first == null) return t.dueDate;
   return DateTime(
     first.year,
@@ -166,7 +213,8 @@ DateTime? _exportDue(Task t) {
   );
 }
 
-/// 今天（含）起 366 天内的首个循环日；无则返回 null（已结束重复 / 规则失效）。
+/// 自 [from]（默认今天）当天（含）起 366 天内的首个循环日；无则返回 null
+///（已结束重复 / 规则失效）。
 ///
 /// 复用 [Task.repeatsOn]，因此已跳过的日子会被跳过（提醒不应落在被跳过的当天）。
 DateTime? _firstOccurrence(Task t, {DateTime? from}) {
@@ -288,34 +336,49 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   final blocks = <Map<String, String>>[];
   Map<String, String>? current;
   String? currentKind;
+  // 提醒段（`BEGIN:VALARM` … `END:VALARM`）内的属性加 `ALARM.` 前缀单独存放。
+  // 若不隔离，VALARM 的 `DESCRIPTION`（本 App 导出时写的就是任务标题）会在
+  // VTODO 自身没有 DESCRIPTION 时顶替成「备注」——「导出 → 导入」往返会把备注
+  // 污染成标题，属静默数据变形。
+  var inAlarm = false;
   for (final raw in lines) {
+    // P3-5（v2.9.1 审计）：结构判定用 trim 后的行，但**属性值取自未 trim 的原始行**
+    // ——RFC 5545 的值内空白有意义（`SUMMARY:  foo` 的前导空格属于标题本身）。
+    // 旧实现对整行 `raw.trim()`，把值首尾空白一并削掉，标题 / 备注静默变形。
     final line = raw.trim();
     if (line.isEmpty) continue;
     if (line.startsWith('BEGIN:VTODO')) {
       current = <String, String>{};
       currentKind = 'VTODO';
+      inAlarm = false;
     } else if (line.startsWith('BEGIN:VEVENT')) {
       current = <String, String>{};
       currentKind = 'VEVENT';
+      inAlarm = false;
+    } else if (line.startsWith('BEGIN:VALARM')) {
+      inAlarm = true;
+    } else if (line.startsWith('END:VALARM')) {
+      inAlarm = false;
     } else if (line.startsWith('END:VTODO') ||
         line.startsWith('END:VEVENT')) {
       if (current != null && currentKind != null) blocks.add(current);
       current = null;
       currentKind = null;
+      inAlarm = false;
     } else if (current != null) {
       // F14：RFC 5545 §3.1 允许属性带参数，形如 `DTSTART;VALUE=DATE:20240101` /
       // `DTSTART;TZID=Asia/Shanghai:20240101T090000`。原本 `indexOf(':')`
       // 直接把前半段当成 key，导致 `DTSTART;VALUE=DATE` 被误识别为完整 key
       // 而查不到 DUE/DTSTART。修正：先以第一个 `:` 切出「name+params / value」，
       // 再以 `;` 切出 name，作为存储 key；参数部分留作后续字段级解析用。
-      final idx = line.indexOf(':');
+      final idx = raw.indexOf(':');
       if (idx <= 0) continue;
-      final head = line.substring(0, idx);
-      final value = line.substring(idx + 1);
-      final name = head.split(';').first.toUpperCase();
+      final head = raw.substring(0, idx);
+      final value = raw.substring(idx + 1); // 保留值内空白（P3-5）
+      final name = head.split(';').first.trim().toUpperCase();
       if (name.isEmpty) continue;
       // 同一 key 可能出现多次（如多 CATEGORIES），用首个即可。
-      current.putIfAbsent(name, () => value);
+      current.putIfAbsent(inAlarm ? 'ALARM.$name' : name, () => value);
     }
   }
   // 3) 逐块映射为 Task。
@@ -354,8 +417,18 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
         uids.add(b['UID']);
         // P2-1（v2.9.0 审计）：统计提醒段的迁移结果——带提醒段但迁移不了的要如实
         // 告知用户「提醒不迁移」，而不是让它静默消失（旧实现整段忽略）。
+        // P3-7（v2.9.1 审计）：重复任务的提醒时刻由 `repeatMinute`（当天时刻）表达，
+        // 与「相对 DUE 的提前量」不是同一语义——只有提前量为 0（提醒时刻 == 落点时刻）
+        // 时才能如实迁移（见 [_blockToTask] 对 repeatMinute 的回填）；非零提前量在
+        // 重复语义下无从表达，必须计入「未迁移」，不能算作已迁移（陈述要如实）。
         if (_hasAlarmSegment(b)) {
-          if (_parseAlarmOffsetMin(b, _blockDueDate(b)) != null) {
+          final off = _parseAlarmOffsetMin(b, _blockDueDate(b));
+          // 判定「是否真的迁成了」：一次性任务看提前量是否可表达；重复任务还要确认
+          // repeatMinute 真的被回填（无 DUE 时无从取得时刻，同样属未迁移）。
+          final migratable = off != null &&
+              (task.repeat == RepeatType.none ||
+                  (off == 0 && task.repeatMinute != null));
+          if (migratable) {
             reminderMigrated++;
           } else {
             reminderDropped++;
@@ -389,10 +462,17 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
 }
 
 /// P2-1（v2.9.0 审计）：块内是否含提醒段（RFC 5545 `TRIGGER` 或 vCalendar 1.0
-/// `AALARM`）。扁平解析把 `BEGIN:VALARM` 之后的属性直接挂在块上，故按属性名判定。
+/// `AALARM`）。`VALARM` 内的属性以 `ALARM.` 前缀隔离存放；同时兼容「无
+/// `BEGIN:VALARM` 包裹、直接把 TRIGGER 写在块级」的宽容写法（第三方生成器常见）。
 bool _hasAlarmSegment(Map<String, String> b) =>
-    (b['TRIGGER']?.trim().isNotEmpty ?? false) ||
-    (b['AALARM']?.trim().isNotEmpty ?? false);
+    (_triggerProp(b)?.trim().isNotEmpty ?? false) ||
+    (_aalarmProp(b)?.trim().isNotEmpty ?? false);
+
+/// 提醒段里的 `TRIGGER` 值：优先取 `VALARM` 隔离键，回退块级裸键（宽容第三方写法）。
+String? _triggerProp(Map<String, String> b) => b['ALARM.TRIGGER'] ?? b['TRIGGER'];
+
+/// 提醒段里的 `AALARM`（vCalendar 1.0）值：同上。
+String? _aalarmProp(Map<String, String> b) => b['ALARM.AALARM'] ?? b['AALARM'];
 
 /// 块的落点（`DUE` 优先，其次 `DTSTART`），无则 null。抽出来供 [_blockToTask] 与
 /// 提醒迁移统计共用，避免两处口径漂移。
@@ -412,7 +492,7 @@ DateTime? _blockDueDate(Map<String, String> b) {
 /// 无法表达 / 缺少落点时返回 null（调用方计入「提醒未迁移」并如实提示）。
 int? _parseAlarmOffsetMin(Map<String, String> b, DateTime? due) {
   // 1) TRIGGER：先按 duration 解析（本 App 自身的导出形态即此类）。
-  final trig = b['TRIGGER']?.trim();
+  final trig = _triggerProp(b)?.trim();
   if (trig != null && trig.isNotEmpty) {
     final rel = _triggerDurationToOffsetMin(trig);
     if (rel != null) return rel;
@@ -421,7 +501,7 @@ int? _parseAlarmOffsetMin(Map<String, String> b, DateTime? due) {
     if (mins != null) return mins;
   }
   // 2) vCalendar 1.0 AALARM：`AALARM:<触发时刻>;<时长>;...`（只取首段绝对时刻）。
-  final aal = b['AALARM']?.trim();
+  final aal = _aalarmProp(b)?.trim();
   if (aal != null && aal.isNotEmpty) {
     final abs = _parseIcsDateTime(aal.split(';').first);
     final mins = _offsetFromAbsolute(abs, due);
@@ -466,7 +546,11 @@ int? _triggerDurationToOffsetMin(String raw) {
   final se = int.tryParse(m.group(6) ?? '') ?? 0;
   final seconds = sign * ((((w * 7 + d) * 24 + h) * 60 + mi) * 60 + se);
   if (seconds > 0) return null; // 晚于落点：无法表达
-  final mins = (-seconds) ~/ 60;
+  // P3-7（v2.9.1 审计）：秒级精度取**最近的分钟**，不再向下取整。
+  // 旧实现 `(-seconds) ~/ 60` 会把 `-PT30S` 变成 0（语义从「提前 30 秒」漂移成
+  // 「准点提醒」）、把 `-PT90S` 变成 1（少 30 秒）。本 App 的最小粒度是分钟，
+  // 四舍五入到最近分钟是误差最小的表达（且不会把 30 秒错当成准点）。
+  final mins = ((-seconds) + 30) ~/ 60;
   return mins > 7 * 24 * 60 ? null : mins;
 }
 
@@ -589,19 +673,25 @@ Task? _blockToTask(Map<String, String> b) {
           .map((s) => _icsWeekdayToDart[s.trim().toUpperCase()])
           .whereType<int>()
           .toList();
-      if (days.length >= 5 &&
-          days.toSet().containsAll(_dartWeekdayToIcs.keys.where((k) => k <= 5))) {
-        // 含全部工作日 → 仅工作日。
+      // P2-4（v2.9.1 审计）：仅当 BYDAY **恰好就是工作日集合（MO-FR）** 时才映射为
+      // 「仅工作日」。此前判据是「长度 ≥5 且包含周一~周五」，而
+      // `BYDAY=MO,TU,WE,TH,FR,SA,SU`（App 内「每周」多选全部 7 天导出的形态）同样满足
+      // ——于是往返时周六日被静默丢掉，第三方日历的 6 天写法亦然。
+      final set = days.toSet();
+      if (set.length == 5 && set.containsAll(const [1, 2, 3, 4, 5])) {
+        // 含且仅含全部工作日 → 仅工作日。
         repeat = RepeatType.weekday;
-      } else if (days.length == 1) {
-        repeat = RepeatType.weekly;
-        weekdays = days;
       } else if (days.isNotEmpty) {
+        // P3-6（v2.9.1 审计）：原 `days.length == 1` 与 `isNotEmpty` 两个分支体完全
+        // 相同（死代码），此处合并；单日 / 多日一律按逐日集合保留。
         repeat = RepeatType.weekly;
         weekdays = days;
       } else {
+        // P3-6（v2.9.1 审计）：不带 BYDAY 的 `FREQ=WEEKLY` 是合法写法（RFC 5545 缺省
+        // 即落点当日的周几）。旧实现静默默认周一，会把第三方日历里的「每周三」搬成
+        // 「每周一」。这里改以落点（DUE / DTSTART）的周几为锚，无落点才回退周一。
         repeat = RepeatType.weekly;
-        weekdays = const [1];
+        weekdays = [dueDate?.weekday ?? DateTime.monday];
       }
     } else if (freq == 'MONTHLY') {
       // 每月 N 号：BYMONTHDAY；每月第 N 个周几：BYDAY + BYSETPOS（-1=最后一个）。
@@ -653,6 +743,17 @@ Task? _blockToTask(Map<String, String> b) {
     if (int.tryParse(numPart) != null) idForImport = numPart;
   }
 
+  // P3-7（v2.9.1 审计）：重复任务的提醒时刻在本 App 只有一种表达——`repeatMinute`
+  // （每个循环日的当天时刻）。故当提醒段表达的是「提醒时刻 == 落点时刻」（提前量 0）
+  // 时，把落点的时分回填为 `repeatMinute`，让重复提醒真正迁移过来（此前导入侧从不写
+  // 该字段，重复任务导入后一律无提醒，而统计却报「提醒已迁移」）。提前量非 0 的
+  // 重复提醒无对应语义，保持 null 并由调用方计入「未迁移」。
+  int? repeatMinute;
+  if (repeat != RepeatType.none && dueDate != null) {
+    final off = _parseAlarmOffsetMin(b, dueDate);
+    if (off == 0) repeatMinute = dueDate.hour * 60 + dueDate.minute;
+  }
+
   return Task(
     id: idForImport,
     title: title,
@@ -666,6 +767,7 @@ Task? _blockToTask(Map<String, String> b) {
     // P2-1：提醒提前量随导入落库（无提醒段时为 0 = 落点时刻提醒）。
     reminderOffsetMin: reminderOffsetMin,
     repeat: repeat,
+    repeatMinute: repeatMinute,
     repeatWeekdays: weekdays,
     repeatInterval: interval,
     repeatUntil: repeatUntil,

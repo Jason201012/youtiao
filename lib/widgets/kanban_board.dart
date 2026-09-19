@@ -54,7 +54,11 @@ double kanbanLaneWidthFor(double available, int laneCount) {
   if (available.isNaN || available <= 0) return _scrollLaneWidth;
   if (available < _wideBreakpoint) return _scrollLaneWidth;
   const gap = 8.0; // 与 `_Column` 的 `margin.right` 对齐
-  final raw = (available - gap * (laneCount - 1)) / laneCount;
+  // P3-9（v2.9.1 审计）：每列都带 `margin.right: 8`（**含最后一列**），故间距要按
+  // 「列数」扣而不是「列数 − 1」。旧算法在未触发夹取时整行实宽 = available + 8：
+  // 1000dp 宽屏 4 列会莫名其妙多出 8px 溢出并出现横向滚动条，与「宽屏铺满」的
+  // 设计目标相反（夹取到上限时因 raw 被截断反而不溢出，故只在中间区间暴露）。
+  final raw = (available - gap * laneCount) / laneCount;
   return raw.clamp(_minLaneWidth, _maxLaneWidth);
 }
 
@@ -133,7 +137,14 @@ List<KanbanLaneData> buildKanbanLanes(
         }
       }
       final top = freq.entries.toList()
-        ..sort((a, b) => b.value.compareTo(a.value));
+        // P3-11（v2.9.1 审计）：补字典序次级键——Dart 的 `List.sort` **不是稳定排序**，
+        // 同频标签的先后完全取决于底层实现的内部顺序，于是「顺序稳定可复现」的注释
+        // 并不成立（计数和没错，但泳道顺序可能在不同运行 / 不同 SDK 版本下变化，
+        // 让用户以为看板自己重排了）。频次降序 + 标签字典序 = 完全确定的顺序。
+        ..sort((a, b) {
+          final byCount = b.value.compareTo(a.value);
+          return byCount != 0 ? byCount : a.key.compareTo(b.key);
+        });
       final topTags =
           top.take(maxTagLanes).map((e) => e.key).toList(growable: false);
       // 先按频次降序建桶，保证泳道顺序稳定。

@@ -43,4 +43,33 @@ void main() {
     expect(find.text('晨间喝水'), findsOneWidget);
     expect(find.text('(无标题)'), findsNothing);
   });
+
+  testWidgets('U2-1：重排场景（constrainTitleWidth）下标题不再被锁 80px', (tester) async {
+    // 首页拖拽重排默认常开 → 每行都传 constrainTitleWidth: true。v2.4.1 起该标记
+    // 会把标题固定成 80px（长标题只剩 ~8 字、备注/标签 chips 竖排堆叠）。
+    // v2.9.1 审计后改为「用 LayoutBuilder 探可用宽」：有界即放开 Expanded，
+    // 仅无界/过窄才 80px 兜底。这里用 400dp 有界容器钉死新行为。
+    final task = Task(
+      id: 'r3',
+      title: '一个相当长的任务标题用于验证标题区宽度不再被固定为八十像素',
+      priority: Priority.medium,
+      category: Category.work,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(useMaterial3: true, extensions: [ext]),
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 400,
+              child: TaskRow(task: task, constrainTitleWidth: true),
+            ),
+          ),
+        ),
+      ),
+    );
+    final width = tester.getSize(find.text(task.title)).width;
+    expect(width, greaterThan(120),
+        reason: '可用宽有界时必须放开标题（旧实现恒为 80px）');
+  });
 }

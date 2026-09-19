@@ -1223,11 +1223,15 @@ void _showUndoSnackBar(BuildContext context, TaskProvider provider, Task removed
         label: '撤销',
         onPressed: () => provider.undoDelete(),
       ),
-      duration: const Duration(seconds: 4),
+      // U3-1（v2.9.1 审计）：时长与文案口径统一——批量删除 / 滑删的二次确认框都写
+      // 「可在 5 秒内撤销」，而这里的 SnackBar 只有 4 秒，用户按 5 秒的承诺去点
+      // 会扑空。这里把时长提到 5 秒与文案对齐（detail 页删除文案同步改为如实说明
+      // 去向为回收站）。
+      duration: const Duration(seconds: 5),
     ),
   );
-  // 兜底：无论是否点击撤销，4 秒后强制收起。
-  Future.delayed(const Duration(seconds: 4), () {
+  // 兜底：无论是否点击撤销，5 秒后强制收起。
+  Future.delayed(const Duration(seconds: 5), () {
     controller.close();
   });
 }
@@ -1243,10 +1247,11 @@ void _showBatchUndoSnackBar(
         label: '撤销',
         onPressed: () => provider.undoDelete(),
       ),
-      duration: const Duration(seconds: 4),
+      // U3-1（v2.9.1 审计）：5 秒，与「可在 5 秒内撤销」的确认框文案对齐。
+      duration: const Duration(seconds: 5),
     ),
   );
-  Future.delayed(const Duration(seconds: 4), () {
+  Future.delayed(const Duration(seconds: 5), () {
     controller.close();
   });
 }

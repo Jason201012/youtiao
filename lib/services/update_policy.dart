@@ -16,10 +16,8 @@
 class UpdatePolicy {
   const UpdatePolicy._();
 
-  /// F-01：「强制签名」的最低清单版本。
-  ///
-  /// 声明版本不早于此值的**正式版**清单必须携带合法 ECDSA-P256 签名（[signature] 字段），
-  /// 缺签名 / 验签失败一律拒绝；此前的历史版本维持「可选签名」的渐进策略。
+  /// 历史门槛（已退役）：v2.9.1 审计起签名改为**无条件强制**，见
+  /// [requiresMandatorySignature]。常量保留仅供文档对照与测试矩阵可读。
   static const String signatureRequiredSinceVersion = '2.8.0';
 
   /// APK 下载体积硬上限（200 MB）。当前包体约 45 MB，留足余量；
@@ -83,25 +81,25 @@ class UpdatePolicy {
   static bool isValidVersion(String v) =>
       v.isNotEmpty && v.length <= maxVersionChars && versionRe.hasMatch(v);
 
-  /// F-01：清单声明版本是否**必须**携带合法签名。
+  /// 清单是否**必须**携带合法签名（F-01 收口；P2-7 / P3-14 起改为无条件强制）。
   ///
-  /// 判定口径（与 `update_checker.check` 的设计意图一致）：
-  /// - 版本号形态非法 → false（形态校验由解析阶段拒绝，不额外加码）；
-  /// - 预发布版本（2.9.0-beta）→ false，不参与强制（内部测试包不必签名）；
-  /// - 声明版本 **不早于** [signatureRequiredSinceVersion] → true。
+  /// 判定口径的历史演进：
+  /// - F-01：原实现把比较方向写反（`compareVersion(declared,'2.8.0') >= 0`），
+  ///   导致 2.8.2 及所有未来版本反而**不要求**签名——攻击者删掉 `signature` 字段
+  ///   即可绕过 C-2 验签。当时把语义收进本纯函数，由
+  ///   `update_signature_gate_test.dart` 固化矩阵。
+  /// - P3-1（v2.9.0 审计）：门槛与本地版本取并集，避免清单自报版本被改小后降级。
+  /// - P2-7 / P3-14（v2.9.1 审计）：**一律强制**。原口径留了两条绕过面：
+  ///   ① 清单自报版本 < 2.8.0 时门槛退化为「可选签名」——攻击者把 `version` 改小
+  ///      并删除签名即可让清单被接受（虽不会下发旧版，但能静默压住修复推送）；
+  ///   ② 预发布形态（如 `2.9.0-beta`）被整体豁免，长期停留在预发布版的设备
+  ///      与 ① 拥有同一条投毒面。
+  ///   现在不论自报版本与形态，缺签名 / 验签失败一律拒绝：清单签名是更新链路
+  ///   唯一的「来源可信」锚（`apkSha256` 由同一份清单自带，只能证明文件与清单一致，
+  ///   证明不了清单本身可信）。
   ///
-  /// ⚠️ 陷阱（本函数存在的全部理由）：[compareVersion] 的返回方向是
-  /// 「>0 表示 b 比 a 新」，即 **a 越新、返回值越小（负）**。判断
-  /// 「a 不早于 2.8.0」因此应写成 `<= 0`。写成 `>= 0` 会让 2.8.2 及所有
-  /// 未来新版本**反而不要求签名**，攻击者删掉 signature 字段即可绕过验签。
-  /// 这里把语义收进单一纯函数并由 `update_signature_gate_test.dart` 固化，
-  /// 避免比较方向再次散落到调用点。
-  static bool requiresMandatorySignature(String declaredVersion) {
-    final v = declaredVersion.trim();
-    if (!isValidVersion(v)) return false;
-    if (prereleaseOf(v) != null) return false;
-    return compareVersion(v, signatureRequiredSinceVersion) <= 0;
-  }
+  /// 参数 [declaredVersion] 保留，使调用点的「按版本判定」语义与测试矩阵无需改写。
+  static bool requiresMandatorySignature(String declaredVersion) => true;
 
   /// 发行版页面兜底 URL 里的 tag 段净化（L-13）。
   ///
