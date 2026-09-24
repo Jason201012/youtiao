@@ -488,11 +488,21 @@ class _HabitRow extends StatelessWidget {
     final checked = status.checked;
     // T1-2：量化习惯显示「今日 x/y」而不是「待打卡 / 已打卡」——
     // 「喝了 3 杯但目标 8 杯」既不该显示「已打卡」，也不该显示「待打卡」。
-    final label = status.habit.isQuantified
-        ? (status.met
-            ? '已达标 ${status.value}/${status.target}'
-            : '今日 ${status.value}/${status.target}')
-        : (checked ? '已打卡' : (status.shouldCheckIn ? '待打卡' : '今天不打卡'));
+    // P3-5（v2.9.3 审计）：量化分支此前忽略 [status.shouldCheckIn]——
+    // 「每周一三五 · 8 杯水」在周二（休息日）显示「今日 0/8」，
+    // 与布尔习惯的「今天不打卡」口径不一致；现休息日统一显示「今天不打卡」
+    // （有记录时仍优先展示进度，保留补录事实）。
+    final label = checked
+        ? (status.habit.isQuantified
+            ? (status.met
+                ? '已达标 ${status.value}/${status.target}'
+                : '今日 ${status.value}/${status.target}')
+            : '已打卡')
+        : (status.shouldCheckIn
+            ? (status.habit.isQuantified
+                ? '今日 ${status.value}/${status.target}'
+                : '待打卡')
+            : '今天不打卡');
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
       child: Row(

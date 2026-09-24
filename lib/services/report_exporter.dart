@@ -4,7 +4,6 @@ import 'package:excel/excel.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:todolist/models/task.dart';
-import 'package:todolist/models/checkin.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -102,42 +101,39 @@ class ReportExporter {
   }
 
   static void _fillHabitSheet(Sheet s, HabitProvider habit) {
-    const headers = [
-      '习惯',
-      '表情',
-      '创建时间',
-      '当前连续(天)',
-      '最长连续(天)',
-      '累计打卡',
-      '提醒',
-      '是否归档',
-    ];
-    for (var c = 0; c < headers.length; c++) {
-      _set(s, 0, c, headers[c]);
+    // P2-5（v2.9.3 审计）：与 CSV 共用同一列定义（单一真源，见
+    // [HabitProvider.habitExportHeaders]）。此前 Excel 自写一份 8 列表头，
+    // v2.9.3 给 CSV 补的「每日目标 / 宽限日」与「累计达标」口径全部缺席，
+    // 量化量级在 Excel 副本里整体丢失。
+    for (var c = 0; c < HabitProvider.habitExportHeaders.length; c++) {
+      _set(s, 0, c, HabitProvider.habitExportHeaders[c]);
     }
     var r = 1;
     for (final h in habit.habits) {
-      _set(s, r, 0, h.title);
-      _set(s, r, 1, h.emoji);
-      _set(s, r, 2, _fmt(h.createdAt));
-      _set(s, r, 3, habit.currentStreak(h));
-      _set(s, r, 4, habit.longestStreak(h));
-      _set(s, r, 5, habit.checkInCount(h));
-      _set(s, r, 6, h.reminderMinute == null ? '' : _fmtMinute(h.reminderMinute!));
-      _set(s, r, 7, h.archived ? '是' : '否');
+      final cells = habit.habitExportCells(h);
+      for (var c = 0; c < cells.length; c++) {
+        _set(s, r, c, cells[c]);
+      }
       r++;
     }
   }
 
   static void _fillCheckInSheet(Sheet s, HabitProvider habit) {
-    _set(s, 0, 0, '习惯');
-    _set(s, 0, 1, '打卡日期');
+    // P2-5：打卡表同样共用 [HabitProvider.checkInExportHeaders]，补「累计量」列
+    // （此前只有习惯 + 日期两列，量化习惯「喝了多少」在 Excel 副本不可见）。
+    for (var c = 0; c < HabitProvider.checkInExportHeaders.length; c++) {
+      _set(s, 0, c, HabitProvider.checkInExportHeaders[c]);
+    }
     final titleById = {for (final h in habit.habits) h.id: h.title};
     var r = 1;
     for (final c in habit.checkIns) {
-      final name = titleById[c.habitId] ?? c.habitId;
-      _set(s, r, 0, name);
-      _set(s, r, 1, CheckIn.dateKey(c.date));
+      final cells = habit.checkInExportCells(
+        c,
+        name: titleById[c.habitId] ?? c.habitId,
+      );
+      for (var i = 0; i < cells.length; i++) {
+        _set(s, r, i, cells[i]);
+      }
       r++;
     }
   }
@@ -194,9 +190,6 @@ class ReportExporter {
 
   static String _fmtDate(DateTime d) =>
       '${d.year}-${_p2(d.month)}-${_p2(d.day)}';
-
-  static String _fmtMinute(int m) =>
-      '${_p2(m ~/ 60)}:${_p2(m % 60)}';
 
   static String _p2(int n) => n.toString().padLeft(2, '0');
 }

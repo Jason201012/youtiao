@@ -390,6 +390,9 @@ class PeriodHabitBlock extends StatelessWidget {
                 done: r.habits[i].done,
                 expected: r.habits[i].expected,
                 rate: r.habits[i].rate,
+                // P3-6（v2.9.3 审计）：月报/年报接入区间累计投入量
+                // （「本月共 240 杯」）——valueSum 此前只算不显，易被误判死代码。
+                valueSum: r.habits[i].valueSum,
                 isLast: i == r.habits.length - 1,
                 onBg: onBg,
                 meta: ext.meta,

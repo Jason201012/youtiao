@@ -49,14 +49,22 @@ class ScheduleItem {
     required this.focusedMinutes,
   });
 
-  /// 「可能高估 / 低估」偏差文案（无预估或无专注记录时为 null）。
+  /// 「可能高估 / 低估」偏差文案（无预估、无专注记录或**重复任务**时为 null）。
   ///
   /// 与 [estimateBiasLabel] 同源，供排程建议行与任务详情/统计处复用，
   /// 保证两处口径不会漂移。
-  String? get biasLabel => estimateBiasLabel(
-        estimatedMinutes: explicit ? minutes : null,
-        actualMinutes: focusedMinutes,
-      );
+  ///
+  /// P2-3（v2.9.3 审计）：[Task.estimateMinutes] 是「做一次」的预估，
+  /// 而 [Task.focusedMinutes] 是该任务**历史上全部分次专注的累计值**——
+  /// 重复任务（每天写日报预计 5 分钟、累计专注 60 分钟）两者直接比对必然
+  /// 恒显「可能低估」，是一条系统性错误的自我评估。故重复任务一律不展示偏差，
+  /// 只对一次性任务（累计专注即本次投入）比较。
+  String? get biasLabel => task.isRepeating
+      ? null
+      : estimateBiasLabel(
+          estimatedMinutes: explicit ? minutes : null,
+          actualMinutes: focusedMinutes,
+        );
 
   /// 预计时段文案，如「14:05–14:35」。
   String get windowLabel => '${_hhmm(start)}–${_hhmm(end)}';
@@ -129,6 +137,11 @@ String formatMinutes(int mins) {
 /// 判定口径：以预估的 ±20% 作为「接近」的容差带（至少 5 分钟，避免小预估下
 /// 1 分钟的抖动就被判定为偏差）。返回 null 表示**无从比较**——无预估、
 /// 预估非法、或尚无实际投入，此时 UI 不应展示任何偏差文案。
+///
+/// P2-3（v2.9.3 审计）：调用方必须保证两个数字**同一口径**——
+/// [estimatedMinutes] 是「单次执行」的预估，[actualMinutes] 就只能是同一次执行
+/// 的实际投入。对重复任务，[Task.focusedMinutes] 是历史累计值，不满足该前提，
+/// 应直接不展示（见 [ScheduleItem.biasLabel] 的处理），而不是把累计值塞进来。
 String? estimateBiasLabel({
   required int? estimatedMinutes,
   required int? actualMinutes,

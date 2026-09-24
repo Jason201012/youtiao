@@ -67,6 +67,13 @@ class TemplateItem {
   /// [monthlyDay] / [monthlyWeekday] 互斥使用。
   final int monthlyFromEnd;
 
+  /// 预计时长（分钟，1..43200）；null = 未预估。
+  ///
+  /// P2-4（v2.9.3 审计）：T1-1 的 [Task.estimateMinutes] 此前未进模板链路，
+  /// 「另存为模板 → 套用」会静默丢失预估、排程建议退回 30 分钟兜底。
+  /// 旧模板 JSON 缺该键时缺省 null（向后兼容，零迁移）。
+  final int? estimateMinutes;
+
   const TemplateItem(
     this.title,
     this.category,
@@ -82,6 +89,7 @@ class TemplateItem {
     this.monthlyWeekday,
     this.monthlyWeekIndex,
     this.monthlyFromEnd = 0,
+    this.estimateMinutes,
   });
 
   /// 从一条真实任务生成模板项（「另存为模板」用）。
@@ -113,6 +121,8 @@ class TemplateItem {
       // P2-5：模板套用时一并带上「每月倒数第 N 天」。原实现漏掉，导致「另存为
       // 模板 → 套用」会让倒数天数任务被错误展开成「第 N 个周几」或退化为月度 1 号。
       monthlyFromEnd: t.monthlyFromEnd,
+      // P2-4（v2.9.3 审计）：预估时长随任务进模板，套用后不再静默丢失。
+      estimateMinutes: t.estimateMinutes,
     );
   }
 
@@ -131,6 +141,7 @@ class TemplateItem {
         'monthlyWeekday': monthlyWeekday,
         'monthlyWeekIndex': monthlyWeekIndex,
         'monthlyFromEnd': monthlyFromEnd,
+        'estimateMinutes': estimateMinutes,
       };
 
   factory TemplateItem.fromJson(Map<String, dynamic> j) {
@@ -151,7 +162,18 @@ class TemplateItem {
       monthlyWeekday: j['monthlyWeekday'] as int?,
       monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
       monthlyFromEnd: j['monthlyFromEnd'] as int? ?? 0,
+      // P2-4：与 [Task.fromJson] 同区间夹取（1..43200 分钟），越界视为未设——
+      // 模板 JSON 同样是「不可信输入」（可被手改 / 来自他人 / 传输损坏）。
+      estimateMinutes: _clampEstimateMinutes(j['estimateMinutes']),
     );
+  }
+
+  /// 预估时长夹取（口径与 [Task.fromJson] 一致：1..43200，越界 / 非数值返回 null）。
+  static int? _clampEstimateMinutes(dynamic v) {
+    if (v is! num) return null;
+    final n = v.toInt();
+    if (n < 1 || n > 30 * 24 * 60) return null;
+    return n;
   }
 }
 
@@ -478,6 +500,8 @@ int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
       monthlyWeekIndex: item.monthlyWeekIndex,
       // P2-5：从模板创建任务时一并带上「每月倒数第 N 天」字段。
       monthlyFromEnd: item.monthlyFromEnd,
+      // P2-4（v2.9.3 审计）：套用模板时恢复预估时长，排程建议不再退回 30 分钟兜底。
+      estimateMinutes: item.estimateMinutes,
       tags: List.from(item.tags),
     ));
     created++;

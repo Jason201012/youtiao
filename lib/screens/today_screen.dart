@@ -11,6 +11,8 @@ import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
+import 'package:todolist/screens/habit_screen.dart'
+    show toggleHabitWithUndo, incrementWithCelebration;
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/services/schedule_advisor.dart';
@@ -107,8 +109,13 @@ class TodayScreen extends StatelessWidget {
                       today: today,
                       accent: accent,
                       ext: ext,
-                      onToggle: (h) => habit.toggleCheckInToday(h),
-                      onIncrement: (h) => habit.adjustCheckInValue(h, DateTime.now(), 1),
+                      // U2-2（v2.9.3 审计）：取消打卡改走带 10 秒撤销的入口，
+                      // 与习惯列表圆圈同口径（此前轻点即撤、误触无提示）。
+                      onToggle: (h) => toggleHabitWithUndo(context, habit, h),
+                      // U3-1（v2.9.3 审计）：今日页「+1」改走与习惯页相同的
+                      // 庆祝路径——达标那一刻有反馈，用户不再以为没生效。
+                      onIncrement: (h) =>
+                          incrementWithCelebration(context, habit, h),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -301,8 +308,11 @@ class _TodoTile extends StatelessWidget {
 ///
 /// 展示三条信息：① 汇总（项数 / 总时长 / 预计完成时刻）；② 每条任务的预计时段与
 /// 时长；③ 两类风险提示——「预计来不及」（超过截止时间）与「可能高估 / 低估」
-/// （与累计专注时长比对）。
-class _ScheduleAdvisor extends StatelessWidget {
+/// （与累计专注时长比对，仅一次性任务，见 schedule_advisor 的 P2-3 口径）。
+///
+/// U2-4（v2.9.3 审计）：①全部完成时不再误报「今天没有待办」；②头部可点击折叠，
+/// 收起明细行、保留汇总行（折叠态为会话内状态，不落盘）。
+class _ScheduleAdvisor extends StatefulWidget {
   final TodayAggregate today;
   final Color accent;
   final AppColorsExt ext;
@@ -312,11 +322,21 @@ class _ScheduleAdvisor extends StatelessWidget {
     required this.ext,
   });
 
+  @override
+  State<_ScheduleAdvisor> createState() => _ScheduleAdvisorState();
+}
+
+class _ScheduleAdvisorState extends State<_ScheduleAdvisor> {
   /// 最多展示的条目数：再多用户也读不完，且会把页面拉得很长。
   static const int _maxRows = 8;
 
+  bool _collapsed = false;
+
   @override
   Widget build(BuildContext context) {
+    final today = widget.today;
+    final accent = widget.accent;
+    final ext = widget.ext;
     final onBg = Theme.of(context).colorScheme.onBackground;
     final meta = ext.meta;
     final advice = buildScheduleAdvice(today.pendingTasks);
@@ -325,21 +345,42 @@ class _ScheduleAdvisor extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Text('排程建议',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-            const Spacer(),
-            Text('截止 → 时长 → 优先级',
-                style: TextStyle(fontSize: 11, color: meta)),
-          ],
+        // U2-4：头部可点折叠/展开，右侧给状态箭头。
+        InkWell(
+          onTap: () => setState(() => _collapsed = !_collapsed),
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              children: [
+                Text('排程建议',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                Text('截止 → 时长 → 优先级',
+                    style: TextStyle(fontSize: 11, color: meta)),
+                const SizedBox(width: 6),
+                Icon(
+                  _collapsed ? Symbols.expand_more : Symbols.expand_less,
+                  size: 18,
+                  color: meta,
+                  semanticLabel: _collapsed ? '展开排程明细' : '收起排程明细',
+                ),
+              ],
+            ),
+          ),
         ),
         const SizedBox(height: 8),
+        // U2-4：完成态换文案——用户刚做完所有事，不该再被告知「没有待办」。
         Text(
-          advice.summary,
+          advice.isEmpty
+              ? (today.completedToday > 0
+                  ? '今日待办已全部完成'
+                  : '今天没有待办，无需排程')
+              : advice.summary,
           style: TextStyle(fontSize: 12, color: meta),
         ),
-        if (!advice.isEmpty) ...[
+        if (!advice.isEmpty && !_collapsed) ...[
           const SizedBox(height: 10),
           for (int i = 0; i < rows.length; i++)
             _ScheduleRow(
@@ -358,8 +399,9 @@ class _ScheduleAdvisor extends StatelessWidget {
           if (advice.missedDueCount > 0) ...[
             const SizedBox(height: 8),
             _AdviceNote(
+              // U3-3（v2.9.3 审计）：警示改用体系内的黑白样式（警示图标 + 正文色）。
               icon: Symbols.warning,
-              color: Colors.orange,
+              color: onBg,
               text: '${advice.missedDueCount} 项按顺延预计会超过截止时间，'
                   '建议先处理最紧急的一项或缩短预估',
             ),
@@ -438,7 +480,9 @@ class _ScheduleRow extends StatelessWidget {
                   ].join(' · '),
                   style: TextStyle(
                     fontSize: 11,
-                    color: item.missedDue ? Colors.orange : meta,
+                    // U3-3（v2.9.3 审计）：超时标记回到黑白——正文色比 meta 更重，
+                    // 不引入彩色也能形成层级。
+                    color: item.missedDue ? onBg : meta,
                   ),
                 ),
               ],
@@ -501,6 +545,16 @@ class _HabitList extends StatelessWidget {
       children: [
         Text('今日待打卡',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        // P3-6（v2.9.3 审计）：量化习惯的「今日合计」叙事入口——
+        // 此前 [TodayAggregate.habitValueToday] / [habitValueTarget] 定义后零消费。
+        if (today.habitValueTarget > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              '量化合计 · 今日 ${today.habitValueToday}/${today.habitValueTarget}',
+              style: TextStyle(fontSize: 12, color: ext.meta),
+            ),
+          ),
         const SizedBox(height: 12),
         if (list.isEmpty)
           Padding(

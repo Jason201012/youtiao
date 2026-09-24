@@ -404,11 +404,29 @@ void _handleNotificationAction(String? actionId, String? payload) {
 
 /// U3：把习惯标记为今天已打卡。与补卡共用 [HabitProvider.checkInOnDay]（幂等：
 /// 已打卡则忽略），打卡后弹覆盖式确认通知（同 id 不刷屏），用户无需进 App。
+///
+/// P2-2（v2.9.3 审计）：量化习惯此前走 `checkInOnDay` 只记 1 个单位却回报
+/// 「已打卡 ✓」——目标 8 杯点一下只算 1/8 还谎称完成。现在量化习惯走
+/// [HabitProvider.completeTodayTarget]（通知按钮「打卡」= 把今天做满，与文案一致），
+/// 并按实际达标情况回报；布尔习惯行为不变。
 void _doHabitCheckIn(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
   if (habit == null) return;
   final now = DateTime.now();
+  if (habit.isQuantified) {
+    // 异步顶满今日目标：内部走 setCheckInValue（落盘 + 重排提醒/挽留）；失败静默。
+    hp.completeTodayTarget(habit).catchError((_) => false).then((_) {
+      // 按完成后的真实进度回报（理论上已达标 →「已打卡 ✓」；
+      // 极端情况下（如并发改目标）未达标也如实显示「已记 x/y」）。
+      NotificationService.instance.showHabitCheckedConfirm(
+        habit,
+        value: hp.todayValue(habit),
+        target: habit.effectiveTarget,
+      );
+    });
+    return;
+  }
   // 异步打卡：checkInOnDay 内部持久化 + 重排今日提醒/挽留；失败静默。
   hp.checkInOnDay(habit, now).catchError((_) => false);
   NotificationService.instance.showHabitCheckedConfirm(habit);

@@ -75,6 +75,9 @@ class HabitProvider extends ChangeNotifier {
     int? reminderMinute,
     int weeklyGoal = 0,
     /// T1-2：每日目标量（null / <=0 = 布尔打卡）。
+    /// P3-4（v2.9.3 审计）：写入侧统一夹取 1..9999，与反序列化侧
+    /// （[Habit._clampTarget]）同区间——旁路写入（导入/脚本/未来入口）此前
+    /// 会把越界值原样落库，重载时再被静默降级，留下「写完即变」的隐患。
     int? dailyTarget,
     /// T1-4：宽限日（每周允许缺卡 N 天不断签，0..3）。
     int graceDays = 0,
@@ -86,8 +89,12 @@ class HabitProvider extends ChangeNotifier {
       colorValue: colorValue,
       weekdays: weekdays,
       reminderMinute: reminderMinute,
-      weeklyGoal: weeklyGoal,
-      dailyTarget: (dailyTarget != null && dailyTarget > 0) ? dailyTarget : null,
+      // P3-4：上界夹取（UI 已限 9999/14，这里兜住一切非 UI 入口）。
+      // weeklyGoal.clamp / dailyTarget.clamp 返回 num，需 toInt 收敛。
+      weeklyGoal: weeklyGoal.clamp(0, 14).toInt(),
+      dailyTarget: (dailyTarget != null && dailyTarget > 0)
+          ? dailyTarget.clamp(1, 9999).toInt()
+          : null,
       graceDays: graceDays.clamp(0, 3),
       createdAt: DateTime.now(),
     );
@@ -123,8 +130,11 @@ class HabitProvider extends ChangeNotifier {
       colorValue: colorValue,
       weekdays: draft.weekdays,
       reminderMinute: draft.reminderMinute,
-      weeklyGoal: draft.weeklyGoal,
-      dailyTarget: (dailyTarget != null && dailyTarget > 0) ? dailyTarget : null,
+      // P3-4：与 [addHabit] 同款写入侧夹取。
+      weeklyGoal: draft.weeklyGoal.clamp(0, 14).toInt(),
+      dailyTarget: (dailyTarget != null && dailyTarget > 0)
+          ? dailyTarget.clamp(1, 9999).toInt()
+          : null,
       graceDays: graceDays.clamp(0, 3),
       createdAt: DateTime.now(),
     );
@@ -147,9 +157,12 @@ class HabitProvider extends ChangeNotifier {
     _habits[idx] = updated;
     await _persistHabits();
     // 取消旧的（无论改/删都先清干净），再按新值重新挂。
+    // P2-1（v2.9.3 审计）：调度判据与其他四处统一为「达标」口径——
+    // 今天已达标则跳过今日落点，避免「喝满 8 杯后补设提醒，当晚仍弹『该打卡啦』」。
     await NotificationService.instance.cancelHabitReminder(habit.id);
     if (minute != null) {
-      await NotificationService.instance.scheduleHabitReminder(updated);
+      await NotificationService.instance
+          .scheduleHabitReminder(updated, checkedToday: isTargetMetToday(updated));
     }
     notifyListeners();
   }
@@ -205,8 +218,11 @@ class HabitProvider extends ChangeNotifier {
   Future<void> scheduleAllReminders() async {
     for (final h in _habits) {
       if (h.archived || h.reminderMinute == null) continue;
+      // P2-1（v2.9.3 审计）：判据从「有记录」升级为「已达标」——
+      // 量化习惯只喝 1/8 杯不再抑制当天提醒（旧口径下部分打卡即静默吞掉当日提醒，
+      // 是「新口径未横向推广」通病的第 N 次复发）。
       await NotificationService.instance
-          .scheduleHabitReminder(h, checkedToday: isCheckedToday(h));
+          .scheduleHabitReminder(h, checkedToday: isTargetMetToday(h));
     }
   }
 
@@ -278,31 +294,10 @@ class HabitProvider extends ChangeNotifier {
     return _metDaysOf(habit).where((d) => !d.isBefore(monday) && !d.isAfter(sunday)).length;
   }
 
-  /// T1-2：本周量化达成率 0..1 = 本周累计量 /（计划天数 × 每日目标）。
-  ///
-  /// 供「量化习惯」的周进度展示（如「本周 18/56 杯」）。布尔习惯返回 0
-  /// （无「量」可言，调用方应改用 [weeklyCheckIns]）。
-  double weeklyValueRatio(Habit habit) {
-    if (!habit.isQuantified) return 0.0;
-    final monday = _mondayOf(DateTime.now());
-    final sunday = monday.add(const Duration(days: 6));
-    var planned = 0;
-    for (var d = monday; !d.isAfter(sunday); d = d.add(const Duration(days: 1))) {
-      if (habit.shouldCheckInOn(d)) planned++;
-    }
-    if (planned == 0) return 0.0;
-    final target = planned * habit.effectiveTarget;
-    var sum = 0;
-    for (final c in _checkIns) {
-      if (c.habitId != habit.id) continue;
-      final d = DateTime(c.date.year, c.date.month, c.date.day);
-      if (d.isBefore(monday) || d.isAfter(sunday)) continue;
-      sum += c.value;
-    }
-    return (sum / target).clamp(0.0, 1.0).toDouble();
-  }
-
   /// 本周累计量（量化习惯用；布尔习惯等于达标天数）。
+  ///
+  /// P3-6（v2.9.3 审计）：量化叙事的接线入口——习惯详情弹层用它展示
+  /// 「本周 x / y（目标）」。此前定义后零消费，维护者易误判为已实现。
   int weeklyValue(Habit habit) {
     final monday = _mondayOf(DateTime.now());
     final sunday = monday.add(const Duration(days: 6));
@@ -365,25 +360,15 @@ class HabitProvider extends ChangeNotifier {
   ///
   /// T1-2：量化习惯下「打卡」= 记 1 个单位（喝第 1 杯水），**不**直接跳到目标量——
   /// 一键顶满会让「+1 累计」失去意义，也让热力图上的量级彻底失真。
-  /// 想一键达标请用 [completeTodayTarget]（详情页提供）。
+  /// 想一键达标请用 [completeTodayTarget]（详情页「今日达标」按钮提供，U2-5）。
+  ///
+  /// P3-1（v2.9.3 审计）：收口到 [setCheckInValue]（单一真源）。旧实现直接
+  /// `_checkIns.add/removeWhere`——「有记录 → 整日删除」的语义对量化习惯会一次
+  /// 抹掉当天全部累计（3/8 → 0/8），且绕开了写盘收口（落盘/重排/挽留重排全靠
+  /// 手工补齐，正是「某个入口忘记重排」的经典温床）。委托后行为与旧实现逐位等价
+  /// （布尔习惯 0/1 互换），量化习惯的整日撤销语义保持不变但走统一路径。
   Future<void> toggleCheckInToday(Habit habit) async {
-    final k = CheckIn.dateKey(DateTime.now());
-    if (isCheckedToday(habit)) {
-      _checkIns.removeWhere(
-          (c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
-    } else {
-      _checkIns.add(CheckIn.forDay(habit.id, DateTime.now()));
-    }
-    await _persistCheckIns();
-    notifyListeners();
-    // F10：打卡后必须重排当天的习惯提醒。
-    // 此前只调 _notifyHabitsChanged()（仅重排 23:00 漏卡挽留），打卡提醒原样挂着：
-    // 习惯提醒 21:00、用户 20:00 提前打卡 → 21:00 照常弹「该打卡啦」，
-    // 与打卡事实矛盾（任务侧专门做了 skipToday，习惯侧断链）。
-    // 反向取消打卡同样要重排，把当天提醒恢复回来。
-    _rescheduleReminder(habit);
-    // P2-2：打卡变动后重排挽留，避免「已补卡却在 23:00 收到陈旧挽留」。
-    _notifyHabitsChanged();
+    await setCheckInValue(habit, DateTime.now(), isCheckedToday(habit) ? 0 : 1);
   }
 
   /// T1-2：在指定日把累计量调整为 [value]（0 → 删除记录，即撤卡）。
@@ -429,10 +414,14 @@ class HabitProvider extends ChangeNotifier {
 
   /// F10：按当前打卡状态重排某习惯的每日提醒（未设提醒 / 已归档则跳过）。
   /// 失败静默——提醒属锦上添花，绝不因调度失败阻断打卡主流程。
+  ///
+  /// P2-1（v2.9.3 审计）：抑制判据统一为 [isTargetMetToday]（达标口径）。
+  /// 通知侧语义是 `checkedToday=true` 时跳过今天这一次落点——对量化习惯而言
+  /// 「做了 1/8」不该算做完，旧判据 [isCheckedToday] 会在部分打卡后吞掉当天提醒。
   void _rescheduleReminder(Habit habit) {
     if (habit.archived || habit.reminderMinute == null) return;
     NotificationService.instance
-        .scheduleHabitReminder(habit, checkedToday: isCheckedToday(habit))
+        .scheduleHabitReminder(habit, checkedToday: isTargetMetToday(habit))
         .catchError((_) => false);
   }
 
@@ -470,31 +459,41 @@ class HabitProvider extends ChangeNotifier {
       emoji: emoji,
       colorValue: colorValue,
       weekdays: weekdays,
-      weeklyGoal: weeklyGoal,
+      // P3-4（v2.9.3 审计）：写入侧统一夹取 weeklyGoal 0..14（与反序列化侧一致），
+      // 兜住「导入 / 脚本 / 未来入口」的越界写入，避免「写完即被重载降级」。
+      weeklyGoal: (weeklyGoal ?? old.weeklyGoal).clamp(0, 14).toInt(),
       archived: archived,
       reminderMinute: reminderMinute,
       clearReminder: clearReminder,
-      // 0 / 负数视为「取消量化」，与 AddHabitSheet 的「关闭」语义一致。
-      dailyTarget: (dailyTarget != null && dailyTarget > 0) ? dailyTarget : null,
+      // 0 / 负数视为「取消量化」，与 AddHabitSheet 的「关闭」语义一致；
+      // 正数同样夹到 1..9999（P3-4）。
+      dailyTarget: (dailyTarget != null && dailyTarget > 0)
+          ? dailyTarget.clamp(1, 9999).toInt()
+          : null,
       clearDailyTarget: clearDailyTarget || (dailyTarget != null && dailyTarget <= 0),
       graceDays: graceDays?.clamp(0, 3),
     );
     _habits[idx] = updated;
     await _persistHabits();
     // 提醒相关字段（时刻 / 星期 / 归档）任一变化都影响调度，统一重排。
+    // P2-1（v2.9.3 审计）：增补 [dailyTarget] 变化——达标门槛改变会改变「今天
+    // 是否已达标」，从而决定当天落点是否该被跳过（例如目标 8→3 时，已记 5 个
+    // 单位的习惯由未达标变达标，当天提醒应消失；反之 3→8 应恢复）。
     final reminderChanged = old.reminderMinute != updated.reminderMinute ||
         old.archived != updated.archived ||
+        old.dailyTarget != updated.dailyTarget ||
         !_weekdaysEqual(old.weekdays, updated.weekdays);
     if (updated.archived) {
       await NotificationService.instance.cancelHabitReminder(updated.id);
     } else if (reminderChanged) {
-      // 先取消旧提醒再重挂：仅当提醒时刻 / 星期 / 归档状态真的变了才动系统闹钟，
+      // 先取消旧提醒再重挂：仅当提醒时刻 / 星期 / 归档 / 目标量真的变了才动系统闹钟，
       // 避免「只改了个名字」也把提醒取消重挂一遍（无谓的调度抖动）。
       await NotificationService.instance.cancelHabitReminder(updated.id);
       if (updated.reminderMinute != null) {
         await NotificationService.instance.scheduleHabitReminder(
           updated,
-          checkedToday: isCheckedToday(updated),
+          // P2-1：判据与全链路统一为「达标」口径。
+          checkedToday: isTargetMetToday(updated),
         );
       }
     }
@@ -769,6 +768,27 @@ class HabitProvider extends ChangeNotifier {
     return map;
   }
 
+  /// P3-2（v2.9.3 审计）：近 [days] 天内按「日」聚合的**达标习惯数**
+  /// （量化习惯当日累计量 ≥ 目标才计入；布尔习惯即有记录）。
+  ///
+  /// 供多习惯聚合热力图使用：旧口径 [checkInCountsByDay] 数的是「有记录的习惯数」，
+  /// 量化习惯某日只完成 1/8 会与「8/8 达标」得到相同的计数与颜色档位，
+  /// 与详情页「按达成度四档着色」口径相悖。布尔习惯两者逐位等价。
+  Map<DateTime, int> metCountsByDay(int days) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final start = today.subtract(Duration(days: days - 1));
+    final map = <DateTime, int>{};
+    for (final c in _checkIns) {
+      final h = byId(c.habitId);
+      if (h == null || !h.targetMetBy(c.value)) continue; // 只计达标
+      final d = DateTime(c.date.year, c.date.month, c.date.day);
+      if (d.isBefore(start)) continue;
+      map[d] = (map[d] ?? 0) + 1;
+    }
+    return map;
+  }
+
   // ===== 备份 / 导出 / 恢复（并入「备份与恢复」「导出数据」）=====
 
   /// 完整备份数据（习惯 + 打卡记录），用于「备份与恢复」导出。
@@ -810,7 +830,8 @@ class HabitProvider extends ChangeNotifier {
         if (!h.archived && h.reminderMinute != null) {
           await NotificationService.instance.scheduleHabitReminder(
             h,
-            checkedToday: isCheckedToday(h),
+            // P2-1（v2.9.3 审计）：判据统一为「达标」口径。
+            checkedToday: isTargetMetToday(h),
           );
         }
       }
@@ -825,32 +846,81 @@ class HabitProvider extends ChangeNotifier {
     await _persistHabits();
     await _persistCheckIns();
     notifyListeners();
+    // P3-3（v2.9.3 审计）：补触发「习惯/打卡变动」回调——恢复可能整体替换习惯
+    // 与打卡集，23:00 挽留等内容必须按恢复后的口径重排；其他写入口
+    // （addHabit / updateHabit / setCheckInValue / deleteHabit …）均已触发，
+    // 此前只有这里漏掉，靠备份面板兜底重排。
+    _notifyHabitsChanged();
   }
 
-  /// 导出 CSV：先列习惯表（含当前/最长连续、累计打卡），再列打卡记录表。
+  // ===== 导出列单一真源（P2-5，v2.9.3 审计）=====
+  //
+  // 此前 CSV 与 Excel 各写一份表头/取值：v2.9.3 给 CSV 补了「每日目标 / 宽限日 /
+  // 累计量」三列，Excel 路径被漏掉——量化量级在 Excel 副本里全部丢失，且 Excel 的
+  // 「累计打卡」列对量化习惯是达标天数而非投入总量，与 CSV「累计达标(天)」语义
+  // 并列时易被误读。现在两份导出共用下面的列定义，下一轮加列只改这一处。
+
+  /// 习惯表列定义（CSV / Excel 共用，逐列对齐 [habitExportCells]）。
+  static const List<String> habitExportHeaders = [
+    '习惯',
+    '表情',
+    '创建时间',
+    '当前连续(天)',
+    '最长连续(天)',
+    '累计达标(天)',
+    '提醒',
+    '每日目标',
+    '宽限日(天)',
+    '是否归档',
+  ];
+
+  /// 习惯表一行取值（与 [habitExportHeaders] 逐列对齐）。
   ///
-  /// T1-2 / T1-4：习惯表补「每日目标」「宽限日」两列，打卡记录表补「累计量」列——
-  /// 否则量化习惯导出后「8 杯水」的量级全部丢失，可读副本变成「打没打过卡」。
+  /// 文本列回传 String（CSV 侧统一加引号转义、Excel 侧直写单元格），
+  /// 数值列回传 int；「每日目标」对布尔习惯回传空串（与旧 CSV 逐字节一致）。
+  /// 所有取值均非空（返回 List<Object>，Excel 侧 _set 的参数是非空 Object）。
+  List<Object> habitExportCells(Habit h) => [
+        h.title,
+        h.emoji,
+        _fmt(h.createdAt),
+        currentStreak(h),
+        longestStreak(h),
+        checkInCount(h),
+        h.reminderMinute == null ? '' : _fmtMinute(h.reminderMinute!),
+        h.isQuantified ? '${h.dailyTarget}' : '',
+        h.graceDays,
+        h.archived ? '是' : '否',
+      ];
+
+  /// 打卡记录表列定义（CSV / Excel 共用）。
+  static const List<String> checkInExportHeaders = ['习惯', '打卡日期', '累计量'];
+
+  /// 打卡记录表一行取值（[name] = 习惯名，习惯已删时由调用方回退为 id）。
+  List<Object> checkInExportCells(CheckIn c, {required String name}) =>
+      [name, CheckIn.dateKey(c.date), c.value];
+
+  /// 导出 CSV：先列习惯表（含当前/最长连续、累计达标、每日目标、宽限日），
+  /// 再列打卡记录表（含累计量）。列定义见 [habitExportHeaders] / [checkInExportHeaders]。
   String exportCsv() {
     final buf = StringBuffer();
-    buf.writeln('习惯,表情,创建时间,当前连续(天),最长连续(天),累计达标(天),提醒,每日目标,宽限日(天),是否归档');
+    buf.writeln(habitExportHeaders.join(','));
     for (final h in _habits) {
-      final reminder =
-          h.reminderMinute == null ? '' : _fmtMinute(h.reminderMinute!);
-      buf.writeln('"${_esc(h.title)}","${_esc(h.emoji)}","${_fmt(h.createdAt)}",'
-          '${currentStreak(h)},${longestStreak(h)},${checkInCount(h)},'
-          '"$reminder","${h.isQuantified ? h.dailyTarget : ''}",'
-          '${h.graceDays},"${h.archived ? '是' : '否'}"');
+      buf.writeln(_csvLine(habitExportCells(h)));
     }
     buf.writeln();
-    buf.writeln('习惯,打卡日期,累计量');
+    buf.writeln(checkInExportHeaders.join(','));
     final titleById = {for (final h in _habits) h.id: h.title};
     for (final c in _checkIns) {
-      final name = titleById[c.habitId] ?? c.habitId;
-      buf.writeln('"${_esc(name)}","${CheckIn.dateKey(c.date)}",${c.value}');
+      buf.writeln(_csvLine(
+          checkInExportCells(c, name: titleById[c.habitId] ?? c.habitId)));
     }
     return buf.toString();
   }
+
+  /// 一行 CSV：文本列加引号并转义（防公式注入 / 逗号破列），数值列直写。
+  static String _csvLine(List<Object> cells) => cells
+      .map((v) => v is String ? '"${_esc(v)}"' : '$v')
+      .join(',');
 
   /// 导出 Markdown：习惯清单（含连续/累计）+ 打卡记录列表。
   String exportMarkdown() {

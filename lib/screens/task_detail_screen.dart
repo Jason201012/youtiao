@@ -166,10 +166,14 @@ class TaskDetailScreen extends StatelessWidget {
     // 成功文案误导（假成功）。这里据此禁用按钮并改文案。
     final canSkipToday = task.isRepeating && task.occursOnIgnoringSkip(DateTime.now());
     // T1-1：预估 vs 实际的偏差文案（与今日排程建议共用同一 pure 函数，口径不漂移）。
-    final estimateBias = estimateBiasLabel(
-      estimatedMinutes: task.estimateMinutes,
-      actualMinutes: task.focusedMinutes,
-    );
+    // P2-3（v2.9.3 审计）：重复任务的 [Task.focusedMinutes] 是历史累计专注，
+    // 与「单次预估」不可比（恒显「可能低估」），故重复任务不展示偏差提示。
+    final estimateBias = task.isRepeating
+        ? null
+        : estimateBiasLabel(
+            estimatedMinutes: task.estimateMinutes,
+            actualMinutes: task.focusedMinutes,
+          );
 
     return Scaffold(
       appBar: AppBar(
@@ -685,13 +689,20 @@ Future<void> _convertToHabit(BuildContext context, Task task) async {
           _ConvertRow('打卡日', draft.weekdaysLabel),
           _ConvertRow('提醒', draft.reminderLabel),
           _ConvertRow('周目标', draft.weeklyGoalLabel),
+          // U2-1（v2.9.3 审计）：如实告知「不迁移」的字段——否则用户看不出
+          // 标签 / 子任务 / 备注 / 附件 / 预计时长去了哪里，若随后选择「删除任务」，
+          // 它们会随任务一起进回收站。
+          const SizedBox(height: 10),
+          const Text('标签、子任务、备注、附件与预计时长不会迁移到习惯。',
+              style: TextStyle(fontSize: 12)),
           if (draft.droppedNotes.isNotEmpty) ...[
             const SizedBox(height: 10),
             for (final n in draft.droppedNotes)
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
-                child: Text('· $n',
-                    style: const TextStyle(fontSize: 12, color: Colors.orange)),
+                // U3-3（v2.9.3 审计）：折算说明回到纯黑白（默认正文色），
+                // 以「·」列表前缀承担弱提示，不再引入彩色。
+                child: Text('· $n', style: const TextStyle(fontSize: 12)),
               ),
           ],
           const SizedBox(height: 10),

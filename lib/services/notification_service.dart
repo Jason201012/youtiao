@@ -975,8 +975,13 @@ class NotificationService {
   }
 
   /// 为习惯调度每日打卡提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
-  /// [checkedToday] 为 true（今天已打卡）则跳过今日这一次，挂到下一个循环日，
+  /// [checkedToday] 为 true 则跳过今日这一次，挂到下一个循环日，
   /// 避免「已完成仍弹提醒」。返回 true 表示已提交。
+  ///
+  /// P2-1（v2.9.3 审计）：参数语义自本轮起统一为「今天是否已**达标**」
+  /// （量化习惯当日累计量 ≥ [Habit.dailyTarget]；布尔习惯等价于已打卡）。
+  /// 调用方（HabitProvider 五个调度点）已全部切换，通知侧跳过逻辑不变——
+  /// 量化习惯「做了 1/8」不再吞掉当天提醒。
   ///
   /// F-2 / F-3：与 [scheduleRepeatReminder] 统一为「一次性闹钟 × 预挂 N 次」，
   /// 并逐落点过一次勿扰顺延。此前习惯用 OS 周期闹钟（`DateTimeComponents.time` /
@@ -1537,8 +1542,25 @@ class NotificationService {
 
   /// U3：通知「打卡」action 后的覆盖式确认通知：用习惯提醒 id 段位（日 0）弹出
   /// 「已打卡 ✓」，不刷屏不叠加。payload 置空避免点开跳转。
-  Future<void> showHabitCheckedConfirm(Habit habit) async {
+  /// 习惯打卡确认通知（覆盖式，同 id 不刷屏）。
+  ///
+  /// P2-2（v2.9.3 审计）：量化习惯此前只可能回报「已打卡 ✓」——哪怕当天目标 8 杯
+  /// 只记了 1 杯也在撒谎。现在调用方可传入 [value] / [target]（当日累计量 / 目标量），
+  /// 未达标时标题改为「已记 x/y」，正文补充「未达标」，不再误报完成。
+  /// 不传参数（布尔习惯 / 已达标路径）维持原「已打卡 ✓」文案。
+  Future<void> showHabitCheckedConfirm(
+    Habit habit, {
+    int? value,
+    int? target,
+  }) async {
     if (!enabled) return;
+    // 达标判定：无参数（布尔习惯路径）视为已打卡；有参数则严格按 value >= target
+    // ——哪怕 value<=0 的异常态也如实显示「已记 0/x」，不再谎报「已打卡 ✓」。
+    final met = value == null || target == null || value >= target;
+    final title = met ? '已打卡 ✓' : '已记 $value/$target';
+    final body = met
+        ? '${habit.emoji} ${habit.title}'
+        : '${habit.emoji} ${habit.title} · 未达标，继续加油';
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
         _chSound,
@@ -1554,8 +1576,8 @@ class NotificationService {
     try {
       await _plugin.show(
         habitNotifyIdOf(habit.id, 0),
-        '已打卡 ✓',
-        '${habit.emoji} ${habit.title}',
+        title,
+        body,
         detail,
       );
     } catch (e) {

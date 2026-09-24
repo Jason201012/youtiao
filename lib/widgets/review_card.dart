@@ -290,6 +290,10 @@ class HabitProgressRow extends StatelessWidget {
   final bool isLast;
   final Color onBg;
   final Color meta;
+
+  /// P3-6（v2.9.3 审计）：区间累计投入量（量化习惯显示「· 累计 240」）。
+  /// 周报的 HabitWeekStat 无此数据，缺省 0 = 不展示。
+  final int valueSum;
   const HabitProgressRow({
     super.key,
     required this.habit,
@@ -299,6 +303,7 @@ class HabitProgressRow extends StatelessWidget {
     required this.isLast,
     required this.onBg,
     required this.meta,
+    this.valueSum = 0,
   });
 
   @override
@@ -326,7 +331,10 @@ class HabitProgressRow extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Text(
-                '$done/$expected',
+                // P3-6：量化习惯且区间有投入时，在达成数旁补「累计量」叙事。
+                habit.isQuantified && valueSum > 0
+                    ? '$done/$expected · 累计 $valueSum'
+                    : '$done/$expected',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,

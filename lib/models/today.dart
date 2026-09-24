@@ -56,12 +56,16 @@ class TodayAggregate {
   /// 今日习惯已达成总数（T1-2：量化习惯按「达标」判定，而非仅仅「有记录」）。
   int get habitDone => habits.where((h) => h.met).length;
 
-  /// T1-2：今日量化习惯的累计量与目标量（仅统计量化习惯）。
-  /// 供今日页展示「今日 24/32 杯」这类整体进度。
-  int get habitValueToday =>
-      habits.where((h) => h.habit.isQuantified).fold(0, (a, h) => a + h.value);
-  int get habitValueTarget =>
-      habits.where((h) => h.habit.isQuantified).fold(0, (a, h) => a + h.target);
+  /// T1-2 / P3-6（v2.9.3 审计）：今日量化习惯的累计量与目标量，
+  /// 供今日页展示「量化合计 · 今日 24/32 杯」这类整体进度。
+  /// 仅统计「今天应打卡」的量化习惯——休息日不计入分母，避免总量虚高。
+  /// 此前定义后零消费（审计 P3-6），现接入今日页「今日待打卡」区块。
+  int get habitValueToday => habits
+      .where((h) => h.habit.isQuantified && h.shouldCheckIn)
+      .fold(0, (a, h) => a + h.value);
+  int get habitValueTarget => habits
+      .where((h) => h.habit.isQuantified && h.shouldCheckIn)
+      .fold(0, (a, h) => a + h.target);
 
   /// 今日日期文案，如「8月9日 周日」。
   String get dateLabel {

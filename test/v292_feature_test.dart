@@ -373,7 +373,7 @@ void main() {
       expect(hp.currentStreak(h), 1);
     });
 
-    test('本周量化进度：累计量 / 目标量 / 达成率', () async {
+    test('本周量化进度：累计量 / 目标量（P3-6 后 weeklyValueRatio 已删）', () async {
       final hp = await newHabitProvider();
       await hp.addHabit(
           title: '喝水', emoji: '💧', colorValue: 1, weekdays: const [], dailyTarget: 8);
@@ -382,11 +382,13 @@ void main() {
 
       expect(hp.weeklyValue(h), 6);
       expect(hp.weeklyValueTarget(h), 7 * 8); // 空 weekdays = 每天 → 本周 7 天
-      expect(hp.weeklyValueRatio(h), closeTo(6 / 56, 1e-9));
-      // 布尔习惯不参与量化比例
+      // P3-6（v2.9.3 审计）：weeklyValueRatio 定义后零消费已删除——达成率由
+      // weeklyValue / weeklyValueTarget 派生（6 / 56），不再保留第三个同义 API。
+      expect(hp.weeklyValue(h) / hp.weeklyValueTarget(h), closeTo(6 / 56, 1e-9));
+      // 布尔习惯不参与量化目标量
       await hp.addHabit(title: '跑', emoji: '🏃', colorValue: 1, weekdays: const []);
       final b = hp.habits[1];
-      expect(hp.weeklyValueRatio(b), 0.0);
+      expect(hp.weeklyValue(b), hp.weeklyCheckIns(b)); // 布尔 = 达标天数
       expect(hp.weeklyValueTarget(b), 0);
     });
 

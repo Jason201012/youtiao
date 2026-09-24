@@ -80,6 +80,9 @@ class _EditorBodyState extends State<_EditorBody> {
         monthlyDay: e.monthlyDay,
         monthlyWeekday: e.monthlyWeekday,
         monthlyWeekIndex: e.monthlyWeekIndex,
+        // P2-4（v2.9.3 审计）：编辑器克隆项时带上预估时长，避免「另存为模板 →
+        // 编辑 → 保存」把 estimateMinutes 洗掉（根因在数据模型层，四处贯通之一）。
+        estimateMinutes: e.estimateMinutes,
       );
 
   @override
@@ -146,6 +149,10 @@ class _EditorBodyState extends State<_EditorBody> {
         monthlyDay: _int(c.monthlyDay.text, 1),
         monthlyWeekday: it.monthlyWeekday,
         monthlyWeekIndex: it.monthlyWeekIndex,
+        // P2-4（v2.9.3 审计）同族收口：保存时此前把「每月倒数第 N 天」与
+        // 「预计时长」静默洗成默认值——与模板链路丢字段同一类缺陷。
+        monthlyFromEnd: it.monthlyFromEnd,
+        estimateMinutes: it.estimateMinutes,
       ));
     }
     final t = UserTemplate(
@@ -422,7 +429,12 @@ extension _TemplateItemEdit on TemplateItem {
         repeatMinute: repeatMinute ?? this.repeatMinute,
         repeatUntil: repeatUntil ?? this.repeatUntil,
         monthlyDay: monthlyDay ?? this.monthlyDay,
-        monthlyWeekday: monthlyWeekday,
+        // P2-4（v2.9.3 审计）同族收口：此前 monthlyWeekday 被未赋值的形参
+        // 直接顶掉（编辑器不传 → 恒 null → 丢字段），monthlyFromEnd /
+        // estimateMinutes 更是整段缺失——改个分类就会把这三项洗成默认值。
+        monthlyWeekday: monthlyWeekday ?? this.monthlyWeekday,
         monthlyWeekIndex: monthlyWeekIndex,
+        monthlyFromEnd: monthlyFromEnd,
+        estimateMinutes: estimateMinutes,
       );
 }
