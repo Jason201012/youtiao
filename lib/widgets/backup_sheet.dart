@@ -383,7 +383,22 @@ class BackupSheet {
       // 但任一步 IO 失败都应明确告诉用户哪一步失败，而不是笼统的「格式不正确」。
       // 任一步失败不中断已成功的前序步骤（各自已落盘），仅累计错误并提示。
       final failures = <String>[];
-      await provider.restoreFromJson(plaintext, includeTrash: includeTrash);
+      // P3-10（v2.9.4 审计）：rescheduleReminders 仅在「本次会调 provider.load()」
+      // 时才让位 —— load() 内部会重排任务提醒，且读到的是恢复后的新 DND/时区。
+      // 若在此处再排一次，用的是**旧偏好**排出的结果，会被 load() 立刻覆盖，
+      // 中间还多出一个错时提醒窗口。
+      // ⚠️ 备份不含 prefs（旧备份）时下方 `if (data['prefs'] is Map)` 不成立、
+      // provider.load() 不会执行 —— 此时必须由 restoreFromJson 自己重排，
+      // 否则 restoreFromJson 的 cancelAll() 之后任务提醒全部漏挂。
+      final blobStats = await provider.restoreFromJson(plaintext,
+          includeTrash: includeTrash,
+          rescheduleReminders: data['prefs'] is! Map);
+      // P3-10（v2.9.4 审计）：附件还原的「部分失败」（超单文件上限 / 非法文件名 /
+      // 体积截断）此前被 restoreFromJson 直接丢弃，用户只看到「已从备份恢复」，
+      // 却在附件列表里发现附件不见了。这里把统计并入既有 failures 机制，
+      // 让「任务恢复了、附件丢了」如实告知。
+      final blobNote = blobStats.summary();
+      if (blobNote != null) failures.add(blobNote);
       // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
       final focusList = data['focus_sessions'];
       if (focusList is List) {
@@ -428,6 +443,11 @@ class BackupSheet {
           await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
         } catch (e) {
           failures.add('偏好（$e）');
+          // P3-10（v2.9.4 审计）：上面传了 rescheduleReminders: false，若在此
+          // 抛错就跳过了 provider.load()（本次唯一的任务提醒重排点），
+          // 而 restoreFromJson 已 cancelAll() —— 任务提醒会全部漏挂。
+          // 这里用现有（旧）偏好补排一次，宁可按旧 DND 排也不能不排。
+          provider.rescheduleAllNotifications();
         }
       }
       // P2-1/P2-2（v2.8.7 审计）：恢复后重建通知。
@@ -646,7 +666,13 @@ class BackupSheet {
             .toList();
       }
       final failures = <String>[];
-      await provider.restoreFromJson(plaintext, includeTrash: includeTrash);
+      // P3-10（v2.9.4 审计）：同 _doRestore，消费附件还原统计；并按「本次是否会
+      // 调 provider.load()」决定任务提醒的重排责任。
+      final blobStats = await provider.restoreFromJson(plaintext,
+          includeTrash: includeTrash,
+          rescheduleReminders: data['prefs'] is! Map);
+      final blobNote = blobStats.summary();
+      if (blobNote != null) failures.add(blobNote);
       final focusList = data['focus_sessions'];
       if (focusList is List) {
         try {
@@ -677,6 +703,11 @@ class BackupSheet {
           await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
         } catch (e) {
           failures.add('偏好设置（$e）');
+          // P3-10（v2.9.4 审计）：走到这里说明本次已让 restoreFromJson 跳过
+          // 任务提醒重排（rescheduleReminders: false），但 provider.load()
+          // 没跑成 —— 叠加 restoreFromJson 已 cancelAll()，任务提醒会全部漏挂。
+          // 用现有（旧）偏好补排一次：宁可按旧 DND 排，也不能不排。
+          provider.rescheduleAllNotifications();
         }
       }
       // P2-1/P2-2（v2.8.7 审计）：与 _doRestore 同口径——restoreFromJson 的

@@ -10,6 +10,8 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+// U3-5：撤销窗口时长的单一真源（任务 / 批量删除 / 跳过循环日共用）。
+import 'package:todolist/theme/ui_durations.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/task_row.dart';
@@ -207,7 +209,7 @@ class HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('批量删除？'),
-        content: Text('将删除 $count 项任务（可在 5 秒内撤销）。继续吗？'),
+        content: Text('将删除 $count 项任务（可在 $kUndoWindowSeconds 秒内撤销）。继续吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(d, false),
@@ -1166,8 +1168,8 @@ class _DismissibleTask extends StatelessWidget {
           builder: (d) => AlertDialog(
             title: const Text('删除任务？'),
             content: Text(name.isEmpty
-                ? '该任务将移入回收站（可在 5 秒内撤销）。'
-                : '「$name」将移入回收站（可在 5 秒内撤销）。'),
+                ? '该任务将移入回收站（可在 $kUndoWindowSeconds 秒内撤销）。'
+                : '「$name」将移入回收站（可在 $kUndoWindowSeconds 秒内撤销）。'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(d, false),
@@ -1213,25 +1215,26 @@ class _DismissibleTask extends StatelessWidget {
       );
 }
 
+/// U3-5 / P3-10（v2.9.4 审计）：删除撤销窗口的时长与文案已统一到
+/// `theme/ui_durations.dart` 的 [kUndoWindow]（原为 5 秒、散落四处字面量）。
+/// 下面只做「不再主动清空队列」的调整：
+/// 此前 `clearSnackBars()` 等于亲手丢掉前一条撤销机会，而用户毫不知情
+/// （U2-4 同型缺陷）。
+///
 /// 单个删除后底部提示，支持撤销。
 void _showUndoSnackBar(BuildContext context, TaskProvider provider, Task removed) {
-  ScaffoldMessenger.of(context).clearSnackBars();
   final controller = ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text('已删除「${removed.title}」'),
+      content: Text('已删除「${removed.title}」（$kUndoWindowSeconds 秒内可撤销）'),
       action: SnackBarAction(
         label: '撤销',
         onPressed: () => provider.undoDelete(),
       ),
-      // U3-1（v2.9.1 审计）：时长与文案口径统一——批量删除 / 滑删的二次确认框都写
-      // 「可在 5 秒内撤销」，而这里的 SnackBar 只有 4 秒，用户按 5 秒的承诺去点
-      // 会扑空。这里把时长提到 5 秒与文案对齐（detail 页删除文案同步改为如实说明
-      // 去向为回收站）。
-      duration: const Duration(seconds: 5),
+      duration: kUndoWindow,
     ),
   );
-  // 兜底：无论是否点击撤销，5 秒后强制收起。
-  Future.delayed(const Duration(seconds: 5), () {
+  // 兜底：无论是否点击撤销，窗口结束后强制收起。
+  Future.delayed(kUndoWindow, () {
     controller.close();
   });
 }
@@ -1239,19 +1242,17 @@ void _showUndoSnackBar(BuildContext context, TaskProvider provider, Task removed
 /// 批量删除后底部提示，支持整体撤销。
 void _showBatchUndoSnackBar(
     BuildContext context, TaskProvider provider, int count) {
-  ScaffoldMessenger.of(context).clearSnackBars();
   final controller = ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text('已删除 $count 个任务'),
+      content: Text('已删除 $count 个任务（$kUndoWindowSeconds 秒内可撤销）'),
       action: SnackBarAction(
         label: '撤销',
         onPressed: () => provider.undoDelete(),
       ),
-      // U3-1（v2.9.1 审计）：5 秒，与「可在 5 秒内撤销」的确认框文案对齐。
-      duration: const Duration(seconds: 5),
+      duration: kUndoWindow,
     ),
   );
-  Future.delayed(const Duration(seconds: 5), () {
+  Future.delayed(kUndoWindow, () {
     controller.close();
   });
 }

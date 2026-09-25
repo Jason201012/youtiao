@@ -90,10 +90,12 @@ class HabitProvider extends ChangeNotifier {
       weekdays: weekdays,
       reminderMinute: reminderMinute,
       // P3-4：上界夹取（UI 已限 9999/14，这里兜住一切非 UI 入口）。
-      // weeklyGoal.clamp / dailyTarget.clamp 返回 num，需 toInt 收敛。
-      weeklyGoal: weeklyGoal.clamp(0, 14).toInt(),
+      // P3-10（v2.9.4 审计）：weeklyGoal 的上界由写死 14 改为**联动计划天数**
+      // （`weekdays` 为空 = 7 天）——「每周一三五」的习惯此前能设「每周 14 次」，
+      // 目标不可达。weeklyGoal.clamp / dailyTarget.clamp 返回 num，需 toInt 收敛。
+      weeklyGoal: Habit.clampWeeklyGoalTo(weeklyGoal, weekdays),
       dailyTarget: (dailyTarget != null && dailyTarget > 0)
-          ? dailyTarget.clamp(1, 9999).toInt()
+          ? dailyTarget.clamp(1, Habit.maxDailyTarget).toInt()
           : null,
       graceDays: graceDays.clamp(0, 3),
       createdAt: DateTime.now(),
@@ -105,6 +107,11 @@ class HabitProvider extends ChangeNotifier {
       await NotificationService.instance.scheduleHabitReminder(h);
     }
     notifyListeners();
+    // P3-8（v2.9.4 审计）：此前**漏掉**本回调。新建习惯会改变 23:00 晚间
+    // 简报 / 挽留通知的内容（缺卡提醒、明日预告），不重排就仍按旧习惯集
+    // 推送——「新建了晚间提醒的习惯，当晚却没收到」正是这条缺失的表现。
+    // 兄弟方法 [addHabitFromDraft] / [updateHabit] / [deleteHabit] 均已触发。
+    _notifyHabitsChanged();
   }
 
   /// 生成全局唯一习惯 id（时间戳 + 进程内自增序号，避免同毫秒撞 id）。
@@ -131,9 +138,10 @@ class HabitProvider extends ChangeNotifier {
       weekdays: draft.weekdays,
       reminderMinute: draft.reminderMinute,
       // P3-4：与 [addHabit] 同款写入侧夹取。
-      weeklyGoal: draft.weeklyGoal.clamp(0, 14).toInt(),
+      // P3-10：weeklyGoal 上界改为联动计划天数。
+      weeklyGoal: Habit.clampWeeklyGoalTo(draft.weeklyGoal, draft.weekdays),
       dailyTarget: (dailyTarget != null && dailyTarget > 0)
-          ? dailyTarget.clamp(1, 9999).toInt()
+          ? dailyTarget.clamp(1, Habit.maxDailyTarget).toInt()
           : null,
       graceDays: graceDays.clamp(0, 3),
       createdAt: DateTime.now(),
@@ -165,6 +173,10 @@ class HabitProvider extends ChangeNotifier {
           .scheduleHabitReminder(updated, checkedToday: isTargetMetToday(updated));
     }
     notifyListeners();
+    // P3-8（v2.9.4 审计）：此前**漏掉**本回调。与 [addHabit] 同因——
+    // 提醒时刻/取消提醒会改变「今天是否已达标」之外的可提醒习惯集，
+    // 晚间简报的明日预告必须按新时刻重排，否则推送的是旧时刻的预告。
+    _notifyHabitsChanged();
   }
 
   /// 删除习惯及其全部打卡记录（同时取消其提醒通知）。
@@ -263,6 +275,27 @@ class HabitProvider extends ChangeNotifier {
   /// T1-2：某日进度 0..1（量化按 value/target；布尔按有无记录）。
   double progressRatioOn(Habit habit, DateTime day) =>
       habit.progressRatioOf(checkInValueOn(habit, day));
+
+  /// 某日热力图强度档位 0..4（0 = 无记录 / 未达标）。
+  ///
+  /// P2-7（v2.9.4 审计）：抽出为 provider 上的**单一真源**。
+  /// 此前这段「四档分级」内联在习惯详情页的 `levelOf` 闭包里，分享卡
+  /// （[HabitShareData.from] → `HabitHeatmap`）拿不到，只能退回二值着色——
+  /// 于是同一份数据在 App 内按达成度四档、导出成长图却只有「有/无」，
+  /// 量化习惯的 1/8 与 8/8 在分享图上完全同色。这是对外产物的口径失真。
+  ///
+  /// 档位与 [HabitHeatmap] 的 4 档 `steps` 一一对应（1..4）。
+  /// 布尔习惯（无 dailyTarget）两档：达标 1、未记录 0（逐位等价于旧二值）。
+  int progressLevelOn(Habit habit, DateTime day) {
+    final v = checkInValueOn(habit, day);
+    if (v <= 0) return 0;
+    if (!habit.isQuantified) return 1;
+    final r = habit.progressRatioOf(v);
+    if (r < 0.5) return 1;
+    if (r < 0.75) return 2;
+    if (r < 1.0) return 3;
+    return 4; // 达标档
+  }
 
   /// P2-2：「习惯/打卡发生变动」时的重排回调，由 `main.dart` 注入。
   ///
@@ -375,9 +408,9 @@ class HabitProvider extends ChangeNotifier {
   ///
   /// 所有「+1 / 设置数量 / 撤卡」入口都收敛到这里，保证：
   /// 1. 只有一处写盘与重排逻辑，不会再出现「某个入口忘记重排提醒」的经典缺陷；
-  /// 2. 值被夹在 [0, 9999]，负数与天文数字都不会污染数据。
+  /// 2. 值被夹在 [0, [Habit.maxDailyTarget]]，负数与天文数字都不会污染数据。
   Future<void> setCheckInValue(Habit habit, DateTime day, int value) async {
-    final v = value.clamp(0, 9999);
+    final v = value.clamp(0, Habit.maxDailyTarget);
     final k = CheckIn.dateKey(day);
     final idx = _checkIns
         .indexWhere((c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
@@ -454,21 +487,28 @@ class HabitProvider extends ChangeNotifier {
     final idx = _habits.indexWhere((h) => h.id == habit.id);
     if (idx == -1) return;
     final old = _habits[idx];
+    // P3-10（v2.9.4 审计）：weeklyGoal 上界与「**更新后**的计划天数」联动。
+    // 必须在 copyWith 之前算出生效 weekdays——用户在同一次编辑里把「每天」改成
+    // 「每周一三五」时，若按旧值（7 天）算上界，就能把目标设成 7 次而计划只有
+    // 3 天，又造出一个不可达目标。
+    final effWeekdays = weekdays ?? old.weekdays;
     final updated = habit.copyWith(
       title: (title != null && title.trim().isNotEmpty) ? title.trim() : null,
       emoji: emoji,
       colorValue: colorValue,
       weekdays: weekdays,
-      // P3-4（v2.9.3 审计）：写入侧统一夹取 weeklyGoal 0..14（与反序列化侧一致），
+      // P3-4（v2.9.3 审计）：写入侧统一夹取 weeklyGoal（与反序列化侧一致），
       // 兜住「导入 / 脚本 / 未来入口」的越界写入，避免「写完即被重载降级」。
-      weeklyGoal: (weeklyGoal ?? old.weeklyGoal).clamp(0, 14).toInt(),
+      // P3-10：上界不再是 14，而是生效后的计划天数。
+      weeklyGoal:
+          Habit.clampWeeklyGoalTo(weeklyGoal ?? old.weeklyGoal, effWeekdays),
       archived: archived,
       reminderMinute: reminderMinute,
       clearReminder: clearReminder,
       // 0 / 负数视为「取消量化」，与 AddHabitSheet 的「关闭」语义一致；
-      // 正数同样夹到 1..9999（P3-4）。
+      // 正数同样夹到 1..[Habit.maxDailyTarget]（P3-4）。
       dailyTarget: (dailyTarget != null && dailyTarget > 0)
-          ? dailyTarget.clamp(1, 9999).toInt()
+          ? dailyTarget.clamp(1, Habit.maxDailyTarget).toInt()
           : null,
       clearDailyTarget: clearDailyTarget || (dailyTarget != null && dailyTarget <= 0),
       graceDays: graceDays?.clamp(0, 3),
@@ -636,7 +676,24 @@ class HabitProvider extends ChangeNotifier {
 
   // ===== 跨习惯整体统计（成就解锁用）=====
 
-  int get totalCheckIns => _checkIns.length;
+  /// 全局「累计**达标**（天·次）」：各习惯达标天数之和（量化习惯需当日量 ≥ 目标）。
+  ///
+  /// P2-3（v2.9.4 审计）：此前是 `_checkIns.length`（**有记录**口径），与本轮
+  /// 统一的「达标」口径全线漂移：详情页「累计」用 [checkInCount]（达标天数），
+  /// 概览卡与成就体系却数「半途而废的天数」——同页两个「累计」给出两个数字，
+  /// 且「每天 8 杯水」整周只喝 1 杯也能把 `checkin_100` 灌到 100。
+  /// 现改为按 [_metDaysOf] 逐习惯聚合（布尔习惯与旧口径逐位等价，零数据迁移）。
+  int get totalCheckIns {
+    var sum = 0;
+    for (final h in _habits) {
+      sum += _metDaysOf(h).length;
+    }
+    return sum;
+  }
+
+  /// 「累计打卡**记录**数」（有记录即计，含未达标日）。仅用于导出 / 诊断等
+  /// 确实需要「写盘条数」语义的场景，UI 一律用 [totalCheckIns]。
+  int get totalCheckInRecords => _checkIns.length;
   int get habitCount => _habits.length;
   int get overallCurrentStreak =>
       _streakFor(_metDatesAll, allowTodayGap: true);
@@ -754,26 +811,16 @@ class HabitProvider extends ChangeNotifier {
       .map((c) => DateTime(c.date.year, c.date.month, c.date.day))
       .toSet();
 
-  /// 返回近 [days] 天内（含今天）按「日」聚合的打卡次数，供多习惯聚合热力图分级着色。
-  Map<DateTime, int> checkInCountsByDay(int days) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final start = today.subtract(Duration(days: days - 1));
-    final map = <DateTime, int>{};
-    for (final c in _checkIns) {
-      final d = DateTime(c.date.year, c.date.month, c.date.day);
-      if (d.isBefore(start)) continue;
-      map[d] = (map[d] ?? 0) + 1;
-    }
-    return map;
-  }
-
   /// P3-2（v2.9.3 审计）：近 [days] 天内按「日」聚合的**达标习惯数**
   /// （量化习惯当日累计量 ≥ 目标才计入；布尔习惯即有记录）。
   ///
-  /// 供多习惯聚合热力图使用：旧口径 [checkInCountsByDay] 数的是「有记录的习惯数」，
-  /// 量化习惯某日只完成 1/8 会与「8/8 达标」得到相同的计数与颜色档位，
-  /// 与详情页「按达成度四档着色」口径相悖。布尔习惯两者逐位等价。
+  /// 此前同位置还有一个旧口径版本（数「有记录的习惯数」）：量化习惯某日只完成
+  /// 1/8 会与「8/8 达标」得到相同计数与颜色档位，与详情页「按达成度四档着色」
+  /// 口径相悖。布尔习惯两者逐位等价。
+  ///
+  /// P3-10（v2.9.4 审计）：该旧口径方法已**删除**（自本方法落地后无任何生产
+  /// 调用点，纯死代码）。理由：两套口径并存本身就是下一轮审计的抓手——谁再
+  /// 误用「有记录」版，量化习惯的热力图会与概览卡打架。此刻删比留更便宜。
   Map<DateTime, int> metCountsByDay(int days) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -847,9 +894,14 @@ class HabitProvider extends ChangeNotifier {
     await _persistCheckIns();
     notifyListeners();
     // P3-3（v2.9.3 审计）：补触发「习惯/打卡变动」回调——恢复可能整体替换习惯
-    // 与打卡集，23:00 挽留等内容必须按恢复后的口径重排；其他写入口
-    // （addHabit / updateHabit / setCheckInValue / deleteHabit …）均已触发，
-    // 此前只有这里漏掉，靠备份面板兜底重排。
+    // 与打卡集，23:00 挽留等内容必须按恢复后的口径重排。
+    // P3-8（v2.9.4 审计）：上一版注释在这里写「其他写入口（addHabit /
+    // updateHabit / setCheckInValue / deleteHabit …）均已触发」——**与代码不符**：
+    // [addHabit] 与 [setReminder] 当时都没触发，正文注释比代码乐观。
+    // 现已补齐（见两处），本回调的全部写入口覆盖为：
+    // addHabit / addHabitFromDraft / setReminder / updateHabit /
+    // setCheckInValue（含 toggle / adjust / complete / clear / checkInOnDay /
+    // uncheckInOnDay 的委托）/ deleteHabit / restoreHabit / restoreFromJson。
     _notifyHabitsChanged();
   }
 

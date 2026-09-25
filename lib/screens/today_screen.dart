@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
+// U2-3：排程建议折叠态持久化（与看板分组态同一套 SharedPreferences 做法）。
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/focus_session.dart';
@@ -12,7 +14,10 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/screens/habit_screen.dart'
-    show toggleHabitWithUndo, incrementWithCelebration;
+    show
+        toggleHabitWithUndo,
+        incrementWithCelebration,
+        setTodayQuantityWithCelebration;
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/services/schedule_advisor.dart';
@@ -116,6 +121,12 @@ class TodayScreen extends StatelessWidget {
                       // 庆祝路径——达标那一刻有反馈，用户不再以为没生效。
                       onIncrement: (h) =>
                           incrementWithCelebration(context, habit, h),
+                      // P3-9（v2.9.4 审计）：走带庆祝的包装（此前「设置数量」
+                      // 直接调 provider，绕过 _maybeCelebrate，于是今日页 +1 会
+                      // 庆祝、点「设数量」却毫无反馈）。
+                      // U2-2：补可见入口后，这条路径今日页也可直达。
+                      onSetQuantity: (h) =>
+                          setTodayQuantityWithCelebration(context, habit, h),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -330,7 +341,44 @@ class _ScheduleAdvisorState extends State<_ScheduleAdvisor> {
   /// 最多展示的条目数：再多用户也读不完，且会把页面拉得很长。
   static const int _maxRows = 8;
 
+  /// U2-3（v2.9.4 审计）：折叠态的持久化 key（与看板分组态 `kanban_board.dart`
+  /// 同一套做法）。此前是纯 `State` 字段，而今日页由 `pages[_index]` 切换——
+  /// 切到看板再回来会**重建**该 State，用户刚收起的明细又展开。
+  static const String _kCollapsedPrefsKey = 'schedule_advisor_collapsed';
+
   bool _collapsed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreCollapsed();
+  }
+
+  /// U2-3：读取上次折叠态；读取失败静默保持默认（展开）。
+  Future<void> _restoreCollapsed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getBool(_kCollapsedPrefsKey) ?? false;
+      if (!mounted || saved == _collapsed) return;
+      setState(() => _collapsed = saved);
+    } catch (_) {
+      // 偏好不可读：静默保持默认展开，不影响排程建议可用性。
+    }
+  }
+
+  /// U2-3：切换折叠并落盘（落盘失败不影响当次切换）。
+  void _toggleCollapsed() {
+    setState(() => _collapsed = !_collapsed);
+    SharedPreferences.getInstance().then((prefs) async {
+      try {
+        await prefs.setBool(_kCollapsedPrefsKey, _collapsed);
+      } catch (_) {
+        // 写入失败：仅本次不记忆。
+      }
+    }).catchError((_) {
+      // 取实例失败：忽略。
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -346,8 +394,9 @@ class _ScheduleAdvisorState extends State<_ScheduleAdvisor> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // U2-4：头部可点折叠/展开，右侧给状态箭头。
+        // U2-3：改走 _toggleCollapsed（同时落盘，切页回来仍保持折叠）。
         InkWell(
-          onTap: () => setState(() => _collapsed = !_collapsed),
+          onTap: _toggleCollapsed,
           borderRadius: BorderRadius.circular(6),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 2),
@@ -447,6 +496,9 @@ class _ScheduleRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bias = item.biasLabel;
+    // P3-5（v2.9.4 审计）：抑制偏差时给一行弱化说明，否则「重复任务什么都不显示」
+    // 会被读成功能坏了。说明与偏差文案同处副标题行，弱化到 meta 灰。
+    final biasNote = item.biasSuppressedNote;
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
       child: Row(
@@ -477,6 +529,7 @@ class _ScheduleRow extends StatelessWidget {
                     '${item.explicit ? '' : '约 '}${formatMinutes(item.minutes)}',
                     if (item.missedDue) '预计超过截止',
                     if (bias != null) bias,
+                    if (biasNote != null) biasNote,
                   ].join(' · '),
                   style: TextStyle(
                     fontSize: 11,
@@ -528,12 +581,15 @@ class _HabitList extends StatelessWidget {
   final void Function(Habit) onToggle;
   /// T1-2：量化习惯的「+1」快速累加。
   final void Function(Habit) onIncrement;
+  /// U2-2：量化习惯的「设数量」（可发现的可见入口，不再依赖长按）。
+  final void Function(Habit) onSetQuantity;
   const _HabitList({
     required this.today,
     required this.accent,
     required this.ext,
     required this.onToggle,
     required this.onIncrement,
+    required this.onSetQuantity,
   });
 
   @override
@@ -586,6 +642,7 @@ class _HabitList extends StatelessWidget {
               meta: ext.meta,
               onToggle: onToggle,
               onIncrement: onIncrement,
+              onSetQuantity: onSetQuantity,
             ),
       ],
     );
@@ -600,6 +657,9 @@ class _HabitTile extends StatelessWidget {
   final Color meta;
   final void Function(Habit) onToggle;
   final void Function(Habit) onIncrement;
+  /// U2-2（v2.9.4 审计）：今日页补「设数量」入口（列表侧已有可点的 ✎，
+  /// 今日页此前只能长按计数器——触屏上长按不可发现，等于没有入口）。
+  final void Function(Habit) onSetQuantity;
   const _HabitTile({
     required this.status,
     required this.isLast,
@@ -608,6 +668,7 @@ class _HabitTile extends StatelessWidget {
     required this.meta,
     required this.onToggle,
     required this.onIncrement,
+    required this.onSetQuantity,
   });
 
   @override
@@ -637,15 +698,44 @@ class _HabitTile extends StatelessWidget {
                 if (quantified)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      met
-                          ? '今日 ${status.value}/${status.target} · 已达标'
-                          : '今日 ${status.value}/${status.target}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: met ? FontWeight.w600 : FontWeight.normal,
-                        color: met ? accent : meta,
-                      ),
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            met
+                                ? '今日 ${status.value}/${status.target} · 已达标'
+                                : '今日 ${status.value}/${status.target}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight:
+                                  met ? FontWeight.w600 : FontWeight.normal,
+                              color: met ? accent : meta,
+                            ),
+                          ),
+                        ),
+                        // U2-2（v2.9.4 审计）：可见的「设数量」入口。
+                        // 此前今日页只能**长按**计数器改数量——触屏上长按不可发现，
+                        // 报告已点名「手机用户（主要受众）仍需靠猜」。这里给常驻 ✎，
+                        // 与习惯列表侧（v2.9.3 已加）保持同一形态。
+                        // 休息日禁用：与「+1」同口径（不写计划外记录）。
+                        IconButton(
+                          onPressed: canCheckIn
+                              ? () => onSetQuantity(status.habit)
+                              : null,
+                          icon: Icon(Symbols.edit, size: 14),
+                          color: meta,
+                          // U3-1：命中区补到 48dp。
+                          constraints: const BoxConstraints(
+                            minWidth: 48,
+                            minHeight: 48,
+                          ),
+                          padding: const EdgeInsets.all(12),
+                          visualDensity: VisualDensity.compact,
+                          tooltip: '设置今日数量',
+                        ),
+                      ],
                     ),
                   ),
               ],
@@ -656,7 +746,11 @@ class _HabitTile extends StatelessWidget {
             Text('今天不打卡', style: TextStyle(fontSize: 12, color: meta))
           else
             SizedBox(
-              height: 31,
+              // U3-1（v2.9.4 审计）：此前是 `height: 31`——比 Material 最小
+              // 可点目标 48 小了 17px，触屏上「+1」明显难点中。改为 48。
+              // 按钮自身用 `minimumSize` 撑满，视觉重量靠 padding 控制，
+              // 不再用外层 SizedBox 去裁剪命中区。
+              height: 48,
               child: quantified
                   ? FilledButton.icon(
                       // 已达标后仍允许继续累加（记录超额量），只是视觉上弱化。
@@ -665,6 +759,9 @@ class _HabitTile extends StatelessWidget {
                       label: const Text('+1', style: TextStyle(fontSize: 12)),
                       style: FilledButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
+                        // U3-1：撑满 48dp 命中区（视觉上仍是紧凑胶囊，
+                        // 因为按钮背景与内边距不变，只是命中区变高）。
+                        minimumSize: const Size(0, 48),
                         backgroundColor: met ? accent.withValues(alpha: 0.18) : null,
                         foregroundColor: met ? accent : null,
                         shape: RoundedRectangleBorder(
@@ -680,6 +777,7 @@ class _HabitTile extends StatelessWidget {
                               style: TextStyle(fontSize: 12, color: accent)),
                           style: OutlinedButton.styleFrom(
                             padding: const EdgeInsets.symmetric(horizontal: 12),
+                            minimumSize: const Size(0, 48),
                             shape: RoundedRectangleBorder(
                               borderRadius:
                                   BorderRadius.circular(AppColors.chipRadius),
@@ -692,6 +790,7 @@ class _HabitTile extends StatelessWidget {
                           child: const Text('打卡', style: TextStyle(fontSize: 12)),
                           style: FilledButton.styleFrom(
                             padding: const EdgeInsets.symmetric(horizontal: 16),
+                            minimumSize: const Size(0, 48),
                             shape: RoundedRectangleBorder(
                               borderRadius:
                                   BorderRadius.circular(AppColors.chipRadius),

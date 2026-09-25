@@ -19,9 +19,16 @@ class HabitShareData {
   final String title;
   final int current; // 当前连续
   final int longest; // 历史最长
-  final int total; // 累计打卡
+  /// P2-7（v2.9.4 审计）：语义为「累计**达标**天数」（原 `checkInCount`
+  /// 已在 v2.9.4 切到达标口径，此处同步更名，避免标签继续写「累计打卡」）。
+  final int total;
   final DateTime createdAt;
   final Set<DateTime> checkedDays; // 近 [weeks] 周已打卡集合
+  /// P2-7：按达成度分级的强度函数（0..4）；null = 退化为二值着色。
+  ///
+  /// 此前分享卡不传此回调，量化习惯的 1/8 与 8/8 在长图上完全同色——
+  /// App 内四档、导出图二值，属对外产物的口径失真。
+  final int Function(DateTime)? levelOf;
   final int weeks;
 
   const HabitShareData({
@@ -33,6 +40,7 @@ class HabitShareData {
     required this.createdAt,
     required this.checkedDays,
     required this.weeks,
+    this.levelOf,
   });
 
   factory HabitShareData.from(HabitProvider hp, Habit h) => HabitShareData(
@@ -43,6 +51,9 @@ class HabitShareData {
         total: hp.checkInCount(h),
         createdAt: h.createdAt,
         checkedDays: hp.checkedDays(h, 18 * 7),
+        // P2-7：与详情页共用 [HabitProvider.progressLevelOn] 单一真源。
+        // 布尔习惯传 null 走二值即可（无量化语义，分级无意义）。
+        levelOf: h.isQuantified ? (d) => hp.progressLevelOn(h, d) : null,
         weeks: 18,
       );
 }
@@ -193,12 +204,15 @@ class HabitShareCard extends StatelessWidget {
         ),
       ),
       const SizedBox(height: 12),
-      // 统计：最长连续 / 累计打卡
+      // 统计：最长连续 / 累计达标
+      // P2-7（v2.9.4 审计）：标签由「累计打卡」改为「累计达标」——
+      // v2.9.4 已把 checkInCount 切到达标口径，继续写「打卡」会让量化习惯
+      // 的「达标天数」被读成「投入总量」，与 App 内概览卡口径打架。
       Row(
         children: [
           Expanded(child: _Stat(value: '${data.longest}', label: '最长连续')),
           const SizedBox(width: 12),
-          Expanded(child: _Stat(value: '${data.total}', label: '累计打卡')),
+          Expanded(child: _Stat(value: '${data.total}', label: '累计达标')),
         ],
       ),
       const SizedBox(height: 16),
@@ -224,6 +238,8 @@ class HabitShareCard extends StatelessWidget {
             const SizedBox(height: 12),
             HabitHeatmap(
               checkedDays: data.checkedDays,
+              // P2-7：量化习惯按达成度四档着色（与 App 内详情页同源）。
+              levelOf: data.levelOf,
               weeks: data.weeks,
               accent: accent,
             ),

@@ -3,9 +3,11 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+import 'package:todolist/theme/ui_durations.dart';
 
 /// 看板分组模式（本地 UI 状态，不污染任务数据）。
 enum KanbanGroupMode { status, category, tag }
@@ -408,8 +410,17 @@ class _Column extends StatelessWidget {
       onWillAcceptWithDetails: accept
           ? (d) => d.data.status != dropStatus
           : (_) => false,
-      onAcceptWithDetails:
-          accept ? (d) => provider.setStatus(d.data.id, dropStatus!) : null,
+      onAcceptWithDetails: accept
+          ? (d) {
+              // P3-10（v2.9.4 审计）：拖拽改状态同样给出撤销。d.data 是被拖的
+              // 那份 Task 快照（拖拽开始时捕获），可直接用作回滚源。
+              final snapshot = d.data;
+              provider.setStatus(snapshot.id, dropStatus!);
+              if (context.mounted) {
+                _KanbanCard._showStatusUndo(context, provider, snapshot);
+              }
+            }
+          : null,
       builder: (context, candidate, rejected) {
         final active = candidate.isNotEmpty;
         return Container(
@@ -459,10 +470,39 @@ class _KanbanCard extends StatelessWidget {
   final TaskProvider provider;
   const _KanbanCard({required this.task, required this.provider});
 
-  static void _cycle(TaskProvider p, Task t) {
+  /// P3-10（v2.9.4 审计）：单击改状态此前无任何撤销——手滑点一下卡就消失、
+  /// 整列「已完成」的任务被批量点回「待办」都只能一个个手动改回来。
+  /// 现在两种改状态入口（单击 / 拖拽落列）都给出 10 秒撤销。
+  static void _cycle(TaskProvider p, Task t, BuildContext context) {
     final next =
         t.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
+    final snapshot = t;
     p.setStatus(t.id, next);
+    _showStatusUndo(context, p, snapshot);
+  }
+
+  /// 改状态后的撤销提示。[snapshot] 是 [TaskProvider.setStatus] 变更前的快照。
+  ///
+  /// 刻意不调 `hideCurrentSnackBar()`（U2-4 同型缺陷）：那会亲手丢掉队列里
+  /// 上一条尚未点掉的撤销机会。直接 showSnackBar 让 ScaffoldMessenger 按队列
+  /// 依次展示即可。
+  static void _showStatusUndo(
+      BuildContext context, TaskProvider provider, Task snapshot) {
+    final to = snapshot.status == TaskStatus.todo
+        ? '已完成'
+        : snapshot.status == TaskStatus.done
+            ? '待办'
+            : '进行中';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已移至「$to」（$kUndoWindowSeconds 秒内可撤销）'),
+        action: SnackBarAction(
+          label: '撤销',
+          onPressed: () => provider.restoreTaskSnapshot(snapshot),
+        ),
+        duration: kUndoWindow,
+      ),
+    );
   }
 
   @override
@@ -513,7 +553,10 @@ class _KanbanCard extends StatelessWidget {
               ),
             ],
           ),
-          if (dueHint.isNotEmpty || task.isRepeating) ...[
+          // P3-10（v2.9.4 审计）：预计时长此前只出现在任务详情 / 今日页 / 导出表，
+          // 看板卡完全没有——排期时最需要「这件事大概要多久」的场景反而看不到。
+          // 条件同时容纳 dueHint / repeat / estimate 三者，任一存在才占这一行高度。
+          if (dueHint.isNotEmpty || task.isRepeating || task.hasEstimate) ...[
             const SizedBox(height: 6),
             Row(
               children: [
@@ -528,6 +571,21 @@ class _KanbanCard extends StatelessWidget {
                       color: overdue ? AppColors.lightHigh : ext.meta,
                     ),
                   ),
+                if (task.hasEstimate) ...[
+                  if (dueHint.isNotEmpty || task.isRepeating)
+                    const SizedBox(width: 6),
+                  Icon(Icons.schedule, size: 12, color: ext.meta),
+                  const SizedBox(width: 2),
+                  // 完成后淡化，与标题的删除线语义一致：预估此时只是历史值。
+                  Text(
+                    TaskParser.formatDuration(task.estimateMinutes!),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: done ? ext.meta : onBg.withValues(alpha: 0.75),
+                    ),
+                  ),
+                ],
               ],
             ),
           ],
@@ -537,7 +595,7 @@ class _KanbanCard extends StatelessWidget {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => _cycle(provider, task),
+      onTap: () => _cycle(provider, task, context),
       child: LongPressDraggable<Task>(
         data: task,
         feedback: Material(

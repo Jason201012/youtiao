@@ -9,6 +9,8 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+// U3-5：撤销窗口时长的单一真源（与任务侧删除横幅共用）。
+import 'package:todolist/theme/ui_durations.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/habit_heatmap.dart';
@@ -134,6 +136,120 @@ Future<void> incrementWithCelebration(
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
 }
 
+/// P3-9（v2.9.4 审计）：「今日达标」入口的庆祝包装。
+///
+/// 此前「设置数量」「今日达标」两条路径直接调 provider，绕过了 [_maybeCelebrate]，
+/// 于是同一屏里「+1」会庆祝、点「今日达标」却毫无反馈——用户以为按钮没生效。
+/// 现在所有「新增达标」的写入口统一走这一层包装（打卡 / +1 / 今日达标 / 通知打卡）。
+Future<void> completeTodayTargetWithCelebration(
+  BuildContext context,
+  HabitProvider hp,
+  Habit habit,
+) async {
+  final wasMet = hp.isTargetMetToday(habit);
+  final longestBefore = hp.longestStreak(habit);
+  await hp.completeTodayTarget(habit);
+  await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
+}
+
+/// P3-9（v2.9.4 审计）：设置今日数量的庆祝包装（同上，补齐「设置数量」路径）。
+Future<void> setTodayQuantityWithCelebration(
+  BuildContext context,
+  HabitProvider hp,
+  Habit habit,
+) async {
+  final wasMet = hp.isTargetMetToday(habit);
+  final longestBefore = hp.longestStreak(habit);
+  await promptHabitTodayQuantity(context, hp, habit);
+  await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
+}
+
+/// 把「今天」规整为 date-only（撤销时固化操作日用，见 [showCheckInUndoSnackBar]）。
+DateTime _dateOnlyNow() {
+  final n = DateTime.now();
+  return DateTime(n.year, n.month, n.day);
+}
+
+/// P3-1 / P3-2 / U1-1 / U2-4 / U3-4（v2.9.4 审计）：打卡类「撤销」的**唯一**实现。
+///
+/// 四个历史缺陷在此一次性收口：
+/// 1. **P3-1 日期取点击时刻**：撤销闭包里写 `DateTime.now()`，23:59 取消打卡、
+///    00:00 后点撤销 → 记录落到「今天」，昨天连续天数仍断着。改为调用方在
+///    **操作发生时**就传入 [day]（date-only），撤销只按这一天回写。
+/// 2. **P3-2 无条件覆盖**：10 秒内「先 +1 再撤销」会把用户新加的量抹掉。
+///    现在撤销前校验「当前值仍等于操作后的状态（0 = 已清空/已取消）」，
+///    不等则提示「撤销已失效」，不覆盖用户后续操作。
+/// 3. **U1-1 弹层内点不到**：SnackBar 渲染在 ModalBarrier 之下，点击落在遮罩上
+///    （关掉弹层而非撤销）。[closeSheet] 为 true 时先 pop 弹层再提示。
+/// 4. **U2-4 横幅被顶掉**：不再 `hideCurrentSnackBar()`——`ScaffoldMessenger`
+///    自带队列（后一条排在前一条播完之后），主动 hide 等于亲手丢掉上一条撤销机会。
+///    另附 **U3-4**：窗口超时自动收起时给一句「撤销窗口已结束」，避免用户
+///    在 10 秒后点空气。
+Future<void> showCheckInUndoSnackBar(
+  BuildContext context, {
+  required HabitProvider hp,
+  required Habit habit,
+  required DateTime day,
+  required int previous,
+  required String content,
+  bool closeSheet = false,
+}) async {
+  // U1-1：先取 messenger / navigator（pop 之后本页 context 随即失效）。
+  final messenger = ScaffoldMessenger.of(context);
+  final navigator = Navigator.of(context, rootNavigator: true);
+  final dayLabel = '${day.month}月${day.day}日';
+  var undone = false;
+
+  void restore() {
+    // P3-2：只有「当前仍是操作后的状态（0）」才回写。
+    final cur = hp.checkInValueOn(habit, day);
+    if (cur != 0) {
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('撤销已失效：这条记录之后已被再次修改'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      return;
+    }
+    hp.setCheckInValue(habit, day, previous);
+  }
+
+  if (closeSheet) navigator.pop();
+  if (previous <= 0) return;
+
+  // U3-4：超时收起不等于「用户看到了」，补一句明确反馈。
+  //
+  // `closed` 不是 [SnackBar] 的构造参数——它是 [ScaffoldMessenger.showSnackBar]
+  // 返回的 [ScaffoldFeatureController.closed]（Future<SnackBarClosedReason>）。
+  // 这里挂到该 Future 上：只在「超时」且「用户没点撤销」时补提示。
+  final controller = messenger.showSnackBar(
+    SnackBar(
+      content: Text(content),
+      // U3-5：时长读全局单一真源，不再在习惯侧独立写死 10 秒。
+      duration: kUndoWindow,
+      action: SnackBarAction(
+        label: '撤销',
+        onPressed: () {
+          undone = true;
+          restore();
+        },
+      ),
+    ),
+  );
+  controller.closed.then((reason) {
+    if (undone || reason != SnackBarClosedReason.timeout) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('$dayLabel 的撤销窗口已结束'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  });
+}
+
 /// U2-2（v2.9.3 审计）：列表侧的「打卡 / 取消打卡」入口。
 ///
 /// 未打卡 → 正常打卡（带庆祝）；已打卡再点 = 取消，此前零确认零撤销——
@@ -146,26 +262,39 @@ Future<void> toggleHabitWithUndo(
   HabitProvider hp,
   Habit habit,
 ) async {
+  // P3-3 / U2-6（v2.9.4 审计）：休息日统一禁用（今日页 / 列表行 / 详情三处同口径）。
+  // 保留这道守卫是因为本函数是**公开**入口，未来新调用点不必再各自记得判断。
+  if (!habit.shouldCheckInOn(_dateOnlyNow())) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('今天不打卡 · 如需补记请在习惯详情里用「补卡」'),
+        duration: Duration(seconds: 3),
+      ),
+    );
+    return;
+  }
   if (!hp.isCheckedToday(habit)) {
     await checkInWithCelebration(context, hp, habit);
     return;
   }
+  // P3-1：操作发生时就固化 date-only，撤销不再取「点击撤销那一刻」。
+  final day = _dateOnlyNow();
   final previous = hp.todayValue(habit);
   await hp.toggleCheckInToday(habit);
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(
-      SnackBar(
-        content: const Text('已取消今日打卡'),
-        duration: const Duration(seconds: 10),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () =>
-              hp.setCheckInValue(habit, DateTime.now(), previous),
-        ),
-      ),
-    );
+
+  // P3-1 / P3-2 / U2-4 / U3-4：统一走共享撤销实现（日期固化 + 覆盖校验 +
+  // 不再 hideCurrentSnackBar 以保留队列 + 超时反馈）。
+  await showCheckInUndoSnackBar(
+    context,
+    hp: hp,
+    habit: habit,
+    day: day,
+    previous: previous,
+    content: habit.isQuantified
+        ? '已清空今日记录（$previous）'
+        : '已取消今日打卡',
+  );
 }
 
 /// 共用庆祝判定：本次由「未达标」变为「已达标」，且当前连续超过历史最长。
@@ -281,7 +410,10 @@ class _OverviewCard extends StatelessWidget {
     final items = [
       ('今日', '$todayDone/$total'),
       ('连续', '$currentStreak 天'),
-      ('累计', '$totalCheckIns 次'),
+      // P2-3（v2.9.4 审计）：数字改为达标口径（[HabitProvider.totalCheckIns]），
+      // 标签必须同步——否则「累计 7 次」与详情页「累计 3 天」在同一 App 里对同一个
+      // 习惯给出两个数。这里明确写成「累计达标(天)」，与导出的同名列一致。
+      ('累计达标', '$totalCheckIns 天'),
     ];
     return Container(
       width: double.infinity,
@@ -443,6 +575,10 @@ class _HabitTile extends StatelessWidget {
     final goalN = hp.weeklyCheckIns(habit);
     final goalM = habit.weeklyGoal;
     final goalMet = goalN >= goalM;
+    // P3-3 / U2-6（v2.9.4 审计）：今天是否计划内打卡。休息日与今日卡（today_card）
+    // 的「今天不打卡」必须同口径——此前列表行照旧显示「今日 x/y」且「+1」可点，
+    // 写出的计划外记录还会污染连续天数与热力图。
+    final restDay = !habit.shouldCheckInOn(DateTime.now());
 
     // 左侧整块（头像 + 标题 + 连续/频率）点击进入单习惯详情；
     // 提醒 chip 是独立兄弟节点，点它只改提醒、不会误开详情。
@@ -475,6 +611,8 @@ class _HabitTile extends StatelessWidget {
                         Text(freq,
                             style: TextStyle(color: ext.meta, fontSize: 12)),
                         // T1-2：量化进度芯片（今日 / 本周累计 → 目标）。
+                        // P3-3（v2.9.4 审计）：休息日改显「今天不打卡」，不再显示
+                        // 「今日 x/y」并让「+1」可点。
                         if (quantified)
                           Container(
                             padding: const EdgeInsets.symmetric(
@@ -486,7 +624,7 @@ class _HabitTile extends StatelessWidget {
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
-                              '今日 $value/$target',
+                              restDay ? '今天不打卡' : '今日 $value/$target',
                               style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
@@ -504,12 +642,21 @@ class _HabitTile extends StatelessWidget {
                                   : ext.chip,
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            child: Text('本周 $goalN/$goalM',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: goalMet ? primary : ext.meta,
-                                )),
+                            // U3-3（v2.9.4 审计）：「本周 2/5」是裸术语——
+                            // 用户不知道分母是什么、达标了会怎样。Tooltip 给出解释。
+                            // 注意：Tooltip 触屏不可主动发现，故同时把 chip 文案
+                            // 自身补全量词（「次」）——报告点名的「裸术语」问题
+                            // 不能只靠 Tooltip 解决（与 U2-2 同一教训）。
+                            child: Tooltip(
+                              message: '本周已达标 $goalN 天，目标 $goalM 天'
+                                  '（达到即本周达成）',
+                              child: Text('本周 $goalN/$goalM 次',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: goalMet ? primary : ext.meta,
+                                  )),
+                            ),
                           ),
                         // T1-4：宽限日提示（仅开启时显示，避免噪音）。
                         if (habit.graceDays > 0)
@@ -520,8 +667,13 @@ class _HabitTile extends StatelessWidget {
                               color: ext.chip,
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            child: Text('宽限 ${habit.graceDays} 天/周',
-                                style: TextStyle(fontSize: 11, color: ext.meta)),
+                            // U3-3：宽限日同样是裸术语，补 Tooltip 解释
+                            // （「每周允许漏 N 天而不断签」）。
+                            child: Tooltip(
+                              message: '每周允许漏卡 ${habit.graceDays} 天而不中断连续天数',
+                              child: Text('宽限 ${habit.graceDays} 天/周',
+                                  style: TextStyle(fontSize: 11, color: ext.meta)),
+                            ),
                           ),
                       ],
                     ),
@@ -543,11 +695,14 @@ class _HabitTile extends StatelessWidget {
 
     // 右侧动作区：
     // - 布尔习惯：勾选圆圈（点击打卡 + 打破纪录庆祝）；取消打卡走 U2-2 的撤销保护。
-    // - 量化习惯（T1-2）：计数 pill（点开详情 / 长按设数量）+「+1」按钮
+    // - 量化习惯（T1-2）：计数 pill（点开详情）+「✎ 设数量」显式入口 +「+1」按钮
     //   （点击累加 1，达标那一刻触发庆祝）。
-    // U2-3（v2.9.3 审计）：「长按设数量」此前完全不可发现——参照 _ReminderChip 的
-    // 先例，Tooltip 罩在 GestureDetector 外层（waitDuration 限悬停触发），桌面悬停
-    // 有提示；移动端长按手势仍由内层 GestureDetector 赢下手势仲裁，行为不变。
+    // U2-2（v2.9.3 审计）：「长按设数量」此前完全不可发现——Tooltip 罩在
+    // GestureDetector 外层，触屏上内层 onLongPress 赢下手势仲裁，Tooltip 永不弹，
+    // 手机用户只能靠猜。现补**常驻可见的 ✎ 按钮**（不依赖悬停/长按），
+    // 长按设数量作为等价入口保留。
+    // P3-3 / U2-6（v2.9.4 审计）：休息日禁用「✎ / +1」并改提示文案，与今日卡
+    // 「今天不打卡」一致（补卡入口仍在详情弹层里，计划外补记不受影响）。
     final action = quantified
         ? Padding(
             padding: const EdgeInsets.only(right: 6),
@@ -555,13 +710,11 @@ class _HabitTile extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Tooltip(
-                  message: '点按看详情 · 长按设数量',
+                  message: '点按看详情',
                   waitDuration: const Duration(milliseconds: 400),
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: () => showHabitDetailSheet(context, habit),
-                    onLongPress: () =>
-                        promptHabitTodayQuantity(context, hp, habit),
                     child: Container(
                       constraints: const BoxConstraints(minWidth: 46),
                       padding: const EdgeInsets.symmetric(
@@ -583,14 +736,37 @@ class _HabitTile extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 6),
+                // U2-2：可见的「设数量」入口（48×48 命中区），取代仅靠长按的隐藏手势。
                 Tooltip(
-                  message: '点按 +1 · 长按设数量',
+                  message: restDay ? '今天不打卡' : '设置今日数量',
                   waitDuration: const Duration(milliseconds: 400),
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => incrementWithCelebration(context, hp, habit),
-                    onLongPress: () =>
-                        promptHabitTodayQuantity(context, hp, habit),
+                    onTap: restDay
+                        ? null
+                        : () => promptHabitTodayQuantity(context, hp, habit),
+                    child: SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: Icon(
+                        Icons.edit_outlined,
+                        size: 18,
+                        color: restDay ? ext.meta.withValues(alpha: 0.4) : ext.meta,
+                      ),
+                    ),
+                  ),
+                ),
+                Tooltip(
+                  message: restDay ? '今天不打卡' : '点按 +1 · 长按设数量',
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: restDay
+                        ? null
+                        : () => incrementWithCelebration(context, hp, habit),
+                    onLongPress: restDay
+                        ? null
+                        : () => promptHabitTodayQuantity(context, hp, habit),
                     // U3-1（v2.9.3 审计）：视觉圆钮保持 32×32，外包 48×48 命中区，
                     // 达到 Material 48dp 最小可点目标，小圆钮不再易误触/难点中。
                     child: SizedBox(
@@ -602,13 +778,19 @@ class _HabitTile extends StatelessWidget {
                           height: 32,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: checked
-                                ? primary.withValues(alpha: 0.16)
-                                : primary,
+                            color: restDay
+                                ? ext.chip
+                                : checked
+                                    ? primary.withValues(alpha: 0.16)
+                                    : primary,
                           ),
                           child: Icon(Icons.add,
                               size: 18,
-                              color: checked ? primary : Colors.white),
+                              color: restDay
+                                  ? ext.meta.withValues(alpha: 0.4)
+                                  : checked
+                                      ? primary
+                                      : Colors.white),
                         ),
                       ),
                     ),
@@ -620,22 +802,36 @@ class _HabitTile extends StatelessWidget {
           )
         : Padding(
             padding: const EdgeInsets.only(right: 12),
-            child: GestureDetector(
-              // U2-2（v2.9.3 审计）：已打卡状态再点 = 取消打卡，走「撤销 SnackBar」
-              // 保护（与详情页二次确认、删除撤销体验对齐）；未打卡直接打卡不变。
-              onTap: () => toggleHabitWithUndo(context, hp, habit),
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: checked ? primary : Colors.transparent,
-                  border: Border.all(
-                      color: checked ? primary : ext.meta, width: 2),
+            child: Tooltip(
+              // P3-3 / U2-6（v2.9.4 审计）：休息日禁用打卡并说明原因（与今日卡一致）。
+              message: restDay ? '今天不打卡 · 如需补记请在详情里用「补卡」' : '点按打卡',
+              waitDuration: const Duration(milliseconds: 400),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                // U2-2（v2.9.3 审计）：已打卡状态再点 = 取消打卡，走「撤销 SnackBar」
+                // 保护（与详情页二次确认、删除撤销体验对齐）；未打卡直接打卡不变。
+                onTap: restDay ? null : () => toggleHabitWithUndo(context, hp, habit),
+                child: Container(
+                  width: 48,
+                  height: 48,
+                  alignment: Alignment.center,
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: checked ? primary : Colors.transparent,
+                      border: Border.all(
+                          color: checked
+                              ? primary
+                              : ext.meta.withValues(alpha: restDay ? 0.35 : 1),
+                          width: 2),
+                    ),
+                    child: checked
+                        ? const Icon(Icons.check, color: Colors.white, size: 18)
+                        : null,
+                  ),
                 ),
-                child: checked
-                    ? const Icon(Icons.check, color: Colors.white, size: 18)
-                    : null,
               ),
             ),
           );
@@ -932,7 +1128,9 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   final Set<int> _weekdays = {};
   /// 每日提醒时间（分钟数，null = 不提醒）。
   int? _reminderMinute;
-  /// 每周目标打卡次数（0 = 不启用，1..14）。
+  /// 每周目标打卡次数（0 = 不启用，1..计划天数）。
+  /// P3-10（v2.9.4 审计）：上界不再是写死的 14，改为随 [_weekdays] 联动——
+  /// 「每周一三五」的习惯设「每周 14 次」是永远达不到的目标。
   int _weeklyGoal = 0;
   /// T1-2：每日目标量（null = 按天打卡的布尔习惯）。
   int? _dailyTarget;
@@ -944,6 +1142,15 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
     final h = _reminderMinute! ~/ 60;
     final m = _reminderMinute! % 60;
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+  }
+
+  /// P3-10：当前所选星期下的「每周目标」合法上界（不选 = 每天 = 7）。
+  int get _maxWeeklyGoal => Habit.plannedDaysOf(_weekdays.toList());
+
+  /// P3-10：计划天数变化时把 [_weeklyGoal] 收敛到 [_maxWeeklyGoal]。
+  void _syncWeeklyGoalToPlannedDays() {
+    final max = _maxWeeklyGoal;
+    if (_weeklyGoal > max) _weeklyGoal = max;
   }
 
   @override
@@ -1063,6 +1270,10 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                   } else {
                     _weekdays.add(wd);
                   }
+                  // P3-10：计划天数变化后，把「每周目标」收敛到新的上界。
+                  // 典型场景：先设「每周 5 次」再只勾周一三五 → 目标自动降为 3，
+                  // 不留一个永远达不到的进度条。
+                  _syncWeeklyGoalToPlannedDays();
                 }),
                 selectedColor: primary,
                 labelStyle:
@@ -1109,10 +1320,11 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
               const Text('每周目标',
                   style: TextStyle(fontWeight: FontWeight.w600)),
               const Spacer(),
+              // P3-10：候选项只到「计划天数」——再往上就是不可达目标。
               DropdownButton<int>(
                 value: _weeklyGoal,
                 items: List.generate(
-                  15,
+                  _maxWeeklyGoal + 1,
                   (i) => DropdownMenuItem(
                     value: i,
                     child: Text(i == 0 ? '关闭' : '每周 $i 次'),
@@ -1390,24 +1602,30 @@ class _HabitDetailSheet extends StatelessWidget {
   /// 与「设置数量（过对话框）」「取消打卡（详情页有二次确认）」的保护对齐；
   /// 撤销把清空前的累计量原值放回（走 [HabitProvider.setCheckInValue]，
   /// 连续天数 / 周目标进度随记录恢复，无需另行补偿）。
+  ///
+  /// P3-1 / P3-2 / U1-1 / U2-4 / U3-4（v2.9.4 审计）：本函数此前是**独立实现**，
+  /// 于是四个缺陷原样存在——撤销闭包取「点击那一刻」的 `DateTime.now()`
+  /// （跨零点写错日期）、无条件覆盖用户 10 秒内的后续操作、
+  /// `hideCurrentSnackBar()` 顶掉前一条横幅、SnackBar 被详情弹层的
+  /// ModalBarrier 挡住点不到。现在统一委托 [showCheckInUndoSnackBar]，
+  /// 并传 `closeSheet: true` 先关弹层再提示。
   Future<void> _clearTodayWithUndo(BuildContext context, HabitProvider hp) async {
+    // P3-1：操作发生时即固化 date-only。
+    final day = _dateOnlyNow();
     final previous = hp.todayValue(habit);
     if (previous <= 0) return;
     await hp.clearToday(habit);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text('已清空今日记录（$previous）'),
-          duration: const Duration(seconds: 10),
-          action: SnackBarAction(
-            label: '撤销',
-            onPressed: () =>
-                hp.setCheckInValue(habit, DateTime.now(), previous),
-          ),
-        ),
-      );
+    await showCheckInUndoSnackBar(
+      context,
+      hp: hp,
+      habit: habit,
+      day: day,
+      previous: previous,
+      content: '已清空今日记录（$previous）',
+      // U1-1：SnackBar 渲染在 ModalBarrier 之下，必须先关详情弹层。
+      closeSheet: true,
+    );
   }
 
   @override
@@ -1433,6 +1651,9 @@ class _HabitDetailSheet extends StatelessWidget {
     final target = habit.effectiveTarget;
     final metToday = hp.isTargetMetToday(habit);
     final todayRatio = habit.progressRatioOf(todayValue);
+    // P3-3 / U2-6（v2.9.4 审计）：今天是否计划内打卡（与列表行、今日卡同口径）。
+    // 休息日禁用「设置数量 / 今日达标 / 清空今日 / +1」，避免一键写入计划外记录。
+    final restDay = !habit.shouldCheckInOn(DateTime.now());
 
     return SafeArea(
       top: false,
@@ -1545,7 +1766,16 @@ class _HabitDetailSheet extends StatelessWidget {
                     ),
                     _MiniStat(value: '$longest', label: '最长'),
                     const SizedBox(width: 16),
-                    _MiniStat(value: '$total', label: '累计'),
+                    // P2-3（v2.9.4 审计）：标签与概览卡、导出一致（「累计达标」），
+                    // 避免「累计」在概览/详情/成就三处各指一件事。
+                    // U3-3（v2.9.4 审计）：「达标」对新用户是裸术语（量化习惯里
+                    // 指「当日累计量 ≥ 每日目标」），补 Tooltip 一行解释。
+                    Tooltip(
+                      message: habit.isQuantified
+                          ? '累计**达标**天数：当天累计量 ≥ ${habit.effectiveTarget} 才计一天'
+                          : '累计打卡天数',
+                      child: _MiniStat(value: '$total', label: '累计达标'),
+                    ),
                   ],
                 ),
               ),
@@ -1607,11 +1837,23 @@ class _HabitDetailSheet extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 6),
+                      // P3-3 / U2-6（v2.9.4 审计）：休息日说明 + 三个写入口全部禁用
+                      // （「设置数量」「今日达标」会一键写入计划外记录）。
+                      if (restDay)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Text(
+                            '今天不打卡（不在计划的打卡日）· 如需补记请用下方「补卡」',
+                            style: TextStyle(fontSize: 12, color: ext.meta),
+                          ),
+                        ),
                       Row(
                         children: [
                           TextButton.icon(
-                            onPressed: () =>
-                                promptHabitTodayQuantity(context, hp, habit),
+                            onPressed: restDay
+                                ? null
+                                : () => promptHabitTodayQuantity(
+                                    context, hp, habit),
                             icon: const Icon(Symbols.edit, size: 16),
                             label: const Text('设置数量'),
                           ),
@@ -1620,7 +1862,13 @@ class _HabitDetailSheet extends StatelessWidget {
                           // 「+1」或长按猜「设置数量」。已达标后无操作，故直接隐藏。
                           if (!metToday)
                             TextButton.icon(
-                              onPressed: () => hp.completeTodayTarget(habit),
+                              // P3-9（v2.9.4 审计）：此前此路径绕过庆祝，与「+1」/打卡
+                              // 入口不一致（用户「今日达标」看不到反馈，以为没生效）。
+                              // 统一走 completeTodayTargetWithCelebration。
+                              onPressed: restDay
+                                  ? null
+                                  : () => completeTodayTargetWithCelebration(
+                                      context, hp, habit),
                               icon: const Icon(Symbols.done_all, size: 16),
                               label: const Text('今日达标'),
                             ),
@@ -1630,7 +1878,9 @@ class _HabitDetailSheet extends StatelessWidget {
                               // 已达标 8/8 一键归零会连带连续天数、周目标回退，
                               // 而同屏的「设置数量」要过对话框。改为撤销式保护：
                               // 立即清空 + 10 秒内可原值放回（与删除习惯对齐）。
-                              onPressed: () => _clearTodayWithUndo(context, hp),
+                              onPressed: restDay
+                                  ? null
+                                  : () => _clearTodayWithUndo(context, hp),
                               icon: const Icon(Symbols.undo, size: 16),
                               label: const Text('清空今日'),
                             ),
@@ -1666,16 +1916,11 @@ class _HabitDetailSheet extends StatelessWidget {
                       goalMet: hp.goalMetThisWeek(habit),
                       // T1-2：量化习惯用「当日达成度」分级着色（4 档），
                       // 一眼能看出「哪些天只是勉强打了卡、哪些天做满了」。
+                      // P2-7（v2.9.4 审计）：分级判据上移到
+                      // [HabitProvider.progressLevelOn]，与分享卡共用同一真源
+                      // （此前这段内联在闭包里，分享长图只能二值着色）。
                       levelOf: quantified
-                          ? (d) {
-                              final r = habit
-                                  .progressRatioOf(hp.checkInValueOn(habit, d));
-                              if (r <= 0) return 0;
-                              if (r < 0.5) return 1;
-                              if (r < 0.75) return 2;
-                              if (r < 1.0) return 3;
-                              return 4; // 达标档（HabitHeatmap 的 steps 长度为 4）
-                            }
+                          ? (d) => hp.progressLevelOn(habit, d)
                           : null,
                     ),
                   ],
@@ -1688,17 +1933,25 @@ class _HabitDetailSheet extends StatelessWidget {
                     child: FilledButton.icon(
                       // T1-2：量化习惯主按钮是「+1 累加」；布尔习惯沿用
                       // U15 的「已打卡先确认再撤」口径。
-                      onPressed: quantified
-                          ? () => incrementWithCelebration(context, hp, habit)
-                          : (isCheckedToday
-                              ? () => _confirmUncheckToday(context, hp)
-                              : () => checkInWithCelebration(context, hp, habit)),
+                      // P3-3 / U2-6（v2.9.4 审计）：休息日禁用主按钮（补卡入口不受限），
+                      // 避免同屏既说「今天不打卡」又提供一个一键写入的按钮。
+                      onPressed: restDay
+                          ? null
+                          : quantified
+                              ? () =>
+                                  incrementWithCelebration(context, hp, habit)
+                              : (isCheckedToday
+                                  ? () => _confirmUncheckToday(context, hp)
+                                  : () =>
+                                      checkInWithCelebration(context, hp, habit)),
                       icon: Icon(quantified
                           ? Icons.add
                           : (isCheckedToday ? Icons.check : Icons.add)),
-                      label: Text(quantified
-                          ? (metToday ? '+1（已达标）' : '+1')
-                          : (isCheckedToday ? '今日已打卡' : '打卡')),
+                      label: Text(restDay
+                          ? '今天不打卡'
+                          : quantified
+                              ? (metToday ? '+1（已达标）' : '+1')
+                              : (isCheckedToday ? '今日已打卡' : '打卡')),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -1743,7 +1996,11 @@ class _HabitDetailSheet extends StatelessWidget {
 /// U2：编辑习惯底部弹层（改名 / 打卡星期 / 周目标 / 归档 / 删除）。
 ///
 /// 详情弹层顶栏的「编辑」打开这里。保存走 [HabitProvider.updateHabit]（星期变更会
-/// 重排提醒）；删除需二次确认（清除全部历史打卡，不可恢复）。
+/// 重排提醒）；删除需二次确认，且删除后有 [kUndoWindowSeconds] 秒撤销窗口
+/// （[HabitProvider.restoreHabit] 按快照原样恢复含原列表位置）。
+///
+/// P3-10（v2.9.4 审计）：此处原文写「清除全部历史打卡，**不可恢复**」——
+/// 与紧随其后的 10 秒撤销自相矛盾（v2.9.3 已改过弹层内文案，漏了这段文档注释）。
 class _HabitEditSheet extends StatefulWidget {
   final Habit habit;
   const _HabitEditSheet({required this.habit});
@@ -1789,6 +2046,18 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
         '${(m % 60).toString().padLeft(2, '0')}';
   }
 
+  /// P3-10：每周目标上界联动「当前所选星期」（不选 = 每天 = 7）。
+  int get _maxWeeklyGoal => Habit.plannedDaysOf(_weekdays.toList());
+
+  /// P3-10：星期变化时把 [_weeklyGoal] 收敛到新的上界。
+  ///
+  /// 典型：旧数据里「每周一三五 + 目标 5 次」（不可达）→ 打开编辑层即自动降为 3，
+  /// 用户不必手动调；这不写库，只有 [_save] 时才落盘。
+  void _syncWeeklyGoalToPlannedDays() {
+    final max = _maxWeeklyGoal;
+    if (_weeklyGoal > max) _weeklyGoal = max;
+  }
+
   Future<void> _save() async {
     final title = _titleCtl.text.trim();
     if (title.isEmpty) {
@@ -1831,8 +2100,10 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       builder: (d) => AlertDialog(
         title: const Text('删除该习惯？'),
         content: Text(
-          // U3-2（v2.9.3 审计）：旧文案「不可恢复」与随后的 10 秒撤销自相矛盾。
-          '将删除「${widget.habit.title}」及其全部打卡记录，删除后 10 秒内可撤销。',
+          // U3-2（v2.9.3 审计）：旧文案「不可恢复」与随后的撤销自相矛盾；
+          // U3-5（v2.9.4 审计）：秒数也改为读 [kUndoWindowSeconds]，
+          // 不再在本处独立写死「10 秒」（与任务侧删除文案曾长期不一致）。
+          '将删除「${widget.habit.title}」及其全部打卡记录，删除后 $kUndoWindowSeconds 秒内可撤销。',
         ),
         actions: [
           TextButton(
@@ -1853,20 +2124,21 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     // 关闭编辑层 + 其下的详情弹层，回到习惯列表（删除后详情已无意义）。
     navigator.pop();
     navigator.pop();
-    messenger
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(snapshot?.undoLabel ?? '习惯已删除'),
-          duration: const Duration(seconds: 10),
-          action: snapshot == null
-              ? null
-              : SnackBarAction(
-                  label: '撤销',
-                  onPressed: () => hp.restoreHabit(snapshot),
-                ),
-        ),
-      );
+    // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`——`ScaffoldMessenger`
+    // 自带队列，主动 hide 等于亲手丢掉前一条撤销机会（用户毫不知情）。
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(snapshot?.undoLabel ?? '习惯已删除'),
+        // U3-5：时长读全局单一真源。
+        duration: kUndoWindow,
+        action: snapshot == null
+            ? null
+            : SnackBarAction(
+                label: '撤销',
+                onPressed: () => hp.restoreHabit(snapshot),
+              ),
+      ),
+    );
   }
 
   @override
@@ -1939,6 +2211,8 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
                     } else {
                       _weekdays.add(wd);
                     }
+                    // P3-10：计划天数变化 → 每周目标同步收敛。
+                    _syncWeeklyGoalToPlannedDays();
                   }),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
@@ -1979,7 +2253,7 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
                     style: const TextStyle(
                         fontSize: 18, fontWeight: FontWeight.bold)),
                 IconButton(
-                  onPressed: _weeklyGoal < 14
+                  onPressed: _weeklyGoal < _maxWeeklyGoal
                       ? () => setState(() => _weeklyGoal++)
                       : null,
                   icon: const Icon(Symbols.add_circle_outline),

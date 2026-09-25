@@ -148,6 +148,13 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     if (t.note.isNotEmpty) {
       buf.writeln('DESCRIPTION:${_escapeIcs(t.note)}');
     }
+    // P3-10（v2.9.4 审计）：预计时长此前只在 Excel/CSV 与应用内展示，iCal 侧
+    // 完全没有该字段——用户把任务导入系统日历 / 第三方待办后，「预计 45 分钟」
+    // 这一信息单向丢失，排期时只能凭感觉。RFC 5545 用 DURATION 表达时长，
+    // 这是 VTODO 表达预计耗时的标准位置（TYPE=DURATION，默认值）。
+    if (t.estimateMinutes != null) {
+      buf.writeln('DURATION:PT${t.estimateMinutes}M');
+    }
     // 优先级：高=1 / 中=5 / 低=9（iCal 1 最高、9 最低）。
     final prio = t.priority == Priority.high
         ? 1

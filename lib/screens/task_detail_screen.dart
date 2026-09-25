@@ -14,6 +14,8 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+// U3-5：撤销窗口时长的单一真源（与首页删除横幅共用，不再各写一份）。
+import 'package:todolist/theme/ui_durations.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/task_template_sheet.dart';
 import 'package:todolist/widgets/occurrence_sheet.dart';
@@ -168,11 +170,20 @@ class TaskDetailScreen extends StatelessWidget {
     // T1-1：预估 vs 实际的偏差文案（与今日排程建议共用同一 pure 函数，口径不漂移）。
     // P2-3（v2.9.3 审计）：重复任务的 [Task.focusedMinutes] 是历史累计专注，
     // 与「单次预估」不可比（恒显「可能低估」），故重复任务不展示偏差提示。
-    final estimateBias = task.isRepeating
+    //
+    // P3-5（v2.9.4 审计）：抑制范围收窄为「**仍在发生**的重复」
+    // （isRepeating && !repeatEnded）——`repeatEnded`（重复已结束、实际只发生过
+    // 一次）的累计专注恰好就是那唯一一次的投入，是可比的，此前被一并抑制。
+    //
+    // U3-2（v2.9.4 审计）：`completed: task.done`——未完成时不判「可能高估」。
+    // 投入还在累积，「预估 30、已专注 5」只说明做到哪，不说明估得准不准；
+    // 完成时 focusedMinutes 才是这次执行的终值。
+    final estimateBias = (task.isRepeating && !task.repeatEnded)
         ? null
         : estimateBiasLabel(
             estimatedMinutes: task.estimateMinutes,
             actualMinutes: task.focusedMinutes,
+            completed: task.done,
           );
 
     return Scaffold(
@@ -375,27 +386,29 @@ class TaskDetailScreen extends StatelessWidget {
                                 final messenger = ScaffoldMessenger.of(context);
                                 provider.skipOccurrence(task.id);
                                 Navigator.pop(context);
-                                messenger
-                                  ..hideCurrentSnackBar()
-                                  ..showSnackBar(
-                                    SnackBar(
-                                      // U1（v2.9.0 审计）：撤销窗口由 5 秒延长到 10 秒——误触后
-                                      // 若先做了别的操作（弹窗 / 切页），撤销入口即消失，只能去
-                                      // occurrence 预览手动撤销；文案同时给出该常驻路径，与弹层的
-                                      // 「撤销跳过」入口联动（两处走同一个 unskipOccurrence）。
-                                      // U3-2（v2.9.1 审计）：撤销入口在任务行的重复标签上是
-                                      // **点按**（chip 的 onTap），长按反而会进多选——原文案
-                                      // 写「长按」属指错路，这里改正。
-                                      content: const Text('已跳过今天这一次（可点按任务行的重复标签，'
-                                          '在「未来循环日预览」中撤销）'),
-                                      duration: const Duration(seconds: 10),
-                                      action: SnackBarAction(
-                                        label: '撤销',
-                                        onPressed: () =>
-                                            provider.unskipOccurrence(task.id),
-                                      ),
+                                // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`
+                                // ——`ScaffoldMessenger` 自带队列（后一条排在前一条
+                                // 播完之后），主动 hide 等于亲手丢掉上一条撤销机会，
+                                // 而用户毫不知情。
+                                messenger.showSnackBar(
+                                  SnackBar(
+                                    // U1（v2.9.0 审计）：撤销窗口由 5 秒延长到 10 秒——误触后
+                                    // 若先做了别的操作（弹窗 / 切页），撤销入口即消失，只能去
+                                    // occurrence 预览手动撤销；文案同时给出该常驻路径，与弹层的
+                                    // 「撤销跳过」入口联动（两处走同一个 unskipOccurrence）。
+                                    // U3-2（v2.9.1 审计）：撤销入口在任务行的重复标签上是
+                                    // **点按**（chip 的 onTap），长按反而会进多选——原文案
+                                    // 写「长按」属指错路，这里改正。
+                                    content: const Text('已跳过今天这一次（可点按任务行的重复标签，'
+                                        '在「未来循环日预览」中撤销）'),
+                                    duration: kUndoWindow,
+                                    action: SnackBarAction(
+                                      label: '撤销',
+                                      onPressed: () =>
+                                          provider.unskipOccurrence(task.id),
                                     ),
-                                  );
+                                  ),
+                                );
                               }
                             : null,
                         icon: const Icon(Symbols.skip_next, size: 18),

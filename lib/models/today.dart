@@ -53,8 +53,16 @@ class TodayAggregate {
 
   /// 今日习惯应打卡总数（shouldCheckIn 为 true 的数量）。
   int get habitExpected => habits.where((h) => h.shouldCheckIn).length;
+
   /// 今日习惯已达成总数（T1-2：量化习惯按「达标」判定，而非仅仅「有记录」）。
-  int get habitDone => habits.where((h) => h.met).length;
+  ///
+  /// P2-2（v2.9.4 审计）：分子必须与分母 [habitExpected] 同口径——此前分子只判
+  /// [TodayHabitStatus.met] 而不判 `shouldCheckIn`，于是「每周一/三/五」的习惯在
+  /// 周二补打一次就出现「核心习惯 2/1」（分母只算今天该打卡的 1 个，分子却把
+  /// 休息日那条也算进去），进度环与文案自相矛盾。现在分子与分母都限定「今天应打卡」，
+  /// 休息日的计划外记录不再让今日完成度 > 100%。
+  int get habitDone =>
+      habits.where((h) => h.shouldCheckIn && h.met).length;
 
   /// T1-2 / P3-6（v2.9.3 审计）：今日量化习惯的累计量与目标量，
   /// 供今日页展示「量化合计 · 今日 24/32 杯」这类整体进度。

@@ -144,6 +144,15 @@ class NotificationService {
         AndroidNotificationAction(completeActionId, '完成'),
       ];
 
+  /// 习惯类提醒统一的两个 action 按钮：稍后提醒 + 打卡。
+  ///
+  /// P2-1（v2.9.4 审计）：抽出为单一真源——正式落点与 snooze 落点**共用**同一组
+  /// action（此前 snooze 通知一个 action 都没有，顺延后既不能再顺延也不能打卡）。
+  static List<AndroidNotificationAction> get _habitActions => [
+        AndroidNotificationAction(snoozeActionId, '稍后提醒'),
+        AndroidNotificationAction(habitCheckInActionId, '打卡'),
+      ];
+
   /// 点击通知的回调（由 main.dart 注入，负责根据 payload 导航）。
   /// 用实例字段而非直接 import 页面，避免 service 反向依赖 UI。
   static void Function(String? payload)? onNotificationTap;
@@ -974,6 +983,19 @@ class NotificationService {
     return 1000000000 + s * 10 + (dayIndex % 8);
   }
 
+  /// 习惯提醒「稍后提醒（snooze）」的**独立** id（落点段之外的第 8 号槽位）。
+  ///
+  /// P2-1（v2.9.4 审计）：此前 `snoozeHabitReminder` 直接复用落点槽位 0
+  /// （`habitNotifyIdOf(id, 0)`），而落点列表会在每次重排时整体位移——21:00 弹提醒
+  /// → 点「稍后提醒」+10 分钟 → 15 分钟守护周期里落点签名变化，重排把 0..N 全部重挂，
+  /// **同 id 覆盖掉刚排的 snooze**，用户当天再也收不到这条提醒。
+  /// 这里给 snooze 独占 `s*10+8`：落点只用 0..7，下一习惯的段从 `(s+1)*10` 起，
+  /// 故 8 号槽永不被落点重排覆盖（与任务侧 `[_snoozeNotifyIdOf]` 的独立段同理）。
+  static int habitSnoozeNotifyIdOf(String id) {
+    final s = _habitSlotOf(id);
+    return 1000000000 + s * 10 + 8;
+  }
+
   /// 为习惯调度每日打卡提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
   /// [checkedToday] 为 true 则跳过今日这一次，挂到下一个循环日，
   /// 避免「已完成仍弹提醒」。返回 true 表示已提交。
@@ -1023,12 +1045,8 @@ class NotificationService {
           importance: Importance.high,
           priority: Priority.high,
           playSound: true,
-          actions: [
-            AndroidNotificationAction(snoozeActionId, '稍后提醒'),
-            // U3：习惯提醒补「打卡」action——此前「完成」只处理任务，习惯只能进 App
-            // 手动打卡；赶路/开会时点一下即可打卡，不打断当前场景。
-            AndroidNotificationAction(habitCheckInActionId, '打卡'),
-          ],
+          // P2-1（v2.9.4 审计）：与 snooze 落点共用同一组 action（单一真源）。
+          actions: _habitActions,
           // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
           visibility: visibility,
         ),
@@ -1134,6 +1152,9 @@ class NotificationService {
       for (var d = 0; d < _kScheduleSlots; d++) {
         await _plugin.cancel(habitNotifyIdOf(id, d));
       }
+      // P2-1（v2.9.4 审计）：snooze 占用独立的 8 号槽，删习惯 / 重排时一并清掉，
+      // 否则会留下一个「点进去找不到的习惯」的稍后提醒。
+      await _plugin.cancel(habitSnoozeNotifyIdOf(id));
     } catch (e) {
       AppLog.d('[通知] 取消习惯提醒失败 id=$id: $e');
     }
@@ -1200,7 +1221,13 @@ class NotificationService {
     }
   }
 
-  /// 习惯提醒的稍后提醒：用同一习惯通知 id 在 [delay] 后重新弹出打卡提醒。
+  /// 习惯提醒的稍后提醒：在 [delay] 后重新弹出该习惯的打卡提醒。
+  ///
+  /// P2-1（v2.9.4 审计）三处收口，与任务侧 `snoozeTaskReminder` 对齐：
+  /// 1. **独立 id 段**（[habitSnoozeNotifyIdOf] 的 8 号槽）——此前复用落点槽位 0，
+  ///    会被下一轮守护周期的落点重排同 id 覆盖，提醒当天静默丢失；
+  /// 2. **勿扰顺延**（消费 [dndDefer]）——勿扰时段内点「稍后提醒」不该照弹；
+  /// 3. **补回 action 按钮**（稍后提醒 / 打卡）——snooze 后仍可二次顺延或直接打卡。
   Future<bool> snoozeHabitReminder(Habit habit,
       {Duration delay = const Duration(minutes: 10)}) async {
     if (!enabled) {
@@ -1208,7 +1235,15 @@ class NotificationService {
       return false;
     }
     final loc = _loc ?? tz.UTC;
-    final when = tz.TZDateTime.now(loc).add(delay);
+    var when = tz.TZDateTime.now(loc).add(delay);
+    // P2-1：与任务 snooze 同款——落点过一次勿扰顺延。
+    if (dndDefer != null) {
+      final deferred = dndDefer!(when);
+      if (deferred != null) {
+        when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
+            deferred.hour, deferred.minute);
+      }
+    }
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
         _chSound,
@@ -1217,13 +1252,15 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         playSound: true,
+        // P2-1：snooze 后的通知补回两个 action，使它仍可二次顺延 / 直接打卡。
+        actions: _habitActions,
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
       ),
     );
     try {
       await _plugin.zonedSchedule(
-        habitNotifyIdOf(habit.id, 0),
+        habitSnoozeNotifyIdOf(habit.id),
         '习惯打卡',
         '${habit.emoji} ${habit.title} · 该打卡啦',
         when,

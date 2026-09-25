@@ -49,7 +49,7 @@ class ScheduleItem {
     required this.focusedMinutes,
   });
 
-  /// 「可能高估 / 低估」偏差文案（无预估、无专注记录或**重复任务**时为 null）。
+  /// 「可能高估 / 低估」偏差文案（无预估、无专注记录时为 null）。
   ///
   /// 与 [estimateBiasLabel] 同源，供排程建议行与任务详情/统计处复用，
   /// 保证两处口径不会漂移。
@@ -59,12 +59,34 @@ class ScheduleItem {
   /// 重复任务（每天写日报预计 5 分钟、累计专注 60 分钟）两者直接比对必然
   /// 恒显「可能低估」，是一条系统性错误的自我评估。故重复任务一律不展示偏差，
   /// 只对一次性任务（累计专注即本次投入）比较。
-  String? get biasLabel => task.isRepeating
-      ? null
-      : estimateBiasLabel(
-          estimatedMinutes: explicit ? minutes : null,
-          actualMinutes: focusedMinutes,
-        );
+  ///
+  /// P3-5（v2.9.4 审计）：抑制条件由 `isRepeating` **收窄**为
+  /// 「仍在发生的重复」= `isRepeating && !repeatEnded`。
+  /// 原条件把 [Task.repeatEnded]（重复已结束、实际只发生了一次）也一并抑制，
+  /// 而这类任务恰恰是可比的：它历史累计专注就是那唯一一次的投入。
+  /// 抑制后既无偏差也无任何说明，用户只会以为功能坏了。
+  /// 现在这类任务恢复比较，并在 [biasSuppressedNote] 给出一行弱化解释。
+  String? get biasLabel {
+    if (biasSuppressed) return null;
+    return estimateBiasLabel(
+      estimatedMinutes: explicit ? minutes : null,
+      actualMinutes: focusedMinutes,
+      // U3-2：未完成任务不给「高估 / 与预估接近」——投入仍在累积。
+      // 排程建议只喂**未完成**任务（见 [buildScheduleAdvice] 的 pending 语义），
+      // 所以此处恒为 false；保留传参是为了本字段在别处复用时仍口径正确。
+      completed: task.done,
+    );
+  }
+
+  /// P3-5：是否因「口径不可比」而抑制偏差展示。
+  bool get biasSuppressed => task.isRepeating && !task.repeatEnded;
+
+  /// P3-5：抑制时的弱化说明（不抑制时为 null）。
+  ///
+  /// 补这一行是为了「有解释的沉默」：用户看到空白至少知道是**有意不给**
+  /// （重复任务的累计专注与单次预估不同口径），而不是功能出错。
+  String? get biasSuppressedNote =>
+      biasSuppressed ? '重复任务不比较单次预估' : null;
 
   /// 预计时段文案，如「14:05–14:35」。
   String get windowLabel => '${_hhmm(start)}–${_hhmm(end)}';
@@ -136,15 +158,25 @@ String formatMinutes(int mins) {
 ///
 /// 判定口径：以预估的 ±20% 作为「接近」的容差带（至少 5 分钟，避免小预估下
 /// 1 分钟的抖动就被判定为偏差）。返回 null 表示**无从比较**——无预估、
-/// 预估非法、或尚无实际投入，此时 UI 不应展示任何偏差文案。
+/// 预估非法、尚无实际投入，或任务**尚未完成**（见 [completed]），此时 UI 不应
+/// 展示任何偏差文案。
 ///
 /// P2-3（v2.9.3 审计）：调用方必须保证两个数字**同一口径**——
 /// [estimatedMinutes] 是「单次执行」的预估，[actualMinutes] 就只能是同一次执行
 /// 的实际投入。对重复任务，[Task.focusedMinutes] 是历史累计值，不满足该前提，
 /// 应直接不展示（见 [ScheduleItem.biasLabel] 的处理），而不是把累计值塞进来。
+///
+/// U3-2（v2.9.4 审计）：新增 [completed] 参数，任务**未完成**时不给「高估」。
+/// 此前只要「已专注 < 预估 − 容差」就判「可能高估：比预估少 N 分钟」——于是
+/// 预估 30 分钟、刚专注 5 分钟的任务**尚未开工完**就被贴上「可能高估」。
+/// 这是逻辑错误而非措辞问题：投入还在累积，此刻的差值只反映「做到哪」，
+/// 不反映「估得准不准」。任务完成时 `focusedMinutes` 才是这次执行的终值，
+/// 那时才具备可比性。
+/// 「低估」一侧不受影响——已投入超过预估是一个**已发生**的事实，未完成也可断言。
 String? estimateBiasLabel({
   required int? estimatedMinutes,
   required int? actualMinutes,
+  bool completed = true,
 }) {
   final est = estimatedMinutes;
   final act = actualMinutes;
@@ -153,6 +185,9 @@ String? estimateBiasLabel({
   final tolerance = (est * 0.2).ceil().clamp(5, 1 << 30);
   final diff = act - est;
   if (diff > tolerance) return '可能低估：已超预估 $diff 分钟';
+  // U3-2：未完成 → 不判「高估」（也不给「与预估接近」，那同样是未完成态的
+  // 误导性结论：做了一半说「与预估接近」比说「可能高估」更莫名其妙）。
+  if (!completed) return null;
   if (-diff > tolerance) return '可能高估：比预估少 ${-diff} 分钟';
   return '与预估接近';
 }
@@ -198,8 +233,15 @@ ScheduleAdvice buildScheduleAdvice(
       explicit: explicit,
       start: start,
       end: end,
-      // 无截止时间 → 不存在「来不及」；有截止则比较预计结束时刻。
-      missedDue: due != null && end.isAfter(due),
+      // P2-5（v2.9.4 审计）：此前是 `end.isAfter(due)` 的**时刻**比较。
+      // 但截止时间在本应用里通常是「当天 00:00」——模板 `dueInDays` 生成的就是
+      // 当天零点，于是「今天 14:00–14:30 做一条今天截止的任务」必然 14:30 > 00:00，
+      // 恒标「预计超过截止」；对 future dueInDays 则只在到期当天恒真。
+      // 后果不是"多提示一次"，而是**风险提示在到期日恒真 → 等于没有提示**，
+      // 用户对整块提示脱敏后，真正会超期的任务就被淹没了。
+      // 现改为日期口径：预计结束落在「截止日」之后才算来不及（当天内完成不算）。
+      // 用 date-only 比较天然同时处理了 00:00 与 23:59 两种存储形态。
+      missedDue: due != null && _dateOnly(end).isAfter(_dateOnly(due)),
       focusedMinutes: t.focusedMinutes,
     ));
     cursor = end;
@@ -211,6 +253,9 @@ ScheduleAdvice buildScheduleAdvice(
     dayEnd: dayEnd,
   );
 }
+
+/// date-only 规整（丢弃时分秒），用于「同一天不算超期」这类按日判定的场景。
+DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
 /// 排程排序比较器（公开以便单测直接钉死排序口径）。
 ///

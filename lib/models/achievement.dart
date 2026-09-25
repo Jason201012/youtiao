@@ -26,7 +26,10 @@ extension AchievementGroupLabel on AchievementGroup {
 /// 全部字段都能从 TaskProvider / FocusProvider / HabitProvider 的公开状态现算
 /// （见 [AchievementContext.fromProviders]），不新增任何存储。
 class AchievementContext {
-  /// 累计打卡次数（所有习惯合计）。
+  /// 累计**达标**天数（所有习惯合计；量化习惯当日量 ≥ 目标才计）。
+  ///
+  /// P2-3（v2.9.4 审计）：上游 [HabitProvider.totalCheckIns] 已从「有记录条数」
+  /// 改为「达标天数」聚合，本字段随之对齐，避免成就可被「每天只喝 1 杯」灌水。
   final int totalCheckIns;
 
   /// 历史最长连续打卡天数（跨习惯同日只计一次）。
@@ -253,7 +256,9 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'checkin_100',
     title: '百日坚持',
-    desc: '累计打卡 100 次',
+    // P2-3（v2.9.4 审计）：[AchievementContext.totalCheckIns] 已改为「达标」口径，
+    // 文案必须同步，否则「累计打卡 100 次」与实际统计的「累计达标 100 天」不符。
+    desc: '累计达标 100 天',
     emoji: '💯',
     group: AchievementGroup.habit,
     target: 100,
@@ -262,7 +267,7 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'checkin_500',
     title: '千锤百炼',
-    desc: '累计打卡 500 次',
+    desc: '累计达标 500 天',
     emoji: '🧗',
     group: AchievementGroup.habit,
     target: 500,
@@ -385,7 +390,7 @@ final List<Achievement> allAchievements = [
   Achievement.custom(
     id: 'master',
     title: '习惯大师',
-    desc: '5 个习惯且累计打卡 200 次',
+    desc: '5 个习惯且累计达标 200 天',
     emoji: '🏅',
     group: AchievementGroup.mixed,
     unlocked: (c) => c.habitCount >= 5 && c.totalCheckIns >= 200,
@@ -393,7 +398,7 @@ final List<Achievement> allAchievements = [
   Achievement.custom(
     id: 'all_round',
     title: '全面开花',
-    desc: '完成 20 个任务 + 打卡 20 次 + 专注 60 分钟',
+    desc: '完成 20 个任务 + 达标 20 天 + 专注 60 分钟',
     emoji: '🌸',
     group: AchievementGroup.mixed,
     unlocked: (c) =>

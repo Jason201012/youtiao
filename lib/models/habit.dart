@@ -3,6 +3,12 @@
 /// 与任务模型解耦：习惯自成一套轻量模型，仅依赖 SQLite 的整段 JSON 存储
 /// （见 [LocalDatabase] 的 habits 表），不包含提醒调度等复杂逻辑。
 class Habit {
+  /// P3-4（v2.9.4 审计）：每日目标量的合法上界，**读写两侧共用**。
+  ///
+  /// 此前上限 9999 在 [Habit._clampTarget]（读侧）与 `HabitProvider` 的
+  /// `addHabit` / `updateHabit`（写侧）各写一遍字面量，日后调界必然漏改一侧。
+  static const int maxDailyTarget = 9999;
+
   final String id;
   final String title;
   final String emoji;
@@ -52,6 +58,37 @@ class Habit {
   bool shouldCheckInOn(DateTime day) =>
       weekdays.isEmpty || weekdays.contains(day.weekday);
 
+  /// P3-10（v2.9.4 审计）：每周**计划打卡天数**（[weekdays] 为空 = 7 天）。
+  ///
+  /// 存在的理由：`weeklyGoal`（每周目标次数）的上界此前写死 14，于是
+  /// 「每周一三五」的习惯也能设「每周 14 次」——目标永远不可达，达成率恒为
+  /// 一段死数字，白给用户一个「做不到」的进度条。上界应随计划天数联动。
+  int get plannedDaysPerWeek => weekdays.isEmpty ? 7 : weekdays.length;
+
+  /// P3-10：每周目标次数的**合法上界** = 计划天数（不是 14）。
+  ///
+  /// 保留 [maxWeeklyGoal] 作为绝对上限，防止脏数据里的巨值继续向下游传播；
+  /// 但正常入口（新建 / 编辑 UI）与写入兜底都应按本值夹取。
+  static const int maxWeeklyGoal = 14;
+
+  /// 由 [weekdays] 推出每周计划天数（空 = 每天 = 7）。
+  static int plannedDaysOf(List<int> weekdays) =>
+      weekdays.isEmpty ? 7 : weekdays.length;
+
+  /// 夹取每周目标次数到「0 = 不启用，1..计划天数」。
+  ///
+  /// 静态形式是必要的：新建路径里 `Habit` 实例尚不存在（正在构造中），
+  /// 只能拿入参 [weekdays] 算。实例方法 [clampWeeklyGoal] 供已有习惯使用。
+  static int clampWeeklyGoalTo(int v, List<int> weekdays) =>
+      v.clamp(0, plannedDaysOf(weekdays)).toInt();
+
+  /// 夹取每周目标次数到「0 = 不启用，1..计划天数」。
+  ///
+  /// 供 UI 与写入侧共用，避免两侧各写一份判据再次漂移（与 [maxDailyTarget]
+  /// 同理）。已存档的旧数据若 weeklyGoal > 计划天数，读取时保持原值不动
+  /// （**不静默改写用户数据**），仅在用户主动编辑时才收敛。
+  int clampWeeklyGoal(int v) => clampWeeklyGoalTo(v, weekdays);
+
   /// T1-2：是否为「量化习惯」（设了 positive 的每日目标量）。
   bool get isQuantified => dailyTarget != null && dailyTarget! > 0;
 
@@ -97,12 +134,22 @@ class Habit {
         graceDays: ((j['graceDays'] as num?)?.toInt() ?? 0).clamp(0, 3),
       );
 
-  /// 解析每日目标量：非数值 / <=0 / 超出上界一律返回 null（= 布尔打卡）。
+  /// 解析每日目标量。
+  ///
+  /// P3-4（v2.9.4 审计）：此前「超出上界」与「<=0」同归 `null`，于是
+  /// 手工改过的备份里 `dailyTarget: 20000` 会被**静默降级成布尔习惯**——
+  /// 用户的量化语义被整体改掉（进度条消失、目标变1），且没有任何提示。
+  /// 写入侧（`HabitProvider.addHabit` / `updateHabit`）对超上界是**夹到
+  /// [maxDailyTarget]**，两侧语义必须一致，所以现在读侧同样夹取。
+  /// 夹取意味着「目标量偏大」被保留下来（仍可 +1 累加），而不是丢掉。
+  ///
+  /// 仍回落 `null` 的只有两类：非数值（脏数据）与 `<=0`（「取消量化」
+  /// 本就是 `null`，两者在 UI 上等价，都表示布尔习惯）。
   static int? _clampTarget(dynamic v) {
     if (v is! num) return null;
     final n = v.toInt();
-    if (n < 1 || n > 9999) return null;
-    return n;
+    if (n < 1) return null;
+    return n > maxDailyTarget ? maxDailyTarget : n;
   }
 
   /// 复制并覆盖部分字段。

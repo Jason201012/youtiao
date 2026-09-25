@@ -15,6 +15,8 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
+// U3-5：撤销窗口时长的单一真源。
+import 'package:todolist/theme/ui_durations.dart';
 
 class OccurrenceSheet {
   static Future<void> show(
@@ -132,9 +134,11 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
             '${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            // P3-6（v2.9.0 审计）：原 4 秒提示错过即无痕，这里延长到 8 秒，且被跳过的
-            // 那一行本身会显示「已跳过（经『移到下一天』）」，提示不再是唯一凭据。
-            duration: const Duration(seconds: 8),
+            // P3-6（v2.9.0 审计）：原 4 秒提示错过即无痕，这里延长；
+            // U3-5（v2.9.4 审计）：再统一到全局 [kUndoWindow]（10 秒），
+            // 且被跳过的那一行本身会显示「已跳过（经『移到下一天』）」，
+            // 提示不再是唯一凭据。
+            duration: kUndoWindow,
             content: Text(copy == null
                 ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
                 : '已移到 $dayLabel（已新建一次性副本）'),
@@ -159,8 +163,37 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       }
       return;
     }
+    // U2-5（v2.9.4 审计）：非 defer 分支（纯「跳过这一次」）此前是
+    // `skipOccurrence` + `_refresh()` 就结束——**无确认、无撤销**，
+    // 而同一语义在任务详情页（`task_detail_screen.dart` 的「跳过今天这一次」）
+    // 已有 10 秒撤销。同一个动作在两个入口给出两种保护力度，是明确的不对等：
+    // 用户从弹层误触后，当天该次循环彻底消失（列表不出现、提醒不响），
+    // 只能手动去「未来循环日预览」里撤销。
+    //
+    // 现在两处对齐：同样 10 秒窗口 + unskipOccurrence 严格互逆 + 同样重排提醒。
+    // 文案里给出常驻撤销路径（点按任务行的重复标签 → 预览 → 撤销跳过），
+    // 窗口错过也不至于无路可走。
+    //
+    // U2-4 / P3-10：不再 `hideCurrentSnackBar()`——`ScaffoldMessenger` 自带
+    // 队列，主动 hide 等于亲手丢掉前一条撤销机会。
+    final messenger = ScaffoldMessenger.of(context);
     widget.provider.skipOccurrence(_task.id, day: d);
     _refresh();
+    final dayLabel = '${d.month}月${d.day}日';
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('已跳过 $dayLabel 这一次（$kUndoWindowSeconds 秒内可撤销）'),
+        duration: kUndoWindow,
+        action: SnackBarAction(
+          label: '撤销',
+          onPressed: () {
+            widget.provider.unskipOccurrence(_task.id, day: d);
+            _deferSkipped.remove(Task.ymdKey(d));
+            _refresh();
+          },
+        ),
+      ),
+    );
   }
 
   /// P2-2（v2.8.8 审计）：撤销某一天的跳过（与 [_skip] 严格互逆）。

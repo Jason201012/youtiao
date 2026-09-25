@@ -406,19 +406,39 @@ void _handleNotificationAction(String? actionId, String? payload) {
 /// 已打卡则忽略），打卡后弹覆盖式确认通知（同 id 不刷屏），用户无需进 App。
 ///
 /// P2-2（v2.9.3 审计）：量化习惯此前走 `checkInOnDay` 只记 1 个单位却回报
-/// 「已打卡 ✓」——目标 8 杯点一下只算 1/8 还谎称完成。现在量化习惯走
-/// [HabitProvider.completeTodayTarget]（通知按钮「打卡」= 把今天做满，与文案一致），
-/// 并按实际达标情况回报；布尔习惯行为不变。
+/// 「已打卡 ✓」——目标 8 杯点一下只算 1/8 还谎称完成。
+///
+/// U2-1（v2.9.4 审计）：v2.9.3 把量化习惯的「打卡」改成 `completeTodayTarget`
+/// （一键顶满）以对齐文案，**副作用却过强**：已记 3/8 时点一下通知按钮直接变
+/// 8/8，误触即虚增 5 个单位，而通知里没有任何回退手段（要进 App 手动改数）。
+/// 现在按**当日已有量**分档：
+/// - 已记 0 → 顶满目标（通知场景下最省事，与「打卡」按钮语义一致）；
+/// - 已记 >0（未达标）→ 只 **+1**，与 App 内「+1」按钮同语义，误触损失 1 个单位；
+/// - 已达标 → 早退（通知确认提示今日已完成，不重复写入）。
 void _doHabitCheckIn(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
   if (habit == null) return;
   final now = DateTime.now();
   if (habit.isQuantified) {
-    // 异步顶满今日目标：内部走 setCheckInValue（落盘 + 重排提醒/挽留）；失败静默。
-    hp.completeTodayTarget(habit).catchError((_) => false).then((_) {
-      // 按完成后的真实进度回报（理论上已达标 →「已打卡 ✓」；
-      // 极端情况下（如并发改目标）未达标也如实显示「已记 x/y」）。
+    final current = hp.todayValue(habit);
+    if (current >= habit.effectiveTarget) {
+      // U2-1：已达标时不再写入（此前 completeTodayTarget 自身会早退，
+      // 这里显式早退是为了不再弹一次「已打卡」确认覆盖掉用户原有通知）。
+      NotificationService.instance.showHabitCheckedConfirm(
+        habit,
+        value: current,
+        target: habit.effectiveTarget,
+      );
+      return;
+    }
+    // U2-1：已有进度时只 +1，不再一键顶满。
+    final op = current <= 0
+        ? hp.completeTodayTarget(habit)
+        : hp.adjustCheckInValue(habit, now, 1);
+    // 异步写入：内部走 setCheckInValue（落盘 + 重排提醒/挽留）；失败静默。
+    op.catchError((_) => false).then((_) {
+      // 按完成后的真实进度回报（+1 后通常未达标 → 如实显示「已记 x/y」）。
       NotificationService.instance.showHabitCheckedConfirm(
         habit,
         value: hp.todayValue(habit),

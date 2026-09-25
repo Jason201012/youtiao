@@ -389,8 +389,10 @@ void main() {
       final part = hp.metCountsByDay(7);
       expect(part.containsKey(daysAgo(1)), isFalse,
           reason: 'P3-2：1/8 未达标日不得与达标日同色');
-      expect(hp.checkInCountsByDay(7).containsKey(daysAgo(1)), isTrue,
-          reason: '旧口径 API 保留（有记录计数），两者口径区分开');
+      // P3-10（v2.9.4 审计）：旧口径 API checkInCountsByDay 已删除（死代码），
+      // 改用 public 单一真源校验「确实存在记录」这一前提本身。
+      expect(hp.checkInValueOn(h, daysAgo(1)), 1,
+          reason: '前提：1/8 当天确有记录，只是未达标');
 
       // 喝满 8 杯：新口径计数 1。
       await hp.setCheckInValue(h, daysAgo(0), 8);
@@ -402,7 +404,9 @@ void main() {
       final b = hp.habits[1];
       await hp.setCheckInValue(b, daysAgo(2), 1);
       expect(hp.metCountsByDay(7)[daysAgo(2)], 1);
-      expect(hp.checkInCountsByDay(7)[daysAgo(2)], 1);
+      // P3-10：旧 checkInCountsByDay 已删；布尔习惯「有记录 == 达标」，
+      // 用 isCheckedOn 锁定这条等价前提。
+      expect(hp.isCheckedOn(b, daysAgo(2)), isTrue);
     });
   });
 
@@ -447,17 +451,35 @@ void main() {
       );
       final h = hp.habits.first;
       expect(h.dailyTarget, 9999, reason: 'P3-4：写入侧上界 9999，避免重载被静默降级');
-      expect(h.weeklyGoal, 14, reason: 'P3-4：写入侧上界 14');
+      // P3-10（v2.9.4 审计）：weeklyGoal 上界由写死 14 改为**联动计划天数**。
+      // `weekdays: []` = 每天都做 = 计划 7 天，所以上界是 7 而非 14。
+      // 旧断言写的 14 编码的是被审计报告点名的缺陷（目标不可达）。
+      expect(h.weeklyGoal, 7, reason: 'P3-10：上界 = 计划天数（空 weekdays = 7 天）');
 
       await hp.updateHabit(h, dailyTarget: 50000, weeklyGoal: 50);
       final updated = hp.byId(h.id)!;
       expect(updated.dailyTarget, 9999);
-      expect(updated.weeklyGoal, 14);
+      expect(updated.weeklyGoal, 7);
 
       // 正常值不受影响。
       await hp.updateHabit(updated, dailyTarget: 8, weeklyGoal: 5);
       expect(hp.byId(h.id)!.dailyTarget, 8);
       expect(hp.byId(h.id)!.weeklyGoal, 5);
+    });
+
+    test('P3-10：weeklyGoal 上界随 weekdays 收紧（每周一三五 → 3）', () async {
+      // 这正是审计报告点名的病根：「每周 5 天」的习惯此前能设 14 次 → 目标不可达。
+      // 详细的静态判据 / addHabit / updateHabit 同次改星期覆盖在
+      // test/v295_audit_fix_test.dart 的 P3-10 组，这里只钉住 v294 原本断言的那个上界。
+      final hp = await newHabitProvider();
+      await hp.addHabit(
+        title: '周一三五',
+        emoji: '📅',
+        colorValue: 1,
+        weekdays: const [1, 3, 5],
+        weeklyGoal: 99,
+      );
+      expect(hp.habits.first.weeklyGoal, 3);
     });
   });
 

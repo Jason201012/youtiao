@@ -176,15 +176,38 @@ void main() {
       expect(i0.windowLabel, '10:00–10:30');
     });
 
-    test('预计结束晚于截止 → missedDue；无截止任务恒为 false', () {
-      final tight = taskOf('t', due: at(10, 20), estimate: 30);
+    test('预计结束落在截止日之后 → missedDue；同日内完成不算超期', () {
+      // P2-5（v2.9.4 审计）：判据由「时刻比较」改为「日期口径」——
+      // 旧断言是「10:00 起做 30 分钟、截止 10:20 → 超期」，它编码的正是
+      // 报告点名的缺陷（截止只有日期语义时，00:00 存储会让当天任何完成
+      // 时刻都晚于截止 → 恒标超期）。现改为两条分别锁定新口径：
+      //  ① 同一天内结束（含晚于截止时刻）→ **不算**超期；
+      //  ② 结束落在截止日之后（跨天）→ 算超期。
+      final sameDay = taskOf('t', due: at(10, 20), estimate: 30);
       final noDue = taskOf('n', estimate: 600);
-      final advice = buildScheduleAdvice([noDue, tight], now: now);
+      final advice = buildScheduleAdvice([noDue, sameDay], now: now);
       final tightItem = advice.items.firstWhere((i) => i.task.id == 't');
       final noDueItem = advice.items.firstWhere((i) => i.task.id == 'n');
-      expect(tightItem.missedDue, isTrue);
+      expect(tightItem.missedDue, isFalse,
+          reason: 'P2-5：当天完成即不算超期，不按 10:20 这个时刻判');
       expect(noDueItem.missedDue, isFalse);
-      expect(advice.missedDueCount, 1);
+      expect(advice.missedDueCount, 0);
+
+      // 跨天才算：10:00 起 30 分钟，截止是**昨天** → 结束必然晚于截止日。
+      final overdue = taskOf('o', due: at(10, 20, dayOffset: -1), estimate: 30);
+      final a2 = buildScheduleAdvice([overdue], now: now);
+      expect(a2.items.single.missedDue, isTrue);
+      expect(a2.missedDueCount, 1);
+    });
+
+    test('P2-5 模板式 00:00 截止不再恒标超期（到期当天恒真的回归钉死）', () {
+      // dueInDays 生成的截止就是「当天 00:00」。旧口径下同一天 14:00 完成的
+      // 任务恒显「预计超过截止」；新口径下应恒为 false。
+      final dueAtMidnight = taskOf('m', due: at(0, 0), estimate: 30);
+      final a = buildScheduleAdvice([dueAtMidnight], now: now);
+      expect(a.items.single.missedDue, isFalse,
+          reason: 'P2-5：截止 00:00 + 当天完成 = 不得恒标超期');
+      expect(a.missedDueCount, 0);
     });
 
     test('超出当天剩余时间 → overrunMinutes（23:00 起 120 分钟 → 超 60 分钟）', () {

@@ -306,6 +306,20 @@ class HabitProgressRow extends StatelessWidget {
     this.valueSum = 0,
   });
 
+  /// P3-7：把区间累计量换算成「≈ N 天目标量」的可选后缀。
+  ///
+  /// 「累计 240 个单位」仍是个抽象数——用户知道喝水目标 8 杯/天，
+  /// 于是 240 ≈ 30 天，这个换算能让叙事落到自己的习惯尺度上。
+  /// 目标量为 0（理论不该发生，`effectiveTarget` 恒 ≥1）或换算结果为 0 时
+  /// 返回空串，不显示多余的「≈ 0 天」。
+  String _valueUnitHint() {
+    final target = habit.effectiveTarget;
+    if (target <= 0) return '';
+    final days = valueSum ~/ target;
+    if (days <= 0) return '';
+    return '（≈ $days 天目标量）';
+  }
+
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
@@ -332,8 +346,14 @@ class HabitProgressRow extends StatelessWidget {
               const SizedBox(width: 8),
               Text(
                 // P3-6：量化习惯且区间有投入时，在达成数旁补「累计量」叙事。
+                // P3-7（v2.9.4 审计）：原文案「累计 240」是**无量词裸数字**——
+                // 240 杯水？240 页？240 分钟？用户无从判断量级是否合理，
+                // 于是这段叙事等于没说话。现补「个单位」量词，并在能换算时
+                // 附「≈ N 天目标量」（240 单位 / 每日 8 杯 = 30 天），
+                // 让抽象总量落回习惯自身的时间尺度上。
                 habit.isQuantified && valueSum > 0
-                    ? '$done/$expected · 累计 $valueSum'
+                    ? '$done/$expected · 累计 $valueSum 个单位'
+                        '${_valueUnitHint()}'
                     : '$done/$expected',
                 style: TextStyle(
                   fontSize: 13,

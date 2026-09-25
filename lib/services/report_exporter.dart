@@ -180,9 +180,36 @@ class ReportExporter {
 
   // ===== 内部工具 =====
 
+  /// P3-6（v2.9.4 审计）：按值类型写入单元格，而不是一律 `toString()`。
+  ///
+  /// 此前 [_set] 对所有值都写 `TextCellValue(value.toString())`，于是 Excel 里
+  /// **每一个**数字都是文本：单元格左上角带绿色三角、「求和」得到 0、排序按
+  /// 字符串比（「10」排在「9」前面）。用户拿这份导出做二次统计时必须先手工
+  /// 「转换为数字」——一份声称是数据表的文件却不能被当数据表用。
+  ///
+  /// 现在按类型分派到 excel 包的原生值类型：
+  /// - [int] → [IntCellValue]（Excel 里是真正的整数，可求和）；
+  /// - [double] → [DoubleCellValue]（专注时长这类带小数的量）；
+  /// - [DateTime] → [DateCellValue]（真日期格式，可按时间筛选/排序）；
+  /// - 其余（含 [bool]、日期的**字符串**形态如 `2026-09-19 08:30`）→ 文本。
+  ///
+  /// 刻意**不**把日期字符串改成 DateCellValue：这些列是
+  /// `yyyy-MM-dd HH:mm` 的复合文本，转成日期会丢「时分」语义或引入时区解释，
+  /// 反而制造新的歧义。日期列要可排序的话由调用方显式传 [DateTime]。
   static void _set(Sheet s, int row, int col, Object value) {
-    s.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: row)).value =
-        TextCellValue(value.toString());
+    final cell =
+        s.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: row));
+    if (value is int) {
+      cell.value = IntCellValue(value);
+    } else if (value is double) {
+      cell.value = DoubleCellValue(value);
+    } else if (value is DateTime) {
+      // `DateCellValue` 的主构造器是命名参数（year/month/day），另有现成的
+      // `fromDateTime` 工厂——直接用后者，避免手工拆三个字段。
+      cell.value = DateCellValue.fromDateTime(value);
+    } else {
+      cell.value = TextCellValue(value.toString());
+    }
   }
 
   static String _fmt(DateTime d) =>

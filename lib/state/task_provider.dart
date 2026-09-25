@@ -1056,6 +1056,34 @@ class TaskProvider extends ChangeNotifier {
     _habitNudgeEnabled = prefs.getBool(_kHabitNudgeOn) ?? true;
     _habitNudgeMinute = prefs.getInt(_kHabitNudgeMin) ?? 23 * 60;
     NotificationService.instance.enabled = _notificationsEnabled;
+    // P2-6（v2.9.4 审计）：把**有原生副作用**的两个开关纳入 load() 的应用范围。
+    //
+    // 此前这两个字段在 load() 里是直写内存（见上方 `_backgroundGuard = …` 与
+    // `_screenSecurityEnabled = …`），而它们的 setter 才带副作用
+    // （setFlagSecure / BackgroundService.start|stop），副作用只在用户手动
+    // 切换开关、或 main 启动时触发。后果：「从备份恢复偏好」这一路径
+    // （backup_sheet 恢复分支 → provider.load()）**不碰原生侧**——
+    // 防截屏显示为已开启、实际窗口未加 FLAG_SECURE（隐私开关的安全错觉），
+    // 后台守护显示为关闭、实际前台服务仍在跑。须重启才一致。
+    //
+    // 这里刻意选「load() 内应用」而非「在恢复分支显式调一次」：
+    // 自动备份还原、首次启动、备份恢复三条路径共用 load()，改一处即全覆盖；
+    // 在恢复分支补调用只能盖住一条路径，下一条重载路径又会复现。
+    // 均为 fire-and-forget + 静默失败：原生侧异常绝不阻断偏好恢复主流程。
+    // 注意 [BackgroundService.start/stop] 返回 Future<bool>，其 catchError 回退值
+    // 必须同为 bool，故用 `(Object _) => false` 而不是空闭包。
+    unawaited(SecureWindow.setFlagSecure(_screenSecurityEnabled).catchError((_) {}));
+    if (_backgroundGuard) {
+      // 已开启：确保前台服务在跑（幂等，重复 start 无副作用）。
+      unawaited(BackgroundService.instance
+          .start()
+          .catchError((Object _) => false));
+    } else {
+      // 已关闭：显式停掉——恢复前是开着的，不 stop 就等于没恢复。
+      unawaited(BackgroundService.instance
+          .stop()
+          .catchError((Object _) => false));
+    }
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
     //  App 启动时的兜底，并在 App 前台时由 _startMidnightWatch 周期性刷新。）
@@ -1827,6 +1855,27 @@ class TaskProvider extends ChangeNotifier {
       if (t.id == id) return t;
     }
     return null;
+  }
+
+  /// P3-10（v2.9.4 审计）：把任务整体回滚为 [snapshot] 捕获时的状态（撤销改状态）。
+  ///
+  /// 必须用快照**整体替换**而非反向再调一次 [setStatus]：setStatus 会写
+  /// completedAt（取 now）、追加 doneDates、清理 skipDates，这些都无法靠
+  /// 「再切一次」精确还原（时间戳与列表内容已丢），撤销后任务会静默偏移。
+  /// 找不到该任务（已删除）时静默返回，不抛错。
+  void restoreTaskSnapshot(Task snapshot) {
+    final i = _tasks.indexWhere((t) => t.id == snapshot.id);
+    if (i == -1) return;
+    if (identical(_tasks[i], snapshot)) return;
+    _tasks[i] = snapshot;
+    // 与 setStatus 保持同一套副作用口径：状态变了，提醒与重复锚点要跟着重排。
+    if (_tasks[i].isRepeating) {
+      _rescheduleRepeatOnCompletion(_tasks[i]);
+    } else {
+      _reconcileDeadlineOnCompletion(_tasks[i]);
+    }
+    notifyListeners();
+    _persist();
   }
 
   /// 切换某任务的某个子任务勾选态，并持久化。
@@ -2655,7 +2704,22 @@ class TaskProvider extends ChangeNotifier {
 
   /// 从备份 JSON 字符串恢复：覆盖全部任务与偏好，并重排通知。
   /// [includeTrash] 为 true 且备份含回收站时，用备份的回收站覆盖当前回收站。
-  Future<void> restoreFromJson(String raw, {bool includeTrash = true}) async {
+  ///
+  /// P3-10（v2.9.4 审计）：返回值改为 [RestoreBlobsStats]（原 `Future<void>`）。
+  /// 此前 [AttachmentService.restoreBlobs] 已经把「超单文件 / 非法名 / 体积
+  /// 截断」逐项统计好（v2.9.3 的 P2-9 就建了 `summary()` 文案），但本方法
+  /// 直接把返回值**丢弃**——于是「附件部分失败」时用户看到的是一句干净的
+  /// 「已从备份恢复」，毫不知情有几张附件没回来。附件元数据（文件名、大小）
+  /// 随任务 JSON 恢复了，用户点开却是「文件不存在」，属静默数据缺失。
+  /// 现在把统计透出，由 [backup_sheet] 追加到恢复结果提示里。
+  ///
+  /// [rescheduleReminders] 控制「任务截止/重复提醒」的重排责任，默认 true
+  /// （本方法内部 cancelAll + 重排）。传 false 表示调用方会用**恢复后的新偏好**
+  /// 自己重排一次（见 `backup_sheet`：先 applyAppPrefs → provider.load()，
+  /// load() 内部已重排），从而避免本方法用旧 DND/时区排一次再被立刻覆盖。
+  /// ⚠️ 传 false 时调用方**必须**保证最终有一次重排，否则任务提醒会全部漏挂。
+  Future<RestoreBlobsStats> restoreFromJson(String raw,
+      {bool includeTrash = true, bool rescheduleReminders = true}) async {
     final data = jsonDecode(raw) as Map<String, dynamic>;
     // 结构预校验（P2-2）：`tasks` 必须是显式列表，无论 app 标记如何。
     // 旧逻辑 `app != '有条' && tasks is! List` 会放行「带『有条』标记但 tasks 缺失/
@@ -2700,13 +2764,28 @@ class TaskProvider extends ChangeNotifier {
     if (data['sound_enabled'] is bool) _soundEnabled = data['sound_enabled'];
     NotificationService.instance.enabled = _notificationsEnabled;
     NotificationService.instance.cancelAll();
-    if (_notificationsEnabled) _rescheduleAllActive();
+    // P3-10（v2.9.4 审计）：任务提醒的重排责任需要一个**显式**开关，不能靠
+    // 「调用方待会儿会不会 load()」这种隐式契约来推断（一旦 applyAppPrefs 抛错
+    // 走不到 load()，任务提醒就会彻底漏排——比冗余严重得多）。
+    //
+    // 原实现是无条件 `if (_notificationsEnabled) _rescheduleAllActive()`，
+    // 早于偏好写入，于是产生两个问题：
+    //   ① 冗余：两个恢复调用点随后都会走 applyAppPrefs → provider.load()，
+    //      而 load() 内部（见 load 尾部）已再 _rescheduleAllActive() 一次，
+    //      本轮结果被立刻覆盖；
+    //   ② 错时窗口：本轮是用**旧 DND 时段 / 旧时区 override** 排出来的，
+    //      新 DND 要等 load() 生效，中间存在一次可能提前/推迟响的窗口。
+    // 调用方传入 rescheduleReminders: false 表示「我已排好/即将用新偏好重排」。
+    // 默认 true：所有既有调用点（含单测）行为逐位不变。
+    if (_notificationsEnabled && rescheduleReminders) _rescheduleAllActive();
     _recomputeIdSeq();
     notifyListeners();
     await _persist();
     // P0-1：还原附件二进制。备份里随任务 JSON 携带 base64 内联文件（key=attachments），
     // 在此统一写回 `attachments/<taskId>/`，保证手动恢复与自动备份还原都覆盖附件。
-    await AttachmentService.restoreBlobs(data['attachments'] as Map<String, dynamic>?);
+    // P3-10（v2.9.4 审计）：消费统计并作为返回值透出（原先直接丢弃）。
+    final blobStats =
+        await AttachmentService.restoreBlobs(data['attachments'] as Map<String, dynamic>?);
     // F-11：覆盖恢复后回收本机旧附件。
     // 备份只带回「备份内存在的」附件字节，本机原有、备份中并不存在的任务附件目录
     // 会就此变成孤儿并持续占用私有空间（换机 / 用旧备份覆盖时尤其明显）。
@@ -2718,6 +2797,7 @@ class TaskProvider extends ChangeNotifier {
       // 清理失败不影响恢复结果（用户仍可在设置里手动清理）。
       AppLog.d('[恢复] 附件孤儿清理失败（忽略）：$e');
     }
+    return blobStats;
   }
 
   /// P0-1：收集备份所需的附件二进制（base64 内联），随任务一起加密打包。
