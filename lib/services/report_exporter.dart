@@ -53,7 +53,11 @@ class ReportExporter {
     }
     var r = 1;
     void writeRow(Task t, bool deleted) {
-      final values = TaskProvider.taskTableValues(
+      // P3-3（v2.9.5 审计）：改用 [TaskProvider.taskTableCells]——数值列
+      // （预计时长 / 累计专注）回传 int，经 [_set] 写入真正的数值单元格，
+      // 可求和 / 排序 / 透视。此前取 `taskTableValues`（全 String），
+      // P3-6 修好了专注 / 习惯 / 打卡三表，任务表是最后一个漏网点。
+      final values = TaskProvider.taskTableCells(
         t,
         deleted: deleted,
         includeAttachments: includeAttachments,
@@ -75,27 +79,18 @@ class ReportExporter {
   }
 
   static void _fillFocusSheet(Sheet s, FocusProvider focus) {
-    const headers = [
-      '日期',
-      '开始时间',
-      '结束时间',
-      '计划时长(分)',
-      '实际时长(分)',
-      '是否完成',
-      '关联任务',
-    ];
-    for (var c = 0; c < headers.length; c++) {
-      _set(s, 0, c, headers[c]);
+    // P3-11（v2.9.5 审计）：表头与取值改走 [FocusProvider.focusExportHeaders] /
+    // [FocusProvider.focusExportCells] 单一真源——此前与 `exportCsv` 各写一份，
+    // 任何加列动作都要记得改两处，漏一边就静默漂移。
+    for (var c = 0; c < FocusProvider.focusExportHeaders.length; c++) {
+      _set(s, 0, c, FocusProvider.focusExportHeaders[c]);
     }
     var r = 1;
     for (final se in focus.sessions) {
-      _set(s, r, 0, _fmtDate(se.startedAt));
-      _set(s, r, 1, _fmt(se.startedAt));
-      _set(s, r, 2, _fmt(se.endedAt));
-      _set(s, r, 3, (se.plannedSec / 60).round());
-      _set(s, r, 4, (se.durationSec / 60).toDouble());
-      _set(s, r, 5, se.completed ? '是' : '否');
-      _set(s, r, 6, se.taskTitle ?? '');
+      final cells = focus.focusExportCells(se);
+      for (var c = 0; c < cells.length; c++) {
+        _set(s, r, c, cells[c]);
+      }
       r++;
     }
   }
@@ -180,6 +175,10 @@ class ReportExporter {
 
   // ===== 内部工具 =====
 
+  // P3-11（v2.9.5 审计）：旧的 `_fmt` / `_fmtDate` / `_p2` 已随专注表改走
+  // FocusProvider 的单元格真源而整体删除（此前注释说不再使用却漏删函数体，
+  // 触发 unused_element）；若后续新增手写列再按需恢复。
+
   /// P3-6（v2.9.4 审计）：按值类型写入单元格，而不是一律 `toString()`。
   ///
   /// 此前 [_set] 对所有值都写 `TextCellValue(value.toString())`，于是 Excel 里
@@ -211,12 +210,4 @@ class ReportExporter {
       cell.value = TextCellValue(value.toString());
     }
   }
-
-  static String _fmt(DateTime d) =>
-      '${d.year}-${_p2(d.month)}-${_p2(d.day)} ${_p2(d.hour)}:${_p2(d.minute)}';
-
-  static String _fmtDate(DateTime d) =>
-      '${d.year}-${_p2(d.month)}-${_p2(d.day)}';
-
-  static String _p2(int n) => n.toString().padLeft(2, '0');
 }

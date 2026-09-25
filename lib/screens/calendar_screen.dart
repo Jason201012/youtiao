@@ -13,6 +13,8 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/focus_chart.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+// U2-3（v2.9.5 审计）：拖拽改期复用统一撤销条（10 秒 + 超时提示），与逾期顺延同口径。
+import 'package:todolist/widgets/undo_snack_bar.dart';
 // U2-4（v2.9.1 审计）：日历日期弹层里的任务行可点进任务详情页。
 import 'package:todolist/screens/task_detail_screen.dart';
 
@@ -95,13 +97,20 @@ class _CalendarScreenState extends State<CalendarScreen> {
     }
     if (!mounted) return; // 弹框期间本页可能已被销毁
 
+    // U2-3（v2.9.5 审计）：**补撤销**。此前拖拽改期只弹一条 2 秒、无 action 的
+    // 「已改期至 X」，与逾期顺延 / 批量顺延的 10 秒撤销口径不对等——拖错一次
+    // 只能自己再拖回去，而拖拽的落点精度又远不如点选。
+    //
+    // 撤销走 [TaskProvider.restoreTaskSnapshot]（整体替换快照）而非反向
+    // `updateTask(copyWith(dueDate: old))`：前者连带把 dueDate 变化应触发的
+    // 提醒重排一并交回 provider，调用方不必自己记得重排（漏一次就是静默丢提醒）。
+    final provider = Provider.of<TaskProvider>(context, listen: false);
     final updated = task.copyWith(dueDate: newDue);
-    Provider.of<TaskProvider>(context, listen: false).updateTask(updated);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('已改期至 ${DateFormat('M月d日').format(newDue)}'),
-        duration: const Duration(seconds: 2),
-      ),
+    provider.updateTask(updated);
+    showUndoSnackBar(
+      context,
+      content: undoContent('已改期至 ${DateFormat('M月d日').format(newDue)}'),
+      onUndo: () => provider.restoreTaskSnapshot(task),
     );
   }
 
@@ -489,14 +498,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
         // 让重复任务卡片失去原有的「点一下看当天」行为。
         behavior: HitTestBehavior.translucent,
         onLongPress: () {
-          ScaffoldMessenger.of(context)
-            ..hideCurrentSnackBar()
-            ..showSnackBar(
-              const SnackBar(
-                content: Text('重复任务不支持拖拽改期，请在详情页使用「仅此一次改期」'),
-                duration: Duration(seconds: 3),
-              ),
-            );
+          // U3-2（v2.9.5 审计）：去掉 `..hideCurrentSnackBar()`——U2-4 修复
+          // （首页删除撤销）已确立「不主动清场、靠 ScaffoldMessenger 队列」
+          // 的口径，此处仍清场会把队列里尚未点掉的撤销横幅一起收走。
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('重复任务不支持拖拽改期，请在详情页使用「仅此一次改期」'),
+              duration: Duration(seconds: 3),
+            ),
+          );
         },
         child: child,
       );

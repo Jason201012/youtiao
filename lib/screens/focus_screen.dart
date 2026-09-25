@@ -13,6 +13,8 @@ import 'package:todolist/widgets/focus_task_stats.dart';
 import 'package:todolist/services/focus_audio_service.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/focus_chart.dart';
+import 'package:todolist/widgets/undo_snack_bar.dart';
+import 'package:todolist/theme/ui_durations.dart';
 
 /// 专注页（番茄钟）：大圆环倒计时 + 预设切换 + 可选关联任务 + 今日统计与记录。
 ///
@@ -747,25 +749,51 @@ class _RecordList extends StatelessWidget {
               background: Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 decoration: BoxDecoration(
-                  color: Colors.red.shade400,
+                  // U3-3（v2.9.5 审计）：此前硬编码 `Colors.red.shade400`，
+                  // 脱离主题体系（亮色模式下对比度不足，且不随主题走）。
+                  // 改用 `colorScheme.error`，与任务行滑删同一口径。
+                  color: Theme.of(context).colorScheme.error,
                   borderRadius: BorderRadius.circular(AppColors.cardRadius),
                 ),
                 alignment: Alignment.centerRight,
                 padding: const EdgeInsets.only(right: 20),
                 child: const Icon(Symbols.delete, color: Colors.white),
               ),
+              // U3-3：此前**无确认**且**撤销仅 4 秒**，而同一屏的任务行滑删是
+              // 「确认 + 10 秒 + colorScheme.error」——同屏两种保护力度。
+              // 专注记录虽可撤销，但误触（拇指横扫）频率高且用户不易察觉
+              // 「今天的专注时长少了一段」，补齐确认与窗口。
+              confirmDismiss: (direction) async {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('删除该专注记录？'),
+                    content: const Text('可在 $kUndoWindowSeconds 秒内撤销。'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        child: const Text('取消'),
+                      ),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Theme.of(context).colorScheme.error,
+                        ),
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        child: const Text('删除'),
+                      ),
+                    ],
+                  ),
+                );
+                return ok ?? false;
+              },
               onDismissed: (_) {
                 final removed = s;
                 focus.removeSession(s.id);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: const Text('已删除该专注记录'),
-                    duration: const Duration(seconds: 4),
-                    action: SnackBarAction(
-                      label: '撤销',
-                      onPressed: () => focus.addSession(removed),
-                    ),
-                  ),
+                // P3-4 / U3-1：此前硬编码 4 秒；改走唯一实现（10 秒 + 超时提示）。
+                showUndoSnackBar(
+                  context,
+                  content: undoContent('已删除该专注记录'),
+                  onUndo: () => focus.addSession(removed),
                 );
               },
               child: Container(

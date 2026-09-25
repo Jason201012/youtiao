@@ -412,14 +412,30 @@ void _handleNotificationAction(String? actionId, String? payload) {
 /// （一键顶满）以对齐文案，**副作用却过强**：已记 3/8 时点一下通知按钮直接变
 /// 8/8，误触即虚增 5 个单位，而通知里没有任何回退手段（要进 App 手动改数）。
 /// 现在按**当日已有量**分档：
-/// - 已记 0 → 顶满目标（通知场景下最省事，与「打卡」按钮语义一致）；
-/// - 已记 >0（未达标）→ 只 **+1**，与 App 内「+1」按钮同语义，误触损失 1 个单位；
-/// - 已达标 → 早退（通知确认提示今日已完成，不重复写入）。
+/// - 已达标 → 早退（通知确认提示今日已完成，不重复写入）；
+/// - 未达标（**含 0 记录**，U2-6）→ 一律 **+1**，与 App 内「+1」按钮同语义，
+///   误触最多损失 1 个单位。
+///
+/// P3-7（v2.9.5 审计）：补 `shouldCheckInOn` 守卫。列表 / 详情 / 今日页三处
+/// 休息日都已禁用写入口，只有这里没有——改星期 / 顺延会让**已挂出的旧闹钟**
+/// 跨到休息日仍带 action，用户一点就写入了计划外记录（且不庆祝，与全站口径脱节）。
+/// 复现路径：给「每周一三五」的习惯设 21:00 提醒 → 某天改成「每周二四」
+/// → 周一 21:00 的旧闹钟照响 → 点「打卡」。
 void _doHabitCheckIn(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
   if (habit == null) return;
   final now = DateTime.now();
+  // P3-7：休息日不写记录。如实回报「今天不是计划打卡日」而不是谎称已打卡。
+  if (!habit.shouldCheckInOn(now)) {
+    NotificationService.instance.showHabitCheckedConfirm(
+      habit,
+      value: hp.todayValue(habit),
+      target: habit.effectiveTarget,
+      restDay: true,
+    );
+    return;
+  }
   if (habit.isQuantified) {
     final current = hp.todayValue(habit);
     if (current >= habit.effectiveTarget) {
@@ -432,11 +448,18 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
       );
       return;
     }
-    // U2-1：已有进度时只 +1，不再一键顶满。
-    final op = current <= 0
-        ? hp.completeTodayTarget(habit)
-        : hp.adjustCheckInValue(habit, now, 1);
-    // 异步写入：内部走 setCheckInValue（落盘 + 重排提醒/挽留）；失败静默。
+    // U2-6（v2.9.5 审计）：**0 记录也只 +1**，不再一键顶满目标。
+    //
+    // U2-1（v2.9.4）已把「已记 >0」的一键顶满改掉，但 `current <= 0` 分支仍留着
+    // `completeTodayTarget`——于是「今天还没记过」时一次误触就凭空写入整日投入量
+    //（目标 8 杯 → 直接 8/8），而通知里没有任何回退入口（要进 App 手动改数）。
+    // 判据统一为「一律 +1」：通知按钮的语义就是「记 1 个单位」，
+    // 与 App 内「+1」按钮完全一致；想一键达标可在 App 里点「今日达标」。
+    //
+    // 顺带把确认通知的文案对齐：`0 → 1` 时显示「已记 1/8 · 未达标」是如实回报。
+    final op = hp.adjustCheckInValue(habit, now, 1);
+    // 异步写入：内部走 setCheckInValue（落盘 + 重排提醒/挽留 + 撤掉挂起的稍后提醒）；
+    // 失败静默（通知 action 不可弹错误）。
     op.catchError((_) => false).then((_) {
       // 按完成后的真实进度回报（+1 后通常未达标 → 如实显示「已记 x/y」）。
       NotificationService.instance.showHabitCheckedConfirm(
@@ -1094,7 +1117,19 @@ class _MainScaffoldState extends State<MainScaffold>
               children: [
                 // S13 安全模式横幅：数据库加载失败时提示只读、不落盘，引导修复。
                 if (safeMode) const _DbSafeModeBanner(),
-                Expanded(child: pages[_index]),
+                // U2-1（v2.9.5 审计）：改用保活容器，切 Tab 不再丢状态。
+                // 此前是 `Expanded(child: pages[_index])`——同一时刻只挂载当前页，
+                // 切走即销毁 State：首页的多选集合 / 搜索态 / 标签筛选 / 滚动位置、
+                // 日历的月-周视图、看板分组、排程折叠……全部复位。
+                // 看板与今日页早已各自落盘（`kanban_board` / `today_screen` 的
+                // 折叠态持久化），属同一病根未横向收敛。
+                Expanded(
+                  child: _TabKeepAlive(
+                    count: pages.length,
+                    index: _index,
+                    builder: (i) => pages[i],
+                  ),
+                ),
               ],
             ),
           ),
@@ -1223,6 +1258,68 @@ class _MainScaffoldState extends State<MainScaffold>
         }
         return monitored;
       },
+    );
+  }
+}
+
+/// U2-1（v2.9.5 审计）：底部导航各页的**保活容器**（懒构建 + 常驻）。
+///
+/// ## 为什么不是直接换 `IndexedStack`
+///
+/// 报告建议「改用 `IndexedStack`」。实测直接换会引入两个真回归，故本实现是
+/// 「IndexedStack 的语义 + 延迟首建」：
+///
+/// 1. **首页是启动页**。`IndexedStack` 会在首次 build 时把所有 children 都建
+///    起来，于是 `FocusScreen.initState`（`_initAudio()` + 消费
+///    `FocusProvider.pendingTaskId`）会在 App 启动时执行——那正是「用户在任务行
+///    点专注钮 → 跳到专注页并预选该任务」这条链路的起点，pending 会在用户还没
+///    点之前就被清掉，功能静默失效；音频也会在启动时就绪。
+/// 2. **首屏 build 成本**。6 个页面同时构建会让冷启动多付一遍布局/读盘
+///    （设置页 `_loadVersion` 走 `PackageInfo.fromPlatform`、首页要查数据库）。
+///
+/// ## 本实现的行为
+///
+/// - 首次访问某页时才构建该页（`_built` 记录），之后**永不销毁** → State 与
+///   滚动位置、多选集合、搜索态、月/周视图全部保留。
+/// - 未访问过的槽位渲染 `SizedBox.shrink()`（`IndexedStack` 只显示当前项，
+///   占位不会被看到）。
+/// - 槽位按下标固定，与 `IndexedStack` 的保活依赖一致：`children` 长度恒为
+///   [count]，某槽位首次从占位换成真实页时只会创建、不会被重建。
+class _TabKeepAlive extends StatefulWidget {
+  final int count;
+  final int index;
+  final Widget Function(int i) builder;
+  // 私有 widget 且唯一实例化点不传 key：不声明 `super.key`，
+  // 避免 unused_element_parameter 警告。
+  const _TabKeepAlive({
+    required this.count,
+    required this.index,
+    required this.builder,
+  });
+
+  @override
+  State<_TabKeepAlive> createState() => _TabKeepAliveState();
+}
+
+class _TabKeepAliveState extends State<_TabKeepAlive> {
+  /// 已构建过的槽位（`true` = 该页已建，保持在树中不再重建）。
+  ///
+  /// `late final`：首次访问时才按当时的 [count] 定长。`count` 在本 App 恒为 6
+  /// （底部导航项数固定），不存在运行期变化，故不需要重建此列表。
+  late final List<bool> _built = List.generate(widget.count, (_) => false);
+
+  @override
+  Widget build(BuildContext context) {
+    // 当前页一定先建；其余已建过的槽位原样保留（保活）。
+    // 直接改列表而不 setState：这是「标记该槽位已建」的持久记账，不是 UI 变更，
+    // 且随后本方法就会用新标记构建出正确子树。
+    _built[widget.index] = true;
+    return IndexedStack(
+      index: widget.index,
+      children: [
+        for (var i = 0; i < widget.count; i++)
+          _built[i] ? widget.builder(i) : const SizedBox.shrink(),
+      ],
     );
   }
 }

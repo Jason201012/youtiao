@@ -127,6 +127,10 @@ class _EditorBodyState extends State<_EditorBody> {
         // 这是本轮三处同族缺陷里最隐蔽的一个：不改任何字段也会丢。
         monthlyFromEnd: e.monthlyFromEnd,
         estimateMinutes: e.estimateMinutes,
+        // P3-10（v2.9.5 审计）：同族补齐——不传则打开编辑器再保存就把
+        // 备注 / 提醒提前量洗成默认值（与 monthlyFromEnd 同一种丢字段）。
+        note: e.note,
+        reminderOffsetMin: e.reminderOffsetMin,
       );
 
   @override
@@ -183,7 +187,10 @@ class _EditorBodyState extends State<_EditorBody> {
       // `new_task_sheet.dart` 的 `_MonthlyMode` 保持一致（fromEnd 优先 →
       // nthWeekday → day）。此前这里只读 [c.monthlyDay]、其余两档原样透传，
       // 于是「用户在编辑器里把倒数规则改掉」根本不可能——控制器都没有。
-      final fromEnd = _int(c.monthlyFromEnd.text, 0).clamp(0, 30);
+      // P3-10（v2.9.5 审计）：夹取上界此前写死 30，与 `Task.fromJson` 的
+      // `_clampInt(..., 0, 31, 0)`（[lib/models/task.dart]）不一致 ——
+      // 值为 31 的模板「打开即保存」会被静默改写为 30。两侧统一为 31。
+      final fromEnd = _int(c.monthlyFromEnd.text, 0).clamp(0, 31);
       final wd = _int(c.monthlyWeekday.text, 0);
       final wkIdx = _int(c.monthlyWeekIndex.text, 0).clamp(0, 5);
       final useNth = fromEnd <= 0 && wd >= 1 && wd <= 7 && wkIdx >= 1;
@@ -206,6 +213,11 @@ class _EditorBodyState extends State<_EditorBody> {
         // P2-4（v2.9.4 审计）：改为取控制器值（真正可编辑），空串 = 0 = 不倒数。
         monthlyFromEnd: fromEnd,
         estimateMinutes: it.estimateMinutes,
+        // P3-10（v2.9.5 审计）：备注 / 提醒提前量此前不参与重建（编辑器
+        // 尚未提供这两项的输入控件），但**必须原样透传**——否则用户只想
+        // 改个标题，保存后备注就没了。控件补充属功能增强范畴，不在本轮。
+        note: it.note,
+        reminderOffsetMin: it.reminderOffsetMin,
       ));
     }
     final t = UserTemplate(
@@ -487,6 +499,44 @@ class _EditorBodyState extends State<_EditorBody> {
                                 c.monthlyWeekIndex.text = '1';
                               }
                             }
+                            // P2-1（v2.9.5 审计）：**同步数据层**。
+                            // 本回调此前只改控制器，而档位 [mode] 是从
+                            // [_items[i]]（`it.monthlyFromEnd` / `it.monthlyWeekday`
+                            // / `it.monthlyWeekIndex`）反推的 —— 于是
+                            // `DropdownButtonFormField` 内部 `state.value` 变了、
+                            // 下拉**显示**新档，但 `it` 从未更新，`mode` 恒为旧档：
+                            //   下方仍渲染旧档的输入框，新档输入框根本不可见；
+                            //   此时直接保存，_save 读的是刚被 onChanged 写进控制器的
+                            //   「另一档」值 → 存出「所见非所得」的错误规则。
+                            // 典型：模板项「每月 15 号」→ 选「每月倒数第 N 天」→
+                            // 仍显示「每月 N 号」输入框，却存成「每月倒数第 1 天」。
+                            // 修法：把控制器的新值同步回 [TemplateItem]，
+                            // 让 `mode` 与 [TemplateItem] 始终同源。
+                            if (v == _MonthlyMode.fromEnd) {
+                              _items[i] = _items[i].copyEditable(
+                                monthlyFromEnd:
+                                    _int(c.monthlyFromEnd.text, 1).clamp(0, 31),
+                                monthlyWeekday: null,
+                                monthlyWeekIndex: null,
+                                clearMonthlyWeekday: true,
+                              );
+                            } else if (v == _MonthlyMode.nthWeekday) {
+                              _items[i] = _items[i].copyEditable(
+                                monthlyFromEnd: 0,
+                                monthlyWeekday:
+                                    _int(c.monthlyWeekday.text, 1).clamp(1, 7),
+                                monthlyWeekIndex:
+                                    _int(c.monthlyWeekIndex.text, 1).clamp(1, 5),
+                              );
+                            } else {
+                              // 退回「每月 N 号」：清空另两档的**数据层**字段。
+                              _items[i] = _items[i].copyEditable(
+                                monthlyFromEnd: 0,
+                                monthlyWeekday: null,
+                                monthlyWeekIndex: null,
+                                clearMonthlyWeekday: true,
+                              );
+                            }
                           });
                         },
                       ),
@@ -589,6 +639,11 @@ extension _TemplateItemEdit on TemplateItem {
     int? monthlyWeekIndex,
     int? monthlyFromEnd,
     bool clearMonthlyWeekday = false,
+    // P2-1（v2.9.5 审计）：[monthlyWeekIndex] 此前与 [monthlyWeekday] 一样
+    // 无法「显式清空」（传 null 会被 `?? this.x` 当成保留旧值），于是从
+    // 「每月第 N 个周几」退回「每月 N 号」时数据层仍留着旧的周几/序号，
+    // `_monthlyModeOf` 会把它判回 nthWeekday —— 切档「看起来成功、保存后复原」。
+    bool clearMonthlyWeekIndex = false,
   }) =>
       TemplateItem(
         title,
@@ -605,9 +660,16 @@ extension _TemplateItemEdit on TemplateItem {
         // P2-4（v2.9.3 审计）同族收口：此前 monthlyWeekday 被未赋值的形参
         // 直接顶掉（编辑器不传 → 恒 null → 丢字段），monthlyFromEnd /
         // estimateMinutes 更是整段缺失——改个分类就会把这三项洗成默认值。
-        monthlyWeekday: clearMonthlyWeekday ? null : (monthlyWeekday ?? this.monthlyWeekday),
-        monthlyWeekIndex: monthlyWeekIndex ?? this.monthlyWeekIndex,
+        monthlyWeekday:
+            clearMonthlyWeekday ? null : (monthlyWeekday ?? this.monthlyWeekday),
+        monthlyWeekIndex: clearMonthlyWeekIndex
+            ? null
+            : (monthlyWeekIndex ?? this.monthlyWeekIndex),
         monthlyFromEnd: monthlyFromEnd ?? this.monthlyFromEnd,
         estimateMinutes: estimateMinutes,
+        // P3-10（v2.9.5 审计）：编辑器目前不改这两项，故恒透传（不新增
+        // 可改参数——没有输入控件就没有「改」的语义）。
+        note: note,
+        reminderOffsetMin: reminderOffsetMin,
       );
 }

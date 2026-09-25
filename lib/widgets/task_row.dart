@@ -5,7 +5,6 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
-import 'package:flutter/gestures.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/occurrence_sheet.dart';
 
@@ -197,8 +196,11 @@ class TaskRow extends StatelessWidget {
                   },
                   icon: Icon(Symbols.timer, size: 20, color: primary),
                   tooltip: '开始专注',
+                  // U3-6（v2.9.5 审计）：此前 constraints 压到 36dp，低于
+                  // Material 最小命中区 48dp；命中区回归 48dp（视觉仍由
+                  // 20px 图标承担，不额外添噪）。
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 ),
               ],
             ],
@@ -353,17 +355,40 @@ class _MetaInfo extends StatelessWidget {
             task,
             Provider.of<TaskProvider>(context, listen: false),
           );
+      // U3-6（v2.9.5 审计）：此前命中区只有 13px 图标 + 12px 文字
+      // （TapGestureRecognizer 的命中范围 = 字形盒），触屏几乎无法准确命中。
+      // 改为整个 chip 一个命中区：容器高度补到 48dp、`HitTestBehavior.opaque`
+      // 让空白也参与命中；文字用 `Flexible + ellipsis`，超宽时与原 TextSpan
+      // 同样截断，不会横向溢出。
       spans.add(WidgetSpan(
         alignment: PlaceholderAlignment.middle,
         child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTap: open,
-          child: Icon(Symbols.repeat, size: 13, color: primary),
+          // 注意不要给 Container 设 `alignment`：Align 默认会横向撑满可用
+          // 宽度，把行内后续文案（截止时间等）挤出单行。这里靠 Row 的
+          // min 尺寸收缩，高度由 minHeight 48 兜底、子项交叉轴居中。
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Symbols.repeat, size: 13, color: primary),
+                Flexible(
+                  child: Text(
+                    ' ${task.repeatFull}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: primary),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
-      ));
-      spans.add(TextSpan(
-        text: ' ${task.repeatFull}',
-        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: primary),
-        recognizer: TapGestureRecognizer()..onTap = open,
       ));
       spans.add(const TextSpan(text: '  '));
     }

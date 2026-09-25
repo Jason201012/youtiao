@@ -319,7 +319,13 @@ class _StorageScreenState extends State<StorageScreen> {
                               selected: _selected,
                               onToggle: (f) {
                                 final k = '${f.taskId}/${f.fileName}';
+                                // U3-5（v2.9.5 审计）：长按此前只写 `_selected`、
+                                // 不改 `_selecting` → 勾选态「隐形」，再点
+                                // 「批量选择」时凭空多出已勾选项。改为任何 toggle
+                                // 一律先进入选择模式，让勾选态始终可见（选择模式下
+                                // 本行为不变：勾 / 取消勾仍只增删 `_selected`）。
                                 setState(() {
+                                  _selecting = true;
                                   if (_selected.contains(k)) {
                                     _selected.remove(k);
                                   } else {
@@ -346,6 +352,8 @@ class _SummaryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
+    // U3-4（v2.9.5 审计）：占比条改用前景色分档，需要拿到 colorScheme。
+    final scheme = Theme.of(context).colorScheme;
     final total = stats.totalCount;
     final imgF = total == 0 ? 0.0 : stats.images / total;
     final audF = total == 0 ? 0.0 : stats.audios / total;
@@ -369,18 +377,28 @@ class _SummaryCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
               child: Row(
                 children: [
+                  // U3-4（v2.9.5 审计）：此前硬编码 Colors.blue/green/orange，
+                  // 脱离主题体系（本项目设计偏好纯黑白色系）→ 改用前景色
+                  // 三档透明度区分图片 / 录音 / 文件，随明暗主题自适应。
                   if (imgF > 0)
                     Expanded(
                         flex: (imgF * 100).round(),
-                        child: Container(height: 10, color: Colors.blue)),
+                        child: Container(
+                            height: 10,
+                            color: scheme.onBackground.withValues(alpha: 0.9))),
                   if (audF > 0)
                     Expanded(
                         flex: (audF * 100).round(),
-                        child: Container(height: 10, color: Colors.green)),
+                        child: Container(
+                            height: 10,
+                            color: scheme.onBackground.withValues(alpha: 0.5))),
                   if (fileF > 0)
                     Expanded(
                         flex: (fileF * 100).round(),
-                        child: Container(height: 10, color: Colors.orange)),
+                        child: Container(
+                            height: 10,
+                            color:
+                                scheme.onBackground.withValues(alpha: 0.22))),
                 ],
               ),
             ),

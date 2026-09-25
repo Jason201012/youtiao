@@ -25,6 +25,7 @@ import 'package:todolist/screens/task_detail_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
 import 'package:todolist/widgets/batch_edit_sheet.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+import 'package:todolist/widgets/undo_snack_bar.dart';
 import 'package:todolist/services/update_checker.dart';
 import 'package:todolist/services/search_index.dart';
 import 'package:todolist/widgets/update_dialog.dart';
@@ -177,22 +178,23 @@ class HomeScreenState extends State<HomeScreen> {
   }
 
   /// P0-1：批量编辑已选项（改日期 / 优先级 / 分类 / 追加标签 / 置顶）。
-  void _editSelected(BuildContext context) async {
+  Future<void> _editSelected(BuildContext context) async {
     final ids = _selected.toList();
     if (ids.isEmpty) return;
     final n = await BatchEditSheet.show(context, ids);
-    if (n == null || n == 0 || !context.mounted) return;
+    if (n == null || n.count == 0 || !context.mounted) return;
     _exitSelect();
     // F1：批量编辑后提供一键撤销（改前快照已由 TaskProvider 保存）。
+    // P3-4（v2.9.5 审计）：此前**未设 `duration`**，落到 SnackBar 框架默认的 4 秒，
+    // 且文案不带秒数——与删除的 10 秒不一致，用户按删除的节奏去点常已过期。
+    // P3-5：改走 `widgets/undo_snack_bar.dart` 的唯一实现（统一时长 + 超时提示）。
+    // U1-2：用 [TaskProvider.batchUpdateAs] 返回的 batchId 定向撤销。
     final provider = context.read<TaskProvider>();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('已更新 $n 条任务'),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () => provider.undoBatchEdit(),
-        ),
-      ),
+    showUndoSnackBar(
+      context,
+      content: undoContent('已更新 $n.count 条任务'),
+      expiredHint: '这 $n.count 条任务的撤销窗口已结束',
+      onUndo: () => provider.undoBatchEdit(n.batchId),
     );
   }
 
@@ -224,9 +226,11 @@ class HomeScreenState extends State<HomeScreen> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    provider.deleteTasks(ids);
+    // U1-2（v2.9.5 审计）：取定向 `batchId`——这条横幅的「撤销」只还原**本次**
+    // 批量删除（10 秒内又删了别的也不会串）。
+    final r = provider.deleteTasksAs(ids);
     _exitSelect();
-    _showBatchUndoSnackBar(context, provider, count);
+    _showBatchUndoSnackBar(context, provider, r.$1, r.$2.length);
   }
 
   /// P1-6：供桌面端 `Cmd/Ctrl+Enter` 调用，批量完成当前选中项，返回实际完成条数。
@@ -271,7 +275,8 @@ class HomeScreenState extends State<HomeScreen> {
       onLongPress: () => _enterSelect(t),
       onEdit: () => TaskSheet.show(context, task: t),
       onSelect: () => _toggleSelect(t.id),
-      onDeleted: (removed) => _showUndoSnackBar(context, provider, removed),
+      onDeleted: (batchId, removed) =>
+          _showUndoSnackBar(context, provider, batchId, removed),
     );
     if (dragIndex == null) {
       return Padding(
@@ -932,25 +937,25 @@ class _PostponeButton extends StatelessWidget {
       );
       if (!go || !context.mounted) return;
     }
-    final n = provider.postponeTo(ids, day);
+    // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次顺延）。
+    final r = provider.postponeToAs(ids, day);
     if (!context.mounted) return;
+    final n = r.$2;
+    if (n <= 0) return;
     final origText = originalDates.isEmpty
         ? ''
         : '原截止：${originalDates.take(3).join('、')}'
             '${originalDates.length > 3 ? ' 等 ${originalDates.length} 个日期' : ''}';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('已顺延 $n 条任务到 '
-            '${day.month}月${day.day}日'
-            '${origText.isEmpty ? '' : ' · $origText'}'),
-        duration: const Duration(seconds: 4),
-        action: SnackBarAction(
-          // U9：顺延经 batchUpdate 落库，_lastEditBatch 留有改前快照，
-          // undoBatchEdit 可一键还原全部日期与提醒。
-          label: '撤销',
-          onPressed: () => context.read<TaskProvider>().undoBatchEdit(),
-        ),
-      ),
+    // P3-4 / U3-1（v2.9.5 审计）：此前硬编码 `Duration(seconds: 4)`，与删除的
+    // 10 秒不一致；且无「窗口结束」提示。改走唯一实现。
+    // U1-2：撤销按 batchId 定向，不再依赖「最近一次批量编辑」。
+    showUndoSnackBar(
+      context,
+      content: undoContent('已顺延 $n 条任务到 '
+          '${day.month}月${day.day}日'
+          '${origText.isEmpty ? '' : ' · $origText'}'),
+      expiredHint: '这 $n 条顺延的撤销窗口已结束',
+      onUndo: () => provider.undoBatchEdit(r.$1),
     );
   }
 
@@ -1105,7 +1110,9 @@ class _DismissibleTask extends StatelessWidget {
   final VoidCallback? onLongPress;
   final VoidCallback? onEdit;
   final VoidCallback? onSelect;
-  final void Function(Task removed) onDeleted;
+  /// U1-2（v2.9.5 审计）：回调带上 [TaskProvider.deleteTaskAs] 的 `batchId`，
+  /// 让撤销横幅能**定向**还原本次删除（而非「最近一次」）。
+  final void Function(int batchId, Task removed) onDeleted;
   /// U5：转发给 [TaskRow.constrainTitleWidth]（仅拖拽重排场景为 true）。
   final bool constrainTitleWidth;
   const _DismissibleTask({
@@ -1187,8 +1194,10 @@ class _DismissibleTask extends StatelessWidget {
       },
       onDismissed: (_) {
         // 只有右滑（startToEnd）会走到这里。
-        final removed = context.read<TaskProvider>().deleteTask(task.id);
-        if (removed != null) onDeleted(removed);
+        // U1-2：取定向 batchId（点这条横幅的撤销只还原本次删除）。
+        final r = context.read<TaskProvider>().deleteTaskAs(task.id);
+        final removed = r.$2;
+        if (removed != null) onDeleted(r.$1, removed);
       },
       child: row,
     );
@@ -1217,42 +1226,40 @@ class _DismissibleTask extends StatelessWidget {
 
 /// U3-5 / P3-10（v2.9.4 审计）：删除撤销窗口的时长与文案已统一到
 /// `theme/ui_durations.dart` 的 [kUndoWindow]（原为 5 秒、散落四处字面量）。
-/// 下面只做「不再主动清空队列」的调整：
-/// 此前 `clearSnackBars()` 等于亲手丢掉前一条撤销机会，而用户毫不知情
-/// （U2-4 同型缺陷）。
+///
+/// P3-5 / P2-4 / U1-2（v2.9.5 审计）：本文件的删除横幅改为走
+/// `widgets/undo_snack_bar.dart` 的唯一实现，四个历史问题一次收口：
+/// - **P2-4**：删掉了残留的 `Future.delayed(kUndoWindow, controller.close)`
+///   ——它会在第 1 条窗口到点时把**队列中正在展示的第 2 条**一起收起
+///   （debug 断言失败 / release 静默截断别人的撤销窗口）；
+/// - **P3-5**：窗口超时补一句「撤销窗口已结束」，不再让用户点空气；
+/// - **U1-2**：撤销按 [batchId] 定向（横幅闭包持有自己那次删除的 id），
+///   不再依赖「最近一次」的单槽缓冲；
+/// - **U3-2 / U3-8**：全程不调 `hideCurrentSnackBar()`——`ScaffoldMessenger`
+///   自带队列，主动清场等于亲手丢掉上一条撤销机会。
 ///
 /// 单个删除后底部提示，支持撤销。
-void _showUndoSnackBar(BuildContext context, TaskProvider provider, Task removed) {
-  final controller = ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text('已删除「${removed.title}」（$kUndoWindowSeconds 秒内可撤销）'),
-      action: SnackBarAction(
-        label: '撤销',
-        onPressed: () => provider.undoDelete(),
-      ),
-      duration: kUndoWindow,
-    ),
+///
+/// [batchId] 来自 [TaskProvider.deleteTaskAs]，用于定向撤销。
+void _showUndoSnackBar(
+    BuildContext context, TaskProvider provider, int batchId, Task removed) {
+  showUndoSnackBar(
+    context,
+    content: undoContent('已删除「${removed.title}」'),
+    expiredHint: '「${removed.title}」的撤销窗口已结束',
+    onUndo: () => provider.undoDelete(batchId),
   );
-  // 兜底：无论是否点击撤销，窗口结束后强制收起。
-  Future.delayed(kUndoWindow, () {
-    controller.close();
-  });
 }
 
 /// 批量删除后底部提示，支持整体撤销。
+///
+/// [batchId] 来自 [TaskProvider.deleteTasksAs]。
 void _showBatchUndoSnackBar(
-    BuildContext context, TaskProvider provider, int count) {
-  final controller = ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text('已删除 $count 个任务（$kUndoWindowSeconds 秒内可撤销）'),
-      action: SnackBarAction(
-        label: '撤销',
-        onPressed: () => provider.undoDelete(),
-      ),
-      duration: kUndoWindow,
-    ),
+    BuildContext context, TaskProvider provider, int batchId, int count) {
+  showUndoSnackBar(
+    context,
+    content: undoContent('已删除 $count 个任务'),
+    expiredHint: '这 $count 个任务的撤销窗口已结束',
+    onUndo: () => provider.undoDelete(batchId),
   );
-  Future.delayed(kUndoWindow, () {
-    controller.close();
-  });
 }

@@ -7,7 +7,10 @@ import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
-import 'package:todolist/theme/ui_durations.dart';
+// ui_durations 的 kUndoWindow 已收进 undo_snack_bar（P3-4），本文件不再直接用时删 import。
+import 'package:todolist/widgets/undo_snack_bar.dart';
+// U2-4（v2.9.5 审计）：卡片单击进任务详情（此前单击直接改状态，全屏无详情入口）。
+import 'package:todolist/screens/task_detail_screen.dart';
 
 /// 看板分组模式（本地 UI 状态，不污染任务数据）。
 enum KanbanGroupMode { status, category, tag }
@@ -247,16 +250,16 @@ class _KanbanBoardState extends State<KanbanBoard> {
   }
 
   /// 分类 / 标签泳道的强调色循环调色板。
-  static const List<Color> _lanePalette = [
-    Color(0xFF3B82F6), // blue
-    Color(0xFF14B8A6), // teal
-    Color(0xFFF59E0B), // amber
-    Color(0xFF8B5CF6), // violet
-    Color(0xFFEC4899), // pink
-    Color(0xFF06B6D4), // cyan
-    Color(0xFFF97316), // orange
-    Color(0xFF22C55E), // green
-  ];
+  ///
+  /// U3-4（v2.9.5 审计）：原 8 色硬编码调色板（蓝/青/琥珀/紫/粉/…）脱离主题
+  /// 体系，与本项目「纯黑白色系」设计偏好冲突 → 改为前景色 8 档透明度灰阶，
+  /// 随明暗主题自适应；泳道本身仍靠标题与位置区分，不依赖色相辨位。
+  /// （实例 getter 而非 static const：颜色需从 Theme 取 `onBackground`。）
+  List<Color> get _lanePalette {
+    final base = Theme.of(context).colorScheme.onBackground;
+    const alphas = [1.0, 0.85, 0.70, 0.58, 0.47, 0.37, 0.28, 0.20];
+    return [for (final a in alphas) base.withValues(alpha: a)];
+  }
 
   /// 泳道强调色：状态泳道用语义色（已完成 = 深绿、待办 = 次要色），
   /// 分类 / 标签泳道走循环调色板，「其他」泳道用前景色。
@@ -470,9 +473,22 @@ class _KanbanCard extends StatelessWidget {
   final TaskProvider provider;
   const _KanbanCard({required this.task, required this.provider});
 
-  /// P3-10（v2.9.4 审计）：单击改状态此前无任何撤销——手滑点一下卡就消失、
-  /// 整列「已完成」的任务被批量点回「待办」都只能一个个手动改回来。
-  /// 现在两种改状态入口（单击 / 拖拽落列）都给出 10 秒撤销。
+  /// P3-10（v2.9.4 审计）：改状态的两个入口都给出 10 秒撤销。
+  ///
+  /// U2-4（v2.9.5 审计）：**单击不再改状态**，改为打开任务详情。
+  /// 改状态保留两个显式入口：
+  /// - **拖拽落列**（[DragTarget]，仅「状态」模式下生效）——本就是看板的主交互；
+  /// - **长按**——移动端的等价入口。
+  ///
+  /// 变更理由：单击卡片在所有列表型界面里的通用含义都是「打开」；此前单击 =
+  /// 切换完成状态，本意想看详情的人一点就把任务改了，而且**全屏没有任何进入
+  /// 详情的入口**（备注 / 子任务 / 附件 / 预计时长在看板完全不可达）。
+  static void _openDetail(Task t, BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => TaskDetailScreen(taskId: t.id)),
+    );
+  }
+
   static void _cycle(TaskProvider p, Task t, BuildContext context) {
     final next =
         t.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
@@ -486,22 +502,22 @@ class _KanbanCard extends StatelessWidget {
   /// 刻意不调 `hideCurrentSnackBar()`（U2-4 同型缺陷）：那会亲手丢掉队列里
   /// 上一条尚未点掉的撤销机会。直接 showSnackBar 让 ScaffoldMessenger 按队列
   /// 依次展示即可。
+  ///
+  /// P3-5（v2.9.5 审计）：改走 `widgets/undo_snack_bar.dart` 的唯一实现，
+  /// 与首页 / occurrence / 习惯侧统一——除时长外还补上「窗口超时已结束」提示
+  /// （此前在 10 秒后点空气毫无反馈）。
   static void _showStatusUndo(
       BuildContext context, TaskProvider provider, Task snapshot) {
-    final to = snapshot.status == TaskStatus.todo
-        ? '已完成'
-        : snapshot.status == TaskStatus.done
-            ? '待办'
-            : '进行中';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('已移至「$to」（$kUndoWindowSeconds 秒内可撤销）'),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () => provider.restoreTaskSnapshot(snapshot),
-        ),
-        duration: kUndoWindow,
-      ),
+    // P3-15（v2.9.5 审计）：原为三档三元（todo→'已完成'、done→'待办'、
+    // else→'进行中'）。但 [TaskStatus] 只有 `todo` / `done` 两值（见
+    // `task.dart:101`），`'进行中'` 分支不可达——是上一版三态枚举的残留。
+    // 直接二元映射，避免给读者「还有 doing 状态」的错觉。
+    final to =
+        snapshot.status == TaskStatus.todo ? '已完成' : '待办';
+    showUndoSnackBar(
+      context,
+      content: undoContent('已移至「$to」'),
+      onUndo: () => provider.restoreTaskSnapshot(snapshot),
     );
   }
 
@@ -595,7 +611,11 @@ class _KanbanCard extends StatelessWidget {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => _cycle(provider, task, context),
+      // U2-4：单击进详情（此前单击直接切换完成状态，且全屏无详情入口）。
+      onTap: () => _openDetail(task, context),
+      // 改状态的移动端等价入口（拖拽在触屏上依赖长按起手，两者共存不冲突：
+      // LongPressDraggable 胜出时会吃掉手势，不会同时触发 onTap）。
+      onLongPress: () => _cycle(provider, task, context),
       child: LongPressDraggable<Task>(
         data: task,
         feedback: Material(

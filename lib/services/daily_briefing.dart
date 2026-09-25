@@ -98,10 +98,22 @@ DailyBrief buildEveningBriefFromState(
   // 「今日完成任务 0，专注 X 分钟」的混合口径。
   final focusMin = focus.focusSecOn(now) ~/ 60;
   final pomodoros = focus.completedOn(now);
-  final active = habit.activeHabits;
-  final habitDue = active.length;
+  // P2-6（v2.9.5 审计）：分母必须先按 `shouldCheckInOn(now)` 过滤，不能直接取
+  // `activeHabits.length`。
+  //
+  // 旧实现下「每周一/三/五 · 21:00 提醒」的习惯在**周二**晚简报里仍进分母，而
+  // [Habit.shouldCheckInOn] 判 false → `isTargetMetOn` 恒 false → 分子不进，
+  // 于是每周有 2 天白收一条「习惯 0/1 · 未完成」的暗示。
+  //
+  // 这与今日卡（`today.dart` 加 `shouldCheckIn` 分子）、今日页、列表/详情主判定、
+  // 挽留文案全都按 `shouldCheckInOn` 过滤的口径打架——同一件事在 5 个入口
+  // 得到 2 种答案。分子与分母必须同源：先滤出「今天该打卡的」，再在其中数达标的。
+  // 源列表用 `habit.activeHabits`（已滤 archived；此前误写成未定义的 `active`）。
+  final dueToday =
+      habit.activeHabits.where((h) => h.shouldCheckInOn(now)).toList();
+  final habitDue = dueToday.length;
   var habitDone = 0;
-  for (final h in active) {
+  for (final h in dueToday) {
     // T1-2：达成口径——量化习惯需当日累计量达标，仅有记录不算「已达成」。
     if (habit.isTargetMetOn(h, now)) habitDone++;
   }

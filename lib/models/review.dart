@@ -182,6 +182,12 @@ class WeeklyReview {
         expected: expected,
         done: done,
         rate: expected == 0 ? 0.0 : (done / expected),
+        // P3-9（v2.9.5 审计）：补齐区间累计投入量。此前 [HabitWeekStat] 没有这个
+        // 字段，周报「累计 N 个单位 · ≈ N 天目标量」的后缀只能整段不显示——
+        // 而月报有（`period_review_card` 传 `valueSum`）。同一个量词修复只落地了
+        // 月报，周报成了唯一例外。数据源用 `valueBetween`（量化 = 各单位之和，
+        // 布尔 = 达标天数），与月报同源。
+        valueSum: habit.valueBetween(h, start, end),
       ));
     }
     habits.sort((a, b) => b.rate.compareTo(a.rate));
@@ -236,10 +242,14 @@ class HabitWeekStat {
   final int expected; // 本周应打卡次数
   final int done; // 本周已打卡次数
   final double rate; // done / expected，0..1
+  /// P3-9（v2.9.5 审计）：本周累计投入量（量化习惯 = 各单位之和；布尔 = 达标天数）。
+  /// 供周报展示「· 累计 N 个单位 · ≈ N 天目标量」，与月报口径对齐。
+  final int valueSum;
   const HabitWeekStat({
     required this.habit,
     required this.expected,
     required this.done,
     required this.rate,
+    this.valueSum = 0,
   });
 }

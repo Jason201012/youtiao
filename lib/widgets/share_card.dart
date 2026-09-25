@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -676,20 +677,31 @@ class _HomeBlock extends StatelessWidget {
 
   /// 每行次要信息：重复任务显示「规则 + 时间」（如「每周 一、三 09:00」），
   /// 已完成显示「完成于 M月d日」，其余显示相对截止时间（今天 / 明天 / M月d日 …）。
+  /// P3-12（v2.9.5 审计）：有预估时长的任务再补「· 预计 Xm」——分享卡此前
+  /// 只有重复规则 / 截止，看不出工作量（详情 / 看板卡 / 排程建议均有此信息）。
   String _meta(Task t, String key) {
+    String base;
     if (key == 'repeat') {
       // P3-2（v2.9.1 审计）：已「结束重复」的任务不再显示「每天 07:00 至 09/17」
       // 这类已失效的规则文案（分享长图里同样会误导），与任务行 / 今日卡片同一口径。
-      if (t.repeatEnded) return '已结束重复';
-      return t.repeatFull.isNotEmpty ? t.repeatFull : '重复';
-    }
-    if (key == 'done') {
-      if (t.completedAt != null) {
-        return '完成于 ${t.completedAt!.month}月${t.completedAt!.day}日';
+      if (t.repeatEnded) {
+        base = '已结束重复';
+      } else {
+        base = t.repeatFull.isNotEmpty ? t.repeatFull : '重复';
       }
-      return _dueLabel(t.dueDate);
+    } else if (key == 'done') {
+      if (t.completedAt != null) {
+        base = '完成于 ${t.completedAt!.month}月${t.completedAt!.day}日';
+      } else {
+        base = _dueLabel(t.dueDate);
+      }
+    } else {
+      base = _dueLabel(t.dueDate);
     }
-    return _dueLabel(t.dueDate);
+    if (t.hasEstimate) {
+      base = '$base · 预计 ${TaskParser.formatDuration(t.estimateMinutes!)}';
+    }
+    return base;
   }
 
   @override

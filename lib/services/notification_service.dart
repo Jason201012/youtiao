@@ -54,6 +54,19 @@ class NotificationService {
   static const String _chSound = 'todo_reminder';
   static const String _chSilent = 'todo_reminder_silent';
 
+  /// P3-13（v2.9.5 审计）：习惯类通知的**独立**渠道。
+  ///
+  /// 此前习惯打卡提醒 / 习惯稍后提醒 / 漏卡挽留全部复用任务渠道
+  /// [todo_reminder]（其展示名是「任务提醒」），于是：
+  /// - 在系统「通知设置」里，习惯提醒挂在**任务提醒**名下，用户无法单独关掉
+  ///   习惯提醒（一个渠道只有一个开关）；
+  /// - 关掉任务提醒会连带把习惯提醒一起静音，粒度不可分。
+  ///
+  /// Android 一旦建好渠道，其声音/重要性属性不可再改，所以要独立可关就必须
+  /// **另开一个渠道 id**（不能改名复用）。保持与任务渠道相同的 Importance /
+  /// playSound，让用户观感不变，只是多一个可分别管理的开关。
+  static const String _chHabit = 'habit_reminder';
+
   /// 专注进行中常驻通知渠道（锁屏可见、无声、无角标）。
   static const String _chFocusProgress = 'focus_progress';
 
@@ -88,6 +101,10 @@ class NotificationService {
   /// - 专注完成通知：      777777（固定）
   /// - 专注进行中常驻：    777778（固定）
   /// - 习惯提醒：          habitNotifyIdOf(id, d)    ≈ [1.0e9, ~1.001e9]（独立大连段）
+  /// - 习惯稍后提醒：      habitSnoozeNotifyIdOf(id) 落在习惯段内每习惯的**第 8 号槽**
+  ///                       （= 1000000000 + slot*10 + 8，落点只用 0..7，故永不被
+  ///                       落点重排覆盖；详见 [habitSnoozeNotifyIdOf]）
+  /// - 习惯漏卡挽留：      habitNudgeNotifyId = 1500000（固定）
   /// - 定时测试系统闹钟：  _kTestTimerId = 999999（固定）
   /// - 定时测试应用内延迟：_kTestTimerId + 1 = 1000000（固定）
   /// - 即时测试通知：      1200000 + ms%100000     = [1200000, 1299999]（见 [showTest]）
@@ -96,6 +113,15 @@ class NotificationService {
   ///
   /// 即时测试通知此前落在 800000 段，与习惯提醒段重叠，会以相同 id 顶掉用户当天
   /// 尚未触发的习惯打卡闹钟（约 10% 习惯被波及）。现整体移出习惯段到 1200000+。
+  ///
+  /// 【通知渠道分配表（P3-13）】
+  /// - [todo_reminder] 「任务提醒」：任务一次性/重复提醒、专注完成、简报、回收站预告
+  /// - [todo_reminder_silent] 「任务提醒（静音）」：任务类静音变体
+  /// - [habit_reminder] 「习惯提醒」：习惯打卡落点、习惯稍后提醒、漏卡挽留
+  /// - [focus_progress] 「专注进行中」：常驻进度条
+  ///
+  /// 习惯类此前复用 `todo_reminder`，在系统通知设置里与任务提醒混作一项、无法
+  /// 单独关闭，故独立成段。
   static const int _kTestTimerId = 999999;
 
   /// 即时测试通知 id 段起点（避开习惯提醒段 [800000,1800007] 与定时测试段 [999999,1000000]）。
@@ -477,6 +503,15 @@ class NotificationService {
       importance: Importance.defaultImportance,
       playSound: false,
       showBadge: false,
+    ));
+    // P3-13（v2.9.5 审计）：习惯类通知独立渠道（打卡提醒 / 稍后提醒 / 漏卡挽留）。
+    // 意图与声音属性与任务渠道保持一致，只是让用户在系统设置里能单独关掉习惯。
+    await plugin.createNotificationChannel(const AndroidNotificationChannel(
+      _chHabit,
+      '习惯提醒',
+      description: '每日习惯打卡提醒与漏卡挽留',
+      importance: Importance.high,
+      playSound: true,
     ));
   }
 
@@ -1039,7 +1074,7 @@ class NotificationService {
       final body = '${habit.emoji} ${habit.title} · 该打卡啦';
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
-          _chSound, // 习惯提醒统一用有声渠道，引起注意
+          _chHabit, // P3-13：习惯类独立渠道，用户可在系统设置里单独关闭
           '习惯提醒',
           channelDescription: '每日习惯打卡提醒',
           importance: Importance.high,
@@ -1160,6 +1195,25 @@ class NotificationService {
     }
   }
 
+  /// P2-7（v2.9.5 审计）：**只**清掉某习惯挂起的「稍后提醒」（8 号槽）。
+  ///
+  /// 复现：21:00 弹习惯提醒 → 点「稍后提醒」（+10 分钟）→ 21:05 在 App 里记满
+  /// 8/8 达标 → 21:10 仍弹出「该打卡啦」（只有点通知里的「打卡」才会早退）。
+  /// 也就是说**已做完仍被打扰**，且与任务侧不对称：任务侧的稍后提醒会随
+  /// 「完成」被撤掉，习惯侧此前完全没有反向动作。
+  ///
+  /// 这里刻意**不**复用 [cancelHabitReminder]：那会把 0..7 号落点全部取消，
+  /// 而 [HabitProvider.setCheckInValue] 紧接着还会按「已达标 → 跳过今天」重排，
+  /// 两者叠加会让每次打卡都白白做一次「全取消 + 全重挂」的平台往返抖动。
+  /// 只清 8 号槽即可让「稍后提醒」失效，落点由重排逻辑自己接管。
+  Future<void> cancelHabitSnooze(String id) async {
+    try {
+      await _plugin.cancel(habitSnoozeNotifyIdOf(id));
+    } catch (e) {
+      AppLog.d('[通知] 取消习惯稍后提醒失败 id=$id: $e');
+    }
+  }
+
   /// 稍后提醒（snooze）：在 [delay] 后重新弹出该任务提醒。
   ///
   /// F11：使用独立的 [_snoozeNotifyIdOf] 段位，不再复用一次性「截止提醒」的
@@ -1246,7 +1300,7 @@ class NotificationService {
     }
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
-        _chSound,
+        _chHabit, // P3-13：与正式打卡落点同渠道（snooze 后仍归「习惯提醒」名下）
         '习惯提醒',
         channelDescription: '每日习惯打卡提醒',
         importance: Importance.high,
@@ -1443,7 +1497,7 @@ class NotificationService {
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
-          _chSound,
+          _chHabit, // P3-13：漏卡挽留同属习惯，独立渠道
           '习惯提醒',
           channelDescription: '每日习惯打卡提醒',
           importance: Importance.defaultImportance,
@@ -1589,18 +1643,29 @@ class NotificationService {
     Habit habit, {
     int? value,
     int? target,
+    // P3-7（v2.9.5 审计）：休息日分支。调用方（通知 action）发现今天不是计划的
+    // 打卡日、**没有写入任何记录**，此时若沿用默认分支会显示「已打卡 ✓」——
+    // 谎报。改为如实说明「今天不打卡」。
+    bool restDay = false,
   }) async {
     if (!enabled) return;
-    // 达标判定：无参数（布尔习惯路径）视为已打卡；有参数则严格按 value >= target
-    // ——哪怕 value<=0 的异常态也如实显示「已记 0/x」，不再谎报「已打卡 ✓」。
-    final met = value == null || target == null || value >= target;
-    final title = met ? '已打卡 ✓' : '已记 $value/$target';
-    final body = met
-        ? '${habit.emoji} ${habit.title}'
-        : '${habit.emoji} ${habit.title} · 未达标，继续加油';
+    final String title;
+    final String body;
+    if (restDay) {
+      title = '今天不打卡';
+      body = '${habit.emoji} ${habit.title} · 今天不在计划的打卡日';
+    } else {
+      // 达标判定：无参数（布尔习惯路径）视为已打卡；有参数则严格按 value >= target
+      // ——哪怕 value<=0 的异常态也如实显示「已记 0/x」，不再谎报「已打卡 ✓」。
+      final met = value == null || target == null || value >= target;
+      title = met ? '已打卡 ✓' : '已记 $value/$target';
+      body = met
+          ? '${habit.emoji} ${habit.title}'
+          : '${habit.emoji} ${habit.title} · 未达标，继续加油';
+    }
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
-        _chSound,
+        _chHabit, // P3-13：确认通知同属习惯类，归「习惯提醒」渠道
         '习惯提醒',
         channelDescription: '每日习惯打卡提醒',
         importance: Importance.low,

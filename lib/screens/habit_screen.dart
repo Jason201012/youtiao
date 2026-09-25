@@ -140,7 +140,16 @@ Future<void> incrementWithCelebration(
 ///
 /// 此前「设置数量」「今日达标」两条路径直接调 provider，绕过了 [_maybeCelebrate]，
 /// 于是同一屏里「+1」会庆祝、点「今日达标」却毫无反馈——用户以为按钮没生效。
-/// 现在所有「新增达标」的写入口统一走这一层包装（打卡 / +1 / 今日达标 / 通知打卡）。
+///
+/// P3-7（v2.9.5 审计）：**本函数上方原注释**在此声称「所有『新增达标』的写
+/// 入口统一走这一层包装（打卡 / +1 / 今日达标 / **通知打卡**）」——但通知打卡
+/// 走的是 [main.dart] 的 `_doHabitCheckIn`，只能拿到 `NavigatorState.context`，
+/// 从未调用本函数，注释比代码乐观。处置：
+/// - 通知侧无法弹全屏庆祝（App 可能在后台，弹窗不可见且会打断），改为**如实回报**
+///   进度（`showHabitCheckedConfirm` 的「已记 x/y · 未达标」/「已打卡 ✓」），
+///   这是通知场景下唯一有效的反馈形态；
+/// - 因此注释改为只声明它真实覆盖的范围，避免下一轮审计再当成「声称已修」。
+///   界面上四条写入口（打卡 / +1 / 今日达标 / 设置数量）现已全部收口。
 Future<void> completeTodayTargetWithCelebration(
   BuildContext context,
   HabitProvider hp,
@@ -204,14 +213,17 @@ Future<void> showCheckInUndoSnackBar(
     // P3-2：只有「当前仍是操作后的状态（0）」才回写。
     final cur = hp.checkInValueOn(habit, day);
     if (cur != 0) {
-      messenger
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('撤销已失效：这条记录之后已被再次修改'),
-            duration: Duration(seconds: 3),
-          ),
-        );
+      // U3-8（v2.9.5 审计）：此前此处 `messenger..hideCurrentSnackBar()..showSnackBar(...)`，
+      // 与**同一函数上方 4 行**的注释（「不再 `hideCurrentSnackBar()`——主动 hide
+      // 等于亲手丢掉上一条撤销机会」）自相矛盾。复现：习惯页连续两次打卡 →
+      // 点第 1 条横幅的「撤销」（已失效）→ 队列中的第 2 条横幅被一起收走。
+      // 处置：直接入队，不清场。
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('撤销已失效：这条记录之后已被再次修改'),
+          duration: Duration(seconds: 3),
+        ),
+      );
       return;
     }
     hp.setCheckInValue(habit, day, previous);
@@ -642,23 +654,20 @@ class _HabitTile extends StatelessWidget {
                                   : ext.chip,
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            // U3-3（v2.9.4 审计）：「本周 2/5」是裸术语——
-                            // 用户不知道分母是什么、达标了会怎样。Tooltip 给出解释。
-                            // 注意：Tooltip 触屏不可主动发现，故同时把 chip 文案
-                            // 自身补全量词（「次」）——报告点名的「裸术语」问题
-                            // 不能只靠 Tooltip 解决（与 U2-2 同一教训）。
-                            child: Tooltip(
-                              message: '本周已达标 $goalN 天，目标 $goalM 天'
-                                  '（达到即本周达成）',
-                              child: Text('本周 $goalN/$goalM 次',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: goalMet ? primary : ext.meta,
-                                  )),
-                            ),
+                            // U3-3/U3-7（v2.9.4/v2.9.5 审计）：「本周 2/5」是裸
+                            // 术语，此前解释只挂在 Tooltip 上——触屏不可主动发现
+                            // （与 U2-2 同一教训）。改为文案自带「达标」语义；
+                            // 「达标即本周达成」的完整解释下沉到详情弹层常驻文案。
+                            child: Text('本周达标 $goalN/$goalM 次',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: goalMet ? primary : ext.meta,
+                                )),
                           ),
                         // T1-4：宽限日提示（仅开启时显示，避免噪音）。
+                        // U3-7（v2.9.5 审计）：解释此前只挂 Tooltip（触屏不可主动
+                        // 发现）→ 文案自带「漏卡不断签」语义，Tooltip 移除。
                         if (habit.graceDays > 0)
                           Container(
                             padding: const EdgeInsets.symmetric(
@@ -667,13 +676,10 @@ class _HabitTile extends StatelessWidget {
                               color: ext.chip,
                               borderRadius: BorderRadius.circular(8),
                             ),
-                            // U3-3：宽限日同样是裸术语，补 Tooltip 解释
-                            // （「每周允许漏 N 天而不断签」）。
-                            child: Tooltip(
-                              message: '每周允许漏卡 ${habit.graceDays} 天而不中断连续天数',
-                              child: Text('宽限 ${habit.graceDays} 天/周',
-                                  style: TextStyle(fontSize: 11, color: ext.meta)),
-                            ),
+                            child: Text(
+                                '宽限 ${habit.graceDays} 天/周（漏卡不断签）',
+                                style:
+                                    TextStyle(fontSize: 11, color: ext.meta)),
                           ),
                       ],
                     ),
@@ -724,7 +730,11 @@ class _HabitTile extends StatelessWidget {
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(
-                        '$value/$target',
+                        // P3-6（v2.9.5 审计）：同一行左侧 chip 已按休息日改口
+                        // 「今天不打卡」（v2.9.4 的 P3-3），右侧这个点开详情的
+                        // 计数 pill 却仍原样渲染 `0/8`——「左说不打卡、右报 0/8」，
+                        // 用户无从判断该不该点。两处同属一个语义，统一读 [restDay]。
+                        restDay ? '休息' : '$value/$target',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 12,
@@ -744,7 +754,10 @@ class _HabitTile extends StatelessWidget {
                     behavior: HitTestBehavior.opaque,
                     onTap: restDay
                         ? null
-                        : () => promptHabitTodayQuantity(context, hp, habit),
+                        // P3-8（v2.9.5 审计）：此前直调 `promptHabitTodayQuantity`，
+                        // 绕过了 `setTodayQuantityWithCelebration` 的庆祝包装——
+                        // 同一行「+1」会庆祝、「✎ 设数量」不庆祝，用户以为没生效。
+                        : () => setTodayQuantityWithCelebration(context, hp, habit),
                     child: SizedBox(
                       width: 48,
                       height: 48,
@@ -766,7 +779,8 @@ class _HabitTile extends StatelessWidget {
                         : () => incrementWithCelebration(context, hp, habit),
                     onLongPress: restDay
                         ? null
-                        : () => promptHabitTodayQuantity(context, hp, habit),
+                        // P3-8：同上，长按设数量与 ✎ 是同一动作，走同一包装。
+                        : () => setTodayQuantityWithCelebration(context, hp, habit),
                     // U3-1（v2.9.3 审计）：视觉圆钮保持 32×32，外包 48×48 命中区，
                     // 达到 Material 48dp 最小可点目标，小圆钮不再易误触/难点中。
                     child: SizedBox(
@@ -1707,27 +1721,29 @@ class _HabitDetailSheet extends StatelessWidget {
                         const SizedBox(height: 4),
                         Text('$freq · 创建于 $created',
                             style: TextStyle(fontSize: 12, color: ext.meta)),
+                        // U3-7（v2.9.5 审计）：宽限日 / 周目标的完整解释在此
+                        // 常驻展示（卡片 chip 只留短文案），触屏用户点进详情即可见。
                         if (quantified)
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
                             child: Text(
                               '每日目标 $target'
-                              '${habit.graceDays > 0 ? ' · 宽限 ${habit.graceDays} 天/周' : ''}',
+                              '${habit.graceDays > 0 ? ' · 宽限 ${habit.graceDays} 天/周（漏卡不断签）' : ''}',
                               style: TextStyle(fontSize: 12, color: ext.meta),
                             ),
                           )
                         else if (habit.graceDays > 0)
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
-                            child: Text('宽限 ${habit.graceDays} 天/周',
+                            child: Text('宽限 ${habit.graceDays} 天/周（漏卡不断签）',
                                 style: TextStyle(fontSize: 12, color: ext.meta)),
                           ),
                         if (habit.weeklyGoal > 0)
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
                             child: Text(
-                              '本周 ${hp.weeklyCheckIns(habit)}/${habit.weeklyGoal} 次'
-                              '（目标 每周 ${habit.weeklyGoal} 次）',
+                              '本周达标 ${hp.weeklyCheckIns(habit)}/${habit.weeklyGoal} 次'
+                              '（达标 ${habit.weeklyGoal} 次即本周达成）',
                               style: TextStyle(fontSize: 12, color: ext.meta),
                             ),
                           ),
@@ -1852,7 +1868,10 @@ class _HabitDetailSheet extends StatelessWidget {
                           TextButton.icon(
                             onPressed: restDay
                                 ? null
-                                : () => promptHabitTodayQuantity(
+                                // P3-8（v2.9.5 审计）：详情弹层这处「设置数量」同样
+                                // 直调 provider 层、绕过庆祝包装。列表侧两处已改，
+                                // 这里若不改就换个页面又出现「+1 庆祝 / 设数量不庆祝」。
+                                : () => setTodayQuantityWithCelebration(
                                     context, hp, habit),
                             icon: const Icon(Symbols.edit, size: 16),
                             label: const Text('设置数量'),
@@ -2032,6 +2051,21 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
   late int? _dailyTarget = widget.habit.dailyTarget;
   late int _graceDays = widget.habit.graceDays;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // P3-15（v2.9.5 审计）：本类上方注释称「打开编辑层即自动降为计划天数」，
+    // 但此前 `initState` 完全没调 [_syncWeeklyGoalToPlannedDays]——收敛只发生在
+    // 勾选星期与保存时。于是「只打开看一眼就关掉」的用户，界面上的周目标
+    // 仍显示旧的超界值（`+1` 控件的 `onPressed: _weeklyGoal < _maxWeeklyGoal`
+    // 也跟着失效），注释与行为矛盾。
+    //
+    // 兜底补上后：即便内存中的 `weeklyGoal` 超界（读侧已按 P2-5 收敛过，但
+    // 编辑中途的状态不保证），打开弹层即刻呈现合法上界。
+    // **不写库**——落库仍只由 [_save] 触发，保持「不静默改写用户数据」。
+    _syncWeeklyGoalToPlannedDays();
+  }
 
   @override
   void dispose() {

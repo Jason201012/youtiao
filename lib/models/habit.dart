@@ -63,13 +63,12 @@ class Habit {
   /// 存在的理由：`weeklyGoal`（每周目标次数）的上界此前写死 14，于是
   /// 「每周一三五」的习惯也能设「每周 14 次」——目标永远不可达，达成率恒为
   /// 一段死数字，白给用户一个「做不到」的进度条。上界应随计划天数联动。
-  int get plannedDaysPerWeek => weekdays.isEmpty ? 7 : weekdays.length;
-
-  /// P3-10：每周目标次数的**合法上界** = 计划天数（不是 14）。
   ///
-  /// 保留 [maxWeeklyGoal] 作为绝对上限，防止脏数据里的巨值继续向下游传播；
-  /// 但正常入口（新建 / 编辑 UI）与写入兜底都应按本值夹取。
-  static const int maxWeeklyGoal = 14;
+  /// P3-15（v2.9.5 审计）：本成员与 [clampWeeklyGoal] 在 `lib/` 无生产调用
+  /// （仅测试引用）——UI 两处都要在「正在编辑、Habit 尚不存在」时算上界，只能用
+  /// 静态的 [plannedDaysOf]；写入侧三处同理。保留为**静态判据的实例对称形式**：
+  /// 语义正确、有测试锁定，且日后若新增「对已有习惯夹取」的入口可直接复用。
+  int get plannedDaysPerWeek => weekdays.isEmpty ? 7 : weekdays.length;
 
   /// 由 [weekdays] 推出每周计划天数（空 = 每天 = 7）。
   static int plannedDaysOf(List<int> weekdays) =>
@@ -79,14 +78,16 @@ class Habit {
   ///
   /// 静态形式是必要的：新建路径里 `Habit` 实例尚不存在（正在构造中），
   /// 只能拿入参 [weekdays] 算。实例方法 [clampWeeklyGoal] 供已有习惯使用。
+  ///
+  /// 读侧（[fromJson]，P2-5）与写侧（`HabitProvider` 三处）都走这里——
+  /// 判据只有这一处，两侧不会漂移。
   static int clampWeeklyGoalTo(int v, List<int> weekdays) =>
       v.clamp(0, plannedDaysOf(weekdays)).toInt();
 
   /// 夹取每周目标次数到「0 = 不启用，1..计划天数」。
   ///
   /// 供 UI 与写入侧共用，避免两侧各写一份判据再次漂移（与 [maxDailyTarget]
-  /// 同理）。已存档的旧数据若 weeklyGoal > 计划天数，读取时保持原值不动
-  /// （**不静默改写用户数据**），仅在用户主动编辑时才收敛。
+  /// 同理）。
   int clampWeeklyGoal(int v) => clampWeeklyGoalTo(v, weekdays);
 
   /// T1-2：是否为「量化习惯」（设了 positive 的每日目标量）。
@@ -116,23 +117,37 @@ class Habit {
         'graceDays': graceDays,
       };
 
-  factory Habit.fromJson(Map<String, dynamic> j) => Habit(
-        id: j['id'] as String,
-        title: j['title'] as String? ?? '',
-        emoji: j['emoji'] as String? ?? '✅',
-        colorValue: j['color'] as int? ?? 0xFF0061A4,
-        weekdays: (j['weekdays'] as List?)?.map((e) => e as int).toList() ?? [],
-        reminderMinute: j['reminderMinute'] as int?,
-        createdAt: j['createdAt'] is String
-            ? DateTime.parse(j['createdAt'] as String)
-            : DateTime.now(),
-        archived: j['archived'] as bool? ?? false,
-        weeklyGoal: (j['weeklyGoal'] as int? ?? 0).clamp(0, 14),
-        // T1-2 / T1-4：备份是显式不可信输入，越界值一律回落默认——
-        // 目标量 <=0 / 非整数 → 视为布尔习惯；宽限日夹到 [0,3]。
-        dailyTarget: _clampTarget(j['dailyTarget']),
-        graceDays: ((j['graceDays'] as num?)?.toInt() ?? 0).clamp(0, 3),
-      );
+  factory Habit.fromJson(Map<String, dynamic> j) {
+    // P2-5（v2.9.5 审计）：周目标的**读侧**此前写死 `clamp(0, 14)`，与写入侧的
+    // [clampWeeklyGoalTo]（按 `plannedDaysOf`）不是同一档语义。于是老版本建的
+    //「每周一/三/五 · 周目标 7」在升级后仍显示「本周 x/7」——当周只有 3 个计划日，
+    // 目标永远不可达，`consecutiveGoalWeeks` 恒 0、成就「周目标达人」永久锁死，
+    // 且只有用户主动打开编辑层才会收敛、还不落库（与 P3-4 的 `dailyTarget`
+    // 读侧回落 `null` 同型的「双档语义」漏网）。
+    //
+    // 读侧与写入侧统一到 [clampWeeklyGoalTo]：备份 / 数据库是唯一读入口，
+    // 在此处夹取即等价于「读取即静默收敛」（值变小、不改星期，故不丢信息；
+    // 也不需要额外的 dirty 标记位——写回时会被原样保存）。
+    final weekdays =
+        (j['weekdays'] as List?)?.map((e) => e as int).toList() ?? const <int>[];
+    return Habit(
+      id: j['id'] as String,
+      title: j['title'] as String? ?? '',
+      emoji: j['emoji'] as String? ?? '✅',
+      colorValue: j['color'] as int? ?? 0xFF0061A4,
+      weekdays: weekdays,
+      reminderMinute: j['reminderMinute'] as int?,
+      createdAt: j['createdAt'] is String
+          ? DateTime.parse(j['createdAt'] as String)
+          : DateTime.now(),
+      archived: j['archived'] as bool? ?? false,
+      weeklyGoal: clampWeeklyGoalTo((j['weeklyGoal'] as num?)?.toInt() ?? 0, weekdays),
+      // T1-2 / T1-4：备份是显式不可信输入，越界值一律回落默认——
+      // 目标量 <=0 / 非整数 → 视为布尔习惯；宽限日夹到 [0,3]。
+      dailyTarget: _clampTarget(j['dailyTarget']),
+      graceDays: ((j['graceDays'] as num?)?.toInt() ?? 0).clamp(0, 3),
+    );
+  }
 
   /// 解析每日目标量。
   ///

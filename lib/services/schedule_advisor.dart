@@ -239,9 +239,21 @@ ScheduleAdvice buildScheduleAdvice(
       // 恒标「预计超过截止」；对 future dueInDays 则只在到期当天恒真。
       // 后果不是"多提示一次"，而是**风险提示在到期日恒真 → 等于没有提示**，
       // 用户对整块提示脱敏后，真正会超期的任务就被淹没了。
-      // 现改为日期口径：预计结束落在「截止日」之后才算来不及（当天内完成不算）。
-      // 用 date-only 比较天然同时处理了 00:00 与 23:59 两种存储形态。
-      missedDue: due != null && _dateOnly(end).isAfter(_dateOnly(due)),
+      //
+      // P3-1（v2.9.5 审计）：v2.9.4 的日期口径一刀切，**对带具体时刻的截止引入了
+      // 同日假阴性**——截止「今天 10:20」、14:00 才开始做、14:30 结束，整段都晚于
+      // 截止时刻，却不再提示。本轮收敛为**分形态**（[dueCompareKey]，与排序共用
+      // 同一真源）：
+      // - 纯日期形态（00:00 / 23:59）→ **按日比较**：dateOnly(end) 晚于截止日
+      //   才算超期（当天内任何时刻完成都不算，保留 v2.9.4 P2-5 的结论）；
+      // - 带具体时刻 → **按时刻比较**：end 晚于截止时刻即提示。
+      // 注意两侧不能混用：纯日期形态若拿完整时刻 end 与 date-only 键比，
+      // 同日必然 isAfter（00:00 之后的任何时刻都「晚于」）→ 等于退回 v2.9.4
+      // 修复前的恒真 bug；带时刻形态若拿 dateOnly(end) 比，则恒不超期。
+      missedDue: due != null &&
+          (dueIsPureDateForm(due)
+              ? _dateOnly(end).isAfter(dueCompareKey(due))
+              : end.isAfter(dueCompareKey(due))),
       focusedMinutes: t.focusedMinutes,
     ));
     cursor = end;
@@ -257,15 +269,42 @@ ScheduleAdvice buildScheduleAdvice(
 /// date-only 规整（丢弃时分秒），用于「同一天不算超期」这类按日判定的场景。
 DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
+/// 截止时刻的**比较键**归一 —— `missedDue` 判定与 [compareForSchedule] 排序
+/// 共用的唯一真源（P3-1，v2.9.5 审计）。
+///
+/// 本应用的截止时间有两种存储形态：
+/// - **纯日期语义**：「当天 00:00」（模板 `dueInDays` 的产物）或「当天 23:59」
+///   （录入侧历史遗留的占位钉法）。这类截止只有「哪一天」的含义，
+///   当天内任何时刻完成都算没超期（v2.9.4 P2-5 的结论，必须保留）。
+/// - **带具体时刻**：用户显式选了「今天 10:20 截止」。v2.9.4 把它也按日期口径
+///   处理，引入同日假阴性——截止 10:20、14:00 才开始做、14:30 结束，整段都晚于
+///   截止时刻，却不再提示「预计超过截止」（P3-1）。
+///
+/// 归一规则：纯日期形态 → date-only；带时刻 → 原样返回。
+/// 排序与超期判定都过这里，两侧口径**不会**再漂移。
+DateTime dueCompareKey(DateTime due) =>
+    dueIsPureDateForm(due) ? _dateOnly(due) : due;
+
+/// 截止是否为「纯日期」存储形态（当天 00:00 / 23:59，判据与 [dueCompareKey]
+/// 同源）。超期判定据此选择比较粒度：纯日期按「日」比，带时刻按「时刻」比。
+bool dueIsPureDateForm(DateTime due) =>
+    (due.hour == 0 && due.minute == 0 && due.second == 0) ||
+    (due.hour == 23 && due.minute == 59);
+
 /// 排程排序比较器（公开以便单测直接钉死排序口径）。
 ///
 /// 全序：截止时间 → 预计时长 → 优先级 → id。id 兜底保证结果稳定，
 /// 不会因 `List.sort` 的不稳定性在不同运行中给出不同顺序。
+///
+/// P3-1（v2.9.5 审计）：截止比较统一过 [dueCompareKey]——旧实现用**完整时刻**
+/// `compareTo`，与 `missedDue` 的日期口径是两套判据：同一天里「00:00 截止」
+/// 恒排在「09:00 截止」之前（两者语义上都只是「当天截止」，用户看到顺序却像
+/// 有优先级差异）。归一后纯日期形态彼此同键、落进后续比较器，与超期判定同源。
 int compareForSchedule(Task a, Task b, [int defaultMinutes = kDefaultEstimateMinutes]) {
   final da = a.dueDate;
   final db = b.dueDate;
   if (da != null && db != null) {
-    final c = da.compareTo(db);
+    final c = dueCompareKey(da).compareTo(dueCompareKey(db));
     if (c != 0) return c;
   } else if (da != null) {
     return -1; // 有截止的排前

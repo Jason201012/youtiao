@@ -74,6 +74,39 @@ class TemplateItem {
   /// 旧模板 JSON 缺该键时缺省 null（向后兼容，零迁移）。
   final int? estimateMinutes;
 
+  /// 任务备注；套用时整体复制。
+  ///
+  /// P3-10（v2.9.5 审计）：此前 [TemplateItem] 字段集缺 `note`，
+  /// 「另存为模板 → 套用」会静默丢掉备注（备注常含链接 / 口径 / 注意事项，
+  /// 是**不可再生**的内容）。旧模板 JSON 缺该键时缺省空串（零迁移）。
+  final String note;
+
+  /// 一次性任务的提醒提前量（分钟；0 = 准时）。仅非重复任务有意义。
+  ///
+  /// P3-10（v2.9.5 审计）：此前非重复任务的 `reminderOffsetMin` 不进模板，
+  /// 套用后退回默认「准时」，把「提前 15 分钟提醒」的用户设置改掉了。
+  /// 旧模板 JSON 缺该键时缺省 0（与旧行为一致，零迁移）。
+  final int reminderOffsetMin;
+
+  /// P3-10（v2.9.5 审计）：**刻意不迁移**的 [Task] 字段及理由。
+  ///
+  /// 审计要求「补齐字段或明确标注不迁移」。逐项判定如下——这三项不是遗漏，
+  /// 而是**迁移它们反而有害**，故在此固化为设计决策，避免下一轮审计再报：
+  /// - `startDate`：模板以「相对今天 N 天」表达时间语义，套用时重算 `dueDate`；
+  ///   携带绝对开始日会与重算出的 `dueDate` 互相矛盾。
+  /// - `skipDates`（已跳过的发生日）：这是**执行历史**而非计划的一部分。
+  ///   把原任务的「已跳过 3 月 10 日」套到新任务上，等于凭空让它跳过一次。
+  /// - 子任务 / 附件：模板是「计划蓝图」，套用时是**新建**任务。
+  ///   复制子任务进度与附件文件会带来「半完成的新任务」和附件重复占空间；
+  ///   用户要的通常是干净的一份待办。子任务的**存在性**已有 [TemplateItem]
+  ///   无法表达的问题留在功能增强报告里，不在本轮静默复制。
+  static const List<String> intentionallyNotMigrated = [
+    'startDate',
+    'skipDates',
+    'subtasks',
+    'attachments',
+  ];
+
   const TemplateItem(
     this.title,
     this.category,
@@ -90,6 +123,9 @@ class TemplateItem {
     this.monthlyWeekIndex,
     this.monthlyFromEnd = 0,
     this.estimateMinutes,
+    // P3-10（v2.9.5 审计）：补齐此前静默丢失的两个字段（理由见各自注释）。
+    this.note = '',
+    this.reminderOffsetMin = 0,
   });
 
   /// 从一条真实任务生成模板项（「另存为模板」用）。
@@ -123,6 +159,9 @@ class TemplateItem {
       monthlyFromEnd: t.monthlyFromEnd,
       // P2-4（v2.9.3 审计）：预估时长随任务进模板，套用后不再静默丢失。
       estimateMinutes: t.estimateMinutes,
+      // P3-10（v2.9.5 审计）：备注 + 一次性任务提醒提前量此前不迁移。
+      note: t.note,
+      reminderOffsetMin: t.reminderOffsetMin,
     );
   }
 
@@ -142,6 +181,10 @@ class TemplateItem {
         'monthlyWeekIndex': monthlyWeekIndex,
         'monthlyFromEnd': monthlyFromEnd,
         'estimateMinutes': estimateMinutes,
+        // P3-10（v2.9.5 审计）：新增两个键。旧模板 JSON 缺该键 → 缺省
+        // '' / 0（零迁移，与旧行为逐位一致）。
+        'note': note,
+        'reminderOffsetMin': reminderOffsetMin,
       };
 
   factory TemplateItem.fromJson(Map<String, dynamic> j) {
@@ -165,6 +208,13 @@ class TemplateItem {
       // P2-4：与 [Task.fromJson] 同区间夹取（1..43200 分钟），越界视为未设——
       // 模板 JSON 同样是「不可信输入」（可被手改 / 来自他人 / 传输损坏）。
       estimateMinutes: _clampEstimateMinutes(j['estimateMinutes']),
+      // P3-10：与 [Task.fromJson] 同一原则——模板 JSON 是不可信输入。
+      // 备注归一化换行（模板项标题也做同样处理），提前量夹到 0..1440。
+      note: (j['note'] as String? ?? '')
+          .replaceAll(RegExp(r'[\r\n]+'), ' ')
+          .trim(),
+      reminderOffsetMin:
+          ((j['reminderOffsetMin'] as num?)?.toInt() ?? 0).clamp(0, 1440),
     );
   }
 
@@ -502,6 +552,12 @@ int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
       monthlyFromEnd: item.monthlyFromEnd,
       // P2-4（v2.9.3 审计）：套用模板时恢复预估时长，排程建议不再退回 30 分钟兜底。
       estimateMinutes: item.estimateMinutes,
+      // P3-10（v2.9.5 审计）：备注 + 提醒提前量往返补齐。
+      // `reminderOffsetMin` 仅在**有截止且非重复**时生效（`Task` 侧
+      // `normalizedRepeatFields` / 构造校验同口径），无截止时传 0 不会挂出
+      // 幽灵提醒——`_scheduleRemindersFor` 不为无截止任务排提醒。
+      note: item.note,
+      reminderOffsetMin: due == null ? 0 : item.reminderOffsetMin,
       tags: List.from(item.tags),
     ));
     created++;

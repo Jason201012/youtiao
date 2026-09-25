@@ -146,10 +146,24 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
             child: Text('任务模板库',
                 style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
           ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
             child: Text('内置离线清单一键套用；我的模板可编辑 / 分享 / 导入',
                 style: TextStyle(fontSize: 13, color: Colors.grey)),
+          ),
+          // P3-10（v2.9.5 审计）：把「模板不迁移哪些字段」**显式告知**用户。
+          // 此前该边界只存在于代码里，用户「另存为模板 → 套用」后发现子任务/
+          // 附件没了，只能理解为 Bug。说明放在模板库顶部（而非藏在帮助页），
+          // 因为这正是做「另存为模板」决定前需要知道的信息。
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+            child: Text(
+              '模板保存计划规则（标题 / 分类 / 优先级 / 标签 / 重复 / 截止偏移 / '
+              '预计时长 / 备注 / 提醒提前量）；子任务进度、附件与已跳过日期不随模板迁移。',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).colorScheme.outline),
+            ),
           ),
           const Divider(height: 1),
           Expanded(

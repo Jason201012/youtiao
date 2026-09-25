@@ -138,8 +138,10 @@ void main() {
 
   // ── P2-5：missedDue 改日期口径 ────────────────────────────────
   group('P2-5 missedDue 按日期口径（当天完成不算超期）', () {
-    test('今天 10:00 截止、从 10:00 起做 30 分钟 → 不算超期', () {
+    test('模板式 00:00 截止、当天 10:00 起做 30 分钟 → 不算超期', () {
       final now = DateTime(2026, 3, 10, 10, 0);
+      // P3-1（v2.9.5 审计）：00:00 是「纯日期形态」，超期按「日」比较——
+      // 当天内任何时刻完成都不算（原标题写「10:00 截止」与实际 due 不符，已订正）。
       final t = _task('1', title: '模板式今日截止', dueDate: DateTime(2026, 3, 10)); // 当天 00:00（模板 dueInDays 的产物）
       final advice = buildScheduleAdvice([t], now: now);
       expect(advice.items.single.missedDue, isFalse,

@@ -839,19 +839,49 @@ class FocusProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 导出专注会话为 CSV（日期,开始,结束,计划时长(分),实际时长(分),是否完成,关联任务）。
+  /// P3-11（v2.9.5 审计）：专注表列定义（CSV / Excel 共用的**单一真源**）。
+  ///
+  /// 此前表头在 `exportCsv` 与 `report_exporter._fillFocusSheet` 各写一份——
+  /// v2.9.3 给 CSV 补列时 Excel 静默漏改的风险一直存在（任务表在 v2.9.1 就踩过
+  /// 这类双份定义漂移）。现在两路都走这里，下一轮加列只改这一处。
+  static const List<String> focusExportHeaders = [
+    '日期',
+    '开始时间',
+    '结束时间',
+    '计划时长(分)',
+    '实际时长(分)',
+    '是否完成',
+    '关联任务',
+  ];
+
+  /// 专注表一行取值（与 [focusExportHeaders] 逐列对齐）。
+  ///
+  /// 数值列回传真值（计划时长 int / 实际时长 double，Excel 写原生数值单元格），
+  /// CSV 侧对 double 统一 `toStringAsFixed(1)`（与旧格式逐字节一致）。
+  List<Object> focusExportCells(FocusSession s) => [
+        _fmtDate(s.startedAt),
+        _fmt(s.startedAt),
+        _fmt(s.endedAt),
+        (s.plannedSec / 60).round(),
+        s.durationSec / 60,
+        s.completed ? '是' : '否',
+        s.taskTitle ?? '',
+      ];
+
+  /// 导出专注会话为 CSV（列定义见 [focusExportHeaders]）。
   String exportCsv() {
     final buf = StringBuffer();
-    buf.writeln('日期,开始时间,结束时间,计划时长(分),实际时长(分),是否完成,关联任务');
+    buf.writeln(focusExportHeaders.join(','));
     for (final s in _sessions) {
-      final started = _fmt(s.startedAt);
-      final ended = _fmt(s.endedAt);
-      final plannedMin = (s.plannedSec / 60).toStringAsFixed(0);
-      final durMin = (s.durationSec / 60).toStringAsFixed(1);
-      final done = s.completed ? '是' : '否';
-      final task = s.taskTitle == null ? '' : '"${_esc(s.taskTitle!)}"';
-      buf.writeln(
-          '"$started","$ended","$plannedMin","$durMin","$done",$task');
+      final cells = focusExportCells(s);
+      String cell(Object v) =>
+          v is double ? v.toStringAsFixed(1) : v.toString();
+      // P3-11（v2.9.5 审计）顺带修复：表头本就含「日期」列（v2.9.3 补列时
+      // 只加了表头），但数据行从基线起就漏写该字段 → 整行左移一列（开始时间
+      // 落在「日期」列下）。现在从真源 cells 逐列对齐取值，7 列一一对应。
+      buf.writeln('"${cells[0]}","${_fmt(s.startedAt)}","${_fmt(s.endedAt)}",'
+          '"${cell(cells[3])}","${cell(cells[4])}","${cells[5]}",'
+          '"${_esc(s.taskTitle ?? '')}"');
     }
     return buf.toString();
   }
@@ -893,6 +923,11 @@ class FocusProvider extends ChangeNotifier {
   static String _fmt(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} '
       '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
+  /// P3-11：date-only 形态（专注表「日期」列），供 [focusExportCells] 与 Excel 共用。
+  static String _fmtDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
   static String _esc(String s) {
     final v = s.replaceAll('"', '""');
     // S11 修复：CSV 公式注入防护。以 = + - @ 开头的单元格在 Excel/WPS 中会被当作公式执行。

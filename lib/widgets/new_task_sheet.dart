@@ -1693,48 +1693,58 @@ class _TaskSheetState extends State<TaskSheet> {
             ),
           const SizedBox(height: 12),
           // 重复结束日期（可选）：到期后停止循环；点选即设，再点「清除」可清空。
-          Row(
-            children: [
-              Expanded(
-                child: GestureDetector(
-                  onTap: _pickRepeatUntil,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: ext.chip,
-                      borderRadius:
-                          BorderRadius.circular(AppColors.chipRadius),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          _repeatUntilDate == null
-                              ? '无结束日期（无限循环）'
-                              : '结束于 ${_ymd(_repeatUntilDate!)}',
-                          style: TextStyle(
-                            color: scheme.onSurface, fontSize: 15,
-                            fontWeight: _repeatUntilDate == null
-                                ? FontWeight.normal
-                                : FontWeight.w600,
+          //
+          // U2-2（v2.9.5 审计）：本行此前**没有**判 `_repeat != none`（同区上一行的
+          // 「提醒时间」有判），于是「不重复」任务也能看到并设置结束日期——控件自相
+          // 矛盾（「无限循环」与「结束于 X」并存于一个不循环的任务上），且
+          // `Task.normalizedRepeatFields` 在 `!isRepeating` 时把值置 null，
+          // 保存后设定凭空消失，用户只看到一次「假成功」。
+          // 处置：仅在重复类型 ≠ 不重复时渲染这一行。
+          if (_repeat != RepeatType.none) ...[
+            Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: _pickRepeatUntil,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 14),
+                      decoration: BoxDecoration(
+                        color: ext.chip,
+                        borderRadius:
+                            BorderRadius.circular(AppColors.chipRadius),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            _repeatUntilDate == null
+                                ? '无结束日期（无限循环）'
+                                : '结束于 ${_ymd(_repeatUntilDate!)}',
+                            style: TextStyle(
+                              color: scheme.onSurface, fontSize: 15,
+                              fontWeight: _repeatUntilDate == null
+                                  ? FontWeight.normal
+                                  : FontWeight.w600,
+                            ),
                           ),
-                        ),
-                        Icon(Symbols.event_busy, size: 20, color: ext.meta),
-                      ],
+                          Icon(Symbols.event_busy, size: 20, color: ext.meta),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-              if (_repeatUntilDate != null)
-                IconButton(
-                  onPressed: () => setState(() => _repeatUntilDate = null),
-                  icon: const Icon(Symbols.close),
-                  tooltip: '清除结束日期',
-                ),
-            ],
-          ),
-          const SizedBox(height: 18),
+                if (_repeatUntilDate != null)
+                  IconButton(
+                    onPressed: () => setState(() => _repeatUntilDate = null),
+                    icon: const Icon(Symbols.close),
+                    tooltip: '清除结束日期',
+                  ),
+              ],
+            ),
+            const SizedBox(height: 18),
+          ] else
+            const SizedBox(height: 18),
           // 保存
           SizedBox(
             width: double.infinity,

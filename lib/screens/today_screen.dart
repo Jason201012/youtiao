@@ -288,9 +288,16 @@ class _TodoTile extends StatelessWidget {
             // U6：Checkbox 自身即可触发 toggle——保持原 _checkbox 视觉（空心
             // 边框圆角），点击区域仍由 InkWell 接管进入详情；改用 Checkbox
             // 是为了符合 a11y 预期（语义化勾选控件）。
+            //
+            // U2-5（v2.9.5 审计）：此前 `materialTapTargetSize: shrinkWrap` 把命中
+            // 区压到约 18dp——远低于 Material 的 48dp 最小可点目标。勾选框与整行
+            // InkWell（进详情）紧邻，瞄偏几像素就跳进详情页，与用户意图完全相反。
+            // 处置：去掉 shrinkWrap，命中区回到 48dp。
+            // 视觉密度用 `visualDensity: compact` 单独收敛——只压缩视觉，不动命中区
+            // （Material 的正确分层：Density 影响视觉，TapTarget 影响命中）。
             Checkbox(
               value: task.done,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
               onChanged: (_) => onToggle(task),
             ),
             const SizedBox(width: 12),
@@ -702,9 +709,15 @@ class _HabitTile extends StatelessWidget {
                       children: [
                         Flexible(
                           child: Text(
-                            met
-                                ? '今日 ${status.value}/${status.target} · 已达标'
-                                : '今日 ${status.value}/${status.target}',
+                            // P3-6（v2.9.5 审计）：休息日右侧已改显「今天不打卡」，
+                            // 这里却仍报「今日 0/8」——同一行自相矛盾。统一读
+                            // [canCheckIn]（= `shouldCheckInOn`），与列表侧
+                            // `restDay ? '休息' : '$value/$target'` 同一语义。
+                            !canCheckIn
+                                ? '今日休息'
+                                : met
+                                    ? '今日 ${status.value}/${status.target} · 已达标'
+                                    : '今日 ${status.value}/${status.target}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(

@@ -2406,32 +2406,76 @@ class TaskProvider extends ChangeNotifier {
   /// `completedAt`、`focusSecTotal`、`order`，因此 transform 里传 `status: done`
   /// 会被**静默丢弃**（返回条数照常，看起来成功实则无效）。
   /// 要改完成态请逐条调用 [toggleDone] / [setStatus]——它们还会顺带重排重复提醒。
-  int batchUpdate(List<String> ids, Task Function(Task) transform) {
-    if (ids.isEmpty) return 0;
+  ///
+  /// U1-2（v2.9.5 审计）：返回本次编辑的 `batchId`，供 [undoBatchEdit] **定向**撤销。
+  /// 此前 [batchUpdate] 覆写单一缓冲（`List<Task> _lastEditBatch`），于是
+  /// 「批量编辑 A → 10 秒内顺延 B → 点当前可见的那条横幅」会还原 B（缓冲里最后写入的），
+  /// 而横幅文案说的是 A —— 用户看到「撤销」却撤销了别的操作。
+  /// 改法：每次操作分配自增 [batchId]，快照进 `_editUndoLog`；撤销时按 id 取回对应快照。
+  int batchUpdate(List<String> ids, Task Function(Task) transform) =>
+      batchUpdateAs(ids, transform).$2;
+
+  /// P0-1 / U1-2（v2.9.5 审计）：[batchUpdate] 的**定向**版本。
+  ///
+  /// 返回 `(batchId, 实际更新条数)`。调用方应把 [batchId] 传给撤销横幅的
+  /// [undoBatchEdit]，而不是依赖「最近一次」——见 [batchUpdate] 的 U1-2 说明。
+  (int, int) batchUpdateAs(List<String> ids, Task Function(Task) transform) {
+    if (ids.isEmpty) return (0, 0);
     // 先快照再逐条更新：更新会改动 _tasks，边遍历边改不安全。
     final targets = ids.map(byId).whereType<Task>().toList();
     // F1：批量编辑一次性改写 N 条且无快照，历史上「+N 天数输错 / 分类选错」不可逆。
     // 这里外套一份「改前快照」，供 [undoBatchEdit] 一键还原。
     // 撤销按 id 定位（见 [undoBatchEdit]），无需记录索引——中间有插删时索引会错位。
-    _lastEditBatch = targets.map((t) => t.copyWith()).toList();
+    final snapshot = targets.map((t) => t.copyWith()).toList();
+    final batchId = _nextBatchId++;
     var changed = 0;
     for (final t in targets) {
       // P2-4：循环内只改内存（拼音/提醒重排照常逐条生效），循环后统一落库一次。
       if (_applyTaskUpdate(transform(t))) changed++;
     }
     if (changed > 0) {
+      // U1-2：只登记**确实改了内容**的那些（无变更则无可撤销之物）。
+      _editUndoLog[batchId] = snapshot;
+      _trimUndoLog(_editUndoLog);
       notifyListeners();
       _persist();
     }
-    return changed;
+    return (batchId, changed);
   }
 
   // ===== 批量编辑（改前快照 + 撤销）=====
-  // 与删除撤销 [_lastBatch] / [_lastBatchAnchors] 相互独立，互不覆盖。
-  List<Task> _lastEditBatch = [];
+  // 与删除撤销缓冲相互独立，互不覆盖。
 
-  /// 撤销上一次批量编辑：把改前快照逐条写回被改写的任务。
-  /// 仅可撤销最近一次批量编辑（覆盖式缓冲）；与 [undoDelete] 互不影响。
+  /// U1-2（v2.9.5 审计）：**定向**批量编辑撤销缓冲（`batchId` → 改前快照）。
+  ///
+  /// 此前只有单一 `_lastEditBatch` 槽位，后一次 `batchUpdate` 直接覆盖前一次，
+  /// 而 SnackBar 是**队列**展示的（U2-4 修复后不再主动 hide）——于是多条撤销横幅
+  /// 同时在队列里时，点任意一条的「撤销」都只还原**最后一次**编辑，横幅所指与实际
+  /// 动作不一致。改为按操作 id 存储：每条横幅闭包持有自己那次操作的 id。
+  ///
+  /// 上限 [_kUndoLogMax] 条：超过即淘汰最旧的（10 秒窗口外的撤销机会本就过期，
+  /// 留着只是内存）。淘汰是 FIFO，`_nextBatchId` 单调递增故无需重排。
+  final Map<int, List<Task>> _editUndoLog = {};
+
+  /// 删除撤销的定向缓冲（结构同上，但值是「任务 + 邻居锚点」）。
+  final Map<int, _DeleteUndoEntry> _deleteUndoLog = {};
+
+  /// 自增操作 id（删除 / 批量编辑共用一个序列，两套缓冲本身相互独立）。
+  int _nextBatchId = 1;
+
+  /// 撤销缓冲的条数上限（FIFO 淘汰）。
+  static const int _kUndoLogMax = 16;
+
+  /// 淘汰最旧的撤销记录，保持内存有界。
+  void _trimUndoLog(Map<int, Object> log) {
+    while (log.length > _kUndoLogMax) {
+      final oldest = log.keys.reduce((a, b) => a < b ? a : b);
+      log.remove(oldest);
+    }
+  }
+
+  /// 撤销一次批量编辑：[batchId] 为 null / 0 时表示「撤销最近一次」
+  /// （兼容既有测试与未升级的调用点）。
   ///
   /// P1-1(v2.7.6)：必须逐条应用完整更新链路而非直接改内存——批量顺延「+N 天」后撤销时，
   /// 截止日期会回滚，唯有重排链路会触发 `_cancelRemindersFor/_scheduleRemindersFor`
@@ -2441,19 +2485,26 @@ class TaskProvider extends ChangeNotifier {
   /// 之后若用户新增/删除/排序过任务，按旧索引写回会覆盖到无辜任务（数据错乱）。
   /// 这里用 `indexWhere(id)` 找当前位置；找不到说明任务已被删除，跳过（不复活）。
   ///
-  /// P2-4：撤销循环内只改内存（[undoBatchEdit] 逐条走 [_applyTaskUpdate]，
-  /// 提醒重排 / 拼音重算照常生效），循环结束后统一 notify + 落库一次，
-  /// 消除 N 条 × 全量持久化的写放大。
-  void undoBatchEdit() {
-    if (_lastEditBatch.isEmpty) return;
+  /// P2-4：撤销循环内只改内存（逐条走 [_applyTaskUpdate]，提醒重排 / 拼音重算
+  /// 照常生效），循环结束后统一 notify + 落库一次，消除 N 条 × 全量持久化的写放大。
+  ///
+  /// U1-2（v2.9.5 审计）：按 [batchId] 定向取回快照——点哪条横幅的「撤销」，
+  /// 就撤销那次操作，而不是「最近一次」。
+  void undoBatchEdit([int? batchId]) {
+    final log = _editUndoLog;
+    if (log.isEmpty) return;
+    final id = (batchId == null || batchId == 0)
+        ? log.keys.reduce((a, b) => a > b ? a : b)
+        : batchId;
+    final batch = log.remove(id);
+    if (batch == null || batch.isEmpty) return;
     var changed = false;
-    for (final orig in _lastEditBatch) {
+    for (final orig in batch) {
       if (byId(orig.id) == null) continue; // 任务已不在列表（被删除），不允许复活
       // _applyTaskUpdate 会强制保留 status/completedAt/focusSecTotal/order
       // （批量编辑本就不改这些字段），并复用提醒重排 / 拼音重算等既有逻辑。
       if (_applyTaskUpdate(orig)) changed = true;
     }
-    _lastEditBatch = [];
     if (changed) {
       notifyListeners();
       _persist();
@@ -2463,41 +2514,44 @@ class TaskProvider extends ChangeNotifier {
   /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。
   /// 语义是「改期」而非「加天数」——过期多久都拉到同一天，重复任务的重锚点不受影响，
   /// 提醒由 [updateTask] 统一重排。无截止日期的任务原样保留。返回实际更新条数。
-  int postponeTo(List<String> ids, DateTime targetDay) {
-    return batchUpdate(ids, (t) {
-      final d = t.dueDate;
-      if (d == null) return t;
-      return t.copyWith(
-        dueDate: DateTime(
-            targetDay.year, targetDay.month, targetDay.day, d.hour, d.minute),
-      );
-    });
-  }
+  int postponeTo(List<String> ids, DateTime targetDay) =>
+      postponeToAs(ids, targetDay).$2;
+
+  /// P0-2 / U1-2（v2.9.5 审计）：[postponeTo] 的**定向**版本，返回 `(batchId, 条数)`。
+  /// 顺延与批量编辑共用 [_editUndoLog]，故同样可被精确撤销。
+  (int, int) postponeToAs(List<String> ids, DateTime targetDay) =>
+      batchUpdateAs(ids, (t) {
+        final d = t.dueDate;
+        if (d == null) return t;
+        return t.copyWith(
+          dueDate: DateTime(
+              targetDay.year, targetDay.month, targetDay.day, d.hour, d.minute),
+        );
+      });
 
   // ===== 删除（移入回收站，带撤销）=====
   // 用批量撤销缓冲，使「单个删除」与「多选批量删除」共用同一套撤销逻辑。
-  List<Task> _lastBatch = [];
-
-  /// F-05：删除时记下的**邻居锚点**（每个被删任务一条，与 [_lastBatch] 一一对应）。
-  ///
-  /// 此前记的是删除瞬间的列表下标，撤销时按下标插回。
-  /// 问题是删除后用户可能又新增 / 删除 / 勾选 / 拖拽过，列表早已不是当时的样子——
-  /// 陈旧下标会把任务插到**错误位置**（甚至挤掉无关任务附近），且旧 order 与
-  /// 新邻居不连续，后续手动排序错乱（CHANGELOG v2.5.8 自记的「Bug5 择机延后」）。
-  /// 这里改成记「删除时紧邻的前后任务 id」（跳过同时被删的邻居），
-  /// 撤销时按 id 定位——与 [undoBatchEdit] 的「按 id 定位」口径统一。
-  List<({String? prevId, String? nextId})> _lastBatchAnchors = [];
+  //
+  // U1-2（v2.9.5 审计）：[_lastBatch] / [_lastBatchAnchors] 这一对「单槽位」
+  // 已被 [_deleteUndoLog]（`batchId` → [_DeleteUndoEntry]）取代。保留单槽位
+  // 会让「删 A → 10 秒内删 B → 点当前那条横幅的撤销」恢复 B 而非 A
+  // （横幅文案写的是 A）。改为按操作 id 存放，每条横幅闭包持有自己那次的 id。
 
   /// 批量删除指定 id 的任务：从任务列表移除，移入回收站（记录删除时间），
-  /// 并取消其全部本地提醒。返回被删除的任务列表（按原始索引升序）。
-  /// 注意：每次调用都会覆盖上一次删除的撤销缓冲（仅可撤销最近一次删除操作）。
-  List<Task> _removeMany(List<String> ids) {
+  /// 并取消其全部本地提醒。返回 `(batchId, 被删任务列表)`（按原始索引升序），
+  /// `batchId` 供撤销横幅闭包定向恢复。
+  ///
+  /// U1-2（v2.9.5 审计）：原无返回值的 `_removeMany` 包装已无调用点，删除
+  /// （analyze 曾报 unused_element）。
+  (int, List<Task>) _removeManyAs(List<String> ids) {
     // 收集待删任务的原始索引与对象（升序）
     final toRemove = <int, Task>{};
     for (final id in ids) {
       final i = _tasks.indexWhere((t) => t.id == id);
       if (i != -1) toRemove[i] = _tasks[i];
     }
+    if (toRemove.isEmpty) return (0, const <Task>[]);
+
     final sortedIdx = toRemove.keys.toList()..sort(); // 升序
     // F-05：删除前先记锚点——取「左右两侧第一个不被本次删除波及」的任务 id，
     // 这样多个相邻任务同时被删时，锚点仍指向撤销后依然存在的任务。
@@ -2525,34 +2579,56 @@ class TaskProvider extends ChangeNotifier {
       _cancelRemindersFor(r.id);
       _trash.insert(0, r.copyWith(deletedAt: DateTime.now()));
     }
-    _lastBatch = sortedIdx.map((i) => toRemove[i]!).toList(); // 升序
-    _lastBatchAnchors = anchors; // 升序，与 _lastBatch 一一对应
+    final batch = sortedIdx.map((i) => toRemove[i]!).toList(); // 升序
+    // U1-2：登记到定向缓冲——本次删除的横幅闭包持有这个 batchId，
+    // 点它的「撤销」只会撤销本次（哪怕期间又删了别的）。
+    final batchId = _nextBatchId++;
+    _deleteUndoLog[batchId] = _DeleteUndoEntry(batch, anchors);
+    _trimUndoLog(_deleteUndoLog);
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：新入回收站后重排过期预告
-    return _lastBatch;
+    return (batchId, batch);
   }
 
-  /// P2-22：从删除撤销缓冲中移除指定任务（_lastBatch 与 [_lastBatchAnchors] 一一对应，
-  /// 必须同步删除，否则后续撤销会按错位锚点把快照塞回错误的位置）。
+  /// P2-22 / U1-2（v2.9.5 审计）：从**所有**待撤销的删除缓冲中移除指定任务。
+  ///
+  /// 此前只动单一 `_lastBatch` 槽位；改为定向缓冲后必须遍历 [_deleteUndoLog]，
+  /// 否则「删除后 10 秒内就彻底删除该任务」再点撤销，会把一个**物理上已不存在**
+  /// 的任务复活到列表里（其附件目录已被 [AttachmentService.removeDir] 删掉）。
+  /// 条目内的任务与锚点是一一对应的，删任一方都必须同步。
   void _dropFromUndoBuffer(String id) {
-    final k = _lastBatch.indexWhere((t) => t.id == id);
-    if (k == -1) return;
-    _lastBatch.removeAt(k);
-    if (k < _lastBatchAnchors.length) _lastBatchAnchors.removeAt(k);
+    _deleteUndoLog.removeWhere((_, e) {
+      final k = e.tasks.indexWhere((t) => t.id == id);
+      if (k == -1) return false;
+      e.tasks.removeAt(k);
+      if (k < e.anchors.length) e.anchors.removeAt(k);
+      return e.tasks.isEmpty;
+    });
   }
 
   /// 删除指定 id 的任务：从任务列表移除，并移入回收站（记录删除时间）。
   /// 返回被删除的任务（用于撤销 / 提示）。
-  Task? deleteTask(String id) {
-    final removed = _removeMany([id]);
-    return removed.isEmpty ? null : removed.first;
+  ///
+  /// U1-2：需要定向撤销时请改用 [deleteTaskAs]（拿到 `batchId`）。
+  Task? deleteTask(String id) => deleteTaskAs(id).$2;
+
+  /// [deleteTask] 的定向版本：返回 `(batchId, 被删任务)`。
+  /// `batchId == 0` 表示没删到任何东西（id 不存在），此时第二个元素为 null。
+  (int, Task?) deleteTaskAs(String id) {
+    final r = _removeManyAs([id]);
+    return (r.$1, r.$2.isEmpty ? null : r.$2.first);
   }
 
   /// 多选批量删除：一次删除多个任务（移入回收站，可整体撤销）。
-  void deleteTasks(List<String> ids) => _removeMany(ids);
+  ///
+  /// U1-2：需要定向撤销时请改用 [deleteTasksAs]。
+  void deleteTasks(List<String> ids) => deleteTasksAs(ids);
 
-  /// 撤销上一次删除（支持批量）：从回收站取回，按**邻居锚点**归位，恢复其本地提醒。
+  /// [deleteTasks] 的定向版本：返回 `(batchId, 被删任务列表)`。
+  (int, List<Task>) deleteTasksAs(List<String> ids) => _removeManyAs(ids);
+
+  /// 撤销一次删除（支持批量）：从回收站取回，按**邻居锚点**归位，恢复其本地提醒。
   ///
   /// F-05 修复：不再用删除瞬间的下标（列表早已变动，陈旧下标会插错位置），改为
   /// 按记下的前后邻居 id 定位：
@@ -2561,12 +2637,23 @@ class TaskProvider extends ChangeNotifier {
   ///  3) 两端都不在了（邻居也被删并已彻底清除等）→ 落到所属**分区末尾**，
   ///     比按陈旧下标乱插安全得多。
   /// 归位后对该分区重算 [Task.order]，使手动排序重新连续（旧 order 会与邻居重叠）。
-  void undoDelete() {
-    if (_lastBatch.isEmpty) return;
-    for (var k = 0; k < _lastBatch.length; k++) {
-      final r = _lastBatch[k];
-      final anchor = k < _lastBatchAnchors.length
-          ? _lastBatchAnchors[k]
+  ///
+  /// U1-2（v2.9.5 审计）：[batchId] 为 null / 0 时取「最近一次」（兼容既有调用点）；
+  /// 传入具体 id 则**只撤销那次删除**——点哪条横幅的「撤销」就还原哪一次操作。
+  void undoDelete([int? batchId]) {
+    final log = _deleteUndoLog;
+    if (log.isEmpty) return;
+    final id = (batchId == null || batchId == 0)
+        ? log.keys.reduce((a, b) => a > b ? a : b)
+        : batchId;
+    final entry = log.remove(id);
+    if (entry == null || entry.tasks.isEmpty) return;
+    final batch = entry.tasks;
+    final anchors = entry.anchors;
+    for (var k = 0; k < batch.length; k++) {
+      final r = batch[k];
+      final anchor = k < anchors.length
+          ? anchors[k]
           : (prevId: null, nextId: null);
       _trash.removeWhere((t) => t.id == r.id);
       final at = _resolveUndoIndex(r, anchor);
@@ -2574,8 +2661,6 @@ class TaskProvider extends ChangeNotifier {
       _scheduleRemindersFor(r);
       _renumberSection(_sectionNameOf(r));
     }
-    _lastBatch = [];
-    _lastBatchAnchors = [];
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：撤销删除后重排
@@ -2658,7 +2743,7 @@ class TaskProvider extends ChangeNotifier {
     // P0-1：彻底删除时一并清理其附件目录，避免孤立文件长期占用空间。
     AttachmentService.removeDir(id);
     // P2-22：彻底删除后必须作废删除撤销缓冲中的对应项。此前 permanentDelete /
-    // clearTrash 物理删除了附件却不清 _lastBatch，撤销窗口内先彻底删除再点撤销 →
+    // clearTrash 物理删除了附件却不清撤销缓冲，撤销窗口内先彻底删除再点撤销 →
     // 任务复活但附件已删，详情页附件全部「文件不存在」。
     _dropFromUndoBuffer(id);
     notifyListeners();
@@ -2676,10 +2761,8 @@ class TaskProvider extends ChangeNotifier {
     }
     _trash.clear();
     // P2-22：清空回收站后同样作废删除撤销缓冲（附件已物理删除，不允许复活）。
-    if (_lastBatch.isNotEmpty) {
-      _lastBatch = [];
-      _lastBatchAnchors = [];
-    }
+    // U1-2：改为清空整张定向缓冲（不再只是「最近一次」那一条）。
+    if (_deleteUndoLog.isNotEmpty) _deleteUndoLog.clear();
     notifyListeners();
     _persist();
     NotificationService.instance.cancelTrashExpireNotice(); // P1-12：清空回收站即取消预告
@@ -2837,7 +2920,27 @@ class TaskProvider extends ChangeNotifier {
 
   /// 任务表的**原始（未转义）**一行取值，顺序与 [taskTableHeaders] 严格一致。
   /// [includeAttachments] 为 false 时「附件」列给出空串（保持列数对齐）。
+  ///
+  /// P3-3（v2.9.5 审计）：本方法委托 [taskTableCells]（真源）并逐项 `toString()`，
+  /// 供 CSV 等纯文本格式使用。数值列在 CSV 里仍是文本（CSV 没有类型系统），
+  /// Excel 路径请直接用 [taskTableCells]，否则「预计时长 / 累计专注」又会变回
+  /// 文本单元格（不能求和 / 排序）。
   static List<String> taskTableValues(
+    Task t, {
+    required bool deleted,
+    bool includeAttachments = false,
+  }) =>
+      taskTableCells(t, deleted: deleted, includeAttachments: includeAttachments)
+          .map((v) => v.toString())
+          .toList();
+
+  /// P3-3（v2.9.5 审计）：任务表一行**单元格值**（Excel 路径的真源）。
+  ///
+  /// 与 [taskTableValues] 的唯一区别：数值列回传 **int** 而非字符串——Excel 侧
+  /// `_set` 据此写入 [IntCellValue]，「预计时长(分钟)」「累计专注(分钟)」才能
+  /// 求和 / 排序 / 透视（P3-6 修好了专注/习惯/打卡三表，任务表是最后一个漏网点）。
+  /// 无值仍回传空串（保持列数对齐，与 CSV 逐字节一致）。
+  static List<Object> taskTableCells(
     Task t, {
     required bool deleted,
     bool includeAttachments = false,
@@ -2846,7 +2949,7 @@ class TaskProvider extends ChangeNotifier {
     final completed = t.completedAt == null ? '' : _fmt(t.completedAt!);
     // 备注 / 标题可能含换行：归一为空格，避免单个逻辑行在表格里被拆成多行。
     final note = t.note.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
-    return <String>[
+    return <Object>[
       t.title,
       _prioLabel(t.priority),
       _catLabel(t.category),
@@ -2860,9 +2963,11 @@ class TaskProvider extends ChangeNotifier {
       t.subtaskTotal == 0 ? '' : '${t.subtaskDone}/${t.subtaskTotal}',
       t.repeatSummary,
       _reminderLabel(t),
-      // T1-1：预计时长（无预估留空，保持列数对齐）。
-      t.hasEstimate ? '${t.estimateMinutes}' : '',
-      t.focusSecTotal > 0 ? (t.focusSecTotal / 60).round().toString() : '',
+      // T1-1：预计时长（无预估留空，保持列数对齐）。P3-3：int 直写。
+      // hasEstimate 契约保证 estimateMinutes 非空且 >0，此处 `!` 安全
+      // （否则 int? 会与 `<Object>` 列表字面量类型不匹配，analyze 报错）。
+      t.hasEstimate ? t.estimateMinutes! : '',
+      t.focusSecTotal > 0 ? (t.focusSecTotal / 60).round() : '',
       includeAttachments ? _attachmentSummary(t, true) : '',
     ];
   }
@@ -3123,6 +3228,17 @@ class TaskProvider extends ChangeNotifier {
     final today = DateTime(now.year, now.month, now.day);
     return DateTime(d.year, d.month, d.day).isBefore(today);
   }
+}
+
+/// U1-2（v2.9.5 审计）：一次删除操作的撤销凭据。
+///
+/// [tasks] 与 [anchors] 严格一一对应（同下标），删任一方都要同步删另一方
+/// （见 [TaskProvider._dropFromUndoBuffer]）。以**可变列表**持有是因为
+/// 「删除后 10 秒内又彻底删除其中某条」需要就地剔除。
+class _DeleteUndoEntry {
+  final List<Task> tasks;
+  final List<({String? prevId, String? nextId})> anchors;
+  _DeleteUndoEntry(this.tasks, this.anchors);
 }
 
 /// 自动备份快照的轻量描述（供「备份与恢复」面板列出与还原）。

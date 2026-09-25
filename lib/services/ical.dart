@@ -124,6 +124,14 @@ DateTime? _parseIcsDateTime(String s) {
 
 String _pad2(int n) => n.toString().padLeft(2, '0');
 
+/// P2-2（v2.9.5 审计）：本 App 私有的「预计时长」扩展属性名。
+///
+/// RFC 5545 §3.8.8.2 规定 `X-` 前缀属性用于扩展，第三方解析器遇到不认识的
+/// `X-` 属性**必须忽略**（而非丢弃整个组件），因此与 [Task] 的标准
+/// `DURATION` 并存是安全的：[DURATION] 在有 DUE 时被 RFC 禁止同现（§3.6.2），
+/// 由本属性承担往返。
+const String _kEstimateProp = 'X-YOUTIAO-ESTIMATE-MINUTES';
+
 /// 把一组任务导出为完整 .ics（外层 VCALENDAR + 每个任务的 VTODO）。
 ///
 /// [tasks] 为活跃任务；[extra] 为可选的额外任务（如回收站需一并导出时传入）。
@@ -152,8 +160,29 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     // 完全没有该字段——用户把任务导入系统日历 / 第三方待办后，「预计 45 分钟」
     // 这一信息单向丢失，排期时只能凭感觉。RFC 5545 用 DURATION 表达时长，
     // 这是 VTODO 表达预计耗时的标准位置（TYPE=DURATION，默认值）。
-    if (t.estimateMinutes != null) {
-      buf.writeln('DURATION:PT${t.estimateMinutes}M');
+    //
+    // P2-2（v2.9.5 审计）：**有 DUE 时不写 DURATION**。RFC 5545 §3.6.2 明确
+    // `DUE` 与 `DURATION` MUST NOT 在同一组件中同时出现（`DURATION` 在
+    // VTODO 里是**值类型**属性，语义是「从 DUE/DTSTART 起算的持续时间」，
+    // 与「绝对到期时刻」互斥）。v2.9.5 补上 DURATION 导出时两行互相独立，
+    // 于是「截止今天 18:00 + 预计 45 分钟」会同时写出 DUE 与 DURATION ——
+    // Google 日历等严格解析器会**整体丢弃该条目**（用户看到的是「任务不见了」，
+    // 比字段缺失严重得多）。
+    // 处置：**有 DUE 时绝不写 DURATION**（RFC 5545 §3.6.2 禁止二者同现）。
+    // 但「不写」不等于「丢弃」——那会让「截止 + 预计时长」这类最常见的任务
+    // 在往返后再次丢失预计（v2.9.5 原本能带出去，删掉即回退）。
+    // 故改用 RFC 5545 §3.8.8.2 正式允许的扩展属性 `X-`：第三方解析器按规范
+    // **必须忽略**不认识的 X- 属性（不会因此丢条目），而本 App 导入侧能读回来，
+    // 往返幂等与规范合规同时成立。DURATION 仅在「无 DUE 落点」时仍按标准写出。
+    //
+    // P2-3：判据用 [Task.hasEstimate]（>0）而非 `!= null`——与排程建议 / 偏差
+    // 提示同口径，避免手工改过的备份里 `estimateMinutes: 0` 导出成 `PT0M`
+    // 这种「声称 0 分钟预计」的无意义条目。
+    if (t.hasEstimate) {
+      if (due == null) {
+        buf.writeln('DURATION:PT${t.estimateMinutes}M');
+      }
+      buf.writeln('$_kEstimateProp:${t.estimateMinutes}');
     }
     // 优先级：高=1 / 中=5 / 低=9（iCal 1 最高、9 最低）。
     final prio = t.priority == Priority.high
@@ -277,7 +306,18 @@ String? _toRrule(Task t) {
     case RepeatType.interval:
       base = 'FREQ=DAILY;INTERVAL=${t.repeatInterval < 1 ? 1 : t.repeatInterval}';
     case RepeatType.monthly:
-      if (t.monthlyWeekday != null && t.monthlyWeekIndex != null) {
+      // P2-3（v2.9.5 审计）：分档优先级必须与 `Task.repeatsOn` 一致
+      // （fromEnd > nthWeekday > day）——那才是「这条规则今天到底生不生效」
+      // 的唯一真源。此前导出侧是 nthWeekday 优先、且**完全没有** fromEnd 分支，
+      // 于是「每月倒数第 3 天」恒被导出成「每月 1 号」。
+      if (t.monthlyFromEnd > 0) {
+        // RFC 5545 的 `BYMONTHDAY` 接受**负值**表示从月末倒数
+        //（`BYMONTHDAY=-3` = 每月倒数第 3 天）。注意本 App 里 31 号的语义是
+        // 「小月前移到当月最后一天」（`Task._monthlyFromEndTarget`），
+        // 与 RFC 的「超出月长则跳过该月」不同，故仍写负值交由下游判定，
+        // 与既有 BYDAY/BYSETPOS 分支保持同一取舍（不静默改写用户规则）。
+        base = 'FREQ=MONTHLY;BYMONTHDAY=-${t.monthlyFromEnd.clamp(1, 31)}';
+      } else if (t.monthlyWeekday != null && t.monthlyWeekIndex != null) {
         final wd = _dartWeekdayToIcs[t.monthlyWeekday!];
         final pos = t.monthlyWeekIndex == 5 ? -1 : t.monthlyWeekIndex!;
         base = wd != null ? 'FREQ=MONTHLY;BYDAY=$wd;BYSETPOS=$pos' : 'FREQ=MONTHLY';
@@ -650,10 +690,13 @@ Task? _blockToTask(Map<String, String> b) {
   List<int> weekdays = const <int>[];
   int interval = 2;
   String? repeatUntil;
-  // 每月重复（.ics 往返用）：day-of-month 或 第 N 个周几。
+  // 每月重复（.ics 往返用）：day-of-month 或 第 N 个周几 或 倒数第 N 天。
   int monthlyDayIcs = 1;
   int? monthlyWeekdayIcs;
   int? monthlyWeekIndexIcs;
+  // P2-3（v2.9.5 审计）：`BYMONTHDAY` 为负值 = 从月末倒数，与本 App 的
+  // [Task.monthlyFromEnd] 语义一一对应（往返此前会把它降级成「每月 1 号」）。
+  int monthlyFromEndIcs = 0;
   if (rrule != null) {
     final map = <String, String>{};
     for (final part in rrule.split(';')) {
@@ -701,13 +744,23 @@ Task? _blockToTask(Map<String, String> b) {
         weekdays = [dueDate?.weekday ?? DateTime.monday];
       }
     } else if (freq == 'MONTHLY') {
-      // 每月 N 号：BYMONTHDAY；每月第 N 个周几：BYDAY + BYSETPOS（-1=最后一个）。
+      // 每月 N 号：BYMONTHDAY（负值 = 倒数第 N 天）；每月第 N 个周几：BYDAY + BYSETPOS。
       final byMonthDay = map['BYMONTHDAY'];
       if (byMonthDay != null) {
         final d = int.tryParse(byMonthDay);
-        if (d != null && d >= 1 && d <= 31) {
+        if (d != null && d < 0) {
+          // 倒数分支：RFC 允许 -1..-31。本 App 夹到 1..31（0 无意义）。
+          final n = d.abs();
+          if (n >= 1 && n <= 31) {
+            repeat = RepeatType.monthly;
+            monthlyFromEndIcs = n;
+            monthlyWeekdayIcs = null;
+            monthlyWeekIndexIcs = null;
+          }
+        } else if (d != null && d >= 1 && d <= 31) {
           repeat = RepeatType.monthly;
           monthlyDayIcs = d;
+          monthlyFromEndIcs = 0;
           monthlyWeekdayIcs = null;
           monthlyWeekIndexIcs = null;
         }
@@ -781,6 +834,58 @@ Task? _blockToTask(Map<String, String> b) {
     monthlyDay: monthlyDayIcs,
     monthlyWeekday: monthlyWeekdayIcs,
     monthlyWeekIndex: monthlyWeekIndexIcs,
+    // P2-3（v2.9.5 审计）：`BYMONTHDAY=-N` → 「每月倒数第 N 天」。
+    monthlyFromEnd: monthlyFromEndIcs,
+    // P2-3（v2.9.5 审计）：解析预计时长回填。此前导入侧**完全**没有这个分支，
+    // 往返后 `estimateMinutes` 恒 null。读取顺序：
+    //   1) `X-YOUTIAO-ESTIMATE-MINUTES`（本 App 导出侧专用，RFC 合规的往返通道）；
+    //   2) 标准 `DURATION`（第三方日历的写法，含本 App 无 DUE 时的自身产物）。
+    estimateMinutes: _parseEstimateProperty(b[_kEstimateProp]) ??
+        _parseDurationMinutes(b['DURATION']),
     pinyinInitials: Task.computePinyinInitials(title),
   );
+}
+
+/// P2-2（v2.9.5 审计）：解析本 App 的 [ _kEstimateProp ] 扩展属性。
+/// 与 [Task.fromJson] 同一「不可信输入」口径：非数值 / <1 / >43200 一律 null。
+int? _parseEstimateProperty(String? raw) {
+  if (raw == null) return null;
+  final v = int.tryParse(raw.trim());
+  if (v == null || v < 1 || v > 30 * 24 * 60) return null;
+  return v;
+}
+
+/// P2-3（v2.9.5 审计）：把 RFC 5545 的 `DURATION` 值解析为分钟数。
+///
+/// 支持的组合（RFC 5545 §3.3.6 的 duration 语法子集，均为导出侧会写的形态）：
+/// - `PT45M` → 45
+/// - `PT1H30M` → 90（小时 + 分钟）
+/// - `P1DT2H`  → 1560（天 + 小时，第三方日历常用）
+/// - `PT0S`    → 0 → 按 [Task] 的「1..43200」口径视为未设（返回 null）
+///
+/// 与 [Task.fromJson] 的口径严格一致：<1 或 >43200（30 天）一律返回 null
+/// （视为未设），不静默夹取——避免把第三方日历的「全天事件」误当成
+/// 「30 天预计」写进任务。
+int? _parseDurationMinutes(String? raw) {
+  if (raw == null) return null;
+  final v = raw.trim().toUpperCase();
+  // 必须以 P 开头、以 T 或纯日期段结束；P{n}W（周）本 App 无对应语义 → 不解析。
+  final m = RegExp(
+    r'^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$',
+  ).firstMatch(v);
+  if (m == null) return null;
+  final weeks = int.tryParse(m.group(1) ?? '') ?? 0;
+  final days = int.tryParse(m.group(2) ?? '') ?? 0;
+  final hours = int.tryParse(m.group(3) ?? '') ?? 0;
+  final minutes = int.tryParse(m.group(4) ?? '') ?? 0;
+  final seconds = int.tryParse(m.group(5) ?? '') ?? 0;
+  // 纯 `P` / `PT` 之类的空写法视为无时长。
+  if (weeks == 0 && days == 0 && hours == 0 && minutes == 0 && seconds == 0) {
+    return null;
+  }
+  // 周不进位（导出侧不写；`P1W` 与「7 天」在本 App 是两个概念，宁可不猜）。
+  if (weeks > 0) return null;
+  final total = days * 24 * 60 + hours * 60 + minutes + seconds ~/ 60;
+  if (total < 1 || total > 30 * 24 * 60) return null;
+  return total;
 }

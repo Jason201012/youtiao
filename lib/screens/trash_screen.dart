@@ -128,21 +128,32 @@ class TrashScreen extends StatelessWidget {
                               size: 22, color: primary),
                           tooltip: '恢复',
                           padding: EdgeInsets.zero,
+                          // U1-1（v2.9.5 审计）：两钮此前都是 36dp——低于
+                          // Material 48dp 最小可点目标，且两个语义相反的图标
+                          // 紧邻，「恢复」与「彻底删除」只差 36 像素，极易点错。
                           constraints: const BoxConstraints(
-                            minWidth: 36,
-                            minHeight: 36,
+                            minWidth: 48,
+                            minHeight: 48,
                           ),
                         ),
                         // 彻底删除
+                        //
+                        // U1-1：单条彻底删除此前**无任何二次确认**——一次误触即永久
+                        // 删除任务**及其附件目录**（`permanentDelete` 连附件一起删），
+                        // 而同屏「清空回收站」尚有确认弹窗（见 [_confirmClear]），
+                        // 单条删除的保护反而更弱，逻辑上说不通。
+                        // 现补确认（附件是异步 FS 统计，弹窗文案统一按「含附件」
+                        // 表述，不为此引入同步 IO）。
                         IconButton(
-                          onPressed: () => provider.permanentDelete(t.id),
+                          onPressed: () =>
+                              _confirmPermanentDelete(context, provider, t),
                           icon: Icon(Symbols.delete_forever,
                               size: 22, color: error),
                           tooltip: '彻底删除',
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(
-                            minWidth: 36,
-                            minHeight: 36,
+                            minWidth: 48,
+                            minHeight: 48,
                           ),
                         ),
                       ],
@@ -192,6 +203,41 @@ class TrashScreen extends StatelessWidget {
               provider.clearTrash();
             },
             child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// U1-1（v2.9.5 审计）：单条彻底删除的二次确认。
+  ///
+  /// 此前单条删除**无确认**、两钮仅 36dp 且语义相反的图标紧邻，一次误触即永久
+  /// 丢失任务及其附件；而同屏「清空回收站」反倒有确认——保护强度与风险倒挂。
+  /// 撤销在这里并不可行（回收站是终态区），确认弹窗是唯一可行的兜底。
+  void _confirmPermanentDelete(
+      BuildContext context, TaskProvider provider, Task t) {
+    final name = t.title.trim().isEmpty ? '无标题任务' : t.title.trim();
+    showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('彻底删除？'),
+        content: Text('「$name」将被永久删除，其附件也会一并删除，'
+            '此操作不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () {
+              Navigator.pop(d);
+              provider.permanentDelete(t.id);
+            },
+            child: const Text('彻底删除'),
           ),
         ],
       ),

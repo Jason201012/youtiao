@@ -426,6 +426,19 @@ class HabitProvider extends ChangeNotifier {
     await _persistCheckIns();
     notifyListeners();
     _rescheduleReminder(habit);
+    // P2-7（v2.9.5 审计）：**达标后撤掉挂起的「稍后提醒」**。
+    //
+    // 旧行为：21:00 弹提醒 → 点「稍后提醒」(+10min) → 21:05 在 App 里记满 8/8
+    // → 21:10 仍弹「该打卡啦」。落点重排（[_rescheduleReminder]）只能把**今天**
+    // 这一次顺延走，管不到独立 8 号槽的 snooze，于是已做完仍被打扰。
+    // 任务侧「完成」会撤掉 snooze，习惯侧此前完全没有对应动作 → 两侧不对称。
+    //
+    // 判据用 `isTargetMetOn(habit, day)`（本次写入的那天）而非 `isTargetMetToday`：
+    // 补卡 / 撤卡写的是历史日期，只有「今天达标」才与在途 snooze 有关。
+    // 未达标时不清——用户可能只是先记了 1/8，稍后提醒仍该响。
+    if (isTargetMetOn(habit, day)) {
+      NotificationService.instance.cancelHabitSnooze(habit.id);
+    }
     _notifyHabitsChanged();
   }
 

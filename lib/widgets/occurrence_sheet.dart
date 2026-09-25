@@ -17,6 +17,7 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 // U3-5：撤销窗口时长的单一真源。
 import 'package:todolist/theme/ui_durations.dart';
+import 'package:todolist/widgets/undo_snack_bar.dart';
 
 class OccurrenceSheet {
   static Future<void> show(
@@ -138,6 +139,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
             // U3-5（v2.9.4 审计）：再统一到全局 [kUndoWindow]（10 秒），
             // 且被跳过的那一行本身会显示「已跳过（经『移到下一天』）」，
             // 提示不再是唯一凭据。
+            // P3-5（v2.9.5 审计）：本分支的撤销是**复合**的（删副本 + 取消跳过），
+            // 语义上无法直接套 [showUndoSnackBar] 的简单形态，故保留内联写法；
+            // 窗口时长仍读单一真源。
             duration: kUndoWindow,
             content: Text(copy == null
                 ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
@@ -176,23 +180,19 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     //
     // U2-4 / P3-10：不再 `hideCurrentSnackBar()`——`ScaffoldMessenger` 自带
     // 队列，主动 hide 等于亲手丢掉前一条撤销机会。
-    final messenger = ScaffoldMessenger.of(context);
     widget.provider.skipOccurrence(_task.id, day: d);
     _refresh();
     final dayLabel = '${d.month}月${d.day}日';
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('已跳过 $dayLabel 这一次（$kUndoWindowSeconds 秒内可撤销）'),
-        duration: kUndoWindow,
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () {
-            widget.provider.unskipOccurrence(_task.id, day: d);
-            _deferSkipped.remove(Task.ymdKey(d));
-            _refresh();
-          },
-        ),
-      ),
+    // P3-5（v2.9.5 审计）：改走唯一实现——补上「窗口超时已结束」提示，
+    // 并彻底删掉此前散落各处的 `kUndoWindow` / 秒数插值（避免下一轮再漂移）。
+    showUndoSnackBar(
+      context,
+      content: undoContent('已跳过 $dayLabel 这一次'),
+      onUndo: () {
+        widget.provider.unskipOccurrence(_task.id, day: d);
+        _deferSkipped.remove(Task.ymdKey(d));
+        _refresh();
+      },
     );
   }
 

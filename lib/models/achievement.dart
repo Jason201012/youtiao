@@ -220,7 +220,11 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'first_checkin',
     title: '第一步',
-    desc: '完成第一次习惯打卡',
+    // P3-14（v2.9.5 审计）：v2.9.5 把 [value] 从「有记录的天数」改成「**达标**天数」
+    // （`totalCheckIns` 改达标口径），描述却仍写「完成第一次习惯打卡」。于是量化
+    // 习惯只记 1/8 时该成就不解锁，与文案字面预期直接矛盾。
+    // 描述跟随口径改为「达成」措辞，并在括号里说明量化习惯需达标。
+    desc: '首次达成习惯目标（量化习惯需达标）',
     emoji: '🌱',
     group: AchievementGroup.habit,
     target: 1,

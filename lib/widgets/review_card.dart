@@ -269,6 +269,11 @@ class WeeklyHabitBlock extends StatelessWidget {
                 done: r.habits[i].done,
                 expected: r.habits[i].expected,
                 rate: r.habits[i].rate,
+                // P3-9（v2.9.5 审计）：此前漏传，量化习惯的「· 累计 N 个单位 ·
+                // ≈ N 天目标量」后缀在周报里整段消失（月报有）。补上传参，
+                // 与 `HabitProgressRow` 的注释自陈（「周报的 HabitWeekStat 无此
+                // 数据，缺省 0 = 不展示」）所描述的现状对应起来。
+                valueSum: r.habits[i].valueSum,
                 isLast: i == r.habits.length - 1,
                 onBg: onBg,
                 meta: ext.meta,
@@ -292,7 +297,8 @@ class HabitProgressRow extends StatelessWidget {
   final Color meta;
 
   /// P3-6（v2.9.3 审计）：区间累计投入量（量化习惯显示「· 累计 240」）。
-  /// 周报的 HabitWeekStat 无此数据，缺省 0 = 不展示。
+  /// P3-9（v2.9.5 审计）：周报路径此前缺省 0（`HabitWeekStat` 当时没有该字段），
+  /// 现已由 `review.dart` 补齐并在周报调用处透传，月报 / 周报口径一致。
   final int valueSum;
   const HabitProgressRow({
     super.key,

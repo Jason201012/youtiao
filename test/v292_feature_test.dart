@@ -176,22 +176,26 @@ void main() {
       expect(i0.windowLabel, '10:00–10:30');
     });
 
-    test('预计结束落在截止日之后 → missedDue；同日内完成不算超期', () {
+    test('带时刻截止按时刻判；纯日期形态按日期判（P3-1 分形态口径）', () {
       // P2-5（v2.9.4 审计）：判据由「时刻比较」改为「日期口径」——
       // 旧断言是「10:00 起做 30 分钟、截止 10:20 → 超期」，它编码的正是
       // 报告点名的缺陷（截止只有日期语义时，00:00 存储会让当天任何完成
-      // 时刻都晚于截止 → 恒标超期）。现改为两条分别锁定新口径：
-      //  ① 同一天内结束（含晚于截止时刻）→ **不算**超期；
-      //  ② 结束落在截止日之后（跨天）→ 算超期。
+      // 时刻都晚于截止 → 恒标超期）。
+      //
+      // P3-1（v2.9.5 审计）：v2.9.4 的一刀切口径对**带具体时刻**的截止引入同日
+      // 假阴性——截止 10:20、14:00 才开始做，整段都晚于截止却不提示。本轮收敛为
+      // 分形态（`dueCompareKey` 单一真源，排序同源）：
+      //  ① **带时刻**截止（10:20）：结束 10:30 > 10:20 → **算**超期（本用例）；
+      //  ② 纯日期形态（00:00 / 23:59）：当天内完成不算 → 见下面两条钉死。
       final sameDay = taskOf('t', due: at(10, 20), estimate: 30);
       final noDue = taskOf('n', estimate: 600);
       final advice = buildScheduleAdvice([noDue, sameDay], now: now);
       final tightItem = advice.items.firstWhere((i) => i.task.id == 't');
       final noDueItem = advice.items.firstWhere((i) => i.task.id == 'n');
-      expect(tightItem.missedDue, isFalse,
-          reason: 'P2-5：当天完成即不算超期，不按 10:20 这个时刻判');
+      expect(tightItem.missedDue, isTrue,
+          reason: 'P3-1：带时刻截止 10:20，排程 10:00–10:30 结束晚于它 → 提示');
       expect(noDueItem.missedDue, isFalse);
-      expect(advice.missedDueCount, 0);
+      expect(advice.missedDueCount, 1);
 
       // 跨天才算：10:00 起 30 分钟，截止是**昨天** → 结束必然晚于截止日。
       final overdue = taskOf('o', due: at(10, 20, dayOffset: -1), estimate: 30);

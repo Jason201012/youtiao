@@ -17,10 +17,16 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
 
 class BatchEditSheet {
-  /// 打开批量编辑面板，返回实际更新的条数（用户取消则为 null）。
-  static Future<int?> show(BuildContext context, List<String> ids) async {
+  /// 打开批量编辑面板，返回本次编辑的凭据（`batchId` + 实际更新条数）；
+  /// 用户取消则为 null。
+  ///
+  /// U1-2（v2.9.5 审计）：改返回 [BatchEditResult] 而非裸 `int`——调用方需要
+  /// `batchId` 才能做**定向**撤销（点哪条横幅的「撤销」就撤销那次编辑，
+  /// 而非「最近一次」；SnackBar 是队列展示的，两条横幅可同时在列）。
+  static Future<BatchEditResult?> show(
+      BuildContext context, List<String> ids) async {
     if (ids.isEmpty) return null;
-    return showModalBottomSheet<int>(
+    return showModalBottomSheet<BatchEditResult>(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
@@ -29,6 +35,15 @@ class BatchEditSheet {
       builder: (ctx) => _BatchEditBody(ids: ids),
     );
   }
+}
+
+/// 批量编辑的返回值（[TaskProvider.batchUpdateAs] 的 `(batchId, count)` 具名化）。
+///
+/// [batchId] 供 [TaskProvider.undoBatchEdit] 定向撤销；[count] 为实际更新条数。
+class BatchEditResult {
+  final int batchId;
+  final int count;
+  const BatchEditResult(this.batchId, this.count);
 }
 
 /// 截止日期改动模式。
@@ -169,8 +184,9 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
       if (!go || !mounted) return;
     }
 
-    final n = provider.batchUpdate(widget.ids, transform);
-    Navigator.pop(context, n);
+    // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次编辑）。
+    final r = provider.batchUpdateAs(widget.ids, transform);
+    Navigator.pop(context, BatchEditResult(r.$1, r.$2));
   }
 
   @override

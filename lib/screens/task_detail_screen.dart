@@ -14,12 +14,14 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
-// U3-5：撤销窗口时长的单一真源（与首页删除横幅共用，不再各写一份）。
-import 'package:todolist/theme/ui_durations.dart';
+// U3-5 的 kUndoWindow 已随 P3-5 收进 undo_snack_bar，本文件不再直接用，删 import。
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/task_template_sheet.dart';
 import 'package:todolist/widgets/occurrence_sheet.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+// P3-5（v2.9.5 审计）：本次跳过的撤销提示改走唯一实现（此前漏加 import，
+// analyze 报 undefined_method：showUndoSnackBar / undoContent）。
+import 'package:todolist/widgets/undo_snack_bar.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:todolist/models/attachment.dart';
 import 'package:todolist/services/attachment_service.dart';
@@ -178,13 +180,21 @@ class TaskDetailScreen extends StatelessWidget {
     // U3-2（v2.9.4 审计）：`completed: task.done`——未完成时不判「可能高估」。
     // 投入还在累积，「预估 30、已专注 5」只说明做到哪，不说明估得准不准；
     // 完成时 focusedMinutes 才是这次执行的终值。
-    final estimateBias = (task.isRepeating && !task.repeatEnded)
+    //
+    // P3-2（v2.9.5 审计）：抑制时不再返回裸 null——排程侧（`ScheduleItem`）早在
+    // v2.9.4 就补了 [biasSuppressedNote]（「重复任务不比较单次预估」），详情页却
+    // 漏改：被抑制的用户在今日页看得到一行弱化说明，进详情页反而只看到空白，
+    // 会以为偏差功能坏了。两处共用同一文案口径。
+    final bool biasSuppressed = task.isRepeating && !task.repeatEnded;
+    final String? estimateBias = biasSuppressed
         ? null
         : estimateBiasLabel(
             estimatedMinutes: task.estimateMinutes,
             actualMinutes: task.focusedMinutes,
             completed: task.done,
           );
+    final String? biasSuppressedNote =
+        biasSuppressed ? '重复任务不比较单次预估' : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -333,6 +343,8 @@ class TaskDetailScreen extends StatelessWidget {
                     label: '累计专注',
                     value: _focusLabel(task.focusSecTotal)),
                 // T1-1：预估 vs 实际的偏差提示（无预估或无专注记录时为 null）。
+                // P3-2（v2.9.5 审计）：被抑制（进行中的重复任务）时补一行弱化说明，
+                // 与今日排程侧 `biasSuppressedNote` 同文案——「有解释的沉默」。
                 if (estimateBias != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
@@ -343,6 +355,22 @@ class TaskDetailScreen extends StatelessWidget {
                         Expanded(
                           child: Text(
                             estimateBias,
+                            style: TextStyle(fontSize: 11, color: ext.meta),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else if (biasSuppressedNote != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      children: [
+                        Icon(Symbols.info, size: 14, color: ext.meta),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            biasSuppressedNote,
                             style: TextStyle(fontSize: 11, color: ext.meta),
                           ),
                         ),
@@ -382,32 +410,28 @@ class TaskDetailScreen extends StatelessWidget {
                                 // 无法恢复，只能等 occurrence 滚动过期被清掉——对纯本地无云端的
                                 // 待办应用是一条明确的交互死路。这里补 SnackBar 撤销入口
                                 // （unskipOccurrence 与 skipOccurrence 严格互逆、同样重排提醒）。
-                                // 先取 messenger：pop 之后本页 context 已失效，须在 pop 前捕获。
-                                final messenger = ScaffoldMessenger.of(context);
+                                // 先取快照：pop 之后本页 context 已失效。
                                 provider.skipOccurrence(task.id);
                                 Navigator.pop(context);
                                 // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`
                                 // ——`ScaffoldMessenger` 自带队列（后一条排在前一条
                                 // 播完之后），主动 hide 等于亲手丢掉上一条撤销机会，
                                 // 而用户毫不知情。
-                                messenger.showSnackBar(
-                                  SnackBar(
-                                    // U1（v2.9.0 审计）：撤销窗口由 5 秒延长到 10 秒——误触后
-                                    // 若先做了别的操作（弹窗 / 切页），撤销入口即消失，只能去
-                                    // occurrence 预览手动撤销；文案同时给出该常驻路径，与弹层的
-                                    // 「撤销跳过」入口联动（两处走同一个 unskipOccurrence）。
-                                    // U3-2（v2.9.1 审计）：撤销入口在任务行的重复标签上是
-                                    // **点按**（chip 的 onTap），长按反而会进多选——原文案
-                                    // 写「长按」属指错路，这里改正。
-                                    content: const Text('已跳过今天这一次（可点按任务行的重复标签，'
-                                        '在「未来循环日预览」中撤销）'),
-                                    duration: kUndoWindow,
-                                    action: SnackBarAction(
-                                      label: '撤销',
-                                      onPressed: () =>
-                                          provider.unskipOccurrence(task.id),
-                                    ),
-                                  ),
+                                // P3-5（v2.9.5 审计）：改走唯一实现
+                                // （`widgets/undo_snack_bar.dart`），补上
+                                // 「窗口超时已结束」提示，与首页 / 看板 / 习惯侧一致。
+                                showUndoSnackBar(
+                                  context,
+                                  // U1（v2.9.0）：保留常驻撤销路径提示——窗口错过
+                                  // 也不至于无路可走。U3-2（v2.9.1）：该入口是
+                                  // **点按**（chip 的 onTap），非长按。
+                                  content: undoContent('已跳过今天这一次'
+                                      '（也可点按任务行的重复标签，在「未来循环日预览」中撤销跳过）'),
+                                  // 仍用 `unskipOccurrence`（与 `skipOccurrence`
+                                  // 严格互逆、同样重排提醒），**不**改成整体快照回滚
+                                  // ——后者会连带抹掉这 10 秒内用户对同一任务的其它
+                                  // 改动（如重新设了提醒时刻），属过度撤销。
+                                  onUndo: () => provider.unskipOccurrence(task.id),
                                 );
                               }
                             : null,
@@ -477,12 +501,11 @@ class TaskDetailScreen extends StatelessWidget {
                             // 两条任务且副本提醒已过、静默不响）。这里提前拦下并如实反馈。
                             if (Task.isSameDay(picked, DateTime.now())) {
                               if (context.mounted) navigator.pop();
-                              messenger
-                                ..hideCurrentSnackBar()
-                                ..showSnackBar(const SnackBar(
-                                  content: Text('目标日就是今天，本次改期无变化'),
-                                  duration: Duration(seconds: 4),
-                                ));
+                              // U3-2（v2.9.5 审计）：去掉 `..hideCurrentSnackBar()`。
+                              messenger.showSnackBar(const SnackBar(
+                                content: Text('目标日就是今天，本次改期无变化'),
+                                duration: Duration(seconds: 4),
+                              ));
                               return;
                             }
                             // F-2（v2.8.5 审计）：目标日副本提醒时刻已过 → 提前预演提示
@@ -514,16 +537,16 @@ class TaskDetailScreen extends StatelessWidget {
                             final copy =
                                 provider.rescheduleOnceOccurrence(task.id, picked);
                             if (context.mounted) navigator.pop();
-                            messenger
-                              ..hideCurrentSnackBar()
-                              ..showSnackBar(SnackBar(
-                                // U2-2：目标日本身就是循环日时 provider 只跳过本次、
-                                // 不建副本（返回 null）——必须说清，否则用户找不到副本。
-                                content: Text(copy == null
-                                    ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
-                                    : '已改期至 $dayLabel（已新建一次性副本）'),
-                                duration: const Duration(seconds: 8),
-                              ));
+                            // U3-2（v2.9.5 审计）：去掉 `..hideCurrentSnackBar()`
+                            // （同上文口径：不清场，靠队列）。
+                            messenger.showSnackBar(SnackBar(
+                              // U2-2：目标日本身就是循环日时 provider 只跳过本次、
+                              // 不建副本（返回 null）——必须说清，否则用户找不到副本。
+                              content: Text(copy == null
+                                  ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
+                                  : '已改期至 $dayLabel（已新建一次性副本）'),
+                              duration: const Duration(seconds: 8),
+                            ));
                           }
                         },
                         icon: const Icon(Symbols.edit_calendar, size: 18),
