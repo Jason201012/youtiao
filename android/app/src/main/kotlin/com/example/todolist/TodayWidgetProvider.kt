@@ -159,8 +159,20 @@ class TodayWidgetProvider : AppWidgetProvider() {
         private fun isTodayRelevant(obj: JSONObject, today: String): Boolean {
             val repeat = parseRepeat(obj)
             if (repeat != RepeatMode.NONE && isRecurrenceToday(obj, repeat, today)) return true
+            // P2-10（v2.9.6 审计）：与 App 侧口径对齐（`Task.isOverdue` +
+            // `_effectiveDue`），此前 `due <= today` 回落把「自然到期的重复任务」
+            // （如「每天写日报 · 结束于 9/01」）判成「逾期」并长期残留——App 内
+            // 重复任务不计逾期，已结束的重复任务其占位截止日被中性化。
+            // - 仍在重复：是否出现只由「今天是否循环日」决定（App 侧走「每天」
+            //   独立分区，占位 dueDate 不参与今天/逾期分区）；
+            // - 已结束重复：App 侧 `_effectiveDue` 中性化为「无截止 → 今天」，
+            //   故这里恒显示（与「今天」分区一致），meta 不报逾期（见 [metaOf]）。
+            if (repeat != RepeatMode.NONE) {
+                val until = obj.optString("repeatUntil", "")
+                return until.isNotEmpty() && today > until
+            }
             val due = datePart(obj.opt("dueDate")) ?: return false
-            return due <= today // 今天到期或已逾期都显示
+            return due <= today
         }
 
         private fun titleOf(obj: JSONObject): String = obj.optString("title", "（无标题）")
@@ -168,6 +180,10 @@ class TodayWidgetProvider : AppWidgetProvider() {
         private fun orderOf(obj: JSONObject): Double = obj.optDouble("order", 0.0)
 
         private fun metaOf(obj: JSONObject, today: String): String {
+            // P2-10（v2.9.6 审计）：重复任务不再报「逾期」——仍在重复无逾期语义
+            // （App 内重复任务不计逾期），已结束重复的占位截止日被 App 侧
+            // `_effectiveDue` 中性化。两者 meta 一律留空（App 行内亦不展示日期）。
+            if (parseRepeat(obj) != RepeatMode.NONE) return ""
             val dueStr = datePart(obj.opt("dueDate")) ?: return ""
             if (dueStr < today) return "逾期"
             if (dueStr == today) {

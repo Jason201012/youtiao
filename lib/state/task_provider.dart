@@ -980,6 +980,11 @@ class TaskProvider extends ChangeNotifier {
       }
       final loadedTasks = await db.loadTasks();
       final loadedTrash = await db.loadTrash();
+      // P2-3（v2.9.6 审计）：整体替换路径同样清空撤销缓冲——备份恢复分支
+      // （applyAppPrefs → load()）与启动加载共用此处，覆盖 `_tasks` 前不清，
+      // 残留的撤销横幅就可能复活 / 回写恢复前快照（同 [restoreFromJson]）。
+      _editUndoLog.clear();
+      _deleteUndoLog.clear();
       _tasks
         ..clear()
         ..addAll(loadedTasks);
@@ -1676,11 +1681,15 @@ class TaskProvider extends ChangeNotifier {
         .toList()
       ..sort((a, b) {
         // 置顶优先；其次手动排序 order；最后截止时间早的排前（拖最久的排前）。
+        // P3-1（v2.9.6 审计）：截止比较统一过 [dueCompareKey]——此前用完整时刻
+        // `compareTo`，而排程排序（schedule_advisor）已归一为同一比较键，纯日期
+        // 形态（00:00/23:59）在两处列表里的相对顺序可能相反。归一后同一份数据
+        // 顺序一致，且截止口径改动只需动真源一处。
         final p = _comparePinned(a, b);
         if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
-        return a.dueDate!.compareTo(b.dueDate!);
+        return dueCompareKey(a.dueDate!).compareTo(dueCompareKey(b.dueDate!));
       });
     final today = active
         .where((t) {
@@ -1694,12 +1703,14 @@ class TaskProvider extends ChangeNotifier {
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
         // 排序键：优先用截止时间；无截止但有开始时间时用开始时间；两者皆无排末。
+        // P3-1（v2.9.6 审计）：同样过 [dueCompareKey] 归一（与 overdue/future 及
+        // 排程排序同口径）。
         DateTime? keyA = a.dueDate ?? a.startDate;
         DateTime? keyB = b.dueDate ?? b.startDate;
         if (keyA == null && keyB == null) return 0;
         if (keyA == null) return 1;
         if (keyB == null) return -1;
-        return keyA.compareTo(keyB);
+        return dueCompareKey(keyA).compareTo(dueCompareKey(keyB));
       });
     final future = active.where((t) {
       final d = dayDiff(_effectiveDue(t, now));
@@ -1710,7 +1721,8 @@ class TaskProvider extends ChangeNotifier {
         if (p != 0) return p;
         final c = a.order.compareTo(b.order);
         if (c != 0) return c;
-        return a.dueDate!.compareTo(b.dueDate!);
+        // P3-1（v2.9.6 审计）：同 [dueCompareKey] 归一。
+        return dueCompareKey(a.dueDate!).compareTo(dueCompareKey(b.dueDate!));
       });
     // 重复任务单独成段，按提醒时刻升序（置顶优先，其次 order 优先）。
     final repeat = _tasks.where((t) => !t.done && inRepeat(t)).toList()
@@ -1789,6 +1801,24 @@ class TaskProvider extends ChangeNotifier {
     _persist();
   }
 
+  /// P2-9（v2.9.6 审计）：与 [addFocusSec] **对称**的扣减——专注记录被删除时
+  /// 同步扣掉任务累计专注。此前只加不减：删除记录不扣减，而「撤销删除」走
+  /// `addSession` 又回填一次，任务的「已专注」凭空多出一段，直接污染详情页
+  /// 「预估 vs 实际」偏差与排程建议等下游口径。结果夹到 0，防御重复扣减与脏
+  /// 数据；任务已删除则忽略。回调自 FocusProvider.removeSession。
+  void removeFocusSec(String taskId, int sec) {
+    if (sec <= 0) return;
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    _tasks[i] = _tasks[i].copyWith(
+      focusSecTotal: _tasks[i].focusSecTotal - sec > 0
+          ? _tasks[i].focusSecTotal - sec
+          : 0,
+    );
+    notifyListeners();
+    _persist();
+  }
+
   /// 拖拽重排某分区内的任务顺序：把分区当前显示列表的 [oldIndex] 移到 [newIndex]，
   /// 并把它及其后续任务的 [Task.order] 顺次写为 1,2,3…，使手动顺序持久化（order 优先于日期排序）。
   void reorderTasks(String section, int oldIndex, int newIndex) {
@@ -1862,13 +1892,22 @@ class TaskProvider extends ChangeNotifier {
   /// 必须用快照**整体替换**而非反向再调一次 [setStatus]：setStatus 会写
   /// completedAt（取 now）、追加 doneDates、清理 skipDates，这些都无法靠
   /// 「再切一次」精确还原（时间戳与列表内容已丢），撤销后任务会静默偏移。
-  /// 找不到该任务（已删除）时静默返回，不抛错。
-  void restoreTaskSnapshot(Task snapshot) {
+  /// 找不到该任务（已删除）时返回 false 不抛错（P2-2，v2.9.6 审计）。
+  ///
+  /// P2-4（v2.9.6 审计）：写回前先取消该任务**当前**的全部提醒，再按快照统一
+  /// 重排。原实现只走 `_reconcileDeadlineOnCompletion`——它仅在
+  /// `dueDate.isAfter(now)` 时 schedule、**从不 cancel**，于是「日历把逾期任务
+  /// 拖到明天（改期时已挂明天闹钟）→ 10 秒内撤销回逾期快照」时，明天的提醒
+  /// 仍然存活（含应用内兜底定时器）——幽灵提醒。先 cancel 再重排对全部场景
+  /// 安全：快照未到期 → reconcile 重新 schedule；快照已完成 / 已逾期 → 本就
+  /// 不该有在途提醒；重复任务 → 重排链路按快照重挂。
+  bool restoreTaskSnapshot(Task snapshot) {
     final i = _tasks.indexWhere((t) => t.id == snapshot.id);
-    if (i == -1) return;
-    if (identical(_tasks[i], snapshot)) return;
+    if (i == -1) return false;
+    if (identical(_tasks[i], snapshot)) return true;
     _tasks[i] = snapshot;
     // 与 setStatus 保持同一套副作用口径：状态变了，提醒与重复锚点要跟着重排。
+    _cancelRemindersFor(snapshot.id); // P2-4（v2.9.6 审计）：先撤在途，再重排
     if (_tasks[i].isRepeating) {
       _rescheduleRepeatOnCompletion(_tasks[i]);
     } else {
@@ -1876,6 +1915,7 @@ class TaskProvider extends ChangeNotifier {
     }
     notifyListeners();
     _persist();
+    return true;
   }
 
   /// 切换某任务的某个子任务勾选态，并持久化。
@@ -2490,14 +2530,18 @@ class TaskProvider extends ChangeNotifier {
   ///
   /// U1-2（v2.9.5 审计）：按 [batchId] 定向取回快照——点哪条横幅的「撤销」，
   /// 就撤销那次操作，而不是「最近一次」。
-  void undoBatchEdit([int? batchId]) {
+  ///
+  /// P2-2（v2.9.6 审计）：返回是否真正生效——缓冲被清（恢复备份 / 淘汰）或
+  /// 快照任务已全部不存在时返回 false，由 `showUndoSnackBar` 提示
+  /// 「撤销已失效」，不再静默 no-op（横幅承诺了「可撤销」，点了没反应比失败更糟）。
+  bool undoBatchEdit([int? batchId]) {
     final log = _editUndoLog;
-    if (log.isEmpty) return;
+    if (log.isEmpty) return false;
     final id = (batchId == null || batchId == 0)
         ? log.keys.reduce((a, b) => a > b ? a : b)
         : batchId;
     final batch = log.remove(id);
-    if (batch == null || batch.isEmpty) return;
+    if (batch == null || batch.isEmpty) return false;
     var changed = false;
     for (final orig in batch) {
       if (byId(orig.id) == null) continue; // 任务已不在列表（被删除），不允许复活
@@ -2509,6 +2553,7 @@ class TaskProvider extends ChangeNotifier {
       notifyListeners();
       _persist();
     }
+    return changed;
   }
 
   /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。
@@ -2640,14 +2685,18 @@ class TaskProvider extends ChangeNotifier {
   ///
   /// U1-2（v2.9.5 审计）：[batchId] 为 null / 0 时取「最近一次」（兼容既有调用点）；
   /// 传入具体 id 则**只撤销那次删除**——点哪条横幅的「撤销」就还原哪一次操作。
-  void undoDelete([int? batchId]) {
+  ///
+  /// P2-2（v2.9.6 审计）：返回是否真正生效——缓冲为空 / 快照已被
+  /// [_dropFromUndoBuffer] 作废（彻底删除、清空回收站）时返回 false，
+  /// 由 `showUndoSnackBar` 提示「撤销已失效」，不再静默 no-op。
+  bool undoDelete([int? batchId]) {
     final log = _deleteUndoLog;
-    if (log.isEmpty) return;
+    if (log.isEmpty) return false;
     final id = (batchId == null || batchId == 0)
         ? log.keys.reduce((a, b) => a > b ? a : b)
         : batchId;
     final entry = log.remove(id);
-    if (entry == null || entry.tasks.isEmpty) return;
+    if (entry == null || entry.tasks.isEmpty) return false;
     final batch = entry.tasks;
     final anchors = entry.anchors;
     for (var k = 0; k < batch.length; k++) {
@@ -2664,6 +2713,7 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
     _persist();
     _syncTrashExpireNotice(); // P1-12：撤销删除后重排
+    return true;
   }
 
   /// F-05：按邻居锚点解析撤销插入位置（见 [undoDelete] 的三档兜底）。
@@ -2825,6 +2875,14 @@ class TaskProvider extends ChangeNotifier {
           trashList.map((e) => Task.fromJson(e as Map<String, dynamic>)));
     }
     // 全部解析通过后，才真正覆盖内存态并落库。
+    // P2-3（v2.9.6 审计）：整体重载前**清空撤销缓冲**——批量编辑 / 删除的
+    // 撤销横幅闭包持有的是恢复**前**的快照，恢复覆盖 `_tasks`/`_trash` 后再点
+    // 残留横幅：走删除缓冲会把恢复前已删的任务 `insert` 回列表（凭空复活不属于
+    // 恢复集的任务）；走编辑缓冲会按 id 命中恢复后的同 id 任务并回写成恢复前
+    // 状态，静默污染恢复结果。横幅本身 10 秒即过期，清掉缓冲不会损失任何
+    // 合法撤销机会。
+    _editUndoLog.clear();
+    _deleteUndoLog.clear();
     // P1-2：恢复后统一按标题重算拼音首字母（旧版备份 pinyinInitials 多为空串，
     // 直接采用会导致恢复后拼音搜索静默失效），保证搜索始终可用。
     _tasks
@@ -3016,6 +3074,12 @@ class TaskProvider extends ChangeNotifier {
     buf.writeln('# 有条 任务导出');
     buf.writeln('');
     buf.writeln('> 导出时间：${_fmt(DateTime.now())}');
+    // P3-10（v2.9.6 审计）：明确「MD 是可读摘要、CSV/Excel 才是完整字段」——
+    // 任务 MD 缺标签 / 子任务 / 开始时间 / 提醒 / 是否已删除等列（它们在
+    // [taskTableHeaders] 真源里），此前无任何说明，用户会把 MD 当迁移副本用
+    // 而不可逆丢字段。
+    buf.writeln('> 说明：Markdown 为**可读摘要**（不含标签、子任务、开始时间、'
+        '提醒等完整字段）；归档 / 迁移请用 CSV 或 Excel 导出。');
     buf.writeln('');
     buf.writeln('## 未完成（${_tasks.where((e) => !e.done).length}）');
     for (final t in _tasks.where((e) => !e.done)) {

@@ -243,7 +243,12 @@ class ExportSheet {
       // 1) App 私有目录留一份，供「分享」按钮兜底使用。
       final file = await DataIo.saveToAppDocs(name, content);
       // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见。
-      String msg = '已导出 iCal 到「下载」目录（含重复规则与提醒，可被系统日历导入）';
+      // P3-9（v2.9.6 审计）：补一句「预计时长依赖扩展属性」的说明——DUE 与
+      // DURATION 互斥（P2-2，v2.9.5）后预计时长随 `X-YOUTIAO-ESTIMATE-MINUTES`
+      // 携带，第三方日历按规范会忽略 `X-` 扩展属性不回显（导回本 App 不丢），
+      // 不说明用户会以为时长迁丢了。
+      String msg = '已导出 iCal 到「下载」目录（含重复规则与提醒；预计时长为'
+          '本 App 扩展属性，部分第三方日历不显示，导回「有条」不丢）';
       try {
         await DataIo.saveToDownloads(name, content, mimeType: 'text/calendar');
       } catch (e) {

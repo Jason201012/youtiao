@@ -10,6 +10,13 @@ library;
 
 import 'package:todolist/models/task.dart';
 
+// P3-1 / P3-13（v2.9.6 审计）：[dueCompareKey] / [dueIsPureDateForm] 的定义
+// 已**下沉到 `models/task.dart`**——`Task.isOverdue`（models 层）也要消费
+// 该判据，models 依赖 services 属反向依赖；定义放 models 后，全部旧引用点
+// （`import schedule_advisor.dart`）经下面的 export 继续可用。
+export 'package:todolist/models/task.dart'
+    show dueCompareKey, dueIsPureDateForm;
+
 /// 排序 / 兜底用：无预估时长时每项占用的默认分钟数。
 const int kDefaultEstimateMinutes = 30;
 
@@ -86,7 +93,7 @@ class ScheduleItem {
   /// 补这一行是为了「有解释的沉默」：用户看到空白至少知道是**有意不给**
   /// （重复任务的累计专注与单次预估不同口径），而不是功能出错。
   String? get biasSuppressedNote =>
-      biasSuppressed ? '重复任务不比较单次预估' : null;
+      biasSuppressed ? kBiasSuppressedNote : null;
 
   /// 预计时段文案，如「14:05–14:35」。
   String get windowLabel => '${_hhmm(start)}–${_hhmm(end)}';
@@ -266,30 +273,13 @@ ScheduleAdvice buildScheduleAdvice(
   );
 }
 
+/// P3-3（v2.9.6 审计）：偏差抑制说明的**单一真源**——详情页
+/// （`task_detail_screen.dart`）此前复制了同一字面量，改一处会漂移。
+const String kBiasSuppressedNote = '重复任务不比较单次预估';
+
 /// date-only 规整（丢弃时分秒），用于「同一天不算超期」这类按日判定的场景。
+/// P3-1：比较键真源 [dueCompareKey] / [dueIsPureDateForm] 已下沉 models/task.dart。
 DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-/// 截止时刻的**比较键**归一 —— `missedDue` 判定与 [compareForSchedule] 排序
-/// 共用的唯一真源（P3-1，v2.9.5 审计）。
-///
-/// 本应用的截止时间有两种存储形态：
-/// - **纯日期语义**：「当天 00:00」（模板 `dueInDays` 的产物）或「当天 23:59」
-///   （录入侧历史遗留的占位钉法）。这类截止只有「哪一天」的含义，
-///   当天内任何时刻完成都算没超期（v2.9.4 P2-5 的结论，必须保留）。
-/// - **带具体时刻**：用户显式选了「今天 10:20 截止」。v2.9.4 把它也按日期口径
-///   处理，引入同日假阴性——截止 10:20、14:00 才开始做、14:30 结束，整段都晚于
-///   截止时刻，却不再提示「预计超过截止」（P3-1）。
-///
-/// 归一规则：纯日期形态 → date-only；带时刻 → 原样返回。
-/// 排序与超期判定都过这里，两侧口径**不会**再漂移。
-DateTime dueCompareKey(DateTime due) =>
-    dueIsPureDateForm(due) ? _dateOnly(due) : due;
-
-/// 截止是否为「纯日期」存储形态（当天 00:00 / 23:59，判据与 [dueCompareKey]
-/// 同源）。超期判定据此选择比较粒度：纯日期按「日」比，带时刻按「时刻」比。
-bool dueIsPureDateForm(DateTime due) =>
-    (due.hour == 0 && due.minute == 0 && due.second == 0) ||
-    (due.hour == 23 && due.minute == 59);
 
 /// 排程排序比较器（公开以便单测直接钉死排序口径）。
 ///

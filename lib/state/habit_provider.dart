@@ -36,6 +36,15 @@ class HabitProvider extends ChangeNotifier {
   List<Habit> get activeHabits =>
       _habits.where((h) => !h.archived).toList();
 
+  /// P2-5（v2.9.6 审计）：[day] 在计划内的活动习惯（`shouldCheckInOn` 过滤）。
+  ///
+  /// 习惯页概览卡「今日 x/y」的分子分母统一从这里取——此前分母用
+  /// `activeHabits.length`，休息日也被计入（「每周一三五 + 每天」在周二显示
+  /// 「今日 1/2」，持续暗示漏卡），与今日卡（`TodayAggregate`）、晚简报
+  /// （daily_briefing 的 P2-6 修复）同族口径打架。
+  List<Habit> habitsDueOn(DateTime day) =>
+      activeHabits.where((h) => h.shouldCheckInOn(day)).toList();
+
   /// 按 id 查找习惯，找不到返回 null（通知稍后提醒等场景用）。
   Habit? byId(String id) {
     for (final h in _habits) {
@@ -358,13 +367,20 @@ class HabitProvider extends ChangeNotifier {
   }
 
   /// 本周是否达成了周目标（weeklyGoal>0 且达标天数 ≥ 目标）。
+  ///
+  /// P3-7（v2.9.6 审计）：统一读 [Habit.effectiveWeeklyGoal]（按当前计划天数
+  /// 夹取的生效值），不再消费裸字段——裸字段自本轮起保留 fromJson 原值（保真），
+  /// 消费点若不经过夹取判据，「计划日 3 天 · 周目标 7」的存量数据会让目标
+  /// 永不可达（`consecutiveGoalWeeks` 恒 0）。
   bool goalMetThisWeek(Habit habit) =>
-      habit.weeklyGoal > 0 && weeklyCheckIns(habit) >= habit.weeklyGoal;
+      habit.effectiveWeeklyGoal > 0 &&
+      weeklyCheckIns(habit) >= habit.effectiveWeeklyGoal;
 
   /// 从本周往前连续达成周目标的周数（断一周即止）；weeklyGoal<=0 返回 0。
   /// 用于「连续 4 周达成周目标」成就判定。
   int consecutiveGoalWeeks(Habit habit, {int weeks = 4}) {
-    if (habit.weeklyGoal <= 0) return 0;
+    final goal = habit.effectiveWeeklyGoal; // P3-7（v2.9.6 审计）：生效值
+    if (goal <= 0) return 0;
     int run = 0;
     final today = DateTime.now();
     final metDays = _metDaysOf(habit);
@@ -374,7 +390,7 @@ class HabitProvider extends ChangeNotifier {
       final sunday = monday.add(const Duration(days: 6));
       final count =
           metDays.where((d) => !d.isBefore(monday) && !d.isAfter(sunday)).length;
-      if (count >= habit.weeklyGoal) {
+      if (count >= goal) {
         run++;
       } else {
         break;
@@ -433,14 +449,22 @@ class HabitProvider extends ChangeNotifier {
     // 这一次顺延走，管不到独立 8 号槽的 snooze，于是已做完仍被打扰。
     // 任务侧「完成」会撤掉 snooze，习惯侧此前完全没有对应动作 → 两侧不对称。
     //
-    // 判据用 `isTargetMetOn(habit, day)`（本次写入的那天）而非 `isTargetMetToday`：
-    // 补卡 / 撤卡写的是历史日期，只有「今天达标」才与在途 snooze 有关。
+    // P2-6（v2.9.6 审计）：判据修正为「**写入的是今天** 且 今天达标」。本段
+    // 注释在 v2.9.5 的判据句与理由句自相矛盾（判据句写 `isTargetMetOn(habit,
+    // day)`、理由句却说「只有今天达标才与在途 snooze 有关」），实际代码取了
+    // 前者——于是 21:00 挂着 snooze 时补卡**昨天**达标，也会把今天 21:10 的
+    // 在途提醒静默撤掉（当天实际 0/8，提醒再也不响），与 P2-7 的修复目的正好
+    // 相反。`_sameDayKey` 保证跨午夜补卡（凌晨补昨天的卡）也不会误判。
     // 未达标时不清——用户可能只是先记了 1/8，稍后提醒仍该响。
-    if (isTargetMetOn(habit, day)) {
+    if (_sameDayKey(day, DateTime.now()) && isTargetMetOn(habit, day)) {
       NotificationService.instance.cancelHabitSnooze(habit.id);
     }
     _notifyHabitsChanged();
   }
+
+  /// date-only 同日判定（P2-6，v2.9.6 审计）：补卡判据用。
+  static bool _sameDayKey(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
 
   /// T1-2：在某日累计量上增减 [delta]（+1 / −1 按钮走这里）。
   /// 结果 ≤0 时删除记录（等价于撤卡）。
@@ -993,6 +1017,9 @@ class HabitProvider extends ChangeNotifier {
     buf.writeln('# 有条 习惯导出');
     buf.writeln('');
     buf.writeln('> 导出时间：${_fmt(DateTime.now())}');
+    // P3-10（v2.9.6 审计）：与任务 / 专注 MD 同口径——标注「可读摘要」定位，
+    // 完整字段（备注等列）请用 CSV / Excel（列真源见 habitExportHeaders）。
+    buf.writeln('> 说明：Markdown 为**可读摘要**；归档 / 迁移请用 CSV 或 Excel 导出。');
     buf.writeln('');
     if (_habits.isEmpty) {
       buf.writeln('_暂无习惯_');

@@ -15,8 +15,6 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
-// U3-5：撤销窗口时长的单一真源。
-import 'package:todolist/theme/ui_durations.dart';
 import 'package:todolist/widgets/undo_snack_bar.dart';
 
 class OccurrenceSheet {
@@ -133,36 +131,32 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       if (context.mounted) {
         final dayLabel =
             '${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            // P3-6（v2.9.0 审计）：原 4 秒提示错过即无痕，这里延长；
-            // U3-5（v2.9.4 审计）：再统一到全局 [kUndoWindow]（10 秒），
-            // 且被跳过的那一行本身会显示「已跳过（经『移到下一天』）」，
-            // 提示不再是唯一凭据。
-            // P3-5（v2.9.5 审计）：本分支的撤销是**复合**的（删副本 + 取消跳过），
-            // 语义上无法直接套 [showUndoSnackBar] 的简单形态，故保留内联写法；
-            // 窗口时长仍读单一真源。
-            duration: kUndoWindow,
-            content: Text(copy == null
-                ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
-                : '已移到 $dayLabel（已新建一次性副本）'),
-            action: SnackBarAction(
-              label: '撤销',
-              onPressed: () {
-                // P2-1：撤销必须**双向**还原——① 按 service 返回的副本 id 精确移除
-                // 那座一次性副本（原实现按「标题 + 日期」反查，同名任务同一天改期时
-                // 会误删另一个真实任务；而且误用了只作用于回收站的 permanentDelete，
-                // 副本其实一直留在活动列表里，「撤销」形同虚设）；② 把原日从 skipDates
-                // 移除，否则撤销后原日仍显示「已跳过」，UI 对用户说谎。
-                if (copy != null) {
-                  widget.provider.discardTask(copy.id);
-                }
-                widget.provider.unskipOccurrence(_task.id, day: d);
-                _deferSkipped.remove(Task.ymdKey(d));
-                _refresh();
-              },
-            ),
-          ),
+        // P3-2（v2.9.6 审计）：迁入 `widgets/undo_snack_bar.dart` 唯一实现——
+        // 本分支此前是内联 SnackBar（`kUndoWindow` 时长但**无超时提示**、
+        // 文案未插秒数），同族「撤销」第 3 套实现。注释曾称「复合撤销语义上
+        // 无法套用唯一实现的简单形态」不成立：复合动作本就是任意闭包，
+        // 迁入后自动获得秒数插值与「窗口超时已结束」提示。
+        // P3-5（v2.9.5 审计）：本分支的撤销是**复合**的（删副本 + 取消跳过）。
+        showUndoSnackBar(
+          context,
+          content: undoContent(copy == null
+              ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
+              : '已移到 $dayLabel（已新建一次性副本）'),
+          onUndo: () async {
+            // P2-1（v2.8.8）：撤销必须**双向**还原——① 按 service 返回的副本 id
+            // 精确移除那座一次性副本（原实现按「标题 + 日期」反查，同名任务
+            // 同一天改期时会误删另一个真实任务；而且误用了只作用于回收站的
+            // permanentDelete，副本其实一直留在活动列表里，「撤销」形同虚设）；
+            // ② 把原日从 skipDates 移除，否则撤销后原日仍显示「已跳过」，
+            // UI 对用户说谎。两个动作均幂等，复合执行恒可成功。
+            if (copy != null) {
+              widget.provider.discardTask(copy.id);
+            }
+            widget.provider.unskipOccurrence(_task.id, day: d);
+            _deferSkipped.remove(Task.ymdKey(d));
+            _refresh();
+            return true;
+          },
         );
       }
       return;
@@ -188,10 +182,11 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     showUndoSnackBar(
       context,
       content: undoContent('已跳过 $dayLabel 这一次'),
-      onUndo: () {
+      onUndo: () async {
         widget.provider.unskipOccurrence(_task.id, day: d);
         _deferSkipped.remove(Task.ymdKey(d));
         _refresh();
+        return true;
       },
     );
   }

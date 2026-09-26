@@ -25,6 +25,10 @@ import 'package:todolist/screens/task_detail_screen.dart';
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
 
+  /// U2-3（v2.9.6 审计）：MainScaffold 切到日历 Tab 时调用，通知 State
+  /// 「若不在本月则回本月」（保活后 initState 不再随切换执行，见 State 内注释）。
+  static void notifyTodaySeen() => _CalendarScreenState.bumpTodaySignal();
+
   @override
   State<CalendarScreen> createState() => _CalendarScreenState();
 }
@@ -35,13 +39,38 @@ class _CalendarScreenState extends State<CalendarScreen> {
   String _view = 'month'; // 'month' | 'week'
   DateTime? _timelineDay; // 周视图专注时段面板所选日期（null = 今天）
 
+  /// U2-3（v2.9.6 审计）：Tab 保活后 [initState] 不再随切换执行，「进入日历
+  /// 自动落在今天所在月份」的旧行为静默失效——翻到几个月前后切走再切回，
+  /// 仍停在旧月份，用户可能以为「任务没刷新」。MainScaffold 切到日历 Tab 时
+  /// 经 [CalendarScreen.notifyTodaySeen] 触发本信号，State 自行判断是否回
+  /// 本月（已在本月则无感）。
+  static final ValueNotifier<int> _todaySignal = ValueNotifier<int>(0);
+
+  static void bumpTodaySignal() => _todaySignal.value++;
+
   @override
   void initState() {
     super.initState();
     final now = DateTime.now();
     _focused = DateTime(now.year, now.month, 1);
     _viewDate = now;
+    _todaySignal.addListener(_onTodaySignal);
   }
+
+  @override
+  void dispose() {
+    _todaySignal.removeListener(_onTodaySignal);
+    super.dispose();
+  }
+
+  void _onTodaySignal() {
+    final now = DateTime.now();
+    // 仅当不在本月时回跳：用户停在本月（只是周视图翻到了别的周）不受打扰。
+    if (_focused.year != now.year || _focused.month != now.month) {
+      _goToday();
+    }
+  }
+
 
   void _shiftMonth(int delta) =>
       setState(() => _focused = DateTime(_focused.year, _focused.month + delta, 1));
@@ -110,7 +139,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
     showUndoSnackBar(
       context,
       content: undoContent('已改期至 ${DateFormat('M月d日').format(newDue)}'),
-      onUndo: () => provider.restoreTaskSnapshot(task),
+      // P2-2（v2.9.6 审计）：restoreTaskSnapshot 返回是否生效（任务已删除时
+      // false），由唯一实现统一提示「撤销已失效」。
+      onUndo: () async => provider.restoreTaskSnapshot(task),
     );
   }
 

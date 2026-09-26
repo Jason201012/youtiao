@@ -97,7 +97,8 @@ extension CategoryLabel on Category {
 }
 
 /// 任务状态：待办 / 已完成。
-/// 看板页按此分为两列，可在列间拖拽或点击切换。
+/// 看板页按此分为两列；可在列间拖拽（仅状态泳道），点击卡片进详情，
+/// 卡片上的勾选圈负责改状态（U2-4 / P2-7，v2.9.5/v2.9.6 审计）。
 enum TaskStatus { todo, done }
 
 extension TaskStatusLabel on TaskStatus {
@@ -139,6 +140,35 @@ class SubTask {
       );
 }
 
+/// 截止时刻的**比较键**归一 —— 排程超期判定、排序比较、首页分区排序、
+/// 逾期判定与看板 / 任务行日差文案共用的唯一真源（P3-1，v2.9.5 审计提出、
+/// v2.9.6 审计横向推广）。
+///
+/// 本应用的截止时间有两种存储形态：
+/// - **纯日期语义**：「当天 00:00」（模板 `dueInDays` 的产物）或「当天 23:59」
+///   （录入侧历史遗留的占位钉法）。这类截止只有「哪一天」的含义，
+///   当天内任何时刻完成都算没超期（v2.9.4 P2-5 的结论，必须保留）。
+/// - **带具体时刻**：用户显式选了「今天 10:20 截止」。v2.9.4 把它也按日期口径
+///   处理，引入同日假阴性——截止 10:20、14:00 才开始做、14:30 结束，整段都晚于
+///   截止时刻，却不再提示「预计超过截止」（P3-1）。
+///
+/// 归一规则：纯日期形态 → date-only；带时刻 → 原样返回。
+/// 排序与超期判定都过这里，两侧口径**不会**再漂移。
+DateTime dueCompareKey(DateTime due) =>
+    dueIsPureDateForm(due) ? _dateOnlyOf(due) : due;
+
+/// 截止是否为「纯日期」存储形态（当天 00:00 / 23:59，判据与 [dueCompareKey]
+/// 同源）。超期判定据此选择比较粒度：纯日期按「日」比，带时刻按「时刻」比。
+///
+/// P3-13（v2.9.6 审计）：`00:00` 分支此前要求 `second == 0` 而 `23:59` 分支
+/// 不判秒（`23:59:59` 也算纯日期），判据不对称。统一为**都不判秒**：
+/// 00:00:01 是录入 / 序列化链路产生的纯日期形态变体（用户不会主动设 1 秒），
+/// 归入按日比较更符合其语义；两侧分支从此对称。
+bool dueIsPureDateForm(DateTime due) =>
+    (due.hour == 0 && due.minute == 0) || (due.hour == 23 && due.minute == 59);
+
+DateTime _dateOnlyOf(DateTime d) => DateTime(d.year, d.month, d.day);
+
 class Task {
   final String id;
   final String title;
@@ -171,11 +201,16 @@ class Task {
   /// 是否「逾期」：统一口径（看板统计卡、首页「逾期」筛选、分享长图共用）。
   /// 规则：未完成、非重复任务，且截止日期按「天」严格早于今天
   /// （今天到点未做不算逾期）。重复任务不计逾期（v2.2.8 对齐过）。
+  ///
+  /// P3-1（v2.9.6 审计）：日差判定统一经 [dueCompareKey] 取比较键——本应用
+  /// 截止时间有「纯日期（00:00/23:59）」与「带时刻」两种存储形态，逾期判定
+  /// 始终按「天」比，但取键路径与排程 / 排序收口到同一真源，未来判据调整
+  /// （如 P3-13 的判秒统一）不会再与本处漂移。
   static bool isOverdue(Task t, DateTime now) {
     if (t.done || t.isRepeating || t.dueDate == null) return false;
     final today = DateTime(now.year, now.month, now.day);
-    return DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day)
-        .isBefore(today);
+    final key = dueCompareKey(t.dueDate!);
+    return DateTime(key.year, key.month, key.day).isBefore(today);
   }
 
   /// 子任务总数（由 [subtasks] 派生）。

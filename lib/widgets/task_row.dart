@@ -231,7 +231,10 @@ String _dueLabel(DateTime? due) {
   if (due == null) return '无截止';
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
-  final d = DateTime(due.year, due.month, due.day);
+  // P3-1（v2.9.6 审计）：日差判定统一经 [dueCompareKey]（models/task.dart 的
+  // 比较键单一真源），与排程 / 首页 / 看板 / 详情同口径。
+  final key = dueCompareKey(due);
+  final d = DateTime(key.year, key.month, key.day);
   final diff = d.difference(today).inDays;
   final time = ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
   if (diff == 0) return '今天$time';

@@ -17,7 +17,8 @@ import 'package:todolist/screens/habit_screen.dart'
     show
         toggleHabitWithUndo,
         incrementWithCelebration,
-        setTodayQuantityWithCelebration;
+        setTodayQuantityWithCelebration,
+        kHabitRestDayLabel;
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/services/schedule_advisor.dart';
@@ -351,6 +352,8 @@ class _ScheduleAdvisorState extends State<_ScheduleAdvisor> {
   /// U2-3（v2.9.4 审计）：折叠态的持久化 key（与看板分组态 `kanban_board.dart`
   /// 同一套做法）。此前是纯 `State` 字段，而今日页由 `pages[_index]` 切换——
   /// 切到看板再回来会**重建**该 State，用户刚收起的明细又展开。
+  /// P3-12（v2.9.6 审计）：Tab 保活后本页 State 已常驻不再重建，但持久化
+  /// 仍保留——杀后台 / 冷启动时折叠态依旧需要恢复，注释前提同步更新。
   static const String _kCollapsedPrefsKey = 'schedule_advisor_collapsed';
 
   bool _collapsed = false;
@@ -702,7 +705,7 @@ class _HabitTile extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 14, color: onBg),
                 ),
-                if (quantified)
+                if (quantified && canCheckIn)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
                     child: Row(
@@ -713,11 +716,12 @@ class _HabitTile extends StatelessWidget {
                             // 这里却仍报「今日 0/8」——同一行自相矛盾。统一读
                             // [canCheckIn]（= `shouldCheckInOn`），与列表侧
                             // `restDay ? '休息' : '$value/$target'` 同一语义。
-                            !canCheckIn
-                                ? '今日休息'
-                                : met
-                                    ? '今日 ${status.value}/${status.target} · 已达标'
-                                    : '今日 ${status.value}/${status.target}',
+                            // U3-1 / P3-4（v2.9.6 审计）：休息日整块 meta 不再渲染
+                            // ——按钮位已显示共享常量 [kHabitRestDayLabel]
+                            // （原「今日休息」，四种写法之一），不再同屏重复。
+                            met
+                                ? '今日 ${status.value}/${status.target} · 已达标'
+                                : '今日 ${status.value}/${status.target}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -756,7 +760,9 @@ class _HabitTile extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           if (!canCheckIn)
-            Text('今天不打卡', style: TextStyle(fontSize: 12, color: meta))
+            // U3-1（v2.9.6 审计）：休息日文案走共享常量（原裸字面「今天不打卡」）。
+            Text(kHabitRestDayLabel,
+                style: TextStyle(fontSize: 12, color: meta))
           else
             SizedBox(
               // U3-1（v2.9.4 审计）：此前是 `height: 31`——比 Material 最小

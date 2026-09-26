@@ -61,7 +61,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '2.9.6');
+      if (mounted) setState(() => _version = '2.9.7');
     }
   }
 
@@ -232,11 +232,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (oldPass == null && hasOld)
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 8),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
                   child: Text(
                     '【强制重设】旧加密快照将永久无法解开，请确认你知道这意味着什么。',
-                    style: TextStyle(color: Colors.deepOrange),
+                    // U3-6（v2.9.6 审计）：`Colors.deepOrange` → `colorScheme.error`。
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
                 ),
               TextField(
@@ -312,7 +313,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            // U3-6（v2.9.6 审计）：`Colors.red` → `colorScheme.error`。
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
             onPressed: () => Navigator.of(dctx).pop(true),
             child: const Text('仍要重设'),
           ),

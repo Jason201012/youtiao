@@ -211,7 +211,9 @@ class _DownloadBodyState extends State<_DownloadBody> {
               const SizedBox(height: 12),
               Text(_status, style: theme.textTheme.bodySmall),
             ] else ...[
-              const Icon(Symbols.error_outline_rounded, size: 36, color: Colors.red),
+              // U3-6（v2.9.6 审计）：`Colors.red` → `colorScheme.error`。
+              Icon(Symbols.error_outline_rounded,
+                  size: 36, color: Theme.of(context).colorScheme.error),
               const SizedBox(height: 8),
               Text('下载或安装失败：\n$_error', style: theme.textTheme.bodySmall),
               const SizedBox(height: 6),

@@ -124,7 +124,13 @@ class NotificationService {
   /// 单独关闭，故独立成段。
   static const int _kTestTimerId = 999999;
 
-  /// 即时测试通知 id 段起点（避开习惯提醒段 [800000,1800007] 与定时测试段 [999999,1000000]）。
+  /// 即时测试通知 id 段起点。
+  ///
+  /// P3-13（v2.9.6 审计）：本注释此前写「避开习惯提醒段 [800000,1800007]」，
+  /// 与实际不符——习惯提醒段自 P3-13（v2.9.5）独立为 ~1e9 起，800000 旧段
+  /// 已不存在（即时测试通知正是因当时落在 800000 与旧习惯段重叠才整体迁到
+  /// 1200000+）。现按上方段位分配表如实更新：本段 [1200000, 1299999] 只需
+  /// 避开定时测试段 [999999, 1000000] 与简报 / 回收站 / 挽留固定 id。
   static const int _kTestInstantBase = 1200000;
 
   /// 早晚简报固定通知 id：独立于任务/重复/习惯/聚焦/测试各段，互不重叠。
@@ -163,6 +169,11 @@ class NotificationService {
   /// 但保险起见消费端仍做幂等（checkInOnDay 已存在则忽略）。
   static const String habitCheckInActionId = 'habit_checkin';
 
+  /// U2-4（v2.9.6 审计）：确认通知上的「撤销」action——通知打卡此前只能写入
+  /// 不能回退，误触后必须进 App 手动纠正。点击后清空该习惯**今天**的记录
+  /// （消费端走 setCheckInValue 唯一写入口）。
+  static const String habitUndoActionId = 'habit_undo';
+
   /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
   /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
   static List<AndroidNotificationAction> get _taskActions => [
@@ -174,9 +185,14 @@ class NotificationService {
   ///
   /// P2-1（v2.9.4 审计）：抽出为单一真源——正式落点与 snooze 落点**共用**同一组
   /// action（此前 snooze 通知一个 action 都没有，顺延后既不能再顺延也不能打卡）。
-  static List<AndroidNotificationAction> get _habitActions => [
+  ///
+  /// U2-4（v2.9.6 审计）：标签随量化语义变化——量化习惯的「打卡」动作实际是
+  /// **+1**（U2-6 之后恒 +1，不再一键顶满），原标签「打卡」让用户分不清是
+  /// 「+1」还是「达标」。量化习惯改显「记 1 个」；布尔习惯维持「打卡」。
+  static List<AndroidNotificationAction> habitActionsFor(Habit habit) => [
         AndroidNotificationAction(snoozeActionId, '稍后提醒'),
-        AndroidNotificationAction(habitCheckInActionId, '打卡'),
+        AndroidNotificationAction(
+            habitCheckInActionId, habit.isQuantified ? '记 1 个' : '打卡'),
       ];
 
   /// 点击通知的回调（由 main.dart 注入，负责根据 payload 导航）。
@@ -1081,7 +1097,8 @@ class NotificationService {
           priority: Priority.high,
           playSound: true,
           // P2-1（v2.9.4 审计）：与 snooze 落点共用同一组 action（单一真源）。
-          actions: _habitActions,
+          // U2-4（v2.9.6 审计）：量化习惯标签改「记 1 个」。
+          actions: habitActionsFor(habit),
           // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
           visibility: visibility,
         ),
@@ -1307,7 +1324,8 @@ class NotificationService {
         priority: Priority.high,
         playSound: true,
         // P2-1：snooze 后的通知补回两个 action，使它仍可二次顺延 / 直接打卡。
-        actions: _habitActions,
+        // U2-4（v2.9.6 审计）：量化习惯标签改「记 1 个」。
+        actions: habitActionsFor(habit),
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
       ),
@@ -1672,10 +1690,20 @@ class NotificationService {
         priority: Priority.low,
         playSound: false,
         autoCancel: true,
+        // U2-4（v2.9.6 审计）：补「撤销」action——通知打卡写入后此前只能进 App
+        // 纠正。休息日分支没有写入任何记录，不挂撤销。
+        actions: restDay
+            ? null
+            : [AndroidNotificationAction(habitUndoActionId, '撤销')],
         visibility: visibility,
       ),
     );
     try {
+      // U3-5（v2.9.6 审计）：确认通知固定用**日 0 号槽**（覆盖式更新当日落点）。
+      // 若用户从 snooze（8 号槽）通知点打卡，确认与原始 snooze 通知并存与否取决于
+      // 插件的 id 去重（0 号槽 ≠ 8 号槽，两者不同 id 会并存）——但打卡写入本身
+      // 已撤掉该习惯的 snooze（setCheckInValue → cancelHabitSnooze），并存窗口
+      // 实际趋近于零；保留 0 号槽覆盖语义，不为此引入第三个 id。
       await _plugin.show(
         habitNotifyIdOf(habit.id, 0),
         title,
@@ -1684,6 +1712,37 @@ class NotificationService {
       );
     } catch (e) {
       AppLog.d('[通知] 习惯打卡确认通知失败 id=${habit.id}: $e');
+    }
+  }
+
+  /// U2-4（v2.9.6 审计）：通知「撤销」action 后的覆盖式确认——如实回报今天的
+  /// 记录已清空。同 [showHabitCheckedConfirm] 的 0 号槽覆盖语义。
+  Future<void> showHabitUndoConfirm(Habit habit) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        // 撤销后允许直接重新打卡（回到「记 1 个 / 打卡」）。
+        actions: habitActionsFor(habit),
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        habitNotifyIdOf(habit.id, 0),
+        '已撤销今日打卡',
+        '${habit.emoji} ${habit.title} · 今天的记录已清空',
+        detail,
+        payload: '$payloadHabitPrefix${habit.id}',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 习惯撤销确认通知失败 id=${habit.id}: $e');
     }
   }
 

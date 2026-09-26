@@ -399,7 +399,32 @@ void _handleNotificationAction(String? actionId, String? payload) {
     } else {
       _enqueue(_pendingHabitCheckInIds, habitId);
     }
+    return;
   }
+  if (actionId == NotificationService.habitUndoActionId) {
+    // U2-4（v2.9.6 审计）：确认通知补「撤销」action——通知打卡此前只能 +1
+    // 不能回退，误触后必须进 App 手动纠正。撤销清空该习惯**今天**的记录
+    // （走 setCheckInValue 唯一写入口，落盘 + 重排 + 挽留重排全部一致生效），
+    // 并用覆盖式确认通知回报结果。幂等：今天本无记录时无操作。
+    final habitId = NotificationService.parseHabitId(payload);
+    if (habitId == null) return;
+    final state = _navigatorKey.currentState;
+    if (state != null && !_isAppLocked) {
+      _doHabitUndo(state, habitId);
+    }
+    // 锁定期间不暂存：撤销是破坏性回退（与「完成」同级），解锁后用户已可
+    // 直接在 App 内操作，无需跨锁补执行。
+  }
+}
+
+/// U2-4（v2.9.6 审计）：通知「撤销」action——把该习惯今天的打卡记录清空。
+void _doHabitUndo(NavigatorState nav, String habitId) {
+  final hp = Provider.of<HabitProvider>(nav.context, listen: false);
+  final habit = hp.byId(habitId);
+  if (habit == null) return;
+  hp.setCheckInValue(habit, DateTime.now(), 0).catchError((_) => false).then((_) {
+    NotificationService.instance.showHabitUndoConfirm(habit);
+  });
 }
 
 /// U3：把习惯标记为今天已打卡。与补卡共用 [HabitProvider.checkInOnDay]（幂等：
@@ -626,6 +651,10 @@ void main() async {
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);
+  // P2-9（v2.9.6 审计）：专注记录删除时对称扣减任务累计专注——此前只加不减，
+  // 「删除记录 → 撤销删除」会把同一段时长回填两次，任务「已专注」虚高，
+  // 污染详情页「预估 vs 实际」偏差与排程建议。
+  focus.onFocusRemoved = (taskId, sec) => task.removeFocusSec(taskId, sec);
   // 启动前台守护（若用户在设置里开启）：保证划掉后台后定时提醒仍准时送达
   if (task.backgroundGuardEnabled) {
     await BackgroundService.instance.start();
@@ -787,6 +816,14 @@ class _MainScaffoldState extends State<MainScaffold>
 
   /// P1-9：首页 State 句柄，供 Ctrl/Cmd+F 快捷键从宿主 Scaffold 聚焦首页搜索。
   final GlobalKey<HomeScreenState> _homeKey = GlobalKey<HomeScreenState>();
+
+  /// U2-3（v2.9.6 审计）：切 Tab 的统一入口——进入日历 Tab 时通知其
+  /// 「若不在本月则回本月」（保活后 initState 不再随切换执行）。
+  /// 底部导航与 `_SwitchTabIntent` 快捷键共用，避免两条入口口径漂移。
+  void _switchTab(int i) {
+    if (i == 2) CalendarScreen.notifyTodaySeen();
+    setState(() => _index = i);
+  }
 
   /// M-01：应用锁 Provider 引用。锁定期间外部意图只暂存，解锁后由监听回调消费。
   late final AppLockProvider _appLock;
@@ -1095,21 +1132,12 @@ class _MainScaffoldState extends State<MainScaffold>
     ];
     return Consumer<AppLockProvider>(
       builder: (context, appLock, _) {
-        // A4 应用锁：未解锁时渲染独立解锁页，屏蔽主界面交互。
-        if (appLock.locked) {
-          // F9：应用锁触发瞬间，把根 Navigator 上之前 push 的所有路由（任务详情 /
-          // 看板 / 设置等详情页）一次性弹回首页。否则那些详情页会停在栈顶，
-          // AppLockGate 仅替换 MainScaffold 内的视图，那些详情页仍然盖在解锁门
-          // 之上——侧滑手势 / 系统返回键都会先落到详情页再回到门，应用锁形同虚设。
-          // popUntil 用 isFirst 而非 immediatePop，避免 root 路由被一并 pop 掉。
-          final nav = _navigatorKey.currentState;
-          if (nav != null && nav.canPop()) {
-            nav.popUntil((r) => r.isFirst);
-          }
-          return const AppLockGate();
-        }
-        final task = context.watch<TaskProvider>();
-        final safeMode = task.dbLoadFailed;
+        // P3-12（v2.9.6 审计）：此前的 `context.watch<TaskProvider>()` 让**任何**
+        // 任务变更都重建整个 MainScaffold（含 IndexedStack 里全部已访问页），
+        // 重建面由 1 页放大到最多 6 页。本 builder 实际只消费 `dbLoadFailed`
+        // 一个布尔值，改用 `select` 精确订阅。
+        final safeMode =
+            context.select<TaskProvider, bool>((t) => t.dbLoadFailed);
         final scaffold = Scaffold(
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
           body: SafeArea(
@@ -1144,7 +1172,7 @@ class _MainScaffoldState extends State<MainScaffold>
               ? null
               : AppBottomNav(
                   currentIndex: _index,
-                  onTap: (i) => setState(() => _index = i),
+                  onTap: (i) => _switchTab(i),
                 ),
         );
         // P1-2：用 Listener 包裹，任何指针交互（点按 / 滚动 / 拖拽 / 悬停）都重置空闲自动锁定计时。
@@ -1156,8 +1184,9 @@ class _MainScaffoldState extends State<MainScaffold>
           child: scaffold,
         );
         // P1-9：桌面端挂全局快捷键；移动端原样返回 Scaffold，保持触摸交互不变。
-        if (_isDesktopShortcutsEnabled) {
-          return Shortcuts(
+        // U2-1（v2.9.6 审计）：锁定态不再替换整棵子树——见下方锁定分支。
+        final content = _isDesktopShortcutsEnabled
+            ? Shortcuts(
             shortcuts: _appShortcuts,
             child: Actions(
               actions: {
@@ -1237,7 +1266,7 @@ class _MainScaffoldState extends State<MainScaffold>
                     // （Cmd/Ctrl+数字 不受此限，见 _buildAppShortcuts 说明。）
                     if (_isEditingText()) return null;
                     if (_index != intent.index) {
-                      setState(() => _index = intent.index);
+                      _switchTab(intent.index);
                     }
                     return null;
                   },
@@ -1254,9 +1283,39 @@ class _MainScaffoldState extends State<MainScaffold>
               },
               child: monitored,
             ),
+          )
+            : monitored;
+
+        // A4 应用锁：未解锁时渲染独立解锁页，屏蔽主界面交互。
+        //
+        // U2-1（v2.9.6 审计）：改为**覆盖层**而非替换子树——原实现
+        // `if (locked) return AppLockGate()` 把含 `_TabKeepAlive` 的整个
+        // Scaffold 移出树，解锁后全部保活态（多选集合、搜索态、标签筛选、
+        // 滚动位置、日历月/周视图）被销毁、当前 Tab 被强制回首页，而锁定是
+        // 高频场景，「切 Tab 不丢状态」的承诺在锁定路径上整段失效。现在
+        // 底层子树原样保留（被不透明解锁门盖住、指针与焦点全部隔离），
+        // 解锁后掀开即恢复原状。
+        if (appLock.locked) {
+          // F9：应用锁触发瞬间，把根 Navigator 上之前 push 的所有路由（任务详情 /
+          // 看板 / 设置等详情页）一次性弹回首页。否则那些详情页会停在栈顶，
+          // AppLockGate 仅覆盖 MainScaffold 内的视图，那些详情页仍然盖在解锁门
+          // 之上——侧滑手势 / 系统返回键都会先落到详情页再回到门，应用锁形同虚设。
+          // popUntil 用 isFirst 而非 immediatePop，避免 root 路由被一并 pop 掉。
+          final nav = _navigatorKey.currentState;
+          if (nav != null && nav.canPop()) {
+            nav.popUntil((r) => r.isFirst);
+          }
+          return Stack(
+            children: [
+              // 底层保留保活子树；锁定期间禁指针、禁焦点（键盘不再弹出）。
+              IgnorePointer(
+                child: ExcludeFocus(child: content),
+              ),
+              const Positioned.fill(child: AppLockGate()),
+            ],
           );
         }
-        return monitored;
+        return content;
       },
     );
   }

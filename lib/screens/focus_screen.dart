@@ -50,6 +50,9 @@ class _FocusScreenState extends State<FocusScreen> {
   Set<FocusSoundType> _soundTypes = {};
   double _soundVol = 0.5;
 
+  /// P2-8（v2.9.6 审计）：FocusProvider 引用缓存（dispose 移除 listener 用）。
+  FocusProvider? _focusRef;
+
   /// 关联任务选择（开始专注前可选；null = 独立专注）。
   String? _selectedTaskId;
   String? _selectedTaskTitle;
@@ -58,18 +61,44 @@ class _FocusScreenState extends State<FocusScreen> {
   void initState() {
     super.initState();
     _initAudio();
+    // P2-8：缓存 provider 引用（dispose 里不能再用 context 取）。
+    _focusRef = context.read<FocusProvider>();
     // 从任务行「专注」按钮跳转过来时，预选该任务（消费 pending 后清空）。
-    final focus = context.read<FocusProvider>();
-    if (focus.pendingTaskId != null) {
+    _consumePending();
+    // P2-8（v2.9.6 审计）：Tab 保活后本页 State 常驻（首访后不再销毁），
+    // initState 的 pending 消费只在**首次**生效——第二次起「任务行 → 专注钮」
+    // 静默失效。改为订阅 FocusProvider：`requestTask` 现已 notifyListeners
+    // （见 focus_provider），通知到达即消费 pending。本页已在树中（哪怕不在
+    // 当前 Tab），通知都能送达；从未访问过的场景仍由 initState 兜底。
+    _focusRef!.addListener(_consumePending);
+    if (_selectedTaskId == null &&
+        _focusRef!.hasActive &&
+        _focusRef!.activeTaskId != null) {
+      // 从进行中的会话恢复已关联任务，避免显示成「独立专注」。
+      _selectedTaskId = _focusRef!.activeTaskId;
+      _selectedTaskTitle = _focusRef!.activeTaskTitle;
+    }
+  }
+
+  /// P2-8（v2.9.6 审计）：消费 `FocusProvider.pendingTaskId`（幂等）。
+  /// initState 与 provider 通知共用同一入口，先到先得、消费即清，
+  /// pending 不再长期滞留（避免在下一次任意重建时被误消费）。
+  void _consumePending() {
+    final focus = _focusRef;
+    if (focus == null || focus.pendingTaskId == null) return;
+    setState(() {
       _selectedTaskId = focus.pendingTaskId;
       _selectedTaskTitle = focus.pendingTaskTitle;
       focus.pendingTaskId = null;
       focus.pendingTaskTitle = null;
-    } else if (focus.hasActive && focus.activeTaskId != null) {
-      // 切走再切回时页面 state 已重建：从进行中的会话恢复已关联任务，避免显示成「独立专注」。
-      _selectedTaskId = focus.activeTaskId;
-      _selectedTaskTitle = focus.activeTaskTitle;
-    }
+    });
+  }
+
+  @override
+  void dispose() {
+    // P2-8：dispose 里不能再用 context，initState 时缓存引用。
+    _focusRef?.removeListener(_consumePending);
+    super.dispose();
   }
 
   Future<void> _initAudio() async {
@@ -788,12 +817,19 @@ class _RecordList extends StatelessWidget {
               },
               onDismissed: (_) {
                 final removed = s;
+                // P2-9（v2.9.6 审计）：removeSession 现已与 addSession 对称——
+                // 删除即扣减任务累计专注（onFocusRemoved → removeFocusSec），
+                // 撤销再经 addSession 回填，两侧相抵；此前删除不扣、撤销又加，
+                // 任务「已专注」凭空多出一段。
                 focus.removeSession(s.id);
                 // P3-4 / U3-1：此前硬编码 4 秒；改走唯一实现（10 秒 + 超时提示）。
                 showUndoSnackBar(
                   context,
                   content: undoContent('已删除该专注记录'),
-                  onUndo: () => focus.addSession(removed),
+                  onUndo: () async {
+                    focus.addSession(removed);
+                    return true;
+                  },
                 );
               },
               child: Container(
@@ -836,7 +872,7 @@ class _RecordList extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('清空今日记录'),
-        content: const Text('将删除今天的所有专注记录，此操作不可撤销。'),
+        content: const Text('将删除今天的所有专注记录，可在 $kUndoWindowSeconds 秒内撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -850,10 +886,21 @@ class _RecordList extends StatelessWidget {
       ),
     );
     if (ok == true) {
-      focus.clearToday();
+      // P3-15（v2.9.6 审计）：清空也补 10 秒撤销——同屏单条删除已有撤销，
+      // 批量清空反而「不可撤销」，保护力度与风险倒挂。clearToday 返回被删
+      // 记录（含 P2-9 的对称扣减），撤销经 addSession 逐条原样回填（含 taskId
+      // 的记录会同步回填任务累计专注，与删除时的扣减相抵）。
+      final removed = focus.clearToday();
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已清空今日专注记录')),
+        showUndoSnackBar(
+          context,
+          content: undoContent('已清空今日专注记录（${removed.length} 条）'),
+          onUndo: () async {
+            for (final s in removed) {
+              focus.addSession(s);
+            }
+            return true;
+          },
         );
       }
     }

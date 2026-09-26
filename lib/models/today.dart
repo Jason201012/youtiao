@@ -192,7 +192,4 @@ class TodayHabitStatus {
 
   /// T1-2：今日进度 0..1（量化按 值/目标；布尔按有无记录）。
   double get progress => (value / (target <= 0 ? 1 : target)).clamp(0.0, 1.0).toDouble();
-
-  /// T1-2：量化习惯的「今日 x/y」短文案；布尔习惯返回 null（调用方走原有文案）。
-  String? get quantifiedLabel => habit.isQuantified ? '$value/$target' : null;
 }

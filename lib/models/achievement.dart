@@ -233,7 +233,10 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'streak_3',
     title: '三日打鱼',
-    desc: '连续打卡 3 天',
+    // P3-6（v2.9.6 审计）：值为 [longestStreak]（达标日 + 只看计划日 + 宽限日
+    // 可跨越），「连续打卡 N 天」的字面与之不符——非每日习惯的 3 个计划日可跨
+    // 9 个自然日。文案改为与判定同义（first_checkin 的 P3-14 同型残留）。
+    desc: '连续达成 3 个计划日',
     emoji: '🔥',
     group: AchievementGroup.habit,
     target: 3,
@@ -242,7 +245,7 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'streak_7',
     title: '一周不辍',
-    desc: '连续打卡 7 天',
+    desc: '连续达成 7 个计划日',
     emoji: '🔥',
     group: AchievementGroup.habit,
     target: 7,
@@ -251,7 +254,7 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'streak_30',
     title: '月度铁人',
-    desc: '连续打卡 30 天',
+    desc: '连续达成 30 个计划日',
     emoji: '🏔️',
     group: AchievementGroup.habit,
     target: 30,

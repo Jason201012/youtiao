@@ -289,7 +289,10 @@ class _TaskSheetState extends State<TaskSheet> {
             child: const Text('继续编辑'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            // U3-6（v2.9.6 审计）：`Colors.red` → `colorScheme.error`。
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
             onPressed: () => Navigator.pop(d, true),
             child: const Text('放弃并关闭'),
           ),

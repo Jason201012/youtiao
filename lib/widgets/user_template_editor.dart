@@ -205,7 +205,11 @@ class _EditorBodyState extends State<_EditorBody> {
         repeatInterval: _int(c.interval.text, 2),
         repeatMinute: it.repeatMinute,
         repeatUntil: it.repeatUntil,
-        monthlyDay: _int(c.monthlyDay.text, 1),
+        // P3-8（v2.9.6 审计）：monthlyDay 与 `Task.fromJson` 的
+      // `_clampInt(..., 1, 31, 1)` 对齐夹取——此前原样存入模板 JSON，
+      // 套用时直接构造 `Task(monthlyDay: 0)`（构造器不夹取），只在下次
+      // 序列化回读时才被改写，「0 号」这样的非法月度规则会先存活一轮。
+      monthlyDay: _int(c.monthlyDay.text, 1).clamp(1, 31),
         monthlyWeekday: useNth ? wd : null,
         monthlyWeekIndex: useNth ? wkIdx : null,
         // P2-4（v2.9.3 审计）同族收口：保存时此前把「每月倒数第 N 天」与
@@ -639,10 +643,12 @@ extension _TemplateItemEdit on TemplateItem {
     int? monthlyWeekIndex,
     int? monthlyFromEnd,
     bool clearMonthlyWeekday = false,
-    // P2-1（v2.9.5 审计）：[monthlyWeekIndex] 此前与 [monthlyWeekday] 一样
-    // 无法「显式清空」（传 null 会被 `?? this.x` 当成保留旧值），于是从
-    // 「每月第 N 个周几」退回「每月 N 号」时数据层仍留着旧的周几/序号，
-    // `_monthlyModeOf` 会把它判回 nthWeekday —— 切档「看起来成功、保存后复原」。
+    // P2-1（v2.9.5 审计）：[monthlyWeekIndex] 与 [monthlyWeekday] 一样支持
+    // 「显式清空」。P3-11（v2.9.6 审计）：本参数在 copyWith 链路之外**无任何
+    // 调用点**（真正清档走 `clearMonthlyWeekIndex: true` 的路径不存在——
+    // 现有切档逻辑只在 _save 重建时透传），属死参数；保留实现但在此如实标注
+    // 「当前无调用点，仅为与 clearMonthlyWeekday 对称的公开能力」，避免下一轮
+    // 审计再判「注释与实现不符」。若后续确认无需求可整体移除。
     bool clearMonthlyWeekIndex = false,
   }) =>
       TemplateItem(

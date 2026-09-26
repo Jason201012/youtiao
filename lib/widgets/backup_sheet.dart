@@ -329,7 +329,10 @@ class BackupSheet {
                 child: const Text('取消'),
               ),
               FilledButton(
-                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                // U3-6（v2.9.6 审计）：`Colors.red` → `colorScheme.error`。
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error,
+                ),
                 onPressed: () => Navigator.pop(d, true),
                 child: const Text('仍要清空并恢复'),
               ),
@@ -637,7 +640,10 @@ class BackupSheet {
                   child: const Text('取消'),
                 ),
                 FilledButton(
-                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                  // U3-6（v2.9.6 审计）：`Colors.red` → `colorScheme.error`。
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.error,
+                  ),
                   onPressed: () => Navigator.pop(d, true),
                   child: const Text('仍要清空并还原'),
                 ),

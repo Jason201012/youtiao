@@ -189,12 +189,14 @@ class ReportExporter {
   /// 现在按类型分派到 excel 包的原生值类型：
   /// - [int] → [IntCellValue]（Excel 里是真正的整数，可求和）；
   /// - [double] → [DoubleCellValue]（专注时长这类带小数的量）；
-  /// - [DateTime] → [DateCellValue]（真日期格式，可按时间筛选/排序）；
   /// - 其余（含 [bool]、日期的**字符串**形态如 `2026-09-19 08:30`）→ 文本。
   ///
   /// 刻意**不**把日期字符串改成 DateCellValue：这些列是
   /// `yyyy-MM-dd HH:mm` 的复合文本，转成日期会丢「时分」语义或引入时区解释，
-  /// 反而制造新的歧义。日期列要可排序的话由调用方显式传 [DateTime]。
+  /// 反而制造新的歧义。
+  /// P3-11（v2.9.6 审计）：原 [DateTime] 分支已删——P3-3（v2.9.5）改造后
+  /// `taskTableCells` 等四张表真源全部产出结构化标量，再无任何表产出
+  /// [DateTime]，该分支为死代码。
   static void _set(Sheet s, int row, int col, Object value) {
     final cell =
         s.cell(CellIndex.indexByColumnRow(columnIndex: col, rowIndex: row));
@@ -202,10 +204,6 @@ class ReportExporter {
       cell.value = IntCellValue(value);
     } else if (value is double) {
       cell.value = DoubleCellValue(value);
-    } else if (value is DateTime) {
-      // `DateCellValue` 的主构造器是命名参数（year/month/day），另有现成的
-      // `fromDateTime` 工厂——直接用后者，避免手工拆三个字段。
-      cell.value = DateCellValue.fromDateTime(value);
     } else {
       cell.value = TextCellValue(value.toString());
     }

@@ -144,6 +144,10 @@ class TrashScreen extends StatelessWidget {
                         // 单条删除的保护反而更弱，逻辑上说不通。
                         // 现补确认（附件是异步 FS 统计，弹窗文案统一按「含附件」
                         // 表述，不为此引入同步 IO）。
+                        //
+                        // U3-4（v2.9.6 审计）：与「恢复」钮之间拉开 12px——语义相反
+                        // 的两个 48dp 按钮此前零间距紧邻，中心距仅 48px，极易点错。
+                        const SizedBox(width: 12),
                         IconButton(
                           onPressed: () =>
                               _confirmPermanentDelete(context, provider, t),

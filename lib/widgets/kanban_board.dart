@@ -261,10 +261,13 @@ class _KanbanBoardState extends State<KanbanBoard> {
     return [for (final a in alphas) base.withValues(alpha: a)];
   }
 
-  /// 泳道强调色：状态泳道用语义色（已完成 = 深绿、待办 = 次要色），
-  /// 分类 / 标签泳道走循环调色板，「其他」泳道用前景色。
+  /// 泳道强调色：状态泳道与分类 / 标签泳道统一走主题灰阶，
+  /// 「其他」泳道用前景色。
+  ///
+  /// U3-3（v2.9.6 审计）：「已完成」泳道此前仍硬编码深绿 `Color(0xFF0F6E56)`，
+  /// 本轮其余泳道与存储占比条都已回归灰阶，唯独此处漏网——不随主题、且偏离
+  /// 本项目纯黑白的设计偏好。泳道语义靠标题与位置区分即可，无需色相辨位。
   Color _laneColor(KanbanLaneData lane) {
-    if (lane.dropStatus == TaskStatus.done) return const Color(0xFF0F6E56);
     if (lane.dropStatus != null) return appColors(context).meta;
     if (lane.paletteIndex != null) {
       return _lanePalette[lane.paletteIndex! % _lanePalette.length];
@@ -517,7 +520,9 @@ class _KanbanCard extends StatelessWidget {
     showUndoSnackBar(
       context,
       content: undoContent('已移至「$to」'),
-      onUndo: () => provider.restoreTaskSnapshot(snapshot),
+      // P2-2（v2.9.6 审计）：restoreTaskSnapshot 返回是否生效（任务已删除时
+      // false），由唯一实现统一提示「撤销已失效」。
+      onUndo: () async => provider.restoreTaskSnapshot(snapshot),
     );
   }
 
@@ -567,6 +572,24 @@ class _KanbanCard extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              // P2-7（v2.9.6 审计）：显式改状态入口（勾选圈）——外层长按入口
+              // 与 LongPressDraggable 手势竞争后不可达（见 build 末尾注释），
+              // 分类 / 标签分组下曾完全无法从看板改状态。视觉小圆圈、48dp
+              // 命中区，与今日页勾选框同一形态。
+              IconButton(
+                onPressed: () => _cycle(provider, task, context),
+                tooltip: done ? '移到待办' : '标记完成',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                icon: Icon(
+                  done ? Icons.check_circle : Icons.check_circle_outline,
+                  size: 20,
+                  color: done
+                      ? Theme.of(context).colorScheme.primary
+                      : ext.meta,
+                ),
+              ),
             ],
           ),
           // P3-10（v2.9.4 审计）：预计时长此前只出现在任务详情 / 今日页 / 导出表，
@@ -612,10 +635,15 @@ class _KanbanCard extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       // U2-4：单击进详情（此前单击直接切换完成状态，且全屏无详情入口）。
+      //
+      // P2-7（v2.9.6 审计）：**移除外层 `onLongPress` 改状态入口**——它与内层
+      // `LongPressDraggable` 的 `DelayedMultiDragGestureRecognizer`（同为
+      // kLongPressTimeout）在手势竞技场竞争，内层先入竞技场并胜出，外层
+      // `onLongPress` 实际不会被投递；而分类 / 标签分组下 `dropStatus == null`、
+      // `DragTarget` 不接受落点，长按起拖后**既改不了状态也没有第二入口**，
+      // U2-4 想保留的「长按改状态」名存实亡。现改为卡片标题行末尾的**显式
+      // 勾选圈**（P2-7 报告建议），全分组模式下都可用。
       onTap: () => _openDetail(task, context),
-      // 改状态的移动端等价入口（拖拽在触屏上依赖长按起手，两者共存不冲突：
-      // LongPressDraggable 胜出时会吃掉手势，不会同时触发 onTap）。
-      onLongPress: () => _cycle(provider, task, context),
       child: LongPressDraggable<Task>(
         data: task,
         feedback: Material(
@@ -635,7 +663,11 @@ class _KanbanCard extends StatelessWidget {
     if (t.dueDate == null) return '';
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final d = DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
+    // P3-1（v2.9.6 审计）：日差判定统一经 [dueCompareKey] 取比较键——本应用
+    // 截止时间有「纯日期（00:00/23:59）」与「带时刻」两种存储形态，全部比较
+    // 收口到 schedule_advisor 的同一真源，避免口径逐处漂移（P2-10 已是实证）。
+    final key = dueCompareKey(t.dueDate!);
+    final d = DateTime(key.year, key.month, key.day);
     final diff = d.difference(today).inDays;
     if (diff > 0) return '$diff天后';
     if (diff == 0) return '今天';

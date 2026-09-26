@@ -177,9 +177,13 @@ void main() {
     });
   });
 
-  // ── P2-5：weeklyGoal 读侧夹取 ─────────────────────────────────
-  group('P2-5 weeklyGoal 读侧与写侧共用 clampWeeklyGoalTo', () {
-    test('老数据 weeklyGoal=20 + 每周一三五 → 读回夹到 3', () {
+  // ── P2-5 / P3-7：weeklyGoal 读侧口径 ───────────────────────────
+  // P3-7（v2.9.6 审计）：本 group 原断言「fromJson 即夹取」——该行为恰被
+  // v2.9.6 审计判为缺陷：读侧夹取的收敛值会随下一次落盘写回库（`7 → 3`
+  // 不可恢复）。现改为「模型保留原值（保真）+ effectiveWeeklyGoal 按计划天数
+  // 夹取（展示/统计消费口径）」，写侧（addHabit/updateHabit）夹取不变。
+  group('P2-5/P3-7 weeklyGoal：读侧保真，effectiveWeeklyGoal 按计划天数夹取', () {
+    test('老数据 weeklyGoal=20 + 每周一三五 → 裸字段保真 20，生效值 3', () {
       final h = Habit.fromJson({
         'id': 'h1',
         'title': '脏数据习惯',
@@ -187,18 +191,23 @@ void main() {
         'weekdays': [1, 3, 5],
         'weeklyGoal': 20,
       });
-      expect(h.weeklyGoal, 3,
-          reason: '读侧此前写死 clamp(0,14)，与写侧 plannedDaysOf 不是同一档语义');
+      expect(h.weeklyGoal, 20,
+          reason: 'P3-7：fromJson 不再夹取，原值保留（ toJson 原样落库）');
+      expect(h.effectiveWeeklyGoal, 3,
+          reason: '展示/统计消费走生效值（clampWeeklyGoalTo 单一真源）');
+      expect(h.toJson()['weeklyGoal'], 20,
+          reason: '落盘仍是原值——用户改回「每天」即可恢复原目标');
     });
 
-    test('weeklyGoal=20 + 每天（weekdays 空）→ 读回夹到 7', () {
+    test('weeklyGoal=20 + 每天（weekdays 空）→ 生效值 7', () {
       final h = Habit.fromJson({
         'id': 'h2',
         'title': '每天习惯',
         'createdAt': '2026-01-01T00:00:00.000',
         'weeklyGoal': 20,
       });
-      expect(h.weeklyGoal, 7);
+      expect(h.weeklyGoal, 20);
+      expect(h.effectiveWeeklyGoal, 7);
     });
 
     test('weeklyGoal=0（不启用）→ 保持 0', () {
@@ -209,6 +218,7 @@ void main() {
         'weeklyGoal': 0,
       });
       expect(h.weeklyGoal, 0);
+      expect(h.effectiveWeeklyGoal, 0);
     });
 
     test('写侧对称：addHabit(weeklyGoal: 20, 一三五) → 落库 3', () async {
@@ -274,15 +284,19 @@ void main() {
 
       final hp = await newHabitProvider();
       final h = await _addHabit(hp, title: '量化撤snooze', dailyTarget: 2);
-      final day = DateTime(2026, 3, 10); // 每天计划（weekdays 空），该日应打卡
+      // P2-6（v2.9.6 审计）：判据修正为「写入的是**今天**且今天达标」才撤在途
+      // snooze——原用例写入的是历史日期（2026-03-10），在旧判据下会误撤今天
+      // 的在途提醒。改用「今天」写入（weekdays 空 = 每天计划，与星期几无关）。
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
 
       // 先记 1/2：未达标 → 稍后提醒仍该响，不得 cancel。
-      await hp.setCheckInValue(h, day, 1);
+      await hp.setCheckInValue(h, today, 1);
       expect(calls.where((c) => c.method == 'cancel'), isEmpty,
           reason: '未达标只是「先记 1/8」，在途 snooze 不清');
 
       // 记满 2/2：达标 → cancel 精确命中 snooze 的 8 号槽 id。
-      await hp.setCheckInValue(h, day, 2);
+      await hp.setCheckInValue(h, today, 2);
       final cancelIds = calls
           .where((c) => c.method == 'cancel')
           .map((c) => c.arguments is Map
@@ -292,6 +306,37 @@ void main() {
           .toSet();
       expect(cancelIds, contains(NotificationService.habitSnoozeNotifyIdOf(h.id)),
           reason: '任务侧「完成」会撤 snooze，习惯侧必须对称');
+    });
+
+    test('P2-6（v2.9.6 审计）：补卡历史日达标不得撤掉今天的在途 snooze',
+        () async {
+      const ch = MethodChannel('dexterous.com/flutter/local_notifications');
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ch, (call) async {
+        calls.add(call);
+        return null;
+      });
+
+      final hp = await newHabitProvider();
+      final h = await _addHabit(hp, title: '补卡不撤snooze', dailyTarget: 2);
+      final now = DateTime.now();
+      final yesterday = DateTime(now.year, now.month, now.day)
+          .subtract(const Duration(days: 1));
+
+      // 补卡**昨天**并顶到达标：与今天 21:10 的在途 snooze 无关，不得 cancel。
+      await hp.setCheckInValue(h, yesterday, 2);
+      final snoozeId = NotificationService.habitSnoozeNotifyIdOf(h.id);
+      final cancelCalls = calls
+          .where((c) => c.method == 'cancel')
+          .map((c) => c.arguments is Map
+              ? (c.arguments as Map)['id']
+              : c.arguments)
+          .whereType<int>()
+          .toSet();
+      expect(cancelCalls, isNot(contains(snoozeId)),
+          reason: '今天实际 0/8，21:10 的「稍后提醒」必须照常响——'
+              '旧判据 isTargetMetOn(habit, day) 会把它静默撤掉');
     });
   });
 

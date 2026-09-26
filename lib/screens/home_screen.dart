@@ -194,7 +194,9 @@ class HomeScreenState extends State<HomeScreen> {
       context,
       content: undoContent('已更新 $n.count 条任务'),
       expiredHint: '这 $n.count 条任务的撤销窗口已结束',
-      onUndo: () => provider.undoBatchEdit(n.batchId),
+      // P2-2（v2.9.6 审计）：undoBatchEdit 返回是否真正生效，失效时由
+      // showUndoSnackBar 统一提示「撤销已失效」。
+      onUndo: () async => provider.undoBatchEdit(n.batchId),
     );
   }
 
@@ -218,7 +220,10 @@ class HomeScreenState extends State<HomeScreen> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            // U3-6（v2.9.6 审计）：硬编码 `Colors.red` 收口到 `colorScheme.error`。
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
             onPressed: () => Navigator.pop(d, true),
             child: const Text('删除'),
           ),
@@ -955,7 +960,7 @@ class _PostponeButton extends StatelessWidget {
           '${day.month}月${day.day}日'
           '${origText.isEmpty ? '' : ' · $origText'}'),
       expiredHint: '这 $n 条顺延的撤销窗口已结束',
-      onUndo: () => provider.undoBatchEdit(r.$1),
+      onUndo: () async => provider.undoBatchEdit(r.$1),
     );
   }
 
@@ -1247,7 +1252,10 @@ void _showUndoSnackBar(
     context,
     content: undoContent('已删除「${removed.title}」'),
     expiredHint: '「${removed.title}」的撤销窗口已结束',
-    onUndo: () => provider.undoDelete(batchId),
+    // P2-2（v2.9.6 审计）：undoDelete 返回是否真正生效（缓冲被彻底删除 /
+    // 清空回收站作废时为 false），由 showUndoSnackBar 统一提示「撤销已失效」，
+    // 不再静默 no-op。
+    onUndo: () async => provider.undoDelete(batchId),
   );
 }
 
@@ -1260,6 +1268,6 @@ void _showBatchUndoSnackBar(
     context,
     content: undoContent('已删除 $count 个任务'),
     expiredHint: '这 $count 个任务的撤销窗口已结束',
-    onUndo: () => provider.undoDelete(batchId),
+    onUndo: () async => provider.undoDelete(batchId),
   );
 }

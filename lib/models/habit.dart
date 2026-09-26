@@ -90,6 +90,15 @@ class Habit {
   /// 同理）。
   int clampWeeklyGoal(int v) => clampWeeklyGoalTo(v, weekdays);
 
+  /// P3-7（v2.9.6 审计）：**生效的**周目标量——[weeklyGoal] 的展示 / 统计
+  /// 统一消费点（概览「本周达标」、[HabitProvider.weeklyGoalMet]、
+  /// `consecutiveGoalWeeks` 等）读这里而非裸字段。
+  ///
+  /// 裸字段保留 fromJson 的原值（保真，见 fromJson 注释）；本 getter 按当前
+  /// 计划天数夹取，夹取判据与写入侧同为 [clampWeeklyGoalTo] 单一真源。
+  /// 用户在编辑层显式保存时写入侧才会把收敛值落库。
+  int get effectiveWeeklyGoal => clampWeeklyGoal(weeklyGoal);
+
   /// T1-2：是否为「量化习惯」（设了 positive 的每日目标量）。
   bool get isQuantified => dailyTarget != null && dailyTarget! > 0;
 
@@ -118,16 +127,14 @@ class Habit {
       };
 
   factory Habit.fromJson(Map<String, dynamic> j) {
-    // P2-5（v2.9.5 审计）：周目标的**读侧**此前写死 `clamp(0, 14)`，与写入侧的
-    // [clampWeeklyGoalTo]（按 `plannedDaysOf`）不是同一档语义。于是老版本建的
-    //「每周一/三/五 · 周目标 7」在升级后仍显示「本周 x/7」——当周只有 3 个计划日，
-    // 目标永远不可达，`consecutiveGoalWeeks` 恒 0、成就「周目标达人」永久锁死，
-    // 且只有用户主动打开编辑层才会收敛、还不落库（与 P3-4 的 `dailyTarget`
-    // 读侧回落 `null` 同型的「双档语义」漏网）。
+    // P3-7（v2.9.6 审计）：**不再在读取时夹取** [weeklyGoal]——读侧夹取意味着
+    // 「读取即静默收敛」，收敛值会随下一次 `_persistHabits()` 落库，用户的原
+    // 目标量被不可恢复地改写（`7 → 3` 后把打卡日改回「每天」也回不来）。
+    // 现在模型层保留**原值**（[toJson] 原样落库），展示与统计消费统一走
+    // [effectiveWeeklyGoal]（按当前计划天数夹取）；用户在编辑层显式保存时
+    // 才由写入侧收敛到合法值。备份 / 数据库里的原值全程保真。
     //
-    // 读侧与写入侧统一到 [clampWeeklyGoalTo]：备份 / 数据库是唯一读入口，
-    // 在此处夹取即等价于「读取即静默收敛」（值变小、不改星期，故不丢信息；
-    // 也不需要额外的 dirty 标记位——写回时会被原样保存）。
+    // 读侧与写入侧语义仍统一：夹取判据只有一个真源 [clampWeeklyGoalTo]。
     final weekdays =
         (j['weekdays'] as List?)?.map((e) => e as int).toList() ?? const <int>[];
     return Habit(
@@ -141,7 +148,7 @@ class Habit {
           ? DateTime.parse(j['createdAt'] as String)
           : DateTime.now(),
       archived: j['archived'] as bool? ?? false,
-      weeklyGoal: clampWeeklyGoalTo((j['weeklyGoal'] as num?)?.toInt() ?? 0, weekdays),
+      weeklyGoal: (j['weeklyGoal'] as num?)?.toInt() ?? 0,
       // T1-2 / T1-4：备份是显式不可信输入，越界值一律回落默认——
       // 目标量 <=0 / 非整数 → 视为布尔习惯；宽限日夹到 [0,3]。
       dailyTarget: _clampTarget(j['dailyTarget']),

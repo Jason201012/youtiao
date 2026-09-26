@@ -193,8 +193,10 @@ class TaskDetailScreen extends StatelessWidget {
             actualMinutes: task.focusedMinutes,
             completed: task.done,
           );
+    // P3-3（v2.9.6 审计）：文案改引 schedule_advisor 的单一真源常量——
+    // 此前是复制字面量，改一处必漂移。
     final String? biasSuppressedNote =
-        biasSuppressed ? '重复任务不比较单次预估' : null;
+        biasSuppressed ? kBiasSuppressedNote : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -431,7 +433,10 @@ class TaskDetailScreen extends StatelessWidget {
                                   // 严格互逆、同样重排提醒），**不**改成整体快照回滚
                                   // ——后者会连带抹掉这 10 秒内用户对同一任务的其它
                                   // 改动（如重新设了提醒时刻），属过度撤销。
-                                  onUndo: () => provider.unskipOccurrence(task.id),
+                                  onUndo: () async {
+                                    provider.unskipOccurrence(task.id);
+                                    return true;
+                                  },
                                 );
                               }
                             : null,
@@ -539,14 +544,27 @@ class TaskDetailScreen extends StatelessWidget {
                             if (context.mounted) navigator.pop();
                             // U3-2（v2.9.5 审计）：去掉 `..hideCurrentSnackBar()`
                             // （同上文口径：不清场，靠队列）。
-                            messenger.showSnackBar(SnackBar(
-                              // U2-2：目标日本身就是循环日时 provider 只跳过本次、
-                              // 不建副本（返回 null）——必须说清，否则用户找不到副本。
-                              content: Text(copy == null
-                                  ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
-                                  : '已改期至 $dayLabel（已新建一次性副本）'),
-                              duration: const Duration(seconds: 8),
-                            ));
+                            //
+                            // P3-15（v2.9.6 审计）：补 10 秒撤销——日历拖拽改期
+                            // （U2-3）与「移到下一天」都有撤销，同一「仅此一次改期」
+                            // 动作在此入口却零保护，力度倒挂。撤销与 occurrence
+                            // 弹层「移到下一天」同构：删副本（discardTask，含附件
+                            // 清理与撤销缓冲作废）+ 取消原日跳过（unskipOccurrence）。
+                            if (context.mounted) {
+                              showUndoSnackBar(
+                                context,
+                                content: undoContent(copy == null
+                                    ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
+                                    : '已改期至 $dayLabel（已新建一次性副本）'),
+                                onUndo: () async {
+                                  if (copy != null) {
+                                    provider.discardTask(copy.id);
+                                  }
+                                  provider.unskipOccurrence(task.id);
+                                  return true;
+                                },
+                              );
+                            }
                           }
                         },
                         icon: const Icon(Symbols.edit_calendar, size: 18),
@@ -926,7 +944,10 @@ String _dueLabel(DateTime? due) {
   if (due == null) return '无截止';
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
-  final d = DateTime(due.year, due.month, due.day);
+  // P3-1（v2.9.6 审计）：日差判定统一经 [dueCompareKey]（比较键单一真源），
+  // 与排程 / 首页 / 看板同口径。
+  final key = dueCompareKey(due);
+  final d = DateTime(key.year, key.month, key.day);
   final diff = d.difference(today).inDays;
   final time =
       ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';

@@ -78,16 +78,29 @@ class FocusProvider extends ChangeNotifier {
   static VoidCallback? jumpToFocusTab;
 
   /// 任务行点「专注」时调用：暂存待选任务，并请求跳转到专注页。
+  ///
+  /// P2-8（v2.9.6 审计）：赋值后必须 `notifyListeners()`——Tab 保活后
+  /// FocusScreen 首次访问便常驻，`initState` 的 pending 消费只在**首次**生效，
+  /// 此后全靠本通知驱动页面消费（见 focus_screen 的 listener）。此前不 notify，
+  /// 「任务行 → 专注钮预选」从第二次起静默失效。
   void requestTask(String id, String title) {
     pendingTaskId = id;
     pendingTaskTitle = title;
     jumpToFocusTab?.call();
+    notifyListeners();
   }
 
   /// 专注会话记录后的回调：(taskId, durationSec)。由 main 接线到
   /// TaskProvider.addFocusSec，把专注时长回填到关联任务的累计专注字段。
   /// 仅在会话带 taskId 时触发。
   void Function(String taskId, int durationSec)? onFocusRecorded;
+
+  /// P2-9（v2.9.6 审计）：专注会话**删除**后的回调：(taskId, durationSec)。
+  /// 由 main 接线到 TaskProvider.removeFocusSec，与 [onFocusRecorded] 对称——
+  /// 此前删除记录不扣减、撤销删除又经 [addSession] 回填一次，任务「已专注」
+  /// 凭空多出一段（详情页偏差与排程建议的下游口径被污染）。
+  /// 仅在会话带 taskId 时触发。
+  void Function(String taskId, int durationSec)? onFocusRemoved;
 
   // —— 番茄循环：运行态阶段（持久化，杀后台 / 切 Tab 不丢）——
   /// 当前阶段：专注 / 短休 / 长休。非循环单次计时恒为 [FocusPhase.focus]。
@@ -666,21 +679,46 @@ class FocusProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 删除单条专注记录（按 id）。
-  void removeSession(String id) {
-    _sessions.removeWhere((s) => s.id == id);
+  /// 删除单条专注记录（按 id）。返回被删的那条（供撤销原样恢复，P3-5）；
+  /// id 不存在返回 null。
+  ///
+  /// P2-9（v2.9.6 审计）：删除与新增**对称**——带 taskId 的记录删除时经
+  /// [onFocusRemoved] 扣减任务累计专注（此前只加不减，撤销删除再回填即双倍）。
+  FocusSession? removeSession(String id) {
+    final i = _sessions.indexWhere((s) => s.id == id);
+    if (i == -1) return null;
+    final s = _sessions.removeAt(i);
+    if (s.taskId != null) {
+      onFocusRemoved?.call(s.taskId!, s.durationSec);
+    }
     _persist();
     notifyListeners();
+    return s;
   }
 
-  /// 删除今天（date-only）的全部专注记录。
-  void clearToday() {
+  /// 删除今天（date-only）的全部专注记录。返回被删的记录列表（供撤销整体
+  /// 恢复，P3-15——同屏单条删除有 10 秒撤销，批量清空反而无保护，力度倒挂）。
+  ///
+  /// P2-9 对称扣减：与 [removeSession] 同口径，带 taskId 的记录逐条经
+  /// [onFocusRemoved] 扣减；撤销恢复走 [addSession] 逐条回填，两侧相抵。
+  List<FocusSession> clearToday() {
     final t = DateTime.now();
     final today = DateTime(t.year, t.month, t.day);
+    final removed = _sessions
+        .where((s) =>
+            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == today)
+        .toList();
+    if (removed.isEmpty) return const <FocusSession>[];
     _sessions.removeWhere((s) =>
         DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == today);
+    for (final s in removed) {
+      if (s.taskId != null) {
+        onFocusRemoved?.call(s.taskId!, s.durationSec);
+      }
+    }
     _persist();
     notifyListeners();
+    return removed;
   }
 
   /// 某天（date-only）专注总秒数（含休息阶段，历史口径）。
@@ -892,6 +930,9 @@ class FocusProvider extends ChangeNotifier {
     buf.writeln('# 有条 专注记录导出');
     buf.writeln('');
     buf.writeln('> 导出时间：${_fmt(DateTime.now())}');
+    // P3-10（v2.9.6 审计）：与任务 / 习惯 MD 同口径——标注「可读摘要」定位
+    // （本表缺阶段列 / 关联任务 id 等真源列），完整字段请用 CSV / Excel。
+    buf.writeln('> 说明：Markdown 为**可读摘要**；归档 / 迁移请用 CSV 或 Excel 导出。');
     buf.writeln('');
     if (_sessions.isEmpty) {
       buf.writeln('_暂无专注记录_');
