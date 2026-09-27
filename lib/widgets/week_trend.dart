@@ -23,8 +23,11 @@ class WeekTrend extends StatelessWidget {
     final ext = appColors(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fill = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
-    final todayFill =
-        isDark ? const Color(0xFF80C0FF) : const Color(0xFF4DA3FF);
+    // 新U3-5（v2.9.7 审计）：今日高亮改由主题色派生（实心柱 → 55% 透明、
+    // 计数数字 → 实色 primary），替代硬编码 0xFF4DA3FF / 0xFF80C0FF——
+    // 不随用户自定义主题色，偏离纯黑白设计偏好。
+    final primary = Theme.of(context).colorScheme.primary;
+    final todayBarFill = primary.withValues(alpha: 0.55);
     final chipBg = isDark ? AppColors.darkChip : AppColors.lightChip;
     final meta = ext.meta;
     final onBg = Theme.of(context).colorScheme.onBackground;
@@ -110,7 +113,7 @@ class WeekTrend extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
-                          color: i == values.length - 1 ? todayFill : fill,
+                          color: i == values.length - 1 ? primary : fill,
                         ),
                       ),
                       const SizedBox(height: 3),
@@ -137,7 +140,8 @@ class WeekTrend extends StatelessWidget {
                                 width: 26,
                                 height: (values[i] / scaleMax) * 56,
                                 decoration: BoxDecoration(
-                                  color: i == values.length - 1 ? todayFill : fill,
+                                  color:
+                                      i == values.length - 1 ? todayBarFill : fill,
                                   borderRadius:
                                       BorderRadius.circular(AppColors.progressRadius),
                                 ),

@@ -217,15 +217,18 @@ class DataIo {
   /// F13：导出前对载荷做大小预检。超额时自动剥离 `attachments` 段并返回
   /// `(新Map, wasStripped)`；否则原样返回。元数据（任务 / 习惯 / 偏好）保留，
   /// 仅丢弃附件二进制本身（用户可按需再次手动导入）。
+  ///
+  /// 新P3-3（v2.9.7 审计）：`wasStripped` 仅在**实际剥离**了 attachments 段时
+  /// 才为 true——原实现超限但载荷本就无 `attachments` 键时也返回 true，
+  /// 调用方（backup_sheet）会误报「附件因体积超限已剥离」，误导用户以为
+  /// 附件被安全处理过。
   static (Map<String, dynamic>, bool) trimForExport(Map<String, dynamic> map) {
     final est = estimateJsonBytes(map);
     if (est <= maxExportPayloadBytes) return (map, false);
     // 复制后剥离，避免污染调用方持有的原 map（多次调用安全）。
     final trimmed = Map<String, dynamic>.from(map);
-    if (trimmed.remove('attachments') != null) {
-      return (trimmed, true);
-    }
-    return (trimmed, true);
+    final stripped = trimmed.remove('attachments') != null;
+    return (trimmed, stripped);
   }
 
   /// 选择 .json 备份文件并返回其文本内容。

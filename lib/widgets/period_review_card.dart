@@ -32,8 +32,10 @@ class PeriodMetrics extends StatelessWidget {
     final u = r.period.unitLabel; // 本月 / 本年
 
     final habitPct = r.habitPercent;
+    // 新U3-5（v2.9.7 审计）：达标档硬编码深绿 0xFF0F6E56 改走 onBg（前景
+    // 强度三档 onBg / accent / meta），随明暗主题。
     final habitColor = habitPct >= 80
-        ? const Color(0xFF0F6E56)
+        ? onBg
         : (habitPct >= 50 ? accent : ext.meta);
 
     final items = [
@@ -44,7 +46,9 @@ class PeriodMetrics extends StatelessWidget {
     ];
 
     Color deltaColor(int d) {
-      if (d > 0) return const Color(0xFF0F6E56);
+      // 新U3-5：正向改走 accent（主题强调色）——负向原本就走主题令牌
+      // lightHigh/darkHigh，正向的硬编码深绿是漏网点。
+      if (d > 0) return accent;
       if (d < 0) return isDark ? AppColors.darkHigh : AppColors.lightHigh;
       return ext.meta;
     }
@@ -133,8 +137,9 @@ class PeriodTrend extends StatelessWidget {
     final ext = appColors(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fill = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
-    final bestFill =
-        isDark ? const Color(0xFF80C0FF) : const Color(0xFF4DA3FF);
+    // 新U3-5（v2.9.7 审计）：最高产桶高亮改由主题色派生（55% 透明，与
+    // week_trend / trend_chart 同批），替代硬编码 0xFF4DA3FF / 0xFF80C0FF。
+    final bestFill = Theme.of(context).colorScheme.primary.withValues(alpha: 0.55);
     final chipBg = isDark ? AppColors.darkChip : AppColors.lightChip;
     final meta = ext.meta;
     final onBg = Theme.of(context).colorScheme.onBackground;
@@ -585,13 +590,17 @@ class _Footer extends StatelessWidget {
   }
 }
 
-/// 分类 → 帕累托条/标签配色（与 accent 拉开层次；轻量固定色板，避免引入新主题依赖）。
-const Map<Category, Color> _catParetoColors = {
-  Category.work: Color(0xFF4DA3FF),
-  Category.life: Color(0xFF0F6E56),
-  Category.study: Color(0xFFB26A00),
-};
-const Color _untrackedParetoColor = Color(0xFF9AA0A6);
+/// 新U3-5（v2.9.7 审计）：分类帕累托配色改为**前景灰阶 alpha 档**——与看板
+/// 泳道调色板（U3-4，v2.9.5 审计）同一设计语言，随明暗主题与自定义主题色。
+/// 此前固定彩色板（蓝/绿/琥珀 + 灰，`_catParetoColors`）偏离纯黑白偏好且
+/// 不随主题；类别区分靠 alpha 层次 + 行标签文本，与看板「靠标题与位置区分，
+/// 不依赖色相辨位」同一思路。[base] 传调用方的前景色（onSurface）。
+Color _paretoColor(String label, Color base) {
+  if (label == Category.work.label) return base.withValues(alpha: 1.0);
+  if (label == Category.life.label) return base.withValues(alpha: 0.62);
+  if (label == Category.study.label) return base.withValues(alpha: 0.38);
+  return base.withValues(alpha: 0.20); // 未关联
+}
 
 /// 80/20 投入分析：把本期专注秒数按分类聚合后做帕累托排序，
 /// 标出「关键的少数」分类占总专注的比例。
@@ -601,12 +610,7 @@ class ParetoBlock extends StatelessWidget {
   final PeriodReview r;
   const ParetoBlock(this.r, {super.key});
 
-  Color _colorFor(String label) {
-    for (final c in Category.values) {
-      if (c.label == label) return _catParetoColors[c]!;
-    }
-    return _untrackedParetoColor;
-  }
+  Color _colorFor(String label, Color base) => _paretoColor(label, base);
 
   @override
   Widget build(BuildContext context) {
@@ -638,7 +642,7 @@ class ParetoBlock extends StatelessWidget {
       for (final it in p.items)
         Expanded(
           flex: it.value,
-          child: Container(color: _colorFor(it.label)),
+          child: Container(color: _colorFor(it.label, onBg)),
         ),
     ];
     final totalMin = (p.total / 60).round();
@@ -669,7 +673,7 @@ class ParetoBlock extends StatelessWidget {
               name: p.items[i].label,
               sharePct: (p.items[i].share * 100).round(),
               cumPct: (p.items[i].cumulative * 100).round(),
-              color: _colorFor(p.items[i].label),
+              color: _colorFor(p.items[i].label, onBg),
               isVital: i < p.vitalFewCount,
               isLast: i == p.items.length - 1,
               meta: ext.meta,

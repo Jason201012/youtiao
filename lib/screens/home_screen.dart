@@ -22,6 +22,8 @@ import 'package:todolist/screens/review_screen.dart';
 import 'package:todolist/screens/period_review_screen.dart';
 import 'package:todolist/screens/today_screen.dart';
 import 'package:todolist/screens/task_detail_screen.dart';
+// 新P2-2（v2.9.7 审计）：搜索结果的习惯行直达详情弹层（showHabitDetailSheet）。
+import 'package:todolist/screens/habit_screen.dart';
 import 'package:todolist/widgets/share_sheet.dart';
 import 'package:todolist/widgets/batch_edit_sheet.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
@@ -42,10 +44,7 @@ class HomeScreen extends StatefulWidget {
   /// 搜索态变化回调：用于让宿主 Scaffold 在搜索时隐藏「新增任务」FAB。
   final void Function(bool)? onSearchingChanged;
 
-  /// 搜索结果中点「习惯」时，通知宿主切到「习惯」Tab（index 4）。
-  final void Function()? onOpenHabit;
-
-  const HomeScreen({super.key, this.onSearchingChanged, this.onOpenHabit});
+  const HomeScreen({super.key, this.onSearchingChanged});
 
   @override
   State<HomeScreen> createState() => HomeScreenState();
@@ -430,7 +429,14 @@ class HomeScreenState extends State<HomeScreen> {
               metaColor: ext.meta,
             ),
             ...result.habits.map(
-              (h) => _SearchHabitRow(habit: h, onTap: widget.onOpenHabit),
+              // 新P2-2（v2.9.7 审计）：直达详情弹层而非只切 Tab——归档习惯只出现在
+              // 搜索结果（习惯页列表此前不渲染），点击后「跳过去什么都没有」、
+              // 详情/编辑层（含取消归档开关）永久不可达。现点行即开详情；
+              // 配合习惯页新增的「已归档」折叠区，取消归档恢复可达。
+              (h) => _SearchHabitRow(
+                habit: h,
+                onTap: () => showHabitDetailSheet(context, h),
+              ),
             ),
             const SizedBox(height: 8),
           ],
@@ -1061,7 +1067,7 @@ class _PostponeButton extends StatelessWidget {
 }
 
 /// 搜索结果中的习惯行：复用习惯卡片的视觉（emoji 圆头像 + 标题 + 连续天数/频率），
-/// 点击整体跳到「习惯」Tab（由 HomeScreen.onOpenHabit 驱动）。
+/// 点击直达习惯详情弹层（新P2-2，v2.9.7 审计——此前只切 Tab，归档习惯无任何下文）。
 class _SearchHabitRow extends StatelessWidget {
   final Habit habit;
   final VoidCallback? onTap;

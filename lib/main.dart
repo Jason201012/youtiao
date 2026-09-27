@@ -403,27 +403,44 @@ void _handleNotificationAction(String? actionId, String? payload) {
   }
   if (actionId == NotificationService.habitUndoActionId) {
     // U2-4（v2.9.6 审计）：确认通知补「撤销」action——通知打卡此前只能 +1
-    // 不能回退，误触后必须进 App 手动纠正。撤销清空该习惯**今天**的记录
-    // （走 setCheckInValue 唯一写入口，落盘 + 重排 + 挽留重排全部一致生效），
-    // 并用覆盖式确认通知回报结果。幂等：今天本无记录时无操作。
+    // 不能回退，误触后必须进 App 手动纠正。
+    // 新U2-2（v2.9.7 审计）：撤销语义由「清零」改为「-1」，与「打卡 = +1」
+    // 对称（原实现 8/8 误触即清零丢 7 个单位）。
+    // 新U3-1（v2.9.7 审计）：锁定期间不再完全静默——回一条提示通知（撤销是
+    // 破坏性回退，不跨锁暂存；须解锁后在 App 内操作）。
     final habitId = NotificationService.parseHabitId(payload);
     if (habitId == null) return;
     final state = _navigatorKey.currentState;
     if (state != null && !_isAppLocked) {
       _doHabitUndo(state, habitId);
+    } else {
+      NotificationService.instance.showLockedActionHint();
     }
-    // 锁定期间不暂存：撤销是破坏性回退（与「完成」同级），解锁后用户已可
-    // 直接在 App 内操作，无需跨锁补执行。
   }
 }
 
-/// U2-4（v2.9.6 审计）：通知「撤销」action——把该习惯今天的打卡记录清空。
+/// U2-4（v2.9.6 审计）：通知「撤销」action——把该习惯今天的打卡记录回退一步。
+///
+/// 新U2-2（v2.9.7 审计）：由 `setCheckInValue(..., 0)`（清零）改为
+/// `adjustCheckInValue(..., -1)`（-1 对称）；走 setCheckInValue 唯一写入口，
+/// 落盘 + 重排 + 挽留重排全部一致生效。
+/// 新P3-6（v2.9.7 审计）：今天本无记录时**早退且不弹确认**——原实现
+/// `setCheckInValue` 内部早退后仍弹「已撤销今日打卡 · 记录已清空」，属不实回报。
 void _doHabitUndo(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
   if (habit == null) return;
-  hp.setCheckInValue(habit, DateTime.now(), 0).catchError((_) => false).then((_) {
-    NotificationService.instance.showHabitUndoConfirm(habit);
+  final current = hp.todayValue(habit);
+  if (current <= 0) return; // 无记录可撤：无写入即无回报
+  hp
+      .adjustCheckInValue(habit, DateTime.now(), -1)
+      .catchError((_) => false)
+      .then((_) {
+    NotificationService.instance.showHabitUndoConfirm(
+      habit,
+      value: hp.todayValue(habit),
+      target: habit.effectiveTarget,
+    );
   });
 }
 
@@ -868,8 +885,10 @@ class _MainScaffoldState extends State<MainScaffold>
     // 任务行「专注」按钮请求跳到专注 Tab（index=3）；FocusProvider 静态回调。
     FocusProvider.jumpToFocusTab = () => setState(() => _index = 3);
     // U4：命令面板移动端顶栏入口——各 Tab 页经 AppNav.jumpToTab 请求切 Tab。
+    // 新U2-1（v2.9.7 审计）：改走 `_switchTab` 统一入口——此前直写 `_index`，
+    // 从命令面板 / 顶栏跳「日历」不回本月，与底栏口径漂移。
     AppNav.onJumpToTab = (i) {
-      if (i >= 0 && i < _tabCount && mounted) setState(() => _index = i);
+      if (i >= 0 && i < _tabCount && mounted) _switchTab(i);
     };
     // M-01：监听解锁事件——locked 由 true 变 false 时，把锁定期间暂存的
     // 通知跳转 / 通知 action / 分享 / 小组件意图一次性消费掉。
@@ -1122,7 +1141,6 @@ class _MainScaffoldState extends State<MainScaffold>
       HomeScreen(
         key: _homeKey,
         onSearchingChanged: (v) => setState(() => _homeSearching = v),
-        onOpenHabit: () => setState(() => _index = 4),
       ),
       const BoardScreen(),
       const CalendarScreen(),
@@ -1214,7 +1232,9 @@ class _MainScaffoldState extends State<MainScaffold>
                     CommandPalette.show(
                       context,
                       currentIndex: _index,
-                      onPick: (i) => setState(() => _index = i),
+                      // 新U2-1（v2.9.7 审计）：改走 `_switchTab` 统一入口
+                      //（与 AppNav.onJumpToTab 同批修复——切「日历」回本月）。
+                      onPick: _switchTab,
                       // P1-6：面板内 `/done` 命令落地到同一套逻辑。
                       onCompleteSelected: () =>
                           _completeSelectedAndNotify(context),
@@ -1288,14 +1308,18 @@ class _MainScaffoldState extends State<MainScaffold>
 
         // A4 应用锁：未解锁时渲染独立解锁页，屏蔽主界面交互。
         //
-        // U2-1（v2.9.6 审计）：改为**覆盖层**而非替换子树——原实现
-        // `if (locked) return AppLockGate()` 把含 `_TabKeepAlive` 的整个
-        // Scaffold 移出树，解锁后全部保活态（多选集合、搜索态、标签筛选、
-        // 滚动位置、日历月/周视图）被销毁、当前 Tab 被强制回首页，而锁定是
-        // 高频场景，「切 Tab 不丢状态」的承诺在锁定路径上整段失效。现在
-        // 底层子树原样保留（被不透明解锁门盖住、指针与焦点全部隔离），
-        // 解锁后掀开即恢复原状。
-        if (appLock.locked) {
+        // U2-1（v2.9.6 审计）→ 新U2-0（v2.9.7 审计）：改为**覆盖层**而非替换子树，
+        // 且**根节点类型恒定**——v2.9.6 的覆盖层实现在同一父级（Consumer builder）
+        // 下让子 widget 的 runtimeType 在锁定（Stack）与解锁（移动端 Listener /
+        // 桌面 Shortcuts）之间翻转，`Widget.canUpdate` 为 false → 旧 Element 卸载、
+        // 整棵子树重建：`_TabKeepAliveState._built` 复位，多选/搜索/筛选/滚动/
+        // 日历月周视图全丢，与改动前 `return const AppLockGate()` 的破坏面实质
+        // 相同（声称已修而实未修）。现在**始终**返回同一个 Stack 结构：锁定与否
+        // 只改变 `IgnorePointer.ignoring` / `ExcludeFocus.excluding` 两个参数与
+        // 覆盖层的有无（渲染对象原地更新、无状态增删），不改变任何 widget 的
+        // 类型与 key，解锁后掀开即恢复原状。
+        final locked = appLock.locked;
+        if (locked) {
           // F9：应用锁触发瞬间，把根 Navigator 上之前 push 的所有路由（任务详情 /
           // 看板 / 设置等详情页）一次性弹回首页。否则那些详情页会停在栈顶，
           // AppLockGate 仅覆盖 MainScaffold 内的视图，那些详情页仍然盖在解锁门
@@ -1305,17 +1329,21 @@ class _MainScaffoldState extends State<MainScaffold>
           if (nav != null && nav.canPop()) {
             nav.popUntil((r) => r.isFirst);
           }
-          return Stack(
-            children: [
-              // 底层保留保活子树；锁定期间禁指针、禁焦点（键盘不再弹出）。
-              IgnorePointer(
-                child: ExcludeFocus(child: content),
-              ),
-              const Positioned.fill(child: AppLockGate()),
-            ],
-          );
         }
-        return content;
+        return Stack(
+          children: [
+            // 底层子树恒定挂载；锁定期间禁指针、禁焦点（键盘不再弹出）。
+            IgnorePointer(
+              ignoring: locked,
+              child: ExcludeFocus(
+                excluding: locked,
+                child: content,
+              ),
+            ),
+            // 锁定覆盖层：AppLockGate 为全屏不透明 Scaffold，解锁时从树中移除。
+            if (locked) const Positioned.fill(child: AppLockGate()),
+          ],
+        );
       },
     );
   }
@@ -1328,13 +1356,14 @@ class _MainScaffoldState extends State<MainScaffold>
 /// 报告建议「改用 `IndexedStack`」。实测直接换会引入两个真回归，故本实现是
 /// 「IndexedStack 的语义 + 延迟首建」：
 ///
-/// 1. **首页是启动页**。`IndexedStack` 会在首次 build 时把所有 children 都建
-///    起来，于是 `FocusScreen.initState`（`_initAudio()` + 消费
-///    `FocusProvider.pendingTaskId`）会在 App 启动时执行——那正是「用户在任务行
-///    点专注钮 → 跳到专注页并预选该任务」这条链路的起点，pending 会在用户还没
-///    点之前就被清掉，功能静默失效；音频也会在启动时就绪。
-/// 2. **首屏 build 成本**。6 个页面同时构建会让冷启动多付一遍布局/读盘
+/// 1. **首屏 build 成本**。6 个页面同时构建会让冷启动多付一遍布局/读盘
 ///    （设置页 `_loadVersion` 走 `PackageInfo.fromPlatform`、首页要查数据库）。
+///
+/// 新P3-12 附带更正（v2.9.7 审计）：本文档第 1 点旧版以「`initState` 消费
+/// pending」作为反对 `IndexedStack` 的理由——P2-8（v2.9.6 审计）把 pending
+/// 消费改为 **FocusProvider listener**（常驻、不依赖 initState）后，该理由
+/// 对 pending 已失效；`_initAudio()` 的启动时就绪与「首屏 build 成本」仍是
+/// 真实理由，故保留懒建实现，注释只留仍然成立的部分。
 ///
 /// ## 本实现的行为
 ///

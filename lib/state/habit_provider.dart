@@ -36,6 +36,14 @@ class HabitProvider extends ChangeNotifier {
   List<Habit> get activeHabits =>
       _habits.where((h) => !h.archived).toList();
 
+  /// 新P2-2（v2.9.7 审计）：已归档的习惯。
+  ///
+  /// 归档此前是**单向不可逆**操作——习惯页只渲染 `activeHabits`、搜索命中
+  /// 归档习惯只切 Tab，详情/编辑层（含取消归档开关）永久不可达。补本 getter
+  /// 供习惯页「已归档」折叠区展示，让取消归档入口重新可达。
+  List<Habit> get archivedHabits =>
+      _habits.where((h) => h.archived).toList();
+
   /// P2-5（v2.9.6 审计）：[day] 在计划内的活动习惯（`shouldCheckInOn` 过滤）。
   ///
   /// 习惯页概览卡「今日 x/y」的分子分母统一从这里取——此前分母用
@@ -734,6 +742,11 @@ class HabitProvider extends ChangeNotifier {
   int get habitCount => _habits.length;
   int get overallCurrentStreak =>
       _streakFor(_metDatesAll, allowTodayGap: true);
+
+  /// 新P3-11（v2.9.7 审计）：成就 streak_3/7/30 的取值已改为**逐习惯
+  /// longestStreak 的最大值**（见 achievement.dart fromProviders 注）——本
+  /// getter（全部习惯达标日并集、按自然日连续）不再被成就消费，保留供
+  /// 诊断 / 回归测试（habit_provider_test 钉死其「并集自然日」语义）。
   int get overallLongestStreak => _streakFor(_metDatesAll, longest: true);
 
   /// T1-2：某习惯的「达标日」集合（date-only）。

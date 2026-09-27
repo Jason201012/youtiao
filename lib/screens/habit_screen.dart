@@ -84,6 +84,12 @@ class HabitScreen extends StatelessWidget {
                           child: _HabitTile(habit: h),
                         ),
                       ),
+                    // 新P2-2（v2.9.7 审计）：归档习惯的取消归档入口——见
+                    // [_ArchivedSection] 文档。
+                    if (habit.archivedHabits.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      _ArchivedSection(habits: habit.archivedHabits),
+                    ],
                     const SizedBox(height: 24),
                     _SectionTitle('成就'),
                     const SizedBox(height: AppColors.contentGap),
@@ -219,6 +225,15 @@ DateTime _dateOnlyNow() {
 ///    自带队列（后一条排在前一条播完之后），主动 hide 等于亲手丢掉上一条撤销机会。
 ///    另附 **U3-4**：窗口超时自动收起时给一句「撤销窗口已结束」，避免用户
 ///    在 10 秒后点空气。
+///
+/// 新P3-2（v2.9.7 审计）：本函数已**整体委托**给 [showUndoSnackBar]（任务侧
+/// 唯一实现）——此前自管超时提示，缺「活跃计数 skip 判据」，与 v2.9.6 审计
+/// P2-1 的复现①/②完全同型（A 的超时提示排在 B 之后错位；B 撤销成功后仍弹
+/// 「窗口已结束」误导）。现在队列计数、120ms 判定、失效反馈、超时追加提示
+/// 全部继承单一实现；本函数只保留两个习惯侧语义：
+/// - [closeSheet]：先 pop 弹层再展示横幅（U1-1，SnackBar 在 ModalBarrier 之下）；
+/// - **覆盖校验**：撤销前校验「当前值仍等于操作后的状态（0）」，不等则失效
+///   （提示文案带细节，经 [showUndoSnackBar] 的 `failureHint` 传入）。
 Future<void> showCheckInUndoSnackBar(
   BuildContext context, {
   required HabitProvider hp,
@@ -228,63 +243,26 @@ Future<void> showCheckInUndoSnackBar(
   required String content,
   bool closeSheet = false,
 }) async {
-  // U1-1：先取 messenger / navigator（pop 之后本页 context 随即失效）。
-  final messenger = ScaffoldMessenger.of(context);
+  // U1-1：先取 navigator（pop 之后本页 context 随即失效）。
   final navigator = Navigator.of(context, rootNavigator: true);
-  final dayLabel = '${day.month}月${day.day}日';
-  var undone = false;
-
-  void restore() {
-    // P3-2：只有「当前仍是操作后的状态（0）」才回写。
-    final cur = hp.checkInValueOn(habit, day);
-    if (cur != 0) {
-      // U3-8（v2.9.5 审计）：此前此处 `messenger..hideCurrentSnackBar()..showSnackBar(...)`，
-      // 与**同一函数上方 4 行**的注释（「不再 `hideCurrentSnackBar()`——主动 hide
-      // 等于亲手丢掉上一条撤销机会」）自相矛盾。复现：习惯页连续两次打卡 →
-      // 点第 1 条横幅的「撤销」（已失效）→ 队列中的第 2 条横幅被一起收走。
-      // 处置：直接入队，不清场。
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('撤销已失效：这条记录之后已被再次修改'),
-          duration: Duration(seconds: 3),
-        ),
-      );
-      return;
-    }
-    hp.setCheckInValue(habit, day, previous);
-  }
-
   if (closeSheet) navigator.pop();
   if (previous <= 0) return;
 
-  // U3-4：超时收起不等于「用户看到了」，补一句明确反馈。
-  //
-  // `closed` 不是 [SnackBar] 的构造参数——它是 [ScaffoldMessenger.showSnackBar]
-  // 返回的 [ScaffoldFeatureController.closed]（Future<SnackBarClosedReason>）。
-  // 这里挂到该 Future 上：只在「超时」且「用户没点撤销」时补提示。
-  final controller = messenger.showSnackBar(
-    SnackBar(
-      content: Text(content),
-      // U3-5：时长读全局单一真源，不再在习惯侧独立写死 10 秒。
-      duration: kUndoWindow,
-      action: SnackBarAction(
-        label: '撤销',
-        onPressed: () {
-          undone = true;
-          restore();
-        },
-      ),
-    ),
+  showUndoSnackBar(
+    context,
+    content: content,
+    // U3-4：超时追加提示绑定到具体日期（content 无固定后缀，自动剥取会退回
+    // 通用文案，故显式传入）。
+    expiredHint: '${day.month}月${day.day}日 的撤销窗口已结束',
+    failureHint: '撤销已失效：这条记录之后已被再次修改',
+    onUndo: () async {
+      // P3-2：只有「当前仍是操作后的状态（0）」才回写，不覆盖用户后续操作。
+      final cur = hp.checkInValueOn(habit, day);
+      if (cur != 0) return false;
+      hp.setCheckInValue(habit, day, previous);
+      return true;
+    },
   );
-  controller.closed.then((reason) {
-    if (undone || reason != SnackBarClosedReason.timeout) return;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('$dayLabel 的撤销窗口已结束'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-  });
 }
 
 /// U2-2（v2.9.3 审计）：列表侧的「打卡 / 取消打卡」入口。
@@ -679,6 +657,27 @@ class _HabitTile extends StatelessWidget {
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
                                 color: checked ? primary : ext.meta,
+                              ),
+                            ),
+                          )
+                        // 新U2-3（v2.9.7 审计）：布尔习惯的休息日此前**行内零可见
+                        // 文案**——chip 只在量化分支渲染，布尔分支仅长按 Tooltip
+                        // 说明（触屏不可主动发现），周二看「每周一」的布尔行只剩
+                        // 一枚淡圈。补一枚与量化行同款的常驻小字。
+                        else if (restDay)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: ext.chip,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              kHabitRestDayLabel,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: ext.meta,
                               ),
                             ),
                           ),
@@ -1597,8 +1596,14 @@ class _HabitDetailSheet extends StatelessWidget {
           hint: '填 0 = 撤销该日打卡',
         );
         if (v == null) return;
+        // 新U2-4（v2.9.7 审计）：命中今天且改后新达标 → 与其余写入口同享庆祝。
+        // _maybeCelebrate 内部要求「今天由未达标变达标」，对过去日期的写入
+        // 不改变今日达标态，调用为 no-op，无需按日期分支。
+        final wasMet = hp.isTargetMetToday(habit);
+        final longestBefore = hp.longestStreak(habit);
         await hp.setCheckInValue(habit, picked, v);
         if (context.mounted) {
+          await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(v == 0 ? '已撤销 $dayLabel 的打卡' : '已把 $dayLabel 更新为 $v')),
           );
@@ -1623,8 +1628,15 @@ class _HabitDetailSheet extends StatelessWidget {
       value = v;
     }
     if (!context.mounted) return;
+    // 新U2-4（v2.9.7 审计）：补卡日期选择器 `lastDate: today` 允许选今天，
+    // 但该路径此前直调 `checkInOnDay`，绕过了 [_maybeCelebrate]——同一屏里
+    // 列表「+1」/详情「+1」/今日页/通知打卡都会庆祝，「补卡选今天补足目标」
+    // 却毫无反馈，用户以为没生效。补庆祝包装（对过去日期为 no-op，见上）。
+    final wasMet = hp.isTargetMetToday(habit);
+    final longestBefore = hp.longestStreak(habit);
     await hp.checkInOnDay(habit, picked, value: value);
     if (context.mounted) {
+      await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text('已补 $dayLabel 打卡（连续天数已更新）')),
@@ -2035,8 +2047,10 @@ class _HabitDetailSheet extends StatelessWidget {
                       icon: Icon(quantified
                           ? Icons.add
                           : (isCheckedToday ? Icons.check : Icons.add)),
+                      // 新U3-7（v2.9.7 审计）：文案同值但此前是裸字面量，改走
+                      // 共享常量 kHabitRestDayLabel，与列表 chip / 今日页同真源。
                       label: Text(restDay
-                          ? '今天不打卡'
+                          ? kHabitRestDayLabel
                           : quantified
                               ? (metToday ? '+1（已达标）' : '+1')
                               : (isCheckedToday ? '今日已打卡' : '打卡')),
@@ -2076,6 +2090,76 @@ class _HabitDetailSheet extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 新P2-2（v2.9.7 审计）：已归档习惯折叠区。
+///
+/// 归档此前是**单向不可逆**操作：习惯页只渲染 `activeHabits`、搜索命中归档
+/// 习惯只切 Tab——详情/编辑层（取消归档开关在其中）永久不可达，误触归档后
+/// App 内无任何恢复途径（只能靠「从备份恢复」整体回滚）。折叠区让归档习惯
+/// 重新可达：点行进详情 → 编辑 → 关「归档」开关即恢复。
+class _ArchivedSection extends StatefulWidget {
+  final List<Habit> habits;
+  const _ArchivedSection({required this.habits});
+
+  @override
+  State<_ArchivedSection> createState() => _ArchivedSectionState();
+}
+
+class _ArchivedSectionState extends State<_ArchivedSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final onBg = Theme.of(context).colorScheme.onBackground;
+    return Container(
+      decoration: BoxDecoration(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(AppColors.cardRadius),
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Icon(Symbols.archive, size: 18, color: ext.meta),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text('已归档（${widget.habits.length}）',
+                        style: TextStyle(
+                            fontWeight: FontWeight.w600, color: onBg)),
+                  ),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 20,
+                    color: ext.meta,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Column(
+                children: [
+                  for (final h in widget.habits)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: _HabitTile(habit: h),
+                    ),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }

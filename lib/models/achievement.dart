@@ -122,10 +122,24 @@ class AchievementContext {
       if (w > maxGoalWeeks) maxGoalWeeks = w;
     }
 
+    // 新P3-11（v2.9.7 审计，P3-6 返工）：streak_3/7/30 的取值由
+    // `overallLongestStreak` 改为**逐习惯 longestStreak 的最大值**。
+    // `overallLongestStreak` 是「全部习惯达标日的并集、按自然日连续」
+    // （`_streakFor` 的 weekdays 默认空 → 恒为计划日、graceDays=0）——既非
+    // 单习惯、也不感知计划日/宽限日，v2.9.6 按旧报告把文案改成「连续达成
+    // N 个计划日」后与取值更不同义。现取值链与详情页 longestStreak 同源
+    // （[HabitProvider.longestStreak]：单习惯 + 计划日 + 宽限日），
+    // 「计划日」措辞随之成立。
+    int maxStreak = 0;
+    for (final h in habit.habits) {
+      final s = habit.longestStreak(h);
+      if (s > maxStreak) maxStreak = s;
+    }
+
     return AchievementContext(
       totalCheckIns: habit.totalCheckIns,
       maxGoalWeeks: maxGoalWeeks,
-      longestStreak: habit.overallLongestStreak,
+      longestStreak: maxStreak,
       currentStreak: habit.overallCurrentStreak,
       habitCount: habit.habitCount,
       completedTasks: task.completed,
@@ -233,9 +247,9 @@ final List<Achievement> allAchievements = [
   Achievement.counter(
     id: 'streak_3',
     title: '三日打鱼',
-    // P3-6（v2.9.6 审计）：值为 [longestStreak]（达标日 + 只看计划日 + 宽限日
-    // 可跨越），「连续打卡 N 天」的字面与之不符——非每日习惯的 3 个计划日可跨
-    // 9 个自然日。文案改为与判定同义（first_checkin 的 P3-14 同型残留）。
+    // P3-6（v2.9.6 审计）→ 新P3-11（v2.9.7 审计）：值已改为逐习惯 longestStreak
+    // 的最大值（单习惯 + 计划日 + 宽限日口径，见 fromProviders 注），
+    // 「连续达成 N 个计划日」的文案与取值同义。
     desc: '连续达成 3 个计划日',
     emoji: '🔥',
     group: AchievementGroup.habit,

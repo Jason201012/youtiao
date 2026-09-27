@@ -135,7 +135,10 @@ class TemplateItem {
     if (t.dueDate != null) {
       final now = DateTime.now();
       final base = DateTime(now.year, now.month, now.day);
-      final due = DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
+      // 新P3-9（v2.9.7 审计）：比较键过 [dueCompareKey] 再落 date-only（与
+      // provider 的日差管道同源）。语义不变：相对天数始终按 date-only 差计。
+      final k = dueCompareKey(t.dueDate!);
+      final due = DateTime(k.year, k.month, k.day);
       rel = due.difference(base).inDays;
     } else {
       rel = null;
@@ -201,7 +204,12 @@ class TemplateItem {
       repeatInterval: j['repeatInterval'] as int? ?? 2,
       repeatMinute: j['repeatMinute'] as int?,
       repeatUntil: j['repeatUntil'] as String?,
-      monthlyDay: j['monthlyDay'] as int? ?? 1,
+      // 新P3-4（v2.9.7 审计）：与 [Task.fromJson] 同口径夹取（1..31，缺省 1）——
+      // 此前 `as int?` 硬转型无 clamp：字段为字符串/小数时抛错中断**整份模板**
+      // 加载；旧模板 / 手改 / 外部模板的 `monthlyDay = 0` 套用后会产出
+      // 「每月 0 号」任务并落库。模板 JSON 是不可信输入（同文件对
+      // estimateMinutes / reminderOffsetMin 已做白名单夹取，此处补齐）。
+      monthlyDay: Task.clampIntJson(j['monthlyDay'], 1, 31, 1),
       monthlyWeekday: j['monthlyWeekday'] as int?,
       monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
       monthlyFromEnd: j['monthlyFromEnd'] as int? ?? 0,
@@ -545,7 +553,10 @@ int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
       repeatMinute: repeatMinute,
       repeatAnchor: anchor,
       repeatUntil: item.repeatUntil,
-      monthlyDay: item.monthlyDay,
+      // 新P3-4（v2.9.7 审计）：套用侧兜底夹取——fromTask / 编辑器路径的
+      // monthlyDay 理论上已合法，这里防「未来新增写入点 / 编程构造」旁路，
+      // 保证 Task 构造器（不夹取）永远拿不到 0 或 >31。
+      monthlyDay: item.monthlyDay.clamp(1, 31).toInt(),
       monthlyWeekday: item.monthlyWeekday,
       monthlyWeekIndex: item.monthlyWeekIndex,
       // P2-5：从模板创建任务时一并带上「每月倒数第 N 天」字段。

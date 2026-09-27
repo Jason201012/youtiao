@@ -66,10 +66,12 @@ class _FocusTrendStatsState extends State<FocusTrendStats> {
   @override
   Widget build(BuildContext context) {
     final ext = appColors(context);
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     final meta = ext.meta;
     final onBg = Theme.of(context).colorScheme.onBackground;
-    final focusColor = isDark ? const Color(0xFF80C0FF) : const Color(0xFF4DA3FF);
+    // 新U3-5（v2.9.7 审计）：专注 hero 主色改走主题色——替代硬编码
+    // 0xFF80C0FF / 0xFF4DA3FF（不随自定义主题色与明暗主题）。
+    // 原配套的 isDark 变量仅服务于该硬编码，随之移除。
+    final focusColor = Theme.of(context).colorScheme.primary;
 
     late List<int> values;
     late List<String> labels;

@@ -651,9 +651,11 @@ class TaskProvider extends ChangeNotifier {
       return; // 今天已备份
     }
     try {
-      await _writeAutoBackup(now);
+      // 新P2-1（v2.9.7 审计）：_writeAutoBackup 返回剥离提示（null = 正常）。
+      // 成功落盘后以返回值覆盖错误栏——有剥离时设置页显示 warning，无则清空。
+      final note = await _writeAutoBackup(now);
       _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
-      _lastAutoBackupError = null;
+      _lastAutoBackupError = note;
       // P2-17：落盘最近成功日期，避免重启重复写当日快照 / 同日双形态并存。
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kLastAutoBackup, todayKey);
@@ -678,7 +680,19 @@ class TaskProvider extends ChangeNotifier {
   /// 的口径不一致（root / 取证 / MDM 场景可直接还原全部隐私数据，用户却无从感知）。
   /// 现在按 [autoBackupEncrypt] 走同一套 AES-GCM 信封。口令缺失时**显式失败**并
   /// 把原因展示在设置页，绝不静默降级为明文（沿用 P0-1 的「不降级」原则）。
-  Future<void> _writeAutoBackup(DateTime now) async {
+  ///
+  /// 新P2-1（v2.9.7 审计）：返回 String? 提示（null = 正常无剥离）。此前自动
+  /// 快照不接 `trimForExport`——附件累计（base64 内联）超 32MB 时快照仍落盘
+  /// 成功，等用户真正需要还原时却被导入端 32MB 硬限拒绝（「写得出去、取不
+  /// 回来」），本地滚动备份可能连续多日**静默失效**。现与手动备份同口径：
+  /// 落盘前剥离超限附件，并把剥离事实经返回值记入 `_lastAutoBackupError`
+  /// 展示在设置页。
+  ///
+  /// 新P3-3（v2.9.7 审计）：加密快照按**密文尺寸**预算——base64 承载密文约
+  /// 1.33× 膨胀，明文预算 = 上限 × 3/4 再减 1MB；附件剥离后仍超预算的极端
+  /// 场景（元数据本身超大）直接跳过本日快照并如实记录，绝不写「取不回来」
+  /// 的废快照。
+  Future<String?> _writeAutoBackup(DateTime now) async {
     final focus = FocusProvider.instanceOrNull;
     final habit = HabitProvider.instanceOrNull;
     final payload = <String, dynamic>{
@@ -695,7 +709,22 @@ class TaskProvider extends ChangeNotifier {
       // P0-1：附件二进制（base64 内联）一并纳入滚动快照，保证本地快照可完整还原。
       'attachments': await collectAttachmentBlobs(true),
     };
-    final plain = const JsonEncoder.withIndent('  ').convert(payload);
+    // 新P2-1：与手动备份（backup_sheet._doBackup）同口径的大小预检。
+    final (trimmedPayload, attachmentsStripped) = DataIo.trimForExport(payload);
+    // 新P3-3：加密路径的明文预算（3/4 上限 − 1MB 信封与估算余量）。
+    final budget = _autoBackupEncrypt
+        ? (DataIo.maxExportPayloadBytes * 3 ~/ 4) - (1 << 20)
+        : DataIo.maxExportPayloadBytes;
+    if (DataIo.estimateJsonBytes(trimmedPayload) > budget) {
+      // 附件已剥离仍超限：元数据本身超大（理论极端）。跳过本日快照并
+      // 如实记录——写出去的任何东西都会在还原时被导入端拒绝。
+      _lastAutoBackupError =
+          '自动备份已跳过：数据体积超过还原上限（附件已剥离仍超限）';
+      AppLog.d(_lastAutoBackupError!);
+      notifyListeners();
+      return _lastAutoBackupError;
+    }
+    final plain = const JsonEncoder.withIndent('  ').convert(trimmedPayload);
     // L-08：按开关决定是否加密。buildBackupPayload 在「要求加密但无口令」时抛
     // BackupEncryptException，此处不捕获，交由 _autoBackupIfNeeded 记入错误提示。
     final body =
@@ -703,6 +732,15 @@ class TaskProvider extends ChangeNotifier {
     final suffix = _autoBackupEncrypt ? '.enc.json' : '.json';
     await DataIo.saveToAppDocs('backup/auto/${_dateKey(now)}$suffix', body);
     _rotateAutoBackups();
+    if (attachmentsStripped) {
+      // 新P2-1：剥离事实不静默——记入设置页可见的错误栏（warning 性质：
+      // 任务/习惯/专注数据完整，仅附件被剥离）。
+      _lastAutoBackupError = '自动备份已剥离附件（数据体积超限），任务/习惯/专注数据完整';
+      AppLog.d(_lastAutoBackupError!);
+      notifyListeners();
+      return _lastAutoBackupError;
+    }
+    return null;
   }
 
   /// 滚动保留：仅保留最近 7 份当日快照（backup/auto/ 目录），删除更早的。
@@ -1619,13 +1657,6 @@ class TaskProvider extends ChangeNotifier {
   /// 口径与首页完全一致（按「天」比较截止日期，每日提醒任务单独成段、不参与日期切分），
   /// 供分享卡片直接复用，避免再依赖首页私有的 _dueDayDiff。
   Map<String, int> get sectionCounts {
-    int? dayDiff(DateTime? due) {
-      if (due == null) return null;
-      final now = DateTime.now();
-      final today = DateTime(now.year, now.month, now.day);
-      return DateTime(due.year, due.month, due.day).difference(today).inDays;
-    }
-
     final now = DateTime.now();
     // P2-1：「结束重复」（repeatUntil = 昨天）后，重复任务不再属于「重复」分区，
     // 回落到日期分区——此前弹窗承诺「今天起不再出现」，首页却仍把它留在重复区。
@@ -1633,18 +1664,19 @@ class TaskProvider extends ChangeNotifier {
     bool inRepeat(Task t) => t.isRepeating && !t.isRepeatEnded(now);
 
     final stillRepeating = _tasks.where((t) => !t.done && inRepeat(t)).length;
+    // 新P3-9：日差统一走 [_dueDayDiff]（比较键真源管道）。
     final overdue = _tasks.where((t) {
       if (t.done || inRepeat(t)) return false;
-      return (dayDiff(_effectiveDue(t, now)) ?? 0) < 0;
+      return (_dueDayDiff(_effectiveDue(t, now), now) ?? 0) < 0;
     }).length;
     final today = _tasks.where((t) {
       if (t.done || inRepeat(t)) return false;
       final ed = _effectiveDue(t, now);
-      return dayDiff(ed) == 0 || ed == null;
+      return _dueDayDiff(ed, now) == 0 || ed == null;
     }).length;
     final future = _tasks.where((t) {
       if (t.done || inRepeat(t)) return false;
-      final d = dayDiff(_effectiveDue(t, now));
+      final d = _dueDayDiff(_effectiveDue(t, now), now);
       return d != null && d > 0;
     }).length;
     final done = _tasks.where((t) => t.done).length;
@@ -1661,13 +1693,6 @@ class TaskProvider extends ChangeNotifier {
   /// 与首页 [_section] 完全一致的分组与排序口径，供分享卡片列出「详细事件 / 任务」，
   /// 而非只有计数。置顶(pinned)任务在各分区内优先于 order / 截止时间排最前。
   Map<String, List<Task>> get homeTasks {
-    int? dayDiff(DateTime? due) {
-      if (due == null) return null;
-      final now = DateTime.now();
-      final today = DateTime(now.year, now.month, now.day);
-      return DateTime(due.year, due.month, due.day).difference(today).inDays;
-    }
-
     final now = DateTime.now();
     // P2-1 / F6：重复分区口径统一为「仍在循环期内」（[Task.isRepeatEnded]），
     // 「结束重复」后的任务回落到日期分区，与 [sectionCounts] 完全一致。
@@ -1676,8 +1701,9 @@ class TaskProvider extends ChangeNotifier {
     // 未完成 + 非（仍在循环的）重复任务，按截止日期切分为 逾期 / 今天 / 未来。
     // F-5：已结束的重复任务用 [_effectiveDue] 中性化其过期占位截止日。
     final active = _tasks.where((t) => !t.done && !inRepeat(t)).toList();
+    // 新P3-9：日差统一走 [_dueDayDiff]（比较键真源管道）。
     final overdue = active
-        .where((t) => (dayDiff(_effectiveDue(t, now)) ?? 0) < 0)
+        .where((t) => (_dueDayDiff(_effectiveDue(t, now), now) ?? 0) < 0)
         .toList()
       ..sort((a, b) {
         // 置顶优先；其次手动排序 order；最后截止时间早的排前（拖最久的排前）。
@@ -1694,7 +1720,7 @@ class TaskProvider extends ChangeNotifier {
     final today = active
         .where((t) {
           final ed = _effectiveDue(t, now);
-          return dayDiff(ed) == 0 || ed == null;
+          return _dueDayDiff(ed, now) == 0 || ed == null;
         })
         .toList()
       ..sort((a, b) {
@@ -1713,7 +1739,7 @@ class TaskProvider extends ChangeNotifier {
         return dueCompareKey(keyA).compareTo(dueCompareKey(keyB));
       });
     final future = active.where((t) {
-      final d = dayDiff(_effectiveDue(t, now));
+      final d = _dueDayDiff(_effectiveDue(t, now), now);
       return d != null && d > 0;
     }).toList()
       ..sort((a, b) {
@@ -1787,6 +1813,18 @@ class TaskProvider extends ChangeNotifier {
   /// （判定是派生的），故在此统一中性化，两条路径口径一致。
   static DateTime? _effectiveDue(Task t, DateTime now) =>
       (t.isRepeating && t.isRepeatEnded(now)) ? null : t.dueDate;
+
+  /// 新P3-9（v2.9.7 审计）：date-only 取日差的**单一实现**——比较键统一过
+  /// [dueCompareKey]（纯日期形态归 date-only、带时刻保留）再落 date-only。
+  /// 此前 [sectionCounts] / [homeTasks] 各自内联同名 `dayDiff` 闭包（两份
+  /// 逐字相同的 `DateTime(y,m,d)` 取日差），与比较键真源并行——当前结果
+  /// 恒等，但判据一旦调整（如 P3-13 的判秒统一）就会逐处漂移。
+  static int? _dueDayDiff(DateTime? due, DateTime now) {
+    if (due == null) return null;
+    final today = DateTime(now.year, now.month, now.day);
+    final k = dueCompareKey(due);
+    return DateTime(k.year, k.month, k.day).difference(today).inDays;
+  }
 
   /// 专注会话回填：把某次专注时长（秒）累加到关联任务的 [Task.focusSecTotal]，
   /// 并持久化。任务已删除（不在 _tasks）则忽略。回调自 FocusProvider.addSession。

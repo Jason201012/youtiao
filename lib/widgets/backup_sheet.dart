@@ -189,6 +189,27 @@ class BackupSheet {
       final attachmentsDropped = stripped.$2;
       final plain = const JsonEncoder.withIndent('  ').convert(payloadMap);
 
+      // 新P3-3（v2.9.7 审计）：加密路径按**密文尺寸**预检——AES-GCM 信封以
+      // base64 承载密文（约 1.33× 膨胀），明文约 >24MB 时密文 `.enc.json` 会超
+      // 导入端 32MB 硬限（pickJsonFile 读取前拒绝），「备份成功落盘、需要还原
+      // 时被拒于解密之前」。此处用**精确明文字节数**（utf8）估算密文文件尺寸，
+      // 预算 = 上限 × 3/4 再减 1MB（信封字段 KB 级 + 估算安全余量）。
+      if (encryptOn) {
+        final plainBytes = utf8.encode(plain).length;
+        final cipherBudget =
+            (DataIo.maxImportTextBytes * 3 ~/ 4) - (1 << 20);
+        if (plainBytes > cipherBudget) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('加密备份未执行：数据超过密文导入上限'
+                  '（附件已剥离仍超限）。请减少大附件后重试，或改用不加密备份'),
+              duration: Duration(seconds: 5),
+            ));
+          }
+          return;
+        }
+      }
+
       // 口令加密导出：明文经 AES-256-GCM 信封化，落盘 / 分享的都是密文。
       // P0-1 守卫：encryptOn 为真而口令缺失时 buildBackupPayload 会抛
       // BackupEncryptException，整个备份中止（不写任何文件），绝不静默降级明文。

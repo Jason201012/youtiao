@@ -58,6 +58,10 @@ typedef UndoAction = Future<bool> Function();
 /// 描述（undoContent 的固定后缀）拼装为「已删除「X」：撤销窗口已结束」，
 /// 使提示与具体操作绑定（P2-1）。
 ///
+/// [failureHint] 为撤销失效（onUndo 返回 false / 抛错）时的提示文案；缺省 =
+/// 统一口径「撤销已失效：该操作已不可恢复」。习惯打卡侧传入带细节的文案
+/// （新P3-2，v2.9.7 审计：委托唯一实现的同时保留「已被再次修改」的语义）。
+///
 /// 返回该提示的控制器，便于调用方在需要时（如页面销毁）主动收起。
 
 /// P2-1（v2.9.6 审计）：每个 [ScaffoldMessengerState] 上**活跃**的撤销横幅计数。
@@ -80,10 +84,15 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason> showUndoSnackBar(
   required String content,
   UndoAction? onUndo,
   String? expiredHint,
+  String? failureHint,
 }) {
   final messenger = ScaffoldMessenger.of(context);
   var undoPressed = false;
-  _bumpActiveUndoSnacks(messenger, 1);
+  // 新P3-1（v2.9.7 审计）：计数不变式 = 「在途的撤销横幅数」。无 action 的
+  // 提示没有撤销窗口、也不会注册 `closed` 减计数，此前无条件 `+1` 会永久
+  // 泄漏，导致该 messenger 上后续所有「窗口已结束」提示被 `> 0` 判据跳过。
+  // 计数 `+1` 必须与 `closed.then` 里的 `−1` 同在 `onUndo != null` 分支。
+  if (onUndo != null) _bumpActiveUndoSnacks(messenger, 1);
   final controller = messenger.showSnackBar(
     SnackBar(
       content: Text(content),
@@ -102,12 +111,15 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason> showUndoSnackBar(
                   ok = false; // provider 抛错同样按「未生效」反馈，不静默。
                 }
                 // P2-2：缓冲失效（快照已被彻底删除 / 清空回收站 / 恢复备份
-                // 作废）时明确反馈，与习惯侧「撤销已失效」口径一致。
+                // 作废）时明确反馈；[failureHint] 允许调用方替换为带细节的
+                // 文案（见新P3-2 注）。
                 if (!ok) {
                   messenger.showSnackBar(
-                    const SnackBar(
-                      content: Text('撤销已失效：该操作已不可恢复'),
-                      duration: Duration(seconds: 2),
+                    SnackBar(
+                      content: Text(
+                        failureHint ?? '撤销已失效：该操作已不可恢复',
+                      ),
+                      duration: const Duration(seconds: 2),
                     ),
                   );
                 }

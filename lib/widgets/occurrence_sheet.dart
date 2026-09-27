@@ -148,7 +148,11 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
             // 同一天改期时会误删另一个真实任务；而且误用了只作用于回收站的
             // permanentDelete，副本其实一直留在活动列表里，「撤销」形同虚设）；
             // ② 把原日从 skipDates 移除，否则撤销后原日仍显示「已跳过」，
-            // UI 对用户说谎。两个动作均幂等，复合执行恒可成功。
+            // UI 对用户说谎。两个动作均幂等。
+            // 新P3-8（v2.9.7 审计）：返回**真实结果**——源任务在 10 秒窗口内
+            // 被他处删除时（byId == null），副本清理与「取消跳过」都无从谈起
+            // （unskipOccurrence 对不存在的源任务静默 no-op），不能谎报成功。
+            if (widget.provider.byId(_task.id) == null) return false;
             if (copy != null) {
               widget.provider.discardTask(copy.id);
             }
@@ -183,6 +187,8 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       context,
       content: undoContent('已跳过 $dayLabel 这一次'),
       onUndo: () async {
+        // 新P3-8（v2.9.7 审计）：源任务已被他处删除时返回 false（见 defer 分支注）。
+        if (widget.provider.byId(_task.id) == null) return false;
         widget.provider.unskipOccurrence(_task.id, day: d);
         _deferSkipped.remove(Task.ymdKey(d));
         _refresh();

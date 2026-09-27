@@ -16,7 +16,11 @@ import org.json.JSONObject
 import java.util.Calendar
 
 /**
- * 桌面小组件（4×2）：展示「今日相关」任务列表（未完成 且 [循环命中今天 ∨ 今天到期 ∨ 已逾期]）。
+ * 桌面小组件（4×2）：展示「今日相关」任务列表（未完成 且 [循环命中今天 ∨ 一次性任务今天到期 ∨ 已逾期]）。
+ *
+ * 新P3-5（v2.9.7 审计）：已结束的重复任务不再展示（App 侧 `_effectiveDue` 中性化
+ * 会把它们中性地落进「今天」分区，但小组件名额仅 8 个，已退场任务占位会把
+ * 真正的今日任务挤出列表）。重复任务 meta 显示当天时刻（repeatMinute → HH:mm）。
  *
  * 与 App 内首页同源：直接跨进程只读打开 youtiao.db（复用 :guard 进程的 WAL + busy_timeout + 重试三件套），
  * 不引入 home_widget 等第三方包。点击任务项经 MainActivity 的 EXTRA_TASK_ID → MethodChannel → Dart
@@ -157,20 +161,20 @@ class TodayWidgetProvider : AppWidgetProvider() {
         }
 
         private fun isTodayRelevant(obj: JSONObject, today: String): Boolean {
+            // 新P3-9（v2.9.7 审计）：`repeat == NONE` 前置口径——重复任务的出现
+            // 与否**只**由「今天是否循环日」决定（下行已含 repeatUntil / skipDates
+            // 判定）；一次性任务才进入 dueDate 比较，两条路径互不渗透（与 P2-10
+            // 同源的口径声明，防止后续改动把两条路径重新纠缠）。
             val repeat = parseRepeat(obj)
-            if (repeat != RepeatMode.NONE && isRecurrenceToday(obj, repeat, today)) return true
-            // P2-10（v2.9.6 审计）：与 App 侧口径对齐（`Task.isOverdue` +
-            // `_effectiveDue`），此前 `due <= today` 回落把「自然到期的重复任务」
-            // （如「每天写日报 · 结束于 9/01」）判成「逾期」并长期残留——App 内
-            // 重复任务不计逾期，已结束的重复任务其占位截止日被中性化。
-            // - 仍在重复：是否出现只由「今天是否循环日」决定（App 侧走「每天」
-            //   独立分区，占位 dueDate 不参与今天/逾期分区）；
-            // - 已结束重复：App 侧 `_effectiveDue` 中性化为「无截止 → 今天」，
-            //   故这里恒显示（与「今天」分区一致），meta 不报逾期（见 [metaOf]）。
             if (repeat != RepeatMode.NONE) {
-                val until = obj.optString("repeatUntil", "")
-                return until.isNotEmpty() && today > until
+                return isRecurrenceToday(obj, repeat, today)
             }
+            // 新P3-5（v2.9.7 审计）：删除 P2-10 轮的「已结束重复恒显示」回落——
+            // App 侧 `_effectiveDue` 中性化让已结束重复落进「今天」分区，但小组件
+            // 名额仅 8 个，已退场任务永久占位会把真正的今日任务挤出列表（只解决
+            // 「逾期」标签、未解决占位）。不再复刻该中性化。
+            // P2-10（v2.9.6 审计）：与 App 侧口径对齐（`Task.isOverdue`）——
+            // 一次性任务「今天到期 ∨ 已逾期」显示，未来截止不显示。
             val due = datePart(obj.opt("dueDate")) ?: return false
             return due <= today
         }
@@ -180,10 +184,18 @@ class TodayWidgetProvider : AppWidgetProvider() {
         private fun orderOf(obj: JSONObject): Double = obj.optDouble("order", 0.0)
 
         private fun metaOf(obj: JSONObject, today: String): String {
-            // P2-10（v2.9.6 审计）：重复任务不再报「逾期」——仍在重复无逾期语义
-            // （App 内重复任务不计逾期），已结束重复的占位截止日被 App 侧
-            // `_effectiveDue` 中性化。两者 meta 一律留空（App 行内亦不展示日期）。
-            if (parseRepeat(obj) != RepeatMode.NONE) return ""
+            // P2-10（v2.9.6 审计）：重复任务不再报「逾期」——App 内重复任务不计
+            // 逾期，已结束重复也不会出现在列表（新P3-5）。
+            // 新P3-5（v2.9.7 审计）：重复任务 meta 不再一律清空——「每周二 08:00、
+            // 今日命中」这类**当天时刻**是有用信息。repeatMinute 有值时显示
+            // HH:mm（与 App 内重复任务行的展示口径一致），无值留空。
+            if (parseRepeat(obj) != RepeatMode.NONE) {
+                val rm = obj.optInt("repeatMinute", -1)
+                if (rm in 0 until 24 * 60) {
+                    return String.format("%02d:%02d", rm / 60, rm % 60)
+                }
+                return ""
+            }
             val dueStr = datePart(obj.opt("dueDate")) ?: return ""
             if (dueStr < today) return "逾期"
             if (dueStr == today) {

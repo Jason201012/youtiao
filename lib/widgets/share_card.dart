@@ -494,7 +494,9 @@ class _KanbanBlock extends StatelessWidget {
   ];
 
   Color _colColor(BuildContext context, TaskStatus s) {
-    if (s == TaskStatus.done) return const Color(0xFF0F6E56);
+    // 新U3-5（v2.9.7 审计）：「已完成」列头硬编码深绿 0xFF0F6E56 改走
+    // appColors.meta——与 v2.9.6 看板泳道收口（U3-3）同一口径，列语义靠
+    // 标题区分，不依赖色相。
     return appColors(context).meta;
   }
 
@@ -660,6 +662,10 @@ class _HomeBlock extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final ext = appColors(context);
+    // 新U3-5（v2.9.7 审计）：`repeat` / `done` 两档此前硬编码 0xFF80C0FF /
+    // 0xFF378ADD / 0xFF0F6E56，不随主题。改走主题令牌：repeat → primary、
+    // done → onBg（完成态用最强前景，与「已结清」语义一致），全映射随明暗
+    // 主题与自定义主题色。
     switch (key) {
       case 'overdue':
         return scheme.error;
@@ -668,10 +674,10 @@ class _HomeBlock extends StatelessWidget {
       case 'future':
         return ext.meta;
       case 'repeat':
-        return isDark ? const Color(0xFF80C0FF) : const Color(0xFF378ADD);
+        return scheme.primary;
       case 'done':
       default:
-        return const Color(0xFF0F6E56);
+        return scheme.onBackground;
     }
   }
 
@@ -873,7 +879,10 @@ String _dueLabel(DateTime? due) {
   if (due == null) return '无截止';
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
-  final d = DateTime(due.year, due.month, due.day);
+  // 新P3-9（v2.9.7 审计）：日差取键过 [dueCompareKey] 再落 date-only（与
+  // TaskProvider._dueDayDiff 同一管道）；展示时刻仍用原 due 的时分。
+  final k = dueCompareKey(due);
+  final d = DateTime(k.year, k.month, k.day);
   final diff = d.difference(today).inDays;
   final time =
       ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';

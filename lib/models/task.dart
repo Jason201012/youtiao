@@ -800,6 +800,12 @@ class Task {
   static int _clampInt(dynamic v, int min, int max, int fallback) =>
       _clampIntOrNull(v, min, max) ?? fallback;
 
+  /// 新P3-4（v2.9.7 审计）：公开的 JSON 数值夹取助手——供 TemplateItem.fromJson
+  /// 等外部解析器与 [Task.fromJson] 保持同一口径（含类型校验：非 num / 越界
+  /// 一律回退 [fallback]，不再裸 `as int?` 硬转型中断整份模板加载）。
+  static int clampIntJson(dynamic v, int min, int max, int fallback) =>
+      _clampInt(v, min, max, fallback);
+
   /// F-7：历史日期列表（[doneDates] / [skipDates]）的滚动保留窗口（天）。
   ///
   /// 二者此前只增不清、无上限：一个使用数年的「每天」任务会累积上千条字符串，

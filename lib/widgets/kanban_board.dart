@@ -199,7 +199,9 @@ class _Lane {
 
 /// 看板：支持按「状态 / 分类 / 标签」三种方式分组。
 /// - 长按卡片可拖拽到另一列，松手即改状态（仅「状态」模式下可跨列拖拽）；
-/// - 单击卡片在 待办↔已完成 间切换（ColorOS 上更稳妥的兜底交互）。
+/// - 单击卡片打开任务详情（U2-4，v2.9.5 审计——改状态走显式勾选圈 /
+///   拖拽落列，见 [_KanbanCard] 文档；新U3-6，v2.9.7 审计：本行旧文案
+///   「单击切换完成状态」自 v2.9.5 起已不实）。
 class KanbanBoard extends StatefulWidget {
   const KanbanBoard({super.key});
 
@@ -385,7 +387,25 @@ class _KanbanBoardState extends State<KanbanBoard> {
           onSelectionChanged: (s) => _setMode(s.first),
         ),
         const SizedBox(height: 12),
-        lanesView,
+        // 新U3-4（v2.9.7 审计）：看板全空补空态——「状态」模式此前只剩两条
+        // 空泳道，分类 / 标签模式因「空分组自动隐藏」什么都不剩，页面只有
+        // 标题与分组按钮，用户无从确认「是真没任务还是没加载出来」。
+        if (provider.tasks.any((t) => t.deletedAt == null))
+          lanesView
+        else
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 40),
+            child: Center(
+              child: Text(
+                '暂无任务 · 回首页新建后在这里排布',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: appColors(context).meta,
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -479,9 +499,11 @@ class _KanbanCard extends StatelessWidget {
   /// P3-10（v2.9.4 审计）：改状态的两个入口都给出 10 秒撤销。
   ///
   /// U2-4（v2.9.5 审计）：**单击不再改状态**，改为打开任务详情。
-  /// 改状态保留两个显式入口：
-  /// - **拖拽落列**（[DragTarget]，仅「状态」模式下生效）——本就是看板的主交互；
-  /// - **长按**——移动端的等价入口。
+  /// P2-7（v2.9.7 审计）：v2.9.5 时本文档曾写「改状态保留拖拽落列 + **长按**
+  /// 两个显式入口」——v2.9.6 审计确认外层 `onLongPress` 与
+  /// `LongPressDraggable` 手势竞争后**实际不可达**，已删除（见 build 末尾
+  /// 注释）。现在改状态的等价入口是**标题行末尾的显式勾选圈**（全分组可用）
+  /// 与「拖拽落列」（仅状态模式），本文档随实现更正（新U3-6）。
   ///
   /// 变更理由：单击卡片在所有列表型界面里的通用含义都是「打开」；此前单击 =
   /// 切换完成状态，本意想看详情的人一点就把任务改了，而且**全屏没有任何进入
@@ -579,7 +601,10 @@ class _KanbanCard extends StatelessWidget {
               IconButton(
                 onPressed: () => _cycle(provider, task, context),
                 tooltip: done ? '移到待办' : '标记完成',
-                visualDensity: VisualDensity.compact,
+                // 新U3-3（v2.9.7 审计）：移除 `VisualDensity.compact`——密度
+                // 压缩作用在约束的 min 值上（compact = −2 → min −8px），会把
+                // `constraints` 声明的 48dp 命中区实际压到 40dp。Material 48dp
+                // 最小可点目标是硬要求，视觉紧凑靠 padding: zero 已足够。
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 icon: Icon(

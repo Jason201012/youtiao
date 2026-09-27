@@ -413,7 +413,16 @@ class TaskDetailScreen extends StatelessWidget {
                                 // 待办应用是一条明确的交互死路。这里补 SnackBar 撤销入口
                                 // （unskipOccurrence 与 skipOccurrence 严格互逆、同样重排提醒）。
                                 // 先取快照：pop 之后本页 context 已失效。
-                                provider.skipOccurrence(task.id);
+                                // 新P3-12（v2.9.7 审计）：操作发生时固化
+                                // date-only 操作日——原实现 skip 与撤销都不传
+                                // day（各自落到「执行/点击那一刻的今天」），
+                                // 10 秒窗口跨过 00:00 时撤销会去解跳**新的一天**、
+                                // 原日保持「已跳过」。与打卡侧 `_dateOnlyNow`
+                                // 同款口径。
+                                final n0 = DateTime.now();
+                                final opDay =
+                                    DateTime(n0.year, n0.month, n0.day);
+                                provider.skipOccurrence(task.id, day: opDay);
                                 Navigator.pop(context);
                                 // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`
                                 // ——`ScaffoldMessenger` 自带队列（后一条排在前一条
@@ -434,7 +443,18 @@ class TaskDetailScreen extends StatelessWidget {
                                   // ——后者会连带抹掉这 10 秒内用户对同一任务的其它
                                   // 改动（如重新设了提醒时刻），属过度撤销。
                                   onUndo: () async {
-                                    provider.unskipOccurrence(task.id);
+                                    // 新P3-8（v2.9.7 审计）：返回**真实结果**——
+                                    // 源任务在 10 秒窗口内被他处删除时
+                                    // unskipOccurrence 静默 no-op，不能谎报成功。
+                                    // 仍用 `unskipOccurrence`（与 `skipOccurrence`
+                                    // 严格互逆、同样重排提醒），**不**改成整体快照
+                                    // 回滚——后者会连带抹掉这 10 秒内用户对同一任务
+                                    // 的其它改动（如重新设了提醒时刻），属过度撤销。
+                                    if (provider.byId(task.id) == null) {
+                                      return false;
+                                    }
+                                    provider.unskipOccurrence(task.id,
+                                        day: opDay);
                                     return true;
                                   },
                                 );
@@ -539,8 +559,19 @@ class TaskDetailScreen extends StatelessWidget {
                               );
                               if (!ok) return;
                             }
-                            final copy =
-                                provider.rescheduleOnceOccurrence(task.id, picked);
+                            // 新P3-12（v2.9.7 审计）：原日固化在**操作时刻**并显式
+                            // 传给 provider——撤销时同一值回传，跨午夜不落错日期
+                            // （原实现 origDay 取 provider 内部默认的执行时刻、
+                            // 撤销侧 unskipOccurrence 不传 day 再取一次「撤销时刻
+                            // 的今天」，两处都漂移）。
+                            final n0 = DateTime.now();
+                            final origDay =
+                                DateTime(n0.year, n0.month, n0.day);
+                            final copy = provider.rescheduleOnceOccurrence(
+                              task.id,
+                              picked,
+                              origDay: origDay,
+                            );
                             if (context.mounted) navigator.pop();
                             // U3-2（v2.9.5 审计）：去掉 `..hideCurrentSnackBar()`
                             // （同上文口径：不清场，靠队列）。
@@ -557,10 +588,18 @@ class TaskDetailScreen extends StatelessWidget {
                                     ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
                                     : '已改期至 $dayLabel（已新建一次性副本）'),
                                 onUndo: () async {
+                                  // 新P3-8（v2.9.7 审计）：源任务在窗口内被删时
+                                  // 副本清理与「取消跳过」都无从谈起，如实返回失败
+                                  // （复合撤销此前恒返回 true，UI 仍报成功）。
+                                  // 新P3-12：撤销作用于**操作时刻固化**的原日。
+                                  if (provider.byId(task.id) == null) {
+                                    return false;
+                                  }
                                   if (copy != null) {
                                     provider.discardTask(copy.id);
                                   }
-                                  provider.unskipOccurrence(task.id);
+                                  provider.unskipOccurrence(task.id,
+                                      day: origDay);
                                   return true;
                                 },
                               );

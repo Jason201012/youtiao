@@ -104,6 +104,10 @@ class NotificationService {
   /// - 习惯稍后提醒：      habitSnoozeNotifyIdOf(id) 落在习惯段内每习惯的**第 8 号槽**
   ///                       （= 1000000000 + slot*10 + 8，落点只用 0..7，故永不被
   ///                       落点重排覆盖；详见 [habitSnoozeNotifyIdOf]）
+  /// - 习惯打卡/撤销确认： habitConfirmNotifyIdOf(id) 落在习惯段内每习惯的**第 9 号槽**
+  ///                       （= 1000000000 + slot*10 + 9，同样永不被落点重排覆盖；
+  ///                       详见 [habitConfirmNotifyIdOf]；新P3-6，v2.9.7 审计）
+  /// - 锁定态 action 提示： lockedActionNotifyId = 1600000（固定；新U3-1，v2.9.7 审计）
   /// - 习惯漏卡挽留：      habitNudgeNotifyId = 1500000（固定）
   /// - 定时测试系统闹钟：  _kTestTimerId = 999999（固定）
   /// - 定时测试应用内延迟：_kTestTimerId + 1 = 1000000（固定）
@@ -148,6 +152,10 @@ class NotificationService {
   /// 把当天所有漏卡习惯聚合进同一条通知，避免 23:00 连弹多条。
   /// 见 [scheduleHabitNudge] 与 `HabitNudge`。
   static const int habitNudgeNotifyId = 1500000;
+
+  /// 锁定态 action 提示固定通知 id（1600000）：避开任务/重复/习惯/专注/测试/
+  /// 简报/回收站/挽留全部段位。见 [showLockedActionHint]（新U3-1，v2.9.7 审计）。
+  static const int lockedActionNotifyId = 1600000;
 
   /// 通知 payload 前缀：携带任务 id，点击通知时据此跳转到对应任务详情页。
   static const String payloadTaskPrefix = 'task:';
@@ -1047,6 +1055,19 @@ class NotificationService {
     return 1000000000 + s * 10 + 8;
   }
 
+  /// 习惯「打卡 / 撤销确认」通知的**独立** id（落点段之外的第 9 号槽位）。
+  ///
+  /// 新P3-6（v2.9.7 审计）：确认通知此前固定用落点槽 0（`habitNotifyIdOf(id, 0)`），
+  /// 而 [scheduleHabitReminder] 每次重排都会 cancel + 重挂 0..7——15 分钟守护
+  /// 周期内一旦重排，带「撤销」按钮的确认通知就被同 id 覆盖，撤销入口从通知栏
+  /// 消失。改占 9 号槽（落点只用 0..7、snooze 占 8，下一习惯的段从 `(s+1)*10`
+  /// 起）：永不被落点重排覆盖。打卡确认与撤销确认**共用**本 id——同一时刻
+  /// 只应有一条最新回报，互相覆盖即覆盖式更新语义。
+  static int habitConfirmNotifyIdOf(String id) {
+    final s = _habitSlotOf(id);
+    return 1000000000 + s * 10 + 9;
+  }
+
   /// 为习惯调度每日打卡提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
   /// [checkedToday] 为 true 则跳过今日这一次，挂到下一个循环日，
   /// 避免「已完成仍弹提醒」。返回 true 表示已提交。
@@ -1699,13 +1720,16 @@ class NotificationService {
       ),
     );
     try {
-      // U3-5（v2.9.6 审计）：确认通知固定用**日 0 号槽**（覆盖式更新当日落点）。
-      // 若用户从 snooze（8 号槽）通知点打卡，确认与原始 snooze 通知并存与否取决于
-      // 插件的 id 去重（0 号槽 ≠ 8 号槽，两者不同 id 会并存）——但打卡写入本身
-      // 已撤掉该习惯的 snooze（setCheckInValue → cancelHabitSnooze），并存窗口
-      // 实际趋近于零；保留 0 号槽覆盖语义，不为此引入第三个 id。
+      // U3-5（v2.9.6 审计）→ 新P3-6/P3-7（v2.9.7 审计）：确认通知改用**独立 9 号
+      // 槽**（[habitConfirmNotifyIdOf]）。旧注释曾声称「打卡写入已撤掉 snooze，
+      // 并存窗口趋近于零」——该结论与 P2-6（v2.9.6 审计）落地的判据矛盾：
+      // `setCheckInValue` 仅在「写入的是今天且今天达标」时才撤 snooze，故
+      // ① 休息日分支不写入 → 不撤；② 量化习惯从 snooze 点「记 1 个」未达标
+      // （如 3/8 → 4/8）→ 不撤。此场景下 snooze（8 号槽）与确认（9 号槽）
+      // 确会并存，属如实语义：8 号槽仍带「记 1 个」可继续累计，确认条是
+      // 最新一次操作的回报。原「0 号槽会被重排顶掉」的缺陷随独立槽位一并消除。
       await _plugin.show(
-        habitNotifyIdOf(habit.id, 0),
+        habitConfirmNotifyIdOf(habit.id),
         title,
         body,
         detail,
@@ -1715,10 +1739,28 @@ class NotificationService {
     }
   }
 
-  /// U2-4（v2.9.6 审计）：通知「撤销」action 后的覆盖式确认——如实回报今天的
-  /// 记录已清空。同 [showHabitCheckedConfirm] 的 0 号槽覆盖语义。
-  Future<void> showHabitUndoConfirm(Habit habit) async {
+  /// U2-4（v2.9.6 审计）：通知「撤销」action 后的覆盖式确认。
+  ///
+  /// 新U2-2（v2.9.7 审计）：撤销语义由「清零」改为「-1」（与「打卡 = +1」
+  /// 对称），确认文案不再谎称「记录已清空」——按回退后的真实进度回报
+  /// 「今日 x/y」（量化）或「已取消今日打卡」（布尔归零）。
+  /// 新P3-6（v2.9.7 审计）：同 [showHabitCheckedConfirm] 改用独立 9 号槽。
+  Future<void> showHabitUndoConfirm(
+    Habit habit, {
+    int? value,
+    int? target,
+  }) async {
     if (!enabled) return;
+    final String body;
+    if (habit.isQuantified && value != null && target != null) {
+      body = value >= target
+          ? '${habit.emoji} ${habit.title} · 今日 $value/$target（仍达标）'
+          : '${habit.emoji} ${habit.title} · 今日 $value/$target';
+    } else if (value != null && value > 0) {
+      body = '${habit.emoji} ${habit.title} · 今日记录已回退';
+    } else {
+      body = '${habit.emoji} ${habit.title} · 已取消今日打卡';
+    }
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
         _chHabit,
@@ -1735,14 +1777,44 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        habitNotifyIdOf(habit.id, 0),
-        '已撤销今日打卡',
-        '${habit.emoji} ${habit.title} · 今天的记录已清空',
+        habitConfirmNotifyIdOf(habit.id),
+        '已撤销 1 次打卡',
+        body,
         detail,
         payload: '$payloadHabitPrefix${habit.id}',
       );
     } catch (e) {
       AppLog.d('[通知] 习惯撤销确认通知失败 id=${habit.id}: $e');
+    }
+  }
+
+  /// 锁定态 action 提示（新U3-1，v2.9.7 审计）：锁定期间点通知「撤销」此前
+  /// 完全静默（既不暂存也不回报，与「打卡」会入队解锁后补执行的回报不一致）。
+  /// 撤销是破坏性回退，不跨锁暂存——回一条提示通知如实说明，指引用户解锁后
+  /// 在 App 内操作。固定 id=[lockedActionNotifyId]（1600000，独立于全部段位）。
+  Future<void> showLockedActionHint() async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        lockedActionNotifyId,
+        '已锁定，未执行撤销',
+        '应用处于锁定状态。请解锁后在 App 内撤销打卡记录。',
+        detail,
+      );
+    } catch (e) {
+      AppLog.d('[通知] 锁定态提示通知失败: $e');
     }
   }
 

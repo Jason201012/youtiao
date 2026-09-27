@@ -104,8 +104,11 @@ class WeeklyMetrics extends StatelessWidget {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final accent = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
     final habitPct = r.habitPercent;
+    // 新U3-5（v2.9.7 审计）：达标档硬编码深绿 0xFF0F6E56 改走 onBg——
+    // 前景强度三档（onBg / accent / meta）随明暗主题，与灰阶设计语言一致。
+    final onBg = Theme.of(context).colorScheme.onBackground;
     final habitColor = habitPct >= 80
-        ? const Color(0xFF0F6E56)
+        ? onBg
         : (habitPct >= 50 ? accent : ext.meta);
 
     final items = [
@@ -421,8 +424,10 @@ class WeeklyReviewCard extends StatelessWidget {
     final accent = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
     final onBg = Theme.of(context).colorScheme.onBackground;
     final habitPct = review.habitPercent;
+    // 新U3-5（v2.9.7 审计）：达标档硬编码深绿 0xFF0F6E56 改走 onBg（前景
+    // 强度三档 onBg / accent / meta），随明暗主题。
     final habitColor = habitPct >= 80
-        ? const Color(0xFF0F6E56)
+        ? onBg
         : (habitPct >= 50 ? accent : ext.meta);
 
     final items = [

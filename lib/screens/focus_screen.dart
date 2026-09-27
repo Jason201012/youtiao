@@ -83,7 +83,17 @@ class _FocusScreenState extends State<FocusScreen> {
   /// P2-8（v2.9.6 审计）：消费 `FocusProvider.pendingTaskId`（幂等）。
   /// initState 与 provider 通知共用同一入口，先到先得、消费即清，
   /// pending 不再长期滞留（避免在下一次任意重建时被误消费）。
+  ///
+  /// 新P3-10（v2.9.7 审计）：补两道守卫——本 listener 在
+  /// `FocusProvider.notifyListeners()` 内**同步**执行 `setState`：
+  /// ① State 已 dispose（如应用锁重建窗口期）时 `mounted == false`，
+  ///    markNeedsBuild 会抛「setState after dispose」；
+  /// ② Element 已失活但未 dispose（deactivate → dispose 之间的窗口，
+  ///    应用锁覆盖层翻转 U2-0 时会经过）时同样不应写入。
+  /// 两道都要求 `pending != null` 才可能命中，概率极低，但属 P2-8 修复
+  /// （listener 常驻）的耦合代价，守卫补齐后无副作用。
   void _consumePending() {
+    if (!mounted) return;
     final focus = _focusRef;
     if (focus == null || focus.pendingTaskId == null) return;
     setState(() {
@@ -99,6 +109,25 @@ class _FocusScreenState extends State<FocusScreen> {
     // P2-8：dispose 里不能再用 context，initState 时缓存引用。
     _focusRef?.removeListener(_consumePending);
     super.dispose();
+  }
+
+  @override
+  void deactivate() {
+    // 新P3-10（v2.9.7 审计）：失活期间移除监听——Element 处于 deactivate →
+    // dispose（或重挂窗口）期间，同步 notifyListeners 到达时对失活元素
+    // setState 无意义且有「build 期 markNeedsBuild」风险。被保留重挂的场景
+    // 由 [activate] 恢复监听。
+    _focusRef?.removeListener(_consumePending);
+    super.deactivate();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    // 新P3-10：与 [deactivate] 配对——重挂回树后恢复监听并补一次消费
+    // （失活期间到达的 pending 在此刻兜底，等价于 initState 的兜底语义）。
+    _focusRef?.addListener(_consumePending);
+    _consumePending();
   }
 
   Future<void> _initAudio() async {
@@ -827,6 +856,12 @@ class _RecordList extends StatelessWidget {
                   context,
                   content: undoContent('已删除该专注记录'),
                   onUndo: () async {
+                    // 新U3-2（v2.9.7 审计）：返回**真实结果**——同 id 记录已存在
+                    // （如重复点撤销）时不回填第二条重复记录，按「撤销已失效」
+                    // 反馈（此前恒返回 true，削弱唯一实现的失效提示）。
+                    if (focus.sessions.any((e) => e.id == removed.id)) {
+                      return false;
+                    }
                     focus.addSession(removed);
                     return true;
                   },
@@ -896,6 +931,10 @@ class _RecordList extends StatelessWidget {
           context,
           content: undoContent('已清空今日专注记录（${removed.length} 条）'),
           onUndo: () async {
+            // 新U3-2（v2.9.7 审计）：同 id 记录已在列表（重复撤销）→ 整批按
+            // 失效处理，避免部分回填造成「一半恢复一半丢失」的中间态。
+            final existing = focus.sessions.map((e) => e.id).toSet();
+            if (removed.any((s) => existing.contains(s.id))) return false;
             for (final s in removed) {
               focus.addSession(s);
             }

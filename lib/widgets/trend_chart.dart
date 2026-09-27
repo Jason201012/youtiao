@@ -55,7 +55,10 @@ class TrendChart extends StatelessWidget {
     final ext = appColors(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fill = isDark ? AppColors.darkAccent : AppColors.lightPrimary;
-    final todayFill = isDark ? const Color(0xFF80C0FF) : const Color(0xFF4DA3FF);
+    // 新U3-5（v2.9.7 审计）：今日高亮改由主题色派生（与 week_trend 同批——
+    // 实心柱 55% 透明、计数数字实色 primary），替代硬编码 0xFF4DA3FF / 0xFF80C0FF。
+    final primary = Theme.of(context).colorScheme.primary;
+    final todayBarFill = primary.withValues(alpha: 0.55);
     final chipBg = isDark ? AppColors.darkChip : AppColors.lightChip;
     final meta = ext.meta;
     final onBg = Theme.of(context).colorScheme.onBackground;
@@ -106,7 +109,7 @@ class TrendChart extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
-                          color: i == highlight ? todayFill : fill,
+                          color: i == highlight ? primary : fill,
                         ),
                       ),
                       const SizedBox(height: 3),
@@ -133,7 +136,8 @@ class TrendChart extends StatelessWidget {
                                   width: barW,
                                   height: (values[i] / scaleMax) * 56,
                                   decoration: BoxDecoration(
-                                    color: i == highlight ? todayFill : fill,
+                                    color:
+                                        i == highlight ? todayBarFill : fill,
                                     borderRadius:
                                         BorderRadius.circular(AppColors.progressRadius),
                                   ),

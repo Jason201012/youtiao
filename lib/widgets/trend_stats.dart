@@ -194,7 +194,9 @@ class _StreakHero extends StatelessWidget {
         children: [
           Icon(
             Icons.local_fire_department,
-            color: const Color(0xFFFF7043),
+            // 新U3-5（v2.9.7 审计）：`0xFFFF7043` 硬编码橙改走卡片同源的
+            // 主题强调色 [fill]（accent 随明暗主题与自定义主题色）。
+            color: fill,
             size: 30,
           ),
           const SizedBox(width: 12),

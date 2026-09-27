@@ -152,8 +152,11 @@ class TodayAggregate {
     if (t.deletedAt != null) return false;
     final d = DateTime(today.year, today.month, today.day);
     if (t.dueDate != null) {
-      final due = DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
-      if (due == d) return true;
+      // 新P3-9（v2.9.7 审计）：截止归一走 [dueCompareKey]（比较键真源）再落
+      // date-only 与今天比较——此前自行内联 `DateTime(y,m,d)`，与任务侧
+      // 逾期 / 排序的取键管道并行，判据调整时会漂移。
+      final k = dueCompareKey(t.dueDate!);
+      if (DateTime(k.year, k.month, k.day) == d) return true;
     } else if (!t.isRepeating) {
       return true;
     }
