@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- T2-4（v2.9.2 功能增强）：小组件「＋」快速新建按钮底色——品牌蓝圆角，白色「＋」叠加其上。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/widget_accent" />
+    <corners android:radius="10dp" />
+</shape>

@@ -336,6 +336,22 @@ class _MetaInfo extends StatelessWidget {
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
     final spans = <InlineSpan>[];
+    // T2-5（v2.9.2 功能增强）：暂停角标——重复任务整段跳过期间，今天的
+    // occurrence 不再出现（skipDates 既有语义），若没有任何可读状态，用户会
+    // 以为任务被删了。角标给出暂停终点与隐含的恢复路径（详情页「恢复循环」）。
+    if (task.pausedUntilDate != null) {
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: Icon(Symbols.pause_circle, size: 13, color: ext.meta),
+      ));
+      spans.add(TextSpan(
+        text: ' 已暂停至 '
+            '${task.pausedUntilDate!.month}/${task.pausedUntilDate!.day}',
+        style: TextStyle(
+            fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
+      ));
+      spans.add(const TextSpan(text: '  '));
+    }
     if (task.repeatEnded) {
       // U3（v2.9.0 审计）：`endRepeat(markDone:false)` 会保留 repeat 字段、只把
       // repeatUntil 设为昨天，于是卡片仍按重复样式渲染（「每天 07:00 至 09/17」），

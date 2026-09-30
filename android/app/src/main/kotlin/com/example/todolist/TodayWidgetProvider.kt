@@ -34,6 +34,10 @@ class TodayWidgetProvider : AppWidgetProvider() {
     companion object {
         /** 小组件任务项点击时，原生侧带此 extra 启动 MainActivity，再由 Dart 直达任务详情页。 */
         const val EXTRA_TASK_ID = "com.example.todolist.EXTRA_TASK_ID"
+
+        /** T2-4（v2.9.2 功能增强）：小组件「＋」快速新建。带此 extra 启动 MainActivity，
+         *  再经 widget_nav 通道让 Dart 弹出快速录入层（无预填文本）。 */
+        const val EXTRA_QUICK_ADD = "com.example.todolist.EXTRA_QUICK_ADD"
         private const val TAG = "TodayWidget"
         private const val kDbName = "youtiao.db"
         private const val MAX_ITEMS = 8
@@ -75,6 +79,8 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             views.setOnClickPendingIntent(R.id.header, openApp)
+            // T2-4：「＋」按钮 → 唤起 App 直达快速录入层。
+            views.setOnClickPendingIntent(R.id.quick_add, quickAddPendingIntent(context))
 
             val tasks = readTodayTasks(context)
             if (tasks.isEmpty()) {
@@ -121,8 +127,24 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             views.setOnClickPendingIntent(R.id.header, openApp)
+            // T2-4：兜底视图同样给「＋」入口可用。
+            views.setOnClickPendingIntent(R.id.quick_add, quickAddPendingIntent(context))
             return views
         }
+
+        /** T2-4（v2.9.2 功能增强）：「＋」快速新建的点击意图。
+         *  requestCode 固定 + 独立 data URI（widget://quick-add），与任务项
+         *  （widget://task/&lt;id&gt;）互不混淆；每次构建统一重建，FLAG_UPDATE_CURRENT 幂等。 */
+        private fun quickAddPendingIntent(context: Context): PendingIntent =
+            PendingIntent.getActivity(
+                context, 10001,
+                Intent(context, MainActivity::class.java).apply {
+                    action = "com.example.todolist.WIDGET_QUICK_ADD"
+                    data = Uri.parse("widget://quick-add")
+                    putExtra(EXTRA_QUICK_ADD, "1")
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
 
         /** 读库筛出今日相关任务：未完成 且 [循环命中今天 ∨ 今天到期 ∨ 已逾期]，置顶优先、order 升序，取前 8。 */
         private fun readTodayTasks(context: Context): List<WidgetTask> {

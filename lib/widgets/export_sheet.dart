@@ -6,6 +6,7 @@ import 'package:todolist/services/csv_safe.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/ical.dart';
 import 'package:todolist/services/report_exporter.dart';
+import 'package:todolist/services/task_import_service.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -103,6 +104,18 @@ class ExportSheet {
                   onTap: () {
                     Navigator.pop(ctx);
                     _doImportIcs(taskProvider, context);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Symbols.upload_file),
+                  title: const Text('从 CSV (.csv) 导入'),
+                  // T2-6（v2.9.2 功能增强）：批量导入——列映射宽松、逐行校验，
+                  // 失败行如实报告（可修正后重导），成功行走与 iCal 相同的幂等去重。
+                  subtitle: const Text('把 Excel / 其它工具导出的表格批量建为任务'
+                      '（列名支持中文/英文，追加不覆盖）'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _doImportCsv(taskProvider, context);
                   },
                 ),
               ],
@@ -391,6 +404,123 @@ class ExportSheet {
         : '';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('iCal 导入完成：${parts.join('，')}$extra$partial')),
+    );
+  }
+
+  /// T2-6（v2.9.2 功能增强）：从 CSV 批量导入任务。
+  ///
+  /// 流程与 iCal 导入同构：选文件 → 解析（[parseTasksCsv]，逐行校验）→
+  /// 策略选择（与 iCal 同款去重弹窗）→ [TaskProvider.importDedup] 幂等入库。
+  /// 失败行在弹窗里如实预览（最多 3 条），绝不静默丢弃。
+  static Future<void> _doImportCsv(
+    TaskProvider provider,
+    BuildContext context,
+  ) async {
+    final picked = await DataIo.pickCsvFile();
+    if (picked.cancelled) return;
+    if (picked.error != null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(picked.error!)));
+      }
+      return;
+    }
+    final raw = picked.content!;
+    // 与 iCal 导入同款 2MB 业务上限（超大表会拖垮解析与一次性灌注）。
+    if (utf8.encode(raw).length > 2 * 1024 * 1024) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('文件过大（超过 2MB），请拆分后分批导入')),
+        );
+      }
+      return;
+    }
+    try {
+      final result = parseTasksCsv(raw);
+      final errHead = result.errors.isEmpty
+          ? ''
+          : '；${result.errors.length} 行未通过校验被跳过'
+              '（如「第 ${result.errors.first.row} 行：${result.errors.first.reason}」）';
+      if (result.tasks.isEmpty) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('未解析到可导入的任务$errHead')),
+          );
+        }
+        return;
+      }
+      if (context.mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (dctx) => AlertDialog(
+            title: const Text('选择导入方式'),
+            content: Text(
+              '共解析到 ${result.tasks.length} 条任务（数据行 ${result.totalRows} 行）'
+              '$errHead。请选择重复任务的处理方式：',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dctx);
+                  _runCsvImportDedup(provider, context, result,
+                      skipExisting: true, overwrite: false, fingerprint: false);
+                },
+                child: const Text('跳过重复（推荐）'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dctx);
+                  _runCsvImportDedup(provider, context, result,
+                      skipExisting: false, overwrite: true, fingerprint: false);
+                },
+                child: const Text('覆盖更新'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(dctx);
+                  _runCsvImportDedup(provider, context, result,
+                      skipExisting: true, overwrite: false, fingerprint: true);
+                },
+                child: const Text('模糊去重（标题+日期）'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      }
+    }
+  }
+
+  /// T2-6：按选定策略执行 CSV 幂等导入。CSV 无 UID（全部按新任务处理，
+  /// 开启指纹时按「标题 + 截止日期」去重）。
+  static Future<void> _runCsvImportDedup(
+    TaskProvider provider,
+    BuildContext context,
+    CsvImportResult result, {
+    required bool skipExisting,
+    required bool overwrite,
+    required bool fingerprint,
+  }) async {
+    final stats = provider.importDedup(
+      result.tasks,
+      List<String?>.filled(result.tasks.length, null),
+      skipExisting: skipExisting,
+      overwrite: overwrite,
+      fingerprint: fingerprint,
+    );
+    if (!context.mounted) return;
+    final parts = <String>['新增 ${stats.added}'];
+    if (stats.overwritten > 0) parts.add('覆盖 ${stats.overwritten}');
+    if (stats.skipped > 0) parts.add('跳过 ${stats.skipped}');
+    final failed = result.errors.isEmpty
+        ? ''
+        : '（${result.errors.length} 行校验失败未导入，可修正后重导）';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('CSV 导入完成：${parts.join('，')}$failed')),
     );
   }
 

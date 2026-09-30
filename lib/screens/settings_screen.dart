@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:timezone/timezone.dart' as tz;
+import 'package:todolist/services/data_health_service.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
@@ -61,7 +64,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '2.9.8');
+      if (mounted) setState(() => _version = '2.9.9');
     }
   }
 
@@ -94,14 +97,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// L-08：请求设置「自动备份口令」。返回 null 表示用户取消。
+  /// L-08：请求设置「自动备份口令」。返回 null 表示用户取消；
+  /// 否则返回 `(口令, 口令提示)`（T3-1：提示可选，明文本机存储、不随备份导出）。
   ///
   /// 与手动加密备份共用同一套 AES-GCM 信封，口令仅存本机、不随备份导出。
   /// 如实告知能力边界：防的是「快照文件被单独拷出后可读」，不防 root / 物理接触。
-  Future<String?> _requestAutoBackupPassphrase(BuildContext ctx) async {
+  Future<(String, String)?> _requestAutoBackupPassphrase(BuildContext ctx) async {
     final controller = TextEditingController();
+    final hintCtrl = TextEditingController();
     String? errorText;
-    final result = await showDialog<String>(
+    final result = await showDialog<(String, String)>(
       context: ctx,
       builder: (dctx) => StatefulBuilder(
         builder: (dctx, setLocal) => AlertDialog(
@@ -125,8 +130,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   errorText: errorText,
                 ),
                 onSubmitted: (v) {
-                  if (v.length >= 6) Navigator.of(dctx).pop(v);
+                  if (v.length >= 6) {
+                    Navigator.of(dctx).pop((v, hintCtrl.text.trim()));
+                  }
                 },
+              ),
+              const SizedBox(height: 8),
+              // T3-1（v2.9.2 功能增强）：口令提示（可选）。解密失败时展示帮助回忆；
+              // 仅存本机（明文 SharedPreferences），不进任何备份文件。
+              TextField(
+                controller: hintCtrl,
+                maxLength: 60,
+                decoration: const InputDecoration(
+                  labelText: '口令提示（可选）',
+                  hintText: '只有你看得懂的提醒，如「老家的门牌号」',
+                  helperText: '仅存本机、不进备份文件',
+                  counterText: '',
+                ),
               ),
             ],
           ),
@@ -142,7 +162,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   setLocal(() => errorText = '口令至少 6 位');
                   return;
                 }
-                Navigator.of(dctx).pop(v);
+                Navigator.of(dctx).pop((v, hintCtrl.text.trim()));
               },
               child: const Text('确定'),
             ),
@@ -222,6 +242,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // 输入新口令
     final ctlNew = TextEditingController();
     final ctlConfirm = TextEditingController();
+    // T3-1（v2.9.2 功能增强）：口令提示随口令一起维护（预填当前提示便于增量修改）。
+    final ctlHint =
+        TextEditingController(text: provider.autoBackupPassHint);
     String? errNew;
     final newPass = await showDialog<String>(
       context: ctx,
@@ -253,6 +276,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 controller: ctlConfirm,
                 obscureText: true,
                 decoration: const InputDecoration(labelText: '再次输入'),
+              ),
+              const SizedBox(height: 8),
+              // T3-1：口令提示（可选）。仅存本机、不进备份文件；清空保存即清除提示。
+              TextField(
+                controller: ctlHint,
+                maxLength: 60,
+                decoration: const InputDecoration(
+                  labelText: '口令提示（可选）',
+                  hintText: '解密失败时会展示，帮你回忆口令',
+                  helperText: '仅存本机、不进备份文件',
+                  counterText: '',
+                ),
               ),
             ],
           ),
@@ -287,6 +322,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       oldPass: oldPass,
       force: oldPass == null && hasOld,
     );
+    if (changed >= 0) {
+      // T3-1：口令变更成功后才同步提示（失败不动提示，避免与密钥库实况错位）。
+      await provider.setAutoBackupPassHint(ctlHint.text);
+    }
     if (!ctx.mounted) return;
     final msg = changed < 0
         ? '修改失败'
@@ -322,6 +361,114 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // ===== T3-4（v2.9.2 功能增强）：数据体检 =====
+
+  /// 数据体检四类问题的行展示配置（图标 / 标签 / 修复动作说明）。
+  static const List<(DataHealthIssueType, String, String)> _healthIssueMeta = [
+    (
+      DataHealthIssueType.duplicateTask,
+      '重复任务',
+      '同标题同分类保留最早一条，其余移入回收站（可反悔）'
+    ),
+    (
+      DataHealthIssueType.emptySubtask,
+      '空白子项',
+      '从任务的子任务列表中剔除标题空白的条目'
+    ),
+    (
+      DataHealthIssueType.missingAttachment,
+      '失效附件引用',
+      '剔除实体已缺失的附件引用（不删现有文件）'
+    ),
+    (
+      DataHealthIssueType.staleTrash,
+      '超期回收站',
+      '彻底删除已过保留期的回收站条目（含附件）'
+    ),
+  ];
+
+  /// 数据体检：扫描 → 结果弹层 → 一键修复（修复前 Provider 侧自动备份一次）。
+  /// 扫描含附件实体存在性检查（少量文件 IO），先给 loading 遮罩防「点了没反应」。
+  Future<void> _runDataHealthCheck(BuildContext ctx) async {
+    final provider = Provider.of<TaskProvider>(ctx, listen: false);
+    unawaited(showDialog<void>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    ));
+    DataHealthReport report;
+    try {
+      report = await provider.scanDataHealth();
+    } catch (e) {
+      if (ctx.mounted) {
+        Navigator.of(ctx, rootNavigator: true).pop(); // 关 loading
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(content: Text('体检失败：$e')),
+        );
+      }
+      return;
+    }
+    if (!ctx.mounted) return;
+    Navigator.of(ctx, rootNavigator: true).pop(); // 关 loading
+    if (report.isHealthy) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        const SnackBar(content: Text('体检完成：未发现问题，数据一切正常')),
+      );
+      return;
+    }
+    final doFix = await showDialog<bool>(
+      context: ctx,
+      builder: (dctx) => AlertDialog(
+        title: const Text('数据体检结果'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final (type, label, action) in _healthIssueMeta)
+                if (report.countOf(type) > 0) ...[
+                  Row(
+                    children: [
+                      Icon(Symbols.warning, size: 18,
+                          color: Theme.of(dctx).colorScheme.error),
+                      const SizedBox(width: 6),
+                      Text('$label × ${report.countOf(type)}',
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                    ],
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 24, top: 2),
+                    child: Text(action,
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(dctx).colorScheme.onSurfaceVariant)),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              const Text('修复前会自动备份一次；重复任务将移入回收站，可再恢复。'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(false),
+            child: const Text('暂不处理'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dctx).pop(true),
+            child: Text('一键修复（${report.issues.length} 项）'),
+          ),
+        ],
+      ),
+    );
+    if (doFix != true) return;
+    final fixed = await provider.fixDataHealthIssues(report);
+    if (!ctx.mounted) return;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(content: Text('已修复 $fixed 项；如需找回可在回收站查看')),
     );
   }
 
@@ -1078,10 +1225,12 @@ String _formatIdle(int seconds) {
                         switchValue: provider.autoBackupEncrypt,
                         onSwitchChanged: (v) async {
                           if (v && !provider.hasAutoBackupPassphrase) {
-                            final pass =
+                            final passPair =
                                 await _requestAutoBackupPassphrase(context);
-                            if (pass == null) return; // 用户取消
-                            await provider.setAutoBackupPassphrase(pass);
+                            if (passPair == null) return; // 用户取消
+                            await provider.setAutoBackupPassphrase(passPair.$1);
+                            // T3-1：口令提示随设置口令一并落本机。
+                            await provider.setAutoBackupPassHint(passPair.$2);
                           }
                           final ok = await provider.setAutoBackupEncrypt(v);
                           if (!ok && mounted) {
@@ -1109,6 +1258,16 @@ String _formatIdle(int seconds) {
                             : '未设置口令；可现在设置以启用加密快照',
                         onTap: () => _changeAutoBackupPassphrase(context),
                       ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // T3-4（v2.9.2 功能增强）：数据体检——常态数据健康扫描与
+                    // 一键修复（纯本地：重复任务 / 空白子项 / 失效附件 / 超期回收站）。
+                    SettingsRow(
+                      icon: Symbols.fact_check,
+                      label: '数据体检',
+                      subtitle: '扫描重复任务、空白子项、失效附件引用与超期回收站，'
+                          '可一键修复（修复前自动备份一次）',
+                      onTap: () => _runDataHealthCheck(context),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     // P0-3 日历农历：默认开启，与「农历重复」录入形成展示闭环。

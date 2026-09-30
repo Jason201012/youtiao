@@ -15,6 +15,7 @@ import 'package:todolist/theme/ui_durations.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/task_row.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/review_card.dart';
 import 'package:todolist/widgets/today_card.dart';
@@ -275,7 +276,8 @@ class HomeScreenState extends State<HomeScreen> {
       // U5：仅拖拽重排场景保留任务行固定窄标题（绕过 shrinkWrap 弹性零宽 bug）；
       // 搜索结果 / 标签筛选等普通列表用全宽 Expanded，长标题可读、整行可点进详情。
       constrainTitleWidth: dragIndex != null,
-      onToggle: () => provider.toggleDone(t.id),
+      // T3-2（v2.9.2 功能增强）：勾选完成带 10 秒撤销（与看板改状态同构）。
+      onToggle: () => toggleDoneWithUndo(context, provider, t),
       onLongPress: () => _enterSelect(t),
       onEdit: () => TaskSheet.show(context, task: t),
       onSelect: () => _toggleSelect(t.id),

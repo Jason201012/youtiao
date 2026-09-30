@@ -32,6 +32,22 @@
             android:layout_height="wrap_content"
             android:textColor="@color/widget_text_secondary"
             android:textSize="12sp" />
+
+        <!-- T2-4（v2.9.2 功能增强）：快速新建入口。点击经 PendingIntent 唤起 App
+             直达快速录入层；独立于 header 的打开 App 点击。min 48dp 保证触控目标。 -->
+        <TextView
+            android:id="@+id/quick_add"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="8dp"
+            android:minWidth="32dp"
+            android:minHeight="32dp"
+            android:gravity="center"
+            android:background="@drawable/widget_quick_add_bg"
+            android:text="＋"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
     </LinearLayout>
 
     <!-- 空状态：无今日任务时显示 -->

@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:todolist/services/app_log.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/attachment_service.dart';
+import 'package:todolist/services/data_health_service.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/csv_safe.dart';
 import 'package:todolist/services/backup_crypto.dart';
@@ -376,6 +377,38 @@ class TaskProvider extends ChangeNotifier {
       await prefs.remove(_kAutoBackupPassLegacy);
     }
     _autoBackupPass = pass;
+    // T3-1（v2.9.2 功能增强）：口令提示为明文本机存储，启动时一并载入。
+    _autoBackupPassHint = prefs.getString(_kAutoBackupPassHint) ?? '';
+  }
+
+  // ===== T3-1（v2.9.2 功能增强）：加密备份「口令提示」 =====
+  /// 口令提示：**明文**存本机 SharedPreferences。提示本身就是要能被用户直接
+  /// 看懂的回忆文案，加密存储没有意义；key **不进** prefs_backup.dart 的导出
+  /// 白名单（显式枚举制，未列出的键不会被 collectAppPrefs 带走），因此
+  /// **不随任何备份文件导出**——换机后提示同样不可得，与「口令不随备份保存、
+  /// 换机后无法找回」的设置页告知保持同一口径。纯本地，不联网。
+  static const String _kAutoBackupPassHint = 'auto_backup_pass_hint';
+  String _autoBackupPassHint = '';
+
+  /// 当前保存的口令提示（未设置时为空串）。
+  String get autoBackupPassHint => _autoBackupPassHint;
+
+  /// 设置 / 清空口令提示（trim 后为空即删除本机存储）。
+  Future<void> setAutoBackupPassHint(String hint) async {
+    final v = hint.trim();
+    if (v == _autoBackupPassHint) return;
+    _autoBackupPassHint = v;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (v.isEmpty) {
+        await prefs.remove(_kAutoBackupPassHint);
+      } else {
+        await prefs.setString(_kAutoBackupPassHint, v);
+      }
+    } catch (_) {
+      // 持久化失败只影响下次启动，本轮内存值仍可用。
+    }
+    notifyListeners();
   }
 
   /// 设置 / 更新自动备份口令（不为空即可，长度下限 6 由 UI 侧校验）。
@@ -383,7 +416,14 @@ class TaskProvider extends ChangeNotifier {
   Future<void> setAutoBackupPassphrase(String pass) async {
     _autoBackupPass = pass;
     if (pass.isEmpty) {
-      await _secureStore.delete(key: _kSecureAutoBackupPass);
+      try {
+        await _secureStore.delete(key: _kSecureAutoBackupPass);
+      } catch (_) {
+        // 密钥库删除失败（无平台实现 / 系统异常）：内存态已清空，本轮生效；
+        // 残留密钥在下一次成功设置口令时被覆盖，不阻断提示联动清理。
+      }
+      // T3-1：口令清空后提示失去对应关系，一并清掉，避免残留过期提示误导回忆。
+      await setAutoBackupPassHint('');
     } else {
       await _secureStore.write(key: _kSecureAutoBackupPass, value: pass);
     }
@@ -914,6 +954,130 @@ class TaskProvider extends ChangeNotifier {
   void _syncTrashExpireNotice() {
     final expiring = trashExpiringTomorrow;
     NotificationService.instance.scheduleTrashExpireNotice(expiring).catchError((_) {});
+  }
+
+  // ===== T3-4（v2.9.2 功能增强）：数据体检 =====
+
+  /// 扫描常态数据健康问题（委托 [DataHealthService] 纯函数；附件实体存在性
+  /// 由本方法做文件 IO 后传入，保持纯函数零 IO）。
+  Future<DataHealthReport> scanDataHealth() async {
+    final keys = await _collectExistingAttachmentKeys();
+    return DataHealthService.scan(
+      tasks: _tasks,
+      trash: _trash,
+      existingAttachmentKeys: keys,
+      trashRetentionDays: _trashRetentionDays,
+    );
+  }
+
+  /// 收集本机附件私有目录实际存在的实体 key（`taskId/fileName`）。
+  /// 单任务附件数上限 20、整体量级有限，逐个 existsSync 可接受。
+  Future<Set<String>> _collectExistingAttachmentKeys() async {
+    final keys = <String>{};
+    for (final t in [..._tasks, ..._trash]) {
+      if (t.attachments.isEmpty) continue;
+      for (final a in t.attachments) {
+        try {
+          final f = await AttachmentService.fileFor(t.id, a);
+          if (f.existsSync()) keys.add('${t.id}/${a.fileName}');
+        } catch (_) {
+          // 单个探测失败（路径非法等）按「不存在」处理，交给体检报告呈现。
+        }
+      }
+    }
+    return keys;
+  }
+
+  /// 一键修复体检报告中的全部问题。
+  ///
+  /// 顺序与动作（全部纯本地）：
+  /// 1. 重复任务 → 组内除首条外移入回收站（软删，可反悔）；
+  /// 2. 空白子任务 → 从任务的 `subtasks` 剔除空白项；
+  /// 3. 失效附件引用 → 从任务的 `attachments` 剔除失效条目（不动缺失实体，
+  ///    实体本来就不存在；孤儿实体清理另有 AttachmentService.deleteOrphans）；
+  /// 4. 超期回收站 → 彻底删除（含附件目录与通知，与 permanentDelete 同径）。
+  ///
+  /// **动手前先写一份自动快照兜底**（失败不阻断修复——快照本身可能就是
+  /// 体检要修的对象之一）；返回实际修复的问题条数。
+  Future<int> fixDataHealthIssues(DataHealthReport report) async {
+    if (report.isHealthy) return 0;
+    try {
+      await _writeAutoBackup(DateTime.now());
+    } catch (_) {
+      // 修复前快照失败不阻断：修复动作本身可反悔（重复任务软删），
+      // 快照链路异常已由 lastAutoBackupError 呈现。
+    }
+    var fixed = 0;
+    final keys = await _collectExistingAttachmentKeys();
+
+    // 1) 重复任务：组内除锚点外全部移入回收站。
+    for (final issue in report.issues) {
+      if (issue.type != DataHealthIssueType.duplicateTask) continue;
+      if (issue.relatedIds.isEmpty) continue;
+      deleteTasksAs(issue.relatedIds);
+      fixed++;
+    }
+
+    // 2) 空白子任务 / 3) 失效附件引用：按任务改列表。
+    //    注意 _applyTaskUpdate 只作用于活动列表（回收站任务查不到会返回 false），
+    //    因此回收站里的任务直接以 copyWith 写回 _trash 后统一 _persist。
+    for (final issue in report.issues) {
+      final isSub = issue.type == DataHealthIssueType.emptySubtask;
+      final isAtt = issue.type == DataHealthIssueType.missingAttachment;
+      if (!isSub && !isAtt) continue;
+      Task? t;
+      final i = _tasks.indexWhere((x) => x.id == issue.taskId);
+      var inTrash = false;
+      if (i >= 0) {
+        t = _tasks[i];
+      } else {
+        final j = _trash.indexWhere((x) => x.id == issue.taskId);
+        if (j >= 0) {
+          t = _trash[j];
+          inTrash = true;
+        }
+      }
+      if (t == null) continue; // 已被前面的步骤（如重复软删）处理掉
+      var changed = false;
+      var next = t;
+      if (isSub) {
+        final cleaned = DataHealthService.dropEmptySubtasks(t.subtasks);
+        if (cleaned.length != t.subtasks.length) {
+          next = next.copyWith(subtasks: cleaned);
+          changed = true;
+        }
+      }
+      if (isAtt) {
+        final cleaned = DataHealthService.dropMissingAttachments(
+            next.attachments, next.id, keys);
+        if (cleaned.length != next.attachments.length) {
+          next = next.copyWith(attachments: cleaned);
+          changed = true;
+        }
+      }
+      if (changed) {
+        if (inTrash) {
+          final j = _trash.indexWhere((x) => x.id == next.id);
+          if (j >= 0) _trash[j] = next;
+        } else {
+          _applyTaskUpdate(next);
+        }
+        fixed++;
+      }
+    }
+
+    // 4) 超期回收站：彻底删除（含附件目录、通知、撤销缓冲作废，同 permanentDelete）。
+    for (final issue in report.issues) {
+      if (issue.type != DataHealthIssueType.staleTrash) continue;
+      if (_trash.indexWhere((x) => x.id == issue.taskId) < 0) continue;
+      permanentDelete(issue.taskId);
+      fixed++;
+    }
+
+    notifyListeners();
+    _persist();
+    _syncTrashExpireNotice();
+    return fixed;
   }
 
   // ===== 通知总开关 =====
@@ -2167,6 +2331,69 @@ class TaskProvider extends ChangeNotifier {
     if (updated.isRepeating) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(updated);
+    }
+    notifyListeners();
+    _persist();
+  }
+
+  /// T2-5（v2.9.2 功能增强）：把重复任务从今天（含）暂停到 [until]（含）。
+  ///
+  /// 实现：把 `[today, until]` 内该任务的**全部循环日**一次性写入 [Task.skipDates]
+  /// ——刻意不加新字段：skipDates「当天不出现、不打卡、不影响统计」的既有语义
+  /// 即暂停语义，到期后 [Task.repeatsOn] 自然恢复 true，无需任何定时恢复逻辑；
+  /// Android 侧 `MidnightResetReceiver.isRecurrenceToday` 同样读 skipDates，两侧一致。
+  ///
+  /// - 非重复任务 / [until] 早于今天 → 无操作（防御：UI 入口已限重复任务，此处兜底）；
+  /// - 写入前过 [Task.pruneHistory] 滚动窗口，与 [skipOccurrence] 同口径；
+  /// - 写入后撤挂 + 重排提醒（首个落点顺延到暂停区间之后）。
+  void pauseRepeatsUntil(String taskId, DateTime until) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final src = _tasks[i];
+    if (!src.isRepeating) return;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final untilD = DateTime(until.year, until.month, until.day);
+    if (untilD.isBefore(today)) return;
+    final set = <String>{...src.skipDates};
+    for (var d = today; !d.isAfter(untilD); d = DateTime(d.year, d.month, d.day + 1)) {
+      // 用「忽略跳过」的纯日历判定：已被单独跳过的日子补写无害（集合去重）。
+      if (src.occursOnIgnoringSkip(d)) set.add(_ymd(d));
+    }
+    final skip2 = set.toList()..sort();
+    _tasks[i] = src.copyWith(
+      skipDates: Task.pruneHistory(skip2, now) ?? skip2,
+    );
+    if (_tasks[i].isRepeating) {
+      _cancelRemindersFor(_tasks[i].id);
+      _scheduleRemindersFor(_tasks[i]);
+    }
+    notifyListeners();
+    _persist();
+  }
+
+  /// T2-5 配套：恢复重复——把今天及以后的全部跳过日从 [Task.skipDates] 清除。
+  ///
+  /// 「恢复」语义是**整段撤销未来的不出现**：既清除暂停区间，也顺带清掉用户
+  /// 此前单独跳过的未来日（把任务完整交还给循环规则）；过去的历史跳过记录
+  /// （统计口径）不受影响。非重复任务幂等无操作。
+  void resumeRepeats(String taskId) {
+    final i = _tasks.indexWhere((t) => t.id == taskId);
+    if (i == -1) return;
+    final src = _tasks[i];
+    if (!src.isRepeating) return;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final todayKey = _ymd(today);
+    final remaining =
+        src.skipDates.where((s) => s.compareTo(todayKey) < 0).toList();
+    if (remaining.length == src.skipDates.length) return; // 无未来跳过，幂等
+    _tasks[i] = src.copyWith(
+      skipDates: Task.pruneHistory(remaining, now) ?? remaining,
+    );
+    if (_tasks[i].isRepeating) {
+      _cancelRemindersFor(_tasks[i].id);
+      _scheduleRemindersFor(_tasks[i]);
     }
     notifyListeners();
     _persist();

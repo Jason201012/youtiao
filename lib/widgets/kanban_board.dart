@@ -9,6 +9,8 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 // ui_durations 的 kUndoWindow 已收进 undo_snack_bar（P3-4），本文件不再直接用时删 import。
 import 'package:todolist/widgets/undo_snack_bar.dart';
+// T2-3（v2.9.2 功能增强）：列内「+」快速建卡复用 TaskSheet（分类 / 标签自动预填）。
+import 'package:todolist/widgets/new_task_sheet.dart';
 // U2-4（v2.9.5 审计）：卡片单击进任务详情（此前单击直接改状态，全屏无详情入口）。
 import 'package:todolist/screens/task_detail_screen.dart';
 
@@ -17,6 +19,19 @@ enum KanbanGroupMode { status, category, tag }
 
 /// P3-4（v2.9.0 审计）：分组模式的偏好键——把「视图偏好」从页面内存态升级为持久偏好。
 const String kKanbanGroupModePrefsKey = 'kanban_group_mode';
+
+/// T2-3（v2.9.2 功能增强）：「待办」泳道进行中上限（WIP）的偏好键。0 = 不限。
+const String kKanbanWipLimitPrefsKey = 'kanban_wip_limit';
+
+/// T2-3：待办超限判定（纯函数，供单测钉死）。[limit] <= 0 恒不拦。
+@visibleForTesting
+bool kanbanWipBlocked(int todoCount, int limit) =>
+    limit > 0 && todoCount >= limit;
+
+/// T2-3：全局「待办」计数（与状态分组待办泳道同口径：未删 + todo）。
+int kanbanTodoCountOf(TaskProvider provider) => provider.tasks
+    .where((t) => t.deletedAt == null && t.status == TaskStatus.todo)
+    .length;
 
 /// 分类 / 标签（横向滚动）模式下每条泳道的**基准**宽度（逻辑像素）。
 ///
@@ -88,11 +103,17 @@ class KanbanLaneData {
   /// 分类 / 标签泳道在调色板中的索引；null 表示使用语义色（状态 / 其他）。
   final int? paletteIndex;
 
+  /// T2-3：该泳道「+」快速建卡的预填维度；状态泳道与「其他」泳道为 null。
+  final Category? category;
+  final String? tag;
+
   const KanbanLaneData(
     this.title,
     this.tasks, {
     this.dropStatus,
     this.paletteIndex,
+    this.category,
+    this.tag,
   });
 }
 
@@ -129,7 +150,9 @@ List<KanbanLaneData> buildKanbanLanes(
       for (final c in Category.values) {
         final items = active.where((t) => t.category == c).toList();
         if (items.isEmpty) continue; // 空分组自动隐藏
-        lanes.add(KanbanLaneData(_catLabel(c), items, paletteIndex: i));
+        // T2-3：泳道带分类预填，列内「+」建卡自动归入该分类。
+        lanes.add(KanbanLaneData(_catLabel(c), items,
+            paletteIndex: i, category: c));
         i++;
       }
       return lanes;
@@ -178,7 +201,8 @@ List<KanbanLaneData> buildKanbanLanes(
         // 高频标签可能已被更高频标签「吸走」全部任务，空泳道不再展示
         // （与「分类」模式的空分组自动隐藏一致），调色板索引只对可见泳道递增。
         if (items.isEmpty) continue;
-        lanes.add(KanbanLaneData(tag, items, paletteIndex: i));
+        // T2-3：泳道带标签预填，列内「+」建卡自动带上该标签。
+        lanes.add(KanbanLaneData(tag, items, paletteIndex: i, tag: tag));
         i++;
       }
       if (others.isNotEmpty) {
@@ -194,7 +218,12 @@ class _Lane {
   final Color color;
   final List<Task> tasks;
   final TaskStatus? dropStatus;
-  const _Lane(this.title, this.color, this.tasks, {this.dropStatus});
+
+  /// T2-3：列内「+」建卡的预填维度（分类 / 标签泳道专用）。
+  final Category? category;
+  final String? tag;
+  const _Lane(this.title, this.color, this.tasks,
+      {this.dropStatus, this.category, this.tag});
 }
 
 /// 看板：支持按「状态 / 分类 / 标签」三种方式分组。
@@ -215,10 +244,95 @@ class _KanbanBoardState extends State<KanbanBoard> {
   /// 标签泳道上限，超出部分折叠到「其他」。
   static const int _maxTagLanes = 8;
 
+  /// T2-3：「待办」泳道的进行中上限（0 = 不限）。仅「状态」分组生效。
+  int _wipLimit = 0;
+
   @override
   void initState() {
     super.initState();
     _restoreMode();
+    _restoreWipLimit();
+  }
+
+  /// T2-3：读取持久化的 WIP 上限（读取失败静默保持「不限」）。
+  Future<void> _restoreWipLimit() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getInt(kKanbanWipLimitPrefsKey) ?? 0;
+      if (!mounted || v == _wipLimit) return;
+      setState(() => _wipLimit = v < 0 ? 0 : v);
+    } catch (_) {
+      // 偏好不可读：静默保持不限。
+    }
+  }
+
+  /// T2-3：写入 WIP 上限（落盘失败不影响当次生效）。
+  void _setWipLimit(int v) {
+    final clamped = v < 0 ? 0 : v;
+    setState(() => _wipLimit = clamped);
+    SharedPreferences.getInstance().then((prefs) {
+      return prefs.setInt(kKanbanWipLimitPrefsKey, clamped);
+    }).catchError((_) {
+      // 写入失败：仅本次不记忆。
+    });
+  }
+
+  /// T2-3：WIP 上限编辑弹窗（步进器，0 = 不限）。
+  Future<void> _editWipLimit() async {
+    var v = _wipLimit;
+    final confirmed = await showDialog<int>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, setD) => AlertDialog(
+          title: const Text('待办上限'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '「待办」列最多保留多少个任务（0 = 不限）。'
+                '超限后拖入 / 勾选转回 / 新建都会被拦截。',
+                style: TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    onPressed: v > 0 ? () => setD(() => v--) : null,
+                    icon: const Icon(Symbols.remove_circle_outline),
+                    tooltip: '减',
+                  ),
+                  SizedBox(
+                    width: 56,
+                    child: Center(
+                      child: Text('$v',
+                          style: const TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: v < 99 ? () => setD(() => v++) : null,
+                    icon: const Icon(Symbols.add_circle_outline),
+                    tooltip: '加',
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(c, v),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != null) _setWipLimit(confirmed);
   }
 
   /// P3-4（v2.9.0 审计）：分组模式此前是纯页面内存态（宿主为 `const KanbanBoard()`
@@ -291,6 +405,8 @@ class _KanbanBoardState extends State<KanbanBoard> {
           _laneColor(lane),
           lane.tasks,
           dropStatus: lane.dropStatus,
+          category: lane.category,
+          tag: lane.tag,
         ),
     ];
   }
@@ -309,6 +425,10 @@ class _KanbanBoardState extends State<KanbanBoard> {
           canDrop: lane.dropStatus != null,
           dropStatus: lane.dropStatus,
           provider: provider,
+          // T2-3：WIP 上限只约束「状态」分组的待办列；列内建卡预填维度透传。
+          wipLimit: lane.dropStatus == TaskStatus.todo ? _wipLimit : 0,
+          category: lane.category,
+          tag: lane.tag,
         ),
     ];
 
@@ -365,26 +485,43 @@ class _KanbanBoardState extends State<KanbanBoard> {
               color: Theme.of(context).colorScheme.onBackground,
             )),
         const SizedBox(height: 12),
-        SegmentedButton<KanbanGroupMode>(
-          segments: const [
-            ButtonSegment(
-              value: KanbanGroupMode.status,
-              label: Text('状态'),
-              icon: Icon(Symbols.dashboard, size: 18),
+        // T2-3：WIP 上限配置入口（仅「状态」分组可配；其余分组禁用该按钮）。
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: SegmentedButton<KanbanGroupMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: KanbanGroupMode.status,
+                    label: Text('状态'),
+                    icon: Icon(Symbols.dashboard, size: 18),
+                  ),
+                  ButtonSegment(
+                    value: KanbanGroupMode.category,
+                    label: Text('分类'),
+                    icon: Icon(Symbols.grid_on, size: 18),
+                  ),
+                  ButtonSegment(
+                    value: KanbanGroupMode.tag,
+                    label: Text('标签'),
+                    icon: Icon(Symbols.sell, size: 18),
+                  ),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (s) => _setMode(s.first),
+              ),
             ),
-            ButtonSegment(
-              value: KanbanGroupMode.category,
-              label: Text('分类'),
-              icon: Icon(Symbols.grid_on, size: 18),
-            ),
-            ButtonSegment(
-              value: KanbanGroupMode.tag,
-              label: Text('标签'),
-              icon: Icon(Symbols.sell, size: 18),
+            IconButton(
+              tooltip: '待办上限',
+              onPressed: _mode == KanbanGroupMode.status ? _editWipLimit : null,
+              icon: Badge(
+                isLabelVisible: _wipLimit > 0,
+                label: Text('$_wipLimit'),
+                child: const Icon(Symbols.speed, size: 20),
+              ),
             ),
           ],
-          selected: {_mode},
-          onSelectionChanged: (s) => _setMode(s.first),
         ),
         const SizedBox(height: 12),
         // 新U3-4（v2.9.7 审计）：看板全空补空态——「状态」模式此前只剩两条
@@ -418,14 +555,52 @@ class _Column extends StatelessWidget {
   final bool canDrop;
   final TaskStatus? dropStatus;
   final TaskProvider provider;
+
+  /// T2-3：本列的 WIP 上限（0 = 不限 / 不适用）；仅待办列会拿到 >0 的值。
+  final int wipLimit;
+
+  /// T2-3：列内「+」建卡的预填维度。
+  final Category? category;
+  final String? tag;
   const _Column({
     required this.title,
     required this.color,
     required this.tasks,
     required this.canDrop,
+    required this.wipLimit,
     this.dropStatus,
     required this.provider,
+    this.category,
+    this.tag,
   });
+
+  /// T2-3：本列是否为「状态」分组的待办列（WIP 与「+」的适用对象）。
+  bool get _isTodoLane => dropStatus == TaskStatus.todo;
+
+  /// T2-3：列内快速建卡。WIP 满时先拦截（弹了表单也存不进「待办」，
+  /// 与拖入 / 勾选转回同一口径），并给出明确提示。
+  void _quickAdd(BuildContext context) {
+    if (_isTodoLane &&
+        kanbanWipBlocked(kanbanTodoCountOf(provider), wipLimit)) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(wipLimit > 0
+            ? '待办已满（上限 $wipLimit），先完成或移出其它待办再新建'
+            : '待办已满'),
+        duration: const Duration(seconds: 3),
+      ));
+      return;
+    }
+    TaskSheet.show(
+      context,
+      draft: Task(
+        id: '',
+        title: '',
+        priority: Priority.medium,
+        category: category ?? Category.work,
+        tags: tag == null ? const <String>[] : <String>[tag!],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -438,9 +613,21 @@ class _Column extends StatelessWidget {
           : (_) => false,
       onAcceptWithDetails: accept
           ? (d) {
+              // T2-3（v2.9.2 功能增强）：拖入「待办」超限拦截——先放行悬停
+              // 视觉（onWillAccept 不掺 WIP，让用户知道落点是合法目标），
+              // 接收时再校验并给出明确原因，比悬停即拒绝更有反馈。
+              final snapshot = d.data;
+              if (_isTodoLane &&
+                  snapshot.status != TaskStatus.todo &&
+                  kanbanWipBlocked(kanbanTodoCountOf(provider), wipLimit)) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text('待办已满（上限 $wipLimit），先完成或移出其它待办'),
+                  duration: const Duration(seconds: 3),
+                ));
+                return;
+              }
               // P3-10（v2.9.4 审计）：拖拽改状态同样给出撤销。d.data 是被拖的
               // 那份 Task 快照（拖拽开始时捕获），可直接用作回滚源。
-              final snapshot = d.data;
               provider.setStatus(snapshot.id, dropStatus!);
               if (context.mounted) {
                 _KanbanCard._showStatusUndo(context, provider, snapshot);
@@ -482,7 +669,27 @@ class _Column extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 8),
-              for (final t in tasks) _KanbanCard(task: t, provider: provider),
+              for (final t in tasks)
+                _KanbanCard(task: t, provider: provider, wipLimit: wipLimit),
+              // T2-3（v2.9.2 功能增强）：列内快速建卡——「已完成」列没有
+              // 「往里新建」的语义，不展示；其余列复用 TaskSheet 并预填维度。
+              if (dropStatus != TaskStatus.done)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: TextButton.icon(
+                      onPressed: () => _quickAdd(context),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        foregroundColor:
+                            Theme.of(context).colorScheme.onBackground,
+                      ),
+                      icon: const Icon(Symbols.add, size: 18),
+                      label: const Text('新建'),
+                    ),
+                  ),
+                ),
             ],
           ),
         );
@@ -494,7 +701,12 @@ class _Column extends StatelessWidget {
 class _KanbanCard extends StatelessWidget {
   final Task task;
   final TaskProvider provider;
-  const _KanbanCard({required this.task, required this.provider});
+
+  /// T2-3：所在列的 WIP 上限（0 = 不限 / 不适用）。勾选圈把已完成任务
+  /// 转回「待办」时同样受其约束，与拖拽落列同口径。
+  final int wipLimit;
+  const _KanbanCard(
+      {required this.task, required this.provider, this.wipLimit = 0});
 
   /// P3-10（v2.9.4 审计）：改状态的两个入口都给出 10 秒撤销。
   ///
@@ -514,12 +726,22 @@ class _KanbanCard extends StatelessWidget {
     );
   }
 
-  static void _cycle(TaskProvider p, Task t, BuildContext context) {
+  /// T2-3：勾选圈改状态。done → todo 方向受 WIP 上限约束（与拖拽落列同口径）：
+  /// 超限时提示并阻止，不静默放行。
+  void _cycle(BuildContext context) {
     final next =
-        t.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
-    final snapshot = t;
-    p.setStatus(t.id, next);
-    _showStatusUndo(context, p, snapshot);
+        task.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
+    if (next == TaskStatus.todo &&
+        kanbanWipBlocked(kanbanTodoCountOf(provider), wipLimit)) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('待办已满（上限 $wipLimit），先完成或移出其它待办'),
+        duration: const Duration(seconds: 3),
+      ));
+      return;
+    }
+    final snapshot = task;
+    provider.setStatus(task.id, next);
+    _showStatusUndo(context, provider, snapshot);
   }
 
   /// 改状态后的撤销提示。[snapshot] 是 [TaskProvider.setStatus] 变更前的快照。
@@ -599,7 +821,7 @@ class _KanbanCard extends StatelessWidget {
               // 分类 / 标签分组下曾完全无法从看板改状态。视觉小圆圈、48dp
               // 命中区，与今日页勾选框同一形态。
               IconButton(
-                onPressed: () => _cycle(provider, task, context),
+                onPressed: () => _cycle(context),
                 tooltip: done ? '移到待办' : '标记完成',
                 // 新U3-3（v2.9.7 审计）：移除 `VisualDensity.compact`——密度
                 // 压缩作用在约束的 min 值上（compact = −2 → min −8px），会把

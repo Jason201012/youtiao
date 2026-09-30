@@ -64,6 +64,11 @@ final List<String> _pendingNotificationPayloads = [];
 /// 通道请求直达详情页；导航器未就绪时暂存任务 id，待 MainScaffold 首帧后消费。
 final List<String> _pendingWidgetTaskIds = [];
 
+/// T2-4（v2.9.2 功能增强）：冷启动时由桌面小组件「＋」拉起（MainActivity 带 EXTRA_QUICK_ADD），
+/// 原生经 widget_nav 通道请求弹出快速录入层；导航器未就绪或锁定期间暂存标记，待首帧后消费。
+/// 用空串占位以复用 [_enqueue] 的容量上限逻辑。
+final List<String> _pendingWidgetQuickAdds = [];
+
 /// 冷启动时点击通知「稍后提醒」action 先于导航器就绪到达，暂存任务/习惯 id（并行两队列，成对消费）。
 final List<String> _pendingSnoozeTaskIds = [];
 final List<String> _pendingSnoozeHabitIds = [];
@@ -107,6 +112,18 @@ int _lastShareAtMs = 0;
 final Map<String, int> _lastShareAtBySource = <String, int>{};
 /// 同一来源两次分享的最小间隔（I-05）。
 const int _shareThrottleMs = 1000;
+
+/// T2-4（v2.9.2 功能增强）：小组件「＋」快速新建入口。
+/// 不走 [_openQuickEntry]（分享节流会吞掉 1 秒内的连续主动点击）；
+/// 导航器未就绪或应用锁锁定期间暂存，待 MainScaffold 首帧 / 解锁后消费。
+void _openWidgetQuickAdd() {
+  final state = _navigatorKey.currentState;
+  if (state == null || _isAppLocked) {
+    _enqueue(_pendingWidgetQuickAdds, '');
+    return;
+  }
+  QuickEntrySheet.show(state.context);
+}
 
 void _openQuickEntry(String text, {String? sourcePackage}) {
   final now = DateTime.now().millisecondsSinceEpoch;
@@ -601,6 +618,9 @@ void main() async {
           _enqueue(_pendingWidgetTaskIds, id);
         }
       }
+    } else if (call.method == 'openQuickAdd') {
+      // T2-4（v2.9.2 功能增强）：小组件「＋」快速新建——弹出快速录入层（无预填文本）。
+      _openWidgetQuickAdd();
     }
   });
 
@@ -929,6 +949,11 @@ class _MainScaffoldState extends State<MainScaffold>
     // 桌面小组件点击任务项。
     while (_pendingWidgetTaskIds.isNotEmpty) {
       _doNavigate('task:${_pendingWidgetTaskIds.removeAt(0)}', state);
+    }
+    // T2-4（v2.9.2 功能增强）：桌面小组件「＋」快速新建。
+    while (_pendingWidgetQuickAdds.isNotEmpty) {
+      _pendingWidgetQuickAdds.removeAt(0);
+      QuickEntrySheet.show(state.context);
     }
     // 通知「稍后提醒」action（任务 / 习惯 id 成对消费）。
     while (

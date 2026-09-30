@@ -18,6 +18,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/task_template_sheet.dart';
 import 'package:todolist/widgets/occurrence_sheet.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
 // P3-5（v2.9.5 审计）：本次跳过的撤销提示改走唯一实现（此前漏加 import，
 // analyze 报 undefined_method：showUndoSnackBar / undoContent）。
@@ -232,7 +233,8 @@ class TaskDetailScreen extends StatelessWidget {
                   ),
                 ),
                 GestureDetector(
-                  onTap: () => provider.toggleDone(task.id),
+                  // T3-2（v2.9.2 功能增强）：勾选完成带 10 秒撤销。
+                  onTap: () => toggleDoneWithUndo(context, provider, task),
                   child: Container(
                     width: 24,
                     height: 24,
@@ -463,6 +465,60 @@ class TaskDetailScreen extends StatelessWidget {
                         icon: const Icon(Symbols.skip_next, size: 18),
                         label: Text(canSkipToday ? '本次跳过' : '今天不是循环日'),
                       ),
+                      // T2-5（v2.9.2 功能增强）：暂停重复直到所选日期——把
+                      // [今天, 所选日] 内的全部循环日一次性写入 skipDates，
+                      // 到期由 repeatsOn 自然恢复（不加新字段、无定时器）。
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate:
+                                DateTime.now().add(const Duration(days: 1)),
+                            firstDate: DateTime.now(),
+                            lastDate:
+                                DateTime.now().add(const Duration(days: 365)),
+                          );
+                          if (picked == null || !context.mounted) return;
+                          // 快照取**操作时刻**的当前对象：暂停期间若他处又改过
+                          // 任务，撤销按暂停前状态整体回滚（与看板 _cycle 同构）。
+                          final snapshot = provider.byId(task.id);
+                          provider.pauseRepeatsUntil(task.id, picked);
+                          showUndoSnackBar(
+                            context,
+                            content: undoContent('已暂停「${task.title}」'
+                                '至 ${picked.month}月${picked.day}日'),
+                            onUndo: () async => snapshot == null
+                                ? false
+                                : provider.restoreTaskSnapshot(snapshot),
+                          );
+                        },
+                        icon: const Icon(Symbols.pause_circle, size: 18),
+                        label: const Text('暂停直到…'),
+                      ),
+                      // T2-5：暂停中给出显式恢复入口（提前恢复不必等到期）。
+                      if (task.pausedToday)
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            final snapshot = provider.byId(task.id);
+                            provider.resumeRepeats(task.id);
+                            showUndoSnackBar(
+                              context,
+                              content:
+                                  undoContent('已恢复「${task.title}」的循环'),
+                              onUndo: () async => snapshot == null
+                                  ? false
+                                  : provider.restoreTaskSnapshot(snapshot),
+                            );
+                          },
+                          icon: const Icon(Symbols.play_circle, size: 18),
+                          label: Text(
+                            task.pausedUntilDate == null
+                                ? '恢复循环'
+                                : '已暂停至 '
+                                    '${task.pausedUntilDate!.month}/'
+                                    '${task.pausedUntilDate!.day}，点按恢复',
+                          ),
+                        ),
                       OutlinedButton.icon(
                         onPressed: () async {
                           // F-3（v2.8.5 审计）：旧文案承诺「今天起不再出现」，实际任务

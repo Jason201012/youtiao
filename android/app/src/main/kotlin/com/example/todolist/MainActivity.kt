@@ -58,6 +58,9 @@ class MainActivity : FlutterFragmentActivity() {
     private var widgetNavHandler: MethodChannel? = null
     /// Flutter 引擎尚未就绪时（冷启动）缓存小组件点击的任务 id，引擎就绪后补发。
     private var pendingWidgetTaskId: String? = null
+    /// T2-4（v2.9.2 功能增强）：冷启动时由小组件「＋」拉起（带 EXTRA_QUICK_ADD）先缓存，
+    /// 引擎就绪后补发 openQuickAdd；与 pendingWidgetTaskId 互斥（一个 intent 只带其一）。
+    private var pendingWidgetQuickAdd = false
     /// 小组件刷新通道：Dart 侧每次 _persist 后调用，主动刷新桌面部件（今日任务列表）。
     private val CHANNEL_WIDGET_REFRESH = "com.example.todolist/widget_refresh"
     /// L-07：窗口标志通道——运行时开关 `FLAG_SECURE`（防最近任务缩略图 + 防截屏/录屏）。
@@ -332,6 +335,11 @@ class MainActivity : FlutterFragmentActivity() {
             pendingWidgetTaskId = null
             widgetNavHandler?.invokeMethod("openTask", pw)
         }
+        // T2-4：冷启动期间由小组件「＋」拉起，此刻补发快速录入意图。
+        if (pendingWidgetQuickAdd) {
+            pendingWidgetQuickAdd = false
+            widgetNavHandler?.invokeMethod("openQuickAdd", null)
+        }
 
         // 小组件刷新通道：Dart 侧 _persist 后调用，主动刷新桌面部件（今日任务列表）。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_WIDGET_REFRESH)
@@ -456,6 +464,7 @@ class MainActivity : FlutterFragmentActivity() {
         dispatchShareText(intent)
         dispatchShareStream(intent)
         dispatchWidgetTask(intent)
+        dispatchWidgetQuickAdd(intent)
     }
 
     /// P2-D：`share_inbox` 启动兜底清理。正常路径下 Dart 侧消费完附件后会删除缓存目录，
@@ -483,6 +492,7 @@ class MainActivity : FlutterFragmentActivity() {
         dispatchShareText(intent)
         dispatchShareStream(intent)
         dispatchWidgetTask(intent)
+        dispatchWidgetQuickAdd(intent)
     }
 
     /// I-05：分享节流判定——键为「来源包名 + 时窗」，而非此前的「文本内容相等」。
@@ -703,5 +713,14 @@ class MainActivity : FlutterFragmentActivity() {
         if (id.isEmpty()) return
         pendingWidgetTaskId = id
         widgetNavHandler?.invokeMethod("openTask", id)
+    }
+
+    /// T2-4（v2.9.2 功能增强）：小组件「＋」快速新建——原生带 EXTRA_QUICK_ADD 启动
+    /// MainActivity 后，经 widget_nav 通道让 Dart 弹出快速录入层。引擎未就绪（冷启动）
+    /// 时先挂 pendingWidgetQuickAdd，待 configureFlutterEngine 注册通道后补发。
+    private fun dispatchWidgetQuickAdd(i: Intent?) {
+        if (i?.getStringExtra(TodayWidgetProvider.EXTRA_QUICK_ADD) != "1") return
+        pendingWidgetQuickAdd = true
+        widgetNavHandler?.invokeMethod("openQuickAdd", null)
     }
 }

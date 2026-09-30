@@ -241,6 +241,10 @@ class DataIo {
   static Future<PickedText> pickIcsFile() =>
       _pickTextFile(['ics'], '日历文件');
 
+  /// 选择 .csv 表格文件并返回其文本内容（T2-6 批量导入任务）。
+  static Future<PickedText> pickCsvFile() =>
+      _pickTextFile(['csv'], '表格文件');
+
   /// 选择指定扩展名的文本文件并做大小预检后读入（L-09）。
   static Future<PickedText> _pickTextFile(
       List<String> extensions, String label) async {

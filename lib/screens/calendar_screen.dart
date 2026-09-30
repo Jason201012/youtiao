@@ -15,6 +15,9 @@ import 'package:todolist/widgets/focus_chart.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
 // U2-3（v2.9.5 审计）：拖拽改期复用统一撤销条（10 秒 + 超时提示），与逾期顺延同口径。
 import 'package:todolist/widgets/undo_snack_bar.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
+// T2-1（v2.9.2 功能增强）：日历格长按直达新建任务（复用 TaskSheet 草稿预填）。
+import 'package:todolist/widgets/new_task_sheet.dart';
 // U2-4（v2.9.1 审计）：日历日期弹层里的任务行可点进任务详情页。
 import 'package:todolist/screens/task_detail_screen.dart';
 
@@ -364,7 +367,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final count = counts[date] ?? 0;
     final level = _level(count);
     final isToday = _sameDay(date, today);
-    final dueTasks = provider.tasksDueOn(date);
+    // T2-1/T2-2：当天到期 + 跨天区间覆盖的任务。
+    final dueTasks = _tasksOnDay(provider, date);
+    // T2-1：当日「计划占时」合计（未完成且带显式预估的任务，纯本地求和）。
+    final planMin = dueTasks.fold<int>(
+        0, (s, t) => s + (!t.done && t.hasEstimate ? t.estimateMinutes! : 0));
     final isFuture = date.isAfter(today);
     final focusMin =
         (Provider.of<FocusProvider>(context, listen: false).totalSecOn(date) / 60)
@@ -388,6 +395,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onAcceptWithDetails: (details) => _reschedule(details.data, date),
       builder: (ctx, candidate, rejected) => GestureDetector(
         onTap: () => _openDay(provider, date),
+        // T2-1（v2.9.2 功能增强）：长按空档直接建任务（截止日预填为当天）。
+        onLongPress: () => _createTaskOn(date),
         child: Container(
           margin: const EdgeInsets.all(2),
           clipBehavior: Clip.antiAlias,
@@ -457,6 +466,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       ],
                     ),
                   ),
+                // T2-1：当日计划占时合计（与专注行同款弱化样式，仅有时显示）。
+                if (planMin > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1, left: 2),
+                    child: Row(
+                      children: [
+                        Icon(Symbols.schedule, size: 9, color: ext.meta),
+                        const SizedBox(width: 2),
+                        Text(_planLabel(planMin),
+                            style: TextStyle(fontSize: 10, color: ext.meta)),
+                      ],
+                    ),
+                  ),
                 ],
             ],
           ),
@@ -469,8 +491,29 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Widget _taskChip(Task task, Color onBg, bool isDark, dynamic ext,
       {bool dense = false}) {
     final pColor = _priorityColor(task.priority, isDark);
-    final hasTime = _hasTime(task.dueDate);
-    final time = hasTime ? DateFormat('HH:mm').format(task.dueDate!) : '';
+    // T2-1 / T2-2（v2.9.2 功能增强）：条上时间标签三态——
+    // ① 跨天区间任务：显示「起-止」日期带（M/d-M/d），一眼看出这是区间带的一段；
+    // ② 带时刻且有预估的一次性任务：显示「起-止」时刻（截止 − 预估 = 占用起点），
+    //    周视图的轻量「时间网格」表达，无需整页像素网格即可看出占时；
+    // ③ 其余：维持原「HH:mm」或空。
+    final String time;
+    if (_isSpanTask(task)) {
+      final s = task.startDate!;
+      final d0 = task.dueDate!;
+      time = '${s.month}/${s.day}-${d0.month}/${d0.day}';
+    } else if (_hasTime(task.dueDate)) {
+      final end = task.dueDate!;
+      if (!task.done && task.hasEstimate) {
+        final start =
+            end.subtract(Duration(minutes: task.estimateMinutes!));
+        time = '${DateFormat('HH:mm').format(start)}-'
+            '${DateFormat('HH:mm').format(end)}';
+      } else {
+        time = DateFormat('HH:mm').format(end);
+      }
+    } else {
+      time = '';
+    }
     final child = Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 2),
@@ -515,6 +558,24 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
 
     if (task.done) return child; // 已完成不可拖拽改期
+
+    // T2-2（v2.9.2 功能增强）：跨天区间任务不支持拖拽改期——改 dueDate 会把
+    // 区间带撕裂（startDate 仍是旧起点，区间语义残缺），长按给出正确路径提示
+    // （详情页调整开始/截止时间）。translucent 让点击仍穿透到日期格。
+    if (_isSpanTask(task)) {
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onLongPress: () {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('跨天任务不支持拖拽改期，请在详情页调整开始/截止时间'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        },
+        child: child,
+      );
+    }
 
     // P3-2（v2.8.8 审计）：重复任务的提醒 / 循环由 repeatMinute / repeatUntil /
     // skipDates 表达，dueDate 自 v2.8.5 起已不再被录入侧钉为「创建当天 23:59」，
@@ -686,7 +747,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   Widget _weekColumn(DateTime d, String label, TaskProvider provider, Color base,
       bool isDark, Color onBg, dynamic ext, DateTime today) {
-    final dueTasks = provider.tasksDueOn(d);
+    // T2-1/T2-2：当天到期 + 跨天区间覆盖的任务。
+    final dueTasks = _tasksOnDay(provider, d);
     final isToday = _sameDay(d, today);
     final track = isDark ? AppColors.darkTrack : AppColors.lightTrack;
     return DragTarget<Task>(
@@ -695,7 +757,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onWillAcceptWithDetails: (details) =>
           !details.data.done && !details.data.isRepeating,
       onAcceptWithDetails: (details) => _reschedule(details.data, d),
-      builder: (ctx, candidate, rejected) => Container(
+      builder: (ctx, candidate, rejected) => GestureDetector(
+        // T2-1（v2.9.2 功能增强）：周视图列同样支持长按建任务（与月视图格一致）。
+        onLongPress: () => _createTaskOn(d),
+        child: Container(
         width: 132,
         margin: const EdgeInsets.symmetric(horizontal: 4),
         decoration: BoxDecoration(
@@ -746,8 +811,49 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
           ],
         ),
+        ),
       ),
     );
+  }
+
+  /// T2-1（v2.9.2 功能增强）：日历格长按直达新建任务——落点日期预填为截止日，
+  /// 补上「日历直接建任务」的入口空白（此前日历纯只读，看到空档还得回首页新建）。
+  /// 23:59 = 纯日期形态（dueIsPureDateForm），语义即「当天截止」而非具体时刻。
+  void _createTaskOn(DateTime date) {
+    TaskSheet.show(
+      context,
+      draft: Task(
+        id: '',
+        title: '',
+        priority: Priority.medium,
+        category: Category.work,
+        dueDate: DateTime(date.year, date.month, date.day, 23, 59),
+      ),
+    );
+  }
+
+  /// T2-1 / T2-2（v2.9.2 功能增强）：日历某天应展示的任务 = 当天到期
+  /// （[TaskProvider.tasksDueOn]）+ 跨天区间覆盖的天。区间任务在其截止日已由
+  /// 到期列表收录，这里只补「起止之间的其余天」，天然去重；区间内按开始日排序。
+  List<Task> _tasksOnDay(TaskProvider provider, DateTime date) {
+    final due = provider.tasksDueOn(date);
+    final day = DateTime(date.year, date.month, date.day);
+    final span = provider.tasks
+        .where((t) {
+          if (t.deletedAt != null || t.dueDate == null || t.startDate == null) {
+            return false;
+          }
+          if (!_isSpanTask(t)) return false;
+          if (Task.isSameDay(t.dueDate!, day)) return false; // 截止日已在 due 列表
+          final s0 = DateTime(t.startDate!.year, t.startDate!.month,
+              t.startDate!.day);
+          final d0 =
+              DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
+          return !day.isBefore(s0) && !day.isAfter(d0);
+        })
+        .toList()
+      ..sort((a, b) => a.startDate!.compareTo(b.startDate!));
+    return [...due, ...span];
   }
 
   void _openDay(TaskProvider provider, DateTime date) {
@@ -766,7 +872,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
         expand: false,
         builder: (_, controller) => Consumer<TaskProvider>(
           builder: (ctx2, p, _) {
-            final tasks = p.tasksDueOn(date);
+            // T2-1/T2-2：当天到期 + 跨天区间覆盖的任务。
+            final tasks = _tasksOnDay(p, date);
             // U7：取 appColors 让暗色模式也能正确显示次要文本。
             final ext = appColors(ctx2);
             return Column(
@@ -842,7 +949,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                         value: t.done,
                                         materialTapTargetSize:
                                             MaterialTapTargetSize.shrinkWrap,
-                                        onChanged: (v) => p.toggleDone(t.id),
+                                        // T3-2（v2.9.2 功能增强）：勾选完成带 10 秒撤销。
+                                        onChanged: (v) =>
+                                            toggleDoneWithUndo(context, p, t),
                                       ),
                                     ),
                                     const SizedBox(width: 10),
@@ -907,6 +1016,25 @@ DateTime _weekStart(DateTime d) {
 
 bool _sameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
+
+/// T2-2（v2.9.2 功能增强）：跨天区间任务判定——startDate 的日期部分**严格早于**
+/// dueDate 的日期部分（同日起止是「时段任务」，不算区间）。
+bool _isSpanTask(Task t) {
+  final s = t.startDate;
+  final d = t.dueDate;
+  if (s == null || d == null) return false;
+  final s0 = DateTime(s.year, s.month, s.day);
+  final d0 = DateTime(d.year, d.month, d.day);
+  return s0.isBefore(d0);
+}
+
+/// T2-1（v2.9.2 功能增强）：分钟 → 紧凑时长文案（<60 显示「N分」，否则「X.Xh」），
+/// 与月视图专注行的既有口径一致。
+String _planLabel(int mins) {
+  if (mins < 60) return '${mins}分';
+  final h = mins / 60;
+  return h == h.roundToDouble() ? '${h.round()}h' : '${h.toStringAsFixed(1)}h';
+}
 
 bool _hasTime(DateTime? d) {
   if (d == null) return false;

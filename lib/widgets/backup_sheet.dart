@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
@@ -31,6 +32,10 @@ class BackupSheet {
     var encrypt = false;
     final passCtrl = TextEditingController();
     final passConfirmCtrl = TextEditingController();
+    // T3-1（v2.9.2 功能增强）：口令提示（可选）。预填本机已存提示，便于增量更新；
+    // 明文本机存储、不随备份文件导出（见 TaskProvider._kAutoBackupPassHint 注释）。
+    final hintCtrl =
+        TextEditingController(text: taskProvider.autoBackupPassHint);
     await showModalBottomSheet<void>(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -88,6 +93,23 @@ class BackupSheet {
                       isDense: true,
                     ),
                   ),
+                  const SizedBox(height: 8),
+                  // T3-1（v2.9.2 功能增强）：口令提示（可选）。仅存本机，
+                  // 恢复解密失败时展示帮助回忆；不随备份文件导出。
+                  TextField(
+                    controller: hintCtrl,
+                    maxLength: 60,
+                    decoration: InputDecoration(
+                      labelText: '口令提示（可选）',
+                      hintText: '一句只有你看得懂的提醒，如「老家的门牌号」',
+                      helperText: '仅存本机、不进备份文件',
+                      counterText: '',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      isDense: true,
+                    ),
+                  ),
                 ],
                 const Divider(height: 1),
                 ListTile(
@@ -121,6 +143,9 @@ class BackupSheet {
                       }
                       // 校验全部通过后才锁定口令到局部变量，随后再清空输入框。
                       confirmedPass = p;
+                      // T3-1：提示随导出口令一并落本机（空串=清空旧提示）。
+                      // 不等待：提示保存失败不影响备份主流程。
+                      unawaited(taskProvider.setAutoBackupPassHint(hintCtrl.text));
                       passCtrl.clear();
                       passConfirmCtrl.clear();
                     }
@@ -306,14 +331,15 @@ class BackupSheet {
         plaintext = decryptEnvelope(raw, pass);
       } on BackupDecryptException catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('恢复失败：${e.message}')));
+          // T3-1（v2.9.2 功能增强）：解密失败时展示本机保存的口令提示帮助回忆。
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(_withPassHint('恢复失败：${e.message}', provider))));
         }
         return;
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('解密失败：$e')));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(_withPassHint('解密失败：$e', provider))));
         }
         return;
       }
@@ -563,6 +589,16 @@ class BackupSheet {
     return classes >= 2;
   }
 
+  /// T3-1（v2.9.2 功能增强）：解密失败文案——本机保存过口令提示时附在失败
+  /// 原因后帮助回忆。提示**仅存在本机**（明文 SharedPreferences，不进备份
+  /// 白名单），因此只对「本机自己加密的备份」有参考意义；从别处导入的加密
+  /// 备份用本机提示对不上是正常现象，文案用「本机保存的」限定词避免误导。
+  static String _withPassHint(String base, TaskProvider provider) {
+    final hint = provider.autoBackupPassHint;
+    if (hint.isEmpty) return base;
+    return '$base\n本机保存的口令提示：$hint';
+  }
+
   /// 从本地自动备份快照还原：读取该快照文件全文 → 走与「从备份恢复」相同的
   /// 校验 + 覆盖流程（复用 [_doRestore] 的核心步骤，仅 raw 来源为本地文件）。
   static Future<void> _restoreFromAutoBackup(
@@ -618,15 +654,18 @@ class BackupSheet {
           plaintext = decryptEnvelope(raw, pass);
         } on BackupDecryptException catch (e) {
           if (context.mounted) {
+            // T3-1（v2.9.2 功能增强）：解密失败时展示本机口令提示帮助回忆。
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('还原失败：${e.message}')),
+              SnackBar(
+                  content: Text(_withPassHint('还原失败：${e.message}', provider))),
             );
           }
           return;
         } catch (e) {
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('解密失败：$e')),
+              SnackBar(
+                  content: Text(_withPassHint('解密失败：$e', provider))),
             );
           }
           return;

@@ -670,6 +670,38 @@ class Task {
     return _parseYmd(u).isBefore(DateTime(now.year, now.month, now.day));
   }
 
+  /// T2-5（v2.9.2 功能增强）：任务当前是否处于「暂停循环」态——今天本该循环
+  /// （[occursOnIgnoringSkip] 命中）但该日被整段写入 [skipDates]。
+  ///
+  /// 暂停的实现不加新字段：把区间内循环日批量写入 [skipDates]（见
+  /// [TaskProvider.pauseRepeatsUntil]），「当天不出现、不打卡、不影响统计」的
+  /// 既有语义即暂停语义；到期后 [repeatsOn] 自然恢复，无需任何定时器。
+  /// 单独的「跳过一次」不会命中本判定（要求今天本身是循环日且被跳过）。
+  bool get pausedToday {
+    if (!isRepeating || repeatEnded) return false;
+    final now = DateTime.now();
+    final d = DateTime(now.year, now.month, now.day);
+    return occursOnIgnoringSkip(d) && skipDates.contains(ymdKey(d));
+  }
+
+  /// T2-5：暂停区间的结束日（date-only，含当天）；非暂停态返回 null。
+  ///
+  /// 取「从今天起连续被跳过的循环日」的最后一天：用户单独跳过的孤立未来日
+  /// （不与今天连续）不会把暂停区间误撑长；超过一年（约 [historyRetentionDays]
+  /// 滚动窗口量级）的连续段按封顶处理，防御手改备份写入超长列表时的死循环。
+  DateTime? get pausedUntilDate {
+    if (!pausedToday) return null;
+    final now = DateTime.now();
+    final d0 = DateTime(now.year, now.month, now.day);
+    var last = d0;
+    for (var i = 1; i <= 366; i++) {
+      final n = DateTime(d0.year, d0.month, d0.day + i);
+      if (!occursOnIgnoringSkip(n) || !skipDates.contains(ymdKey(n))) break;
+      last = n;
+    }
+    return last;
+  }
+
   /// [repeatsOn] 的「纯日历」判定：重复规则 + 结束日期，**不含** [skipDates]。
   ///
   /// P2-2（v2.8.8 审计）：把 skip 一段拆出来，供「未来循环日预览」复用——已跳过的

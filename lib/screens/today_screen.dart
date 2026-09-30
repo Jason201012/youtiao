@@ -23,6 +23,7 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/services/schedule_advisor.dart';
 import 'package:todolist/widgets/review_card.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/today_share_sheet.dart';
 
 /// 今日聚合页：从首页「今日」摘要卡 push 进来。
@@ -96,7 +97,8 @@ class TodayScreen extends StatelessWidget {
                     child: _TodoList(
                       today: today,
                       accent: accent,
-                      onToggle: (t) => task.toggleDone(t.id),
+                      // T3-2（v2.9.2 功能增强）：勾选完成带 10 秒撤销。
+                      onToggle: (t) => toggleDoneWithUndo(context, task, t),
                     ),
                   ),
                   const SizedBox(height: 12),
