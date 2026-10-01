@@ -249,6 +249,18 @@ class Task {
   /// 旧 JSON 无此字段时缺省为 null（向后兼容）。「结束重复」即把此字段设为昨天。
   final String? repeatUntil;
 
+  /// P1-4（v2.9.9 审计）：循环暂停窗口的结束日（yyyy-MM-dd，date-only；null = 未暂停）。
+  ///
+  /// v2.9.2 的暂停实现刻意不加字段、只批量写 [skipDates]，但「暂停态」的派生判定
+  /// 只对「每天」规则成立：weekly / monthly / interval 的暂停在非循环日**看不到
+  /// 角标、「恢复循环」入口不可达**（P1-4），且无法与「单独跳过某天」区分。现在
+  /// [TaskProvider.pauseRepeatsUntil] 在写 skipDates 的同时落本字段（展示 + 判定用，
+  /// skipDates 仍是「当天不出现」语义的唯一真源），[TaskProvider.resumeRepeats]
+  /// 恢复时清除；到期后由 [pausedUntilDate] 的窗口判定自然失效，无需定时器。
+  /// 旧 JSON 无此字段时缺省为 null（向后兼容，零迁移）；旧数据（v2.9.9 及更早
+  /// 的暂停）由 [pausedUntilDate] 的回退推导兜底展示。
+  final String? pausedUntil;
+
   /// F7：occurrence 级完成历史（yyyy-MM-dd 列表，date-only）。
   ///
   /// 重复任务的完成记录此前只存在单槽 [completedAt] 里，午夜重置会把昨天（及更早）
@@ -348,6 +360,7 @@ class Task {
     this.repeatAnchor,
     this.skipDates = const [],
     this.repeatUntil,
+    this.pausedUntil,
     this.doneDates = const [],
     this.monthlyDay = 1,
     this.monthlyWeekday,
@@ -388,6 +401,9 @@ class Task {
     Object? repeatAnchor = _kKeep,
     List<String>? skipDates,
     Object? repeatUntil = _kKeep,
+    // P1-4（v2.9.9 审计）：暂停窗口字段必须能「显式清空」——resumeRepeats 要写
+    // null 清除；`?? this.pausedUntil` 会把它误判成保留旧值。
+    Object? pausedUntil = _kKeep,
     List<String>? doneDates,
     int? monthlyDay,
     // F-9：monthlyWeekday / monthlyWeekIndex 也必须能「显式清空」。
@@ -432,6 +448,8 @@ class Task {
         skipDates: skipDates ?? this.skipDates,
         repeatUntil:
             repeatUntil == _kKeep ? this.repeatUntil : repeatUntil as String?,
+        pausedUntil:
+            pausedUntil == _kKeep ? this.pausedUntil : pausedUntil as String?,
         doneDates: doneDates ?? this.doneDates,
         monthlyDay: monthlyDay ?? this.monthlyDay,
         monthlyWeekday: monthlyWeekday == _kKeep
@@ -475,6 +493,7 @@ class Task {
         'repeatAnchor': repeatAnchor?.toIso8601String(),
         'skipDates': skipDates,
         'repeatUntil': repeatUntil,
+        'pausedUntil': pausedUntil,
         'doneDates': doneDates,
         'monthlyDay': monthlyDay,
         'monthlyWeekday': monthlyWeekday,
@@ -561,6 +580,10 @@ class Task {
       // 无从知晓。这里对格式非法的串统一**清空**（视为无限循环）——比「视为
       // 已结束」更安全：最坏情况是多循环/多提醒，而不是静默杀死仍在用的任务。
       repeatUntil: _sanitizeRepeatUntil(j['repeatUntil']),
+      // P1-4（v2.9.9 审计）：暂停窗口字段。备份是不可信输入，非法串（旧版本 /
+      // 手改）统一清空为「未暂停」——与 repeatUntil 的「清空比视为已结束安全」
+      // 同一取向：最坏情况是暂停态丢失（可重新暂停），而不是凭空判为暂停中。
+      pausedUntil: _sanitizeYmd(j['pausedUntil']),
       doneDates: _parseSkipDates(j['doneDates']),
       monthlyDay: _clampInt(j['monthlyDay'], 1, 31, 1),
       monthlyWeekday: _clampIntOrNull(j['monthlyWeekday'], 1, 7),
@@ -670,32 +693,44 @@ class Task {
     return _parseYmd(u).isBefore(DateTime(now.year, now.month, now.day));
   }
 
-  /// T2-5（v2.9.2 功能增强）：任务当前是否处于「暂停循环」态——今天本该循环
-  /// （[occursOnIgnoringSkip] 命中）但该日被整段写入 [skipDates]。
+  /// T2-5（v2.9.2 功能增强）：任务当前是否处于「暂停循环」态。
   ///
-  /// 暂停的实现不加新字段：把区间内循环日批量写入 [skipDates]（见
-  /// [TaskProvider.pauseRepeatsUntil]），「当天不出现、不打卡、不影响统计」的
-  /// 既有语义即暂停语义；到期后 [repeatsOn] 自然恢复，无需任何定时器。
-  /// 单独的「跳过一次」不会命中本判定（要求今天本身是循环日且被跳过）。
-  bool get pausedToday {
-    if (!isRepeating || repeatEnded) return false;
-    final now = DateTime.now();
-    final d = DateTime(now.year, now.month, now.day);
-    return occursOnIgnoringSkip(d) && skipDates.contains(ymdKey(d));
-  }
+  /// P1-4（v2.9.9 审计）：旧判据要求「今天本身是循环日且被跳过」，对
+  /// weekly / monthly / interval 全部失效——暂停后非循环日看不到角标、
+  /// 「恢复循环」入口时隐时现。现以显式 [pausedUntil] 窗口为准（今天 ≤ 窗口
+  /// 终点即暂停中，与今天是否循环日无关）；无字段的旧数据回退旧判据，保证
+  /// 升级不回退。单独的「跳过一次」不写 [pausedUntil]，不会命中本判定。
+  bool get pausedToday => pausedUntilDate != null;
 
   /// T2-5：暂停区间的结束日（date-only，含当天）；非暂停态返回 null。
   ///
-  /// 取「从今天起连续被跳过的循环日」的最后一天：用户单独跳过的孤立未来日
-  /// （不与今天连续）不会把暂停区间误撑长；超过一年（约 [historyRetentionDays]
-  /// 滚动窗口量级）的连续段按封顶处理，防御手改备份写入超长列表时的死循环。
+  /// P1-4（v2.9.9 审计）：优先读显式 [pausedUntil]——窗口已过（< 今天）自然
+  /// 失效返回 null；窗口晚于 [repeatUntil] 时被夹到 repeatUntil（P3-3：暂停
+  /// 「直到」晚于重复结束日不再夸大展示，写入侧 [TaskProvider.pauseRepeatsUntil]
+  /// 同步夹取）。无字段（旧数据 / 单独「跳过今天」）时回退旧「从今天起连续
+  /// 被跳过的循环日」推导：单独跳过的孤立未来日不撑长区间，超过一年
+  /// （滚动窗口量级）按封顶处理，防御手改备份写入超长列表时的死循环。
   DateTime? get pausedUntilDate {
-    if (!pausedToday) return null;
     final now = DateTime.now();
-    final d0 = DateTime(now.year, now.month, now.day);
-    var last = d0;
+    final today = DateTime(now.year, now.month, now.day);
+    final f = _parseYmdOrNull(pausedUntil);
+    if (f != null) {
+      if (f.isBefore(today)) return null; // 窗口已过：自然恢复
+      // P3-3（v2.9.9 审计）：重复早于窗口终点结束 → 以重复结束日为准。
+      final u = repeatUntil == null ? null : _parseYmd(repeatUntil!);
+      if (u != null && u.isBefore(f)) {
+        return u.isBefore(today) ? null : u;
+      }
+      return f;
+    }
+    // —— 旧数据回退推导（v2.9.9 及更早的暂停 / 单独「跳过今天」）——
+    if (!isRepeating || repeatEnded) return null;
+    if (!occursOnIgnoringSkip(today) || !skipDates.contains(ymdKey(today))) {
+      return null;
+    }
+    var last = today;
     for (var i = 1; i <= 366; i++) {
-      final n = DateTime(d0.year, d0.month, d0.day + i);
+      final n = DateTime(today.year, today.month, today.day + i);
       if (!occursOnIgnoringSkip(n) || !skipDates.contains(ymdKey(n))) break;
       last = n;
     }
@@ -800,6 +835,20 @@ class Task {
   static List<String> _parseSkipDates(dynamic raw) {
     if (raw is! List) return const <String>[];
     return raw.whereType<String>().toList();
+  }
+
+  /// P1-4（v2.9.9 审计）：yyyy-MM-dd 形态守卫——仅当串严格匹配该形态时返回原样，
+  /// 否则 null。供 [pausedUntil] 的反序列化使用（非法输入一律视为「未暂停」）。
+  static String? _sanitizeYmd(dynamic raw) {
+    if (raw is! String) return null;
+    if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(raw)) return null;
+    return raw;
+  }
+
+  /// [pausedUntil] 的运行时解析（date-only）；形态非法返回 null。
+  static DateTime? _parseYmdOrNull(String? s) {
+    final clean = _sanitizeYmd(s);
+    return clean == null ? null : _parseYmd(clean);
   }
 
   /// F-8（v2.8.5 审计）：校验 [repeatUntil] 是否为合法的 yyyy-MM-dd 串。

@@ -122,6 +122,9 @@ class BackupSheet {
                     // P0-1 修复：口令必须在「清空输入框之前」取成局部变量并传出。
                     // 原实现先 clear() 再读 passCtrl.text，读到空串导致勾选加密仍写明文。
                     String? confirmedPass;
+                    // P3-16（v2.9.9 审计）：提示与口令一样先取局部变量，
+                    // 备份成功后才由 _doBackup 落本机。
+                    String? passHint;
                     if (encrypt) {
                       final p = passCtrl.text;
                       if (p.length < 8) {
@@ -143,16 +146,18 @@ class BackupSheet {
                       }
                       // 校验全部通过后才锁定口令到局部变量，随后再清空输入框。
                       confirmedPass = p;
-                      // T3-1：提示随导出口令一并落本机（空串=清空旧提示）。
+                      // T3-1：提示随导出口令传出，**备份成功后**才落本机（P3-16，
+                      // v2.9.9 审计：旧实现在导出结果之前就保存——取消保存 /
+                      // 导出失败时提示仍已落盘，与实际口令脱节）。
                       // 不等待：提示保存失败不影响备份主流程。
-                      unawaited(taskProvider.setAutoBackupPassHint(hintCtrl.text));
+                      passHint = hintCtrl.text;
                       passCtrl.clear();
                       passConfirmCtrl.clear();
                     }
                     Navigator.pop(ctx);
                     _doBackup(taskProvider, focusProvider, habitProvider,
                         context, includeTrash,
-                        encryptOn: encrypt, pass: confirmedPass);
+                        encryptOn: encrypt, pass: confirmedPass, passHint: passHint);
                   },
                 ),
                 ListTile(
@@ -187,6 +192,9 @@ class BackupSheet {
     bool includeTrash, {
     bool encryptOn = false,
     String? pass,
+    // P3-16（v2.9.9 审计）：口令提示——备份**成功落盘后**才保存（旧实现在
+    // 导出动作之前就落盘，取消 / 失败时提示与口令脱节）。null = 不动提示。
+    String? passHint,
   }) async {
     try {
       // 与任务数据合并番茄钟专注记录与习惯打卡记录，便于统一备份与恢复。
@@ -245,6 +253,11 @@ class BackupSheet {
           isEnc ? '有条-backup-${_ts()}.enc.json' : '有条-backup-${_ts()}.json';
       // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
       final file = await DataIo.saveToAppDocs(name, payload);
+      // P3-16（v2.9.9 审计）：备份已在 App 文档目录落盘 → 此刻才保存口令提示。
+      // 不等待：提示保存失败不影响备份主流程。
+      if (passHint != null) {
+        unawaited(provider.setAutoBackupPassHint(passHint));
+      }
       // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见
       String msg = isEnc
           ? '已加密保存到「下载」目录（凭口令恢复）'

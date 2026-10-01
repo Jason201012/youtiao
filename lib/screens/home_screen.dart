@@ -247,6 +247,10 @@ class HomeScreenState extends State<HomeScreen> {
   ///
   /// 已完成的项会被跳过——快捷键语义是「完成」而非「反选」，
   /// 否则对混合选区按一次会把已完成的任务又切回未完成。
+  ///
+  /// P2-7（v2.9.9 审计）：批量完成此前无撤销、无反馈，与「完成即撤销」承诺不统一
+  /// （单条勾选 / 看板改状态都有 10 秒撤销）。现在勾选前先取逐条快照，完成后弹
+  /// 批量撤销横幅（onUndo 整体快照回滚，与单条 [toggleDoneWithUndo] 同构）。
   int completeSelected() {
     if (_selected.isEmpty) return 0;
     final provider = context.read<TaskProvider>();
@@ -257,10 +261,26 @@ class HomeScreenState extends State<HomeScreen> {
           return t != null && !t.done;
         })
         .toList();
+    // P2-7：勾选前的逐条快照（撤销 = 整体快照回滚，不用反向 toggleDone——
+    // 那会写新的 completedAt / doneDates，无法精确还原）。
+    final snapshots = [for (final id in ids) provider.byId(id)!];
     for (final id in ids) {
       provider.toggleDone(id);
     }
-    if (ids.isNotEmpty) _exitSelect();
+    if (ids.isNotEmpty) {
+      _exitSelect();
+      showUndoSnackBar(
+        context,
+        content: undoContent('已完成 ${ids.length} 项任务'),
+        onUndo: () async {
+          var ok = true;
+          for (final s in snapshots) {
+            if (!provider.restoreTaskSnapshot(s)) ok = false;
+          }
+          return ok;
+        },
+      );
+    }
     return ids.length;
   }
 

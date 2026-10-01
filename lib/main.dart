@@ -433,6 +433,21 @@ void _handleNotificationAction(String? actionId, String? payload) {
     } else {
       NotificationService.instance.showLockedActionHint();
     }
+    return;
+  }
+  if (actionId == NotificationService.taskUndoActionId) {
+    // P3-22（v2.9.9 审计）：通知「完成」确认条上的「撤销」——用完成前快照整体
+    // 回滚（与 App 内完成撤销同构），回成功确认通知。撤销是破坏性回退，
+    // 锁定期间不跨锁执行，回提示通知（与 habitUndoActionId 同口径）。
+    final taskId = NotificationService.parseTaskId(payload);
+    if (taskId == null) return;
+    final state = _navigatorKey.currentState;
+    if (state != null && !_isAppLocked) {
+      _doTaskUndo(state, taskId);
+    } else {
+      NotificationService.instance.showLockedActionHint();
+    }
+    return;
   }
 }
 
@@ -553,17 +568,46 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
   }
 }
 
+/// P3-22（v2.9.9 审计）：通知「完成」写入前的任务快照（taskId → 完成前对象），
+/// 供确认通知上的「撤销」action 回滚。同一任务重复完成时覆盖为最新快照；
+/// 上限 32 条（先进先出淘汰），防长期运行无界增长。进程重启后丢失——
+/// 此时「撤销」早退且不回确认，绝不谎报成功。
+final Map<String, Task> _notifyCompleteSnapshots = <String, Task>{};
+
 /// 从通知「完成」action 直接把任务标记为已完成：调用 TaskProvider.setStatus，
 /// 并弹一条「已完成 ✓」确认通知（覆盖式，同 id 不刷屏）。任务已处于完成态则跳过。
+///
+/// P3-22（v2.9.9 审计）：写入前留存快照（[_notifyCompleteSnapshots]），确认
+/// 通知带「撤销」action——通知完成此前只能写入不能回退，与 App 内
+/// 「完成即撤销」承诺不统一。
 void _doComplete(NavigatorState nav, String? taskId) {
   if (taskId == null) return;
   final provider = Provider.of<TaskProvider>(nav.context, listen: false);
   final task = provider.byId(taskId);
   if (task == null || task.done) return;
+  if (_notifyCompleteSnapshots.length >= 32) {
+    _notifyCompleteSnapshots.remove(_notifyCompleteSnapshots.keys.first);
+  }
+  _notifyCompleteSnapshots[taskId] = task;
   // 标记完成（内部会取消其一次性截止提醒，避免完成后仍弹；重复任务则跳过今日）。
   provider.setStatus(taskId, TaskStatus.done);
   // 覆盖式确认通知：用任务通知 id，用户一眼可见「已完成」，且不会叠加新通知。
   NotificationService.instance.showCompletedConfirm(taskId, task.title);
+}
+
+/// P3-22（v2.9.9 审计）：通知「撤销」action——把该任务回滚到通知「完成」写入
+/// 前的快照（[TaskProvider.restoreTaskSnapshot]：先撤在途提醒再按快照重排，
+/// 与 App 内完成撤销唯一同构入口），成功后回「已撤销完成」确认通知。
+/// 无快照（进程重启 / 任务已删除）时早退不弹，绝不谎报成功。
+/// 已知边界：完成到撤销之间若用户又在 App 内改过该任务，快照回滚会连同
+/// 那些改动一起还原——与撤销语义「回到完成前状态」一致，属预期行为。
+void _doTaskUndo(NavigatorState nav, String taskId) {
+  final provider = Provider.of<TaskProvider>(nav.context, listen: false);
+  final snapshot = _notifyCompleteSnapshots.remove(taskId);
+  if (snapshot == null) return;
+  if (provider.restoreTaskSnapshot(snapshot)) {
+    NotificationService.instance.showTaskUndoConfirm(taskId, snapshot.title);
+  }
 }
 
 void main() async {
@@ -1152,11 +1196,14 @@ class _MainScaffoldState extends State<MainScaffold>
     }
     final n = _homeKey.currentState?.completeSelected() ?? 0;
     if (!context.mounted) return n;
-    ScaffoldMessenger.of(context).showSnackBar(
-      n > 0
-          ? SnackBar(content: Text('已完成 $n 条任务'))
-          : const SnackBar(content: Text('还没有勾选任何任务')),
-    );
+    // P2-7（v2.9.9 审计）：n > 0 时 completeSelected 内部已弹「已完成 N 项任务」
+    // 的**带撤销**横幅，这里不再补一条无撤销的普通 SnackBar（排队展示等于噪音，
+    // 且旧条无撤销、与新承诺矛盾）。n == 0 的提示保留。
+    if (n == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('还没有勾选任何任务')),
+      );
+    }
     return n;
   }
 

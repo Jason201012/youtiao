@@ -28,10 +28,18 @@ class CsvImportResult {
   final List<Task> tasks;
   final List<CsvImportRowError> errors;
   final int totalRows;
+
+  /// P1-1（v2.9.9 审计）：被识别并**忽略**的非任务数据段数量。本 App 的 CSV
+  /// 导出把任务 / 专注 / 习惯三张表依次拼接（各自带独立表头），旧实现把后续段
+  /// 的所有行都按任务列解析 → 导回自带文件会一次性灌入大量伪任务。现在遇到
+  /// 后续段的表头行即停止任务解析，被忽略的段数在此如实上报。
+  final int skippedSections;
+
   const CsvImportResult({
     required this.tasks,
     required this.errors,
     required this.totalRows,
+    this.skippedSections = 0,
   });
   bool get hasErrors => errors.isNotEmpty;
 }
@@ -46,9 +54,15 @@ CsvImportResult parseTasksCsv(String raw) {
     return const CsvImportResult(tasks: [], errors: [], totalRows: 0);
   }
 
-  // 列名归一：小写 + 去空格 + 去下划线，中英文别名都能命中。
-  String norm(String s) =>
-      s.trim().toLowerCase().replaceAll(' ', '').replaceAll('_', '');
+  // 列名归一：小写 + 去空格 + 去下划线 + 去括号（半/全角），中英文别名都能命中。
+  // P2-2（v2.9.9 审计）：本 App 导出表头是「预计时长(分钟)」，旧归一不去括号 →
+  // 导回时预计列别名全不命中、预计时长往返即丢。
+  String norm(String s) => s
+      .trim()
+      .toLowerCase()
+      .replaceAll(' ', '')
+      .replaceAll('_', '')
+      .replaceAll(RegExp(r'[（）()]'), '');
   final first = rows.first.map(norm).toList();
 
   const titleAliases = {'标题', '任务', '任务名', 'title', 'task', 'name'};
@@ -94,18 +108,43 @@ CsvImportResult parseTasksCsv(String raw) {
       ? colOf(['备注', '说明', 'note', 'notes', 'remark'])
       : 5;
   final iEstimate = hasHeader
-      ? colOf(['预计', '预计时长', '预计分钟', 'estimate', 'estimateminutes'])
+      ? colOf([
+          '预计',
+          '预计时长',
+          '预计分钟',
+          '预计时长分钟', // P2-2：本 App 导出表头「预计时长(分钟)」的归一形态
+          'estimate',
+          'estimateminutes',
+          'estimatemin',
+        ])
       : 6; // 无表头兜底第 7 列 = 预计（原被忽略，纯增强零破坏）。
 
   final tasks = <Task>[];
   final errors = <CsvImportRowError>[];
   var totalRows = 0;
+  var skippedSections = 0;
+  // P1-1（v2.9.9 审计）：命中非任务段表头后置位——此后所有行都视为其它表的
+  // 内容丢弃，只有再次命中段表头时继续计数（三表拼接：任务段 + 专注段 + 习惯段，
+  // 计数如实反映被忽略的段数），绝不把段内数据行当任务解析。
+  var skipping = false;
 
   for (var r = 0; r < dataRows.length; r++) {
     final cells = dataRows[r];
     // 物理行号：表头占第 1 行；无表头时数据从第 1 行起。
     final physical = hasHeader ? r + 2 : r + 1;
     if (cells.every((c) => c.trim().isEmpty)) continue; // 全空行跳过
+    // P1-1（v2.9.9 审计）：三表拼接的导出文件，专注 / 习惯段的表头行首列是
+    // 「日期」/「习惯」——命中即认定任务段结束，进入跳过模式：后续行不再按
+    // 任务列解析造伪任务、不计错误。段数记入 [CsvImportResult.skippedSections]
+    // 由 UI 如实提示。首格恰好叫「日期/习惯」的任务表会被误判提前截断，属
+    // 可接受的保守取舍（宁可少导不可灌垃圾）。
+    final firstCell = norm(cells.first);
+    if (hasHeader && (firstCell == '日期' || firstCell == '习惯')) {
+      skippedSections++;
+      skipping = true;
+      continue;
+    }
+    if (skipping) continue; // 非任务段的普通行（专注/习惯数据）：整体丢弃
     totalRows++;
 
     String cell(int? idx) =>
@@ -151,7 +190,10 @@ CsvImportResult parseTasksCsv(String raw) {
     ));
   }
   return CsvImportResult(
-      tasks: tasks, errors: errors, totalRows: totalRows);
+      tasks: tasks,
+      errors: errors,
+      totalRows: totalRows,
+      skippedSections: skippedSections);
 }
 
 /// RFC 4180 子集 CSV 解析：引号包裹、双写转义、逗号 / CR / LF / CRLF、BOM 剥除。

@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/services/data_health_service.dart';
+import 'package:todolist/widgets/kanban_board.dart'; // P3-6：WIP 弹窗与偏好键
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
@@ -64,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '2.9.9');
+      if (mounted) setState(() => _version = '3.0.0');
     }
   }
 
@@ -371,7 +373,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     (
       DataHealthIssueType.duplicateTask,
       '重复任务',
-      '同标题同分类保留最早一条，其余移入回收站（可反悔）'
+      '同标题同分类保留 1 条，其余移入回收站（可反悔）'
     ),
     (
       DataHealthIssueType.emptySubtask,
@@ -390,7 +392,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
   ];
 
-  /// 数据体检：扫描 → 结果弹层 → 一键修复（修复前 Provider 侧自动备份一次）。
+  /// 数据体检：扫描 → 结果弹层 → 修复。
+  ///
+  /// P1-5（v2.9.9 审计）：**可逆修复与不可逆删除拆开**——旧实现把「超期回收站
+  /// 彻底删除」混进一键修复，弹层无明细、无单独确认，完成后统一提示「可在回收
+  /// 站查看」，对已被永久删除的条目是误导。现在：
+  /// - 各类问题列出**明细**（P3-14：条目 + 描述，最多 6 条，其余计数）；
+  /// - 可逆问题（重复 / 空白子项 / 失效附件）走「修复可逆问题」，修复后按类型
+  ///   如实回报去向；
+  /// - 超期回收站单独红色按钮 + **明细 + 二次确认**，明确「不可恢复」；
+  ///   备份门失败（P2-12）时 Provider 抛错，这里如实透出原因。
   /// 扫描含附件实体存在性检查（少量文件 IO），先给 loading 遮罩防「点了没反应」。
   Future<void> _runDataHealthCheck(BuildContext ctx) async {
     final provider = Provider.of<TaskProvider>(ctx, listen: false);
@@ -419,7 +430,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       return;
     }
-    final doFix = await showDialog<bool>(
+    final staleCount = report.countOf(DataHealthIssueType.staleTrash);
+    final reversibleCount = report.issues.length - staleCount;
+    final chosen = await showDialog<String>(
       context: ctx,
       builder: (dctx) => AlertDialog(
         title: const Text('数据体检结果'),
@@ -439,12 +452,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           style: const TextStyle(fontWeight: FontWeight.w600)),
                     ],
                   ),
+                  // P3-14（v2.9.9 审计）：逐条明细（最多 6 条，其余以计数收尾）。
                   Padding(
                     padding: const EdgeInsets.only(left: 24, top: 2),
-                    child: Text(action,
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: Theme.of(dctx).colorScheme.onSurfaceVariant)),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final issue in report
+                            .issues
+                            .where((i) => i.type == type)
+                            .take(6))
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text('· ${issue.detail}',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: Theme.of(dctx)
+                                        .colorScheme
+                                        .onSurfaceVariant)),
+                          ),
+                        if (report.countOf(type) > 6)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text('……及其余 ${report.countOf(type) - 6} 项',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: Theme.of(dctx)
+                                        .colorScheme
+                                        .onSurfaceVariant)),
+                          ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 8),
                 ],
@@ -454,21 +492,140 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(dctx).pop(false),
+            onPressed: () => Navigator.of(dctx).pop('close'),
             child: const Text('暂不处理'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(dctx).pop(true),
-            child: Text('一键修复（${report.issues.length} 项）'),
-          ),
+          if (staleCount > 0)
+            // P1-5：不可逆动作独立按钮 + 独立确认，不再混入一键修复。
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(dctx).colorScheme.error,
+              ),
+              onPressed: () => Navigator.of(dctx).pop('purge'),
+              child: Text('彻底清理超期回收站（$staleCount 条，不可恢复）'),
+            ),
+          if (reversibleCount > 0)
+            FilledButton(
+              onPressed: () => Navigator.of(dctx).pop('fix'),
+              child: Text('修复可逆问题（$reversibleCount 项）'),
+            ),
         ],
       ),
     );
-    if (doFix != true) return;
-    final fixed = await provider.fixDataHealthIssues(report);
     if (!ctx.mounted) return;
-    ScaffoldMessenger.of(ctx).showSnackBar(
-      SnackBar(content: Text('已修复 $fixed 项；如需找回可在回收站查看')),
+    if (chosen == 'fix') {
+      final fixed = await provider.fixDataHealthIssues(report);
+      if (!ctx.mounted) return;
+      // P1-5：结果提示按类型如实说明去向——可逆的指明「可在回收站找回」，
+      // 不再笼统提示（对永久删除的条目该提示是误导）。
+      final dupMoved = report.issues
+          .where((i) => i.type == DataHealthIssueType.duplicateTask)
+          .fold<int>(0, (s, i) => s + i.relatedIds.length);
+      final parts = <String>[];
+      if (dupMoved > 0) parts.add('重复任务 $dupMoved 条已移入回收站（可找回）');
+      final cleaned =
+          fixed - dupMoved; // 空白子项 / 失效附件引用的剔除次数
+      if (cleaned > 0) parts.add('子任务 / 附件引用已清理 $cleaned 处');
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(content: Text('已修复 ${parts.join('；')}')),
+      );
+      return;
+    }
+    if (chosen == 'purge') {
+      final staleIssues = report
+          .issues
+          .where((i) => i.type == DataHealthIssueType.staleTrash)
+          .toList();
+      final confirmed = await showDialog<bool>(
+        context: ctx,
+        builder: (dctx) => AlertDialog(
+          title: const Text('确认彻底删除？'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('以下 ${staleIssues.length} 条回收站条目已超过保留期，'
+                    '将**连同附件永久删除，无法恢复**：',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                for (final i in staleIssues.take(10))
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text('· ${i.title}',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(dctx).colorScheme.onSurfaceVariant)),
+                  ),
+                if (staleIssues.length > 10)
+                  Text('……及其余 ${staleIssues.length - 10} 条',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(dctx).colorScheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dctx).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(dctx).colorScheme.error,
+              ),
+              onPressed: () => Navigator.of(dctx).pop(true),
+              child: Text('永久删除 ${staleIssues.length} 条'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !ctx.mounted) return;
+      try {
+        final deleted = await provider.fixDataHealthIssues(report,
+            includeStaleTrash: true);
+        if (!ctx.mounted) return;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text('已彻底删除 $deleted 条（含附件，不可恢复；'
+                '删除前已自动备份一次，必要时可从备份找回）'),
+          ),
+        );
+      } catch (e) {
+        // P2-12：备份门失败——Provider 抛 StateError，如实透出原因。
+        if (!ctx.mounted) return;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text(
+                e is StateError ? e.message ?? '$e' : '清理失败：$e'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
+  /// P3-6（v2.9.9 审计）：看板「待办上限」设置页入口——读偏好 → 弹窗 → 写回。
+  /// 与看板侧 [_KanbanBoardState] 共用 [showWipLimitEditor] 与
+  /// [kKanbanWipLimitPrefsKey]，不另造第二份状态。
+  Future<void> _editKanbanWipLimit(BuildContext context) async {
+    final prefs = await SharedPreferences.getInstance();
+    final current = prefs.getInt(kKanbanWipLimitPrefsKey) ?? 0;
+    if (!mounted) return;
+    final v = await showWipLimitEditor(context, initial: current);
+    if (v == null || !mounted) return;
+    try {
+      await prefs.setInt(kKanbanWipLimitPrefsKey, v < 0 ? 0 : v);
+    } catch (_) {
+      // 写入失败：仅本次不记忆（与看板侧 _setWipLimit 同口径）。
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(v <= 0
+            ? '已取消看板待办上限'
+            : '看板待办上限已设为 $v（仅看板生效）'),
+      ),
     );
   }
 
@@ -1279,6 +1436,17 @@ String _formatIdle(int seconds) {
                         switchValue: provider.calendarLunar,
                         onSwitchChanged: (v) => provider.setCalendarLunar(v),
                       ),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P3-6（v2.9.9 审计）：看板「待办上限」此前只埋在看板泳道头的
+                    // 无语义 speed 图标后，可发现性差。设置页补一个显式入口，
+                    // 与看板共用同一弹窗（showWipLimitEditor）与偏好键。
+                    SettingsRow(
+                      icon: Symbols.speed,
+                      label: '看板待办上限',
+                      subtitle: '限制看板「待办」列的任务数（0 = 不限）；'
+                          '看板内拖入 / 勾选转回 / 列内新建会被拦截',
+                      onTap: () => _editKanbanWipLimit(context),
                     ),
                     const SizedBox(height: 24),
                     // U17：把原「数据」巨组（15 项全混）拆成更清晰的子组——

@@ -34,16 +34,20 @@
             android:textSize="12sp" />
 
         <!-- T2-4（v2.9.2 功能增强）：快速新建入口。点击经 PendingIntent 唤起 App
-             直达快速录入层；独立于 header 的打开 App 点击。min 48dp 保证触控目标。 -->
+             直达快速录入层；独立于 header 的打开 App 点击。 -->
+        <!-- P3-17（v2.9.9 审计）：命中区 32dp → 48dp（Material 触控目标下限，
+             否则 4x2 小组件上极易点空），并补 contentDescription 供 TalkBack 播报
+             （此前无障碍用户只听到一个「＋」，无从得知用途）。 -->
         <TextView
             android:id="@+id/quick_add"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
             android:layout_marginStart="8dp"
-            android:minWidth="32dp"
-            android:minHeight="32dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:gravity="center"
             android:background="@drawable/widget_quick_add_bg"
+            android:contentDescription="快速新建任务"
             android:text="＋"
             android:textColor="#FFFFFF"
             android:textSize="16sp"

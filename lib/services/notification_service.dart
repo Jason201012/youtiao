@@ -182,6 +182,12 @@ class NotificationService {
   /// （消费端走 setCheckInValue 唯一写入口）。
   static const String habitUndoActionId = 'habit_undo';
 
+  /// P3-22（v2.9.9 审计）：任务「完成」确认通知上的「撤销」action——通知完成
+  /// 此前只能写入不能回退（_doComplete 直接 setStatus(done)），与 App 内
+  /// 「完成即撤销」承诺不统一。点击后由 main._doTaskUndo 用完成前快照整体回滚
+  /// （restoreTaskSnapshot）。仅任务类确认通知（task: 前缀 payload）携带。
+  static const String taskUndoActionId = 'task_undo';
+
   /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
   /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
   static List<AndroidNotificationAction> get _taskActions => [
@@ -1642,7 +1648,12 @@ class NotificationService {
   Future<void> cancelTrashExpireNotice() => _plugin.cancel(trashExpireNotifyId);
 
   /// 通知「完成」action 后的覆盖式确认通知：用任务通知 id 在原通知位弹出
-  /// 「已完成 ✓」，既不刷屏、也不叠加新通知。用户点开无跳转（payload 置空）。
+  /// 「已完成 ✓」，既不刷屏、也不叠加新通知。
+  ///
+  /// P3-22（v2.9.9 审计）：补「撤销」action + task: 前缀 payload——撤销处理端
+  /// 靠 payload 解析任务 id（与习惯侧 U2-4 同构）。缺 payload 的 action 点击
+  /// 会因解析失败被静默丢弃（习惯侧确认通知曾因漏 payload 有同款死按钮，
+  /// 本轮一并补上）。
   Future<void> showCompletedConfirm(String taskId, String title) async {
     if (!enabled) return;
     final detail = NotificationDetails(
@@ -1654,6 +1665,8 @@ class NotificationService {
         priority: Priority.low,
         playSound: false,
         autoCancel: true,
+        // P3-22：通知完成的 10 秒窗口外仍可反悔——确认通知常驻「撤销」按钮。
+        actions: [AndroidNotificationAction(taskUndoActionId, '撤销')],
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
       ),
@@ -1664,9 +1677,40 @@ class NotificationService {
         '已完成 ✓',
         title.isNotEmpty ? title : '无标题任务',
         detail,
+        payload: '$payloadTaskPrefix$taskId',
       );
     } catch (e) {
       AppLog.d('[通知] 完成确认通知失败 id=$taskId: $e');
+    }
+  }
+
+  /// P3-22（v2.9.9 审计）：通知「撤销」action 后的覆盖式确认——回滚成功后在
+  /// 原通知位回「已撤销完成」，不再谎报任何完成态。不挂新 action（撤销后如需
+  /// 重新完成，进 App 点勾选即可）。
+  Future<void> showTaskUndoConfirm(String taskId, String title) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        _notifyIdOf(taskId),
+        '已撤销完成',
+        title.isNotEmpty ? title : '无标题任务',
+        detail,
+        payload: '$payloadTaskPrefix$taskId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 任务撤销确认通知失败 id=$taskId: $e');
     }
   }
 
@@ -1733,6 +1777,10 @@ class NotificationService {
         title,
         body,
         detail,
+        // P3-22（v2.9.9 审计）顺手修：确认通知挂着「撤销」action 却不带 payload
+        // ——action 点击回传 payload 为空，parseHabitId 解析失败、撤销分支永远
+        // 不可达（U2-4 落地时的同型漏配）。补上 habit: 前缀 payload 打通。
+        payload: '$payloadHabitPrefix${habit.id}',
       );
     } catch (e) {
       AppLog.d('[通知] 习惯打卡确认通知失败 id=${habit.id}: $e');

@@ -708,19 +708,35 @@ class MainActivity : FlutterFragmentActivity() {
     /// 桌面小组件点击任务项：原生带 EXTRA_TASK_ID 启动 MainActivity 后，把任务 id
     /// 经 widget_nav 通道转给 Dart，由 _navigateFromPayload('task:<id>') 直达详情页。
     /// 引擎未就绪（冷启动）时先缓存 id，待 configureFlutterEngine 注册通道后补发。
+    ///
+    /// P3-18（v2.9.9 审计）：handler 就绪时直接送达且**不残留 pending**。旧实现
+    /// 无论引擎是否就绪都先 `pendingWidgetTaskId = id` 再 invoke——热路径下该
+    /// pending 无人消费；一旦 Activity 因配置更改（旋转/主题切换/分屏）重建，
+    /// FlutterEngine 重建 → configureFlutterEngine 再次读到陈旧 id 并补发
+    /// openTask，用户莫名其妙跳进早已离开的任务详情。
     private fun dispatchWidgetTask(i: Intent?) {
         val id = i?.getStringExtra(TodayWidgetProvider.EXTRA_TASK_ID) ?: return
         if (id.isEmpty()) return
-        pendingWidgetTaskId = id
-        widgetNavHandler?.invokeMethod("openTask", id)
+        val h = widgetNavHandler
+        if (h != null) {
+            h.invokeMethod("openTask", id)
+        } else {
+            pendingWidgetTaskId = id
+        }
     }
 
     /// T2-4（v2.9.2 功能增强）：小组件「＋」快速新建——原生带 EXTRA_QUICK_ADD 启动
     /// MainActivity 后，经 widget_nav 通道让 Dart 弹出快速录入层。引擎未就绪（冷启动）
     /// 时先挂 pendingWidgetQuickAdd，待 configureFlutterEngine 注册通道后补发。
+    /// P3-18（v2.9.9 审计）：与 dispatchWidgetTask 同口径——handler 就绪时直接送达，
+    /// 不残留 pending，杜绝 Activity 重建后的陈旧补发。
     private fun dispatchWidgetQuickAdd(i: Intent?) {
         if (i?.getStringExtra(TodayWidgetProvider.EXTRA_QUICK_ADD) != "1") return
-        pendingWidgetQuickAdd = true
-        widgetNavHandler?.invokeMethod("openQuickAdd", null)
+        val h = widgetNavHandler
+        if (h != null) {
+            h.invokeMethod("openQuickAdd", null)
+        } else {
+            pendingWidgetQuickAdd = true
+        }
     }
 }

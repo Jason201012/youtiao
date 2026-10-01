@@ -467,7 +467,8 @@ class TaskDetailScreen extends StatelessWidget {
                       ),
                       // T2-5（v2.9.2 功能增强）：暂停重复直到所选日期——把
                       // [今天, 所选日] 内的全部循环日一次性写入 skipDates，
-                      // 到期由 repeatsOn 自然恢复（不加新字段、无定时器）。
+                      // 到期由 repeatsOn 自然恢复；同时落 pausedUntil 显式窗口
+                      // 字段（P1-4，v2.9.9 审计：任何一天都可见、可恢复）。
                       OutlinedButton.icon(
                         onPressed: () async {
                           final picked = await showDatePicker(
@@ -482,11 +483,16 @@ class TaskDetailScreen extends StatelessWidget {
                           // 快照取**操作时刻**的当前对象：暂停期间若他处又改过
                           // 任务，撤销按暂停前状态整体回滚（与看板 _cycle 同构）。
                           final snapshot = provider.byId(task.id);
-                          provider.pauseRepeatsUntil(task.id, picked);
+                          // P3-3（v2.9.9 审计）：提示用**实际生效**的暂停终点——
+                          // 所选日晚于重复结束日时 Provider 会夹到 repeatUntil，
+                          // 旧文案按用户选择的日期报，夸大暂停范围。
+                          final eff =
+                              provider.pauseRepeatsUntil(task.id, picked);
+                          if (eff == null || !context.mounted) return;
                           showUndoSnackBar(
                             context,
                             content: undoContent('已暂停「${task.title}」'
-                                '至 ${picked.month}月${picked.day}日'),
+                                '至 ${eff.month}月${eff.day}日'),
                             onUndo: () async => snapshot == null
                                 ? false
                                 : provider.restoreTaskSnapshot(snapshot),

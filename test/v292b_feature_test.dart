@@ -106,7 +106,8 @@ void main() {
       expect(t.pausedToday, isTrue);
     });
 
-    test('resumeRepeats：清今天及以后的跳过日，保留历史记录', () async {
+    test('resumeRepeats：只清暂停窗口（今天..窗口终点），窗口外孤立跳过保留',
+        () async {
       final today = _today();
       final yesterday = today.add(const Duration(days: -1));
       final p = await _buildWith([
@@ -118,8 +119,19 @@ void main() {
       ]);
       p.resumeRepeats('r2');
       final t = p.tasks.firstWhere((x) => x.id == 'r2');
-      expect(t.skipDates, [Task.ymdKey(yesterday)],
-          reason: '恢复 = 整段撤销未来的不出现；历史跳过保留');
+      // 改口径（v2.9.9 审计 P2-5）：暂停态以显式 pausedUntil 窗口为真源后，
+      // 「恢复」收窄为**只清暂停窗口本身**（[今天..窗口终点]）。r2 无显式字段 →
+      // 回退推导窗口终点 = 今天（today+1 未被跳过即断），故只清今天。旧实现
+      // 「清今天及以后全部」会把 today+3 这类用户手动设置的孤立跳过日一并吃掉
+      // ——跳过同样是用户意图，不该被恢复动作误伤；历史跳过照旧保留。
+      expect(
+        t.skipDates,
+        unorderedEquals([
+          Task.ymdKey(yesterday),
+          Task.ymdKey(today.add(const Duration(days: 3))),
+        ]),
+        reason: '恢复只清暂停窗口；历史与窗口外孤立跳过均保留',
+      );
       expect(t.pausedToday, isFalse);
     });
 
@@ -456,17 +468,21 @@ void main() {
           ],
         ),
       ]);
-      // 测试环境无 path_provider 平台实现：fileFor 抛异常被捕获 → 实体集合为空，
-      // 所有附件引用判失效——正好构造出「失效附件」的确定性场景。
+      // 改口径（v2.9.9 审计 P2-13）：测试环境无 path_provider 平台实现，
+      // AttachmentService.fileFor 抛异常 → 引用 key 归入 uncertain（异常 ≠ 缺失）
+      // ——不再报「失效」、修复时不剔除（宁可不修，绝不基于一次失败的探测删数据）。
+      // 「确认缺失」（fileFor 成功且 existsSync()==false）仍正常报修，
+      // 见 v299_audit_fix_test 的确定性构造。
       final report = await p.scanDataHealth();
       expect(report.countOf(DataHealthIssueType.duplicateTask), 1);
       expect(report.countOf(DataHealthIssueType.emptySubtask), 1);
-      expect(report.countOf(DataHealthIssueType.missingAttachment), 1);
+      expect(report.countOf(DataHealthIssueType.missingAttachment), 0,
+          reason: '附件探测异常 → uncertain，不报失效');
 
       final fixed = await p.fixDataHealthIssues(report);
       expect(fixed, 3,
-          reason: '三类问题各修 1 处（不含超期回收站——彻底删除依赖'
-              'path_provider 平台通道，单元层不落）');
+          reason: '重复组按实际移入回收站的条数计（d2/d3 共 2 条，P3-11）'
+              ' + 空白子项 1 处；uncertain 附件不参与修复');
 
       // 重复：保留首条 d1，d2/d3 移入回收站（可反悔）。
       expect(p.tasks.any((t) => t.id == 'd1'), isTrue);
@@ -479,9 +495,9 @@ void main() {
       final sub = p.tasks.firstWhere((t) => t.id == 's1');
       expect(sub.subtasks.map((s) => s.id), ['k1']);
 
-      // 失效附件引用剔除（不动附件目录——文件本就不存在）。
+      // 附件引用原样保留（探测异常 ≠ 缺失，P2-13；「不动附件目录」照旧）。
       final att = p.tasks.firstWhere((t) => t.id == 'a1');
-      expect(att.attachments, isEmpty);
+      expect(att.attachments, isNotEmpty);
     });
   });
 

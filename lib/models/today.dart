@@ -156,7 +156,14 @@ class TodayAggregate {
       // date-only 与今天比较——此前自行内联 `DateTime(y,m,d)`，与任务侧
       // 逾期 / 排序的取键管道并行，判据调整时会漂移。
       final k = dueCompareKey(t.dueDate!);
-      if (DateTime(k.year, k.month, k.day) == d) return true;
+      if (DateTime(k.year, k.month, k.day) == d) {
+        // P3-5（v2.9.9 审计）：暂停中 / 已跳过今天的重复任务不属于「今天的事务」
+        // ——带 dueDate 的重复任务此前在截止日恒命中，暂停 / 跳过当天仍出现在
+        // 今日聚合与分享卡，与「当天不出现」语义矛盾。repeatsOn 含 skipDates
+        // 判定；非重复任务不受影响。
+        if (t.isRepeating && !t.repeatsOn(d)) return false;
+        return true;
+      }
     } else if (!t.isRepeating) {
       return true;
     }

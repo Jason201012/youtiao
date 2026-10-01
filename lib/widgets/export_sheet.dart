@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
@@ -436,15 +437,23 @@ class ExportSheet {
       return;
     }
     try {
-      final result = parseTasksCsv(raw);
+      // P2-4（v2.9.9 审计）：解析移入 isolate——旧实现在 UI isolate 同步解析，
+      // 2MB 上限内的大表会明显卡顿。
+      final result = await compute(parseTasksCsv, raw);
+      // P3-1（v2.9.9 审计）：校验失败明细最多展示 3 条（旧实现只报首条，
+      // 与「最多 3 条」的文档注释不符）；分段截断信息一并告知。
       final errHead = result.errors.isEmpty
           ? ''
-          : '；${result.errors.length} 行未通过校验被跳过'
-              '（如「第 ${result.errors.first.row} 行：${result.errors.first.reason}」）';
+          : '；${result.errors.length} 行未通过校验被跳过（'
+              '${result.errors.take(3).map((e) => '第 ${e.row} 行：${e.reason}').join('；')}'
+              '${result.errors.length > 3 ? '…等' : ''}）';
+      final sectionNote = result.skippedSections > 0
+          ? '；已忽略 ${result.skippedSections} 个非任务数据段（专注 / 习惯）'
+          : '';
       if (result.tasks.isEmpty) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('未解析到可导入的任务$errHead')),
+            SnackBar(content: Text('未解析到可导入的任务$errHead$sectionNote')),
           );
         }
         return;
@@ -456,14 +465,17 @@ class ExportSheet {
             title: const Text('选择导入方式'),
             content: Text(
               '共解析到 ${result.tasks.length} 条任务（数据行 ${result.totalRows} 行）'
-              '$errHead。请选择重复任务的处理方式：',
+              '$errHead$sectionNote。'
+              // P1-2（v2.9.9 审计）：CSV 没有稳定 ID（草稿 id 为空），重复判定
+              // 一律按「标题 + 截止日期」指纹——必须如实告知判定依据。
+              '\nCSV 无稳定 ID：重复按「标题 + 截止日期」判定。',
             ),
             actions: [
               TextButton(
                 onPressed: () {
                   Navigator.pop(dctx);
                   _runCsvImportDedup(provider, context, result,
-                      skipExisting: true, overwrite: false, fingerprint: false);
+                      overwrite: false);
                 },
                 child: const Text('跳过重复（推荐）'),
               ),
@@ -471,17 +483,9 @@ class ExportSheet {
                 onPressed: () {
                   Navigator.pop(dctx);
                   _runCsvImportDedup(provider, context, result,
-                      skipExisting: false, overwrite: true, fingerprint: false);
+                      overwrite: true);
                 },
                 child: const Text('覆盖更新'),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(dctx);
-                  _runCsvImportDedup(provider, context, result,
-                      skipExisting: true, overwrite: false, fingerprint: true);
-                },
-                child: const Text('模糊去重（标题+日期）'),
               ),
             ],
           ),
@@ -495,22 +499,26 @@ class ExportSheet {
     }
   }
 
-  /// T2-6：按选定策略执行 CSV 幂等导入。CSV 无 UID（全部按新任务处理，
-  /// 开启指纹时按「标题 + 截止日期」去重）。
+  /// T2-6：按选定策略执行 CSV 幂等导入。
+  ///
+  /// P1-2（v2.9.9 审计）：CSV 草稿 `id` 为空、UID 全为 null，旧实现把 iCal 的
+  /// 三挡策略原样透传且 `fingerprint: false` ——「跳过重复」「覆盖更新」在
+  /// importDedup 里拿到的 existing 恒为 null，两挡**都等于无条件全量新增**，
+  /// 默认推荐项反而整表制造副本。现收敛为两挡并**强制指纹去重**：跳过 =
+  /// 命中「标题+截止」即跳过；覆盖 = 命中后更新（来源为空的字段保留原值，
+  /// 见 TaskProvider.importDedup 的合并规则）。
   static Future<void> _runCsvImportDedup(
     TaskProvider provider,
     BuildContext context,
     CsvImportResult result, {
-    required bool skipExisting,
     required bool overwrite,
-    required bool fingerprint,
   }) async {
     final stats = provider.importDedup(
       result.tasks,
       List<String?>.filled(result.tasks.length, null),
-      skipExisting: skipExisting,
+      skipExisting: true,
       overwrite: overwrite,
-      fingerprint: fingerprint,
+      fingerprint: true, // P1-2：CSV 无 UID，必须走标题+截止指纹
     );
     if (!context.mounted) return;
     final parts = <String>['新增 ${stats.added}'];

@@ -298,7 +298,9 @@ void main() {
         ),
       ]);
       final row = p.exportCsv().split('\n')[1];
-      expect(row.contains('会议 团队'), isTrue, reason: '标签列');
+      // 改口径（v2.9.9 审计 P2-2）：导出标签分隔符由空格改为「、」——导入解析
+      // 只按 ,，、;；/| 切分，空格连接的多标签导回后被并成一条（往返丢数据）。
+      expect(row.contains('会议、团队'), isTrue, reason: '标签列（、「」连接可被导入拆回）');
       expect(row.contains('带上下线 第二行'), isTrue, reason: '备注换行需归一为空格');
       expect(row.contains('1/2'), isTrue, reason: '子任务进度');
       expect(row.contains('提前 30 分钟'), isTrue, reason: '提醒提前量');

@@ -150,6 +150,18 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     // 真实落点，而不是录入侧的占位 dueDate（常常为 null）——否则 RRULE 无起点、
     // VALARM 也无从表达提醒时刻。
     final due = _exportDue(t);
+    // P3-20（v2.9.9 审计）：区间（span）任务的开始日写 `DTSTART;VALUE=DATE`，
+    // 置于 DUE 之前。此前开始日完全不出现在 .ics 里，「10-01 ~ 10-07」这类区间
+    // 导出到第三方日历后塌缩成单个截止日。VTODO 的 DTSTART 语义即开始（RFC 5545
+    // §3.8.2.4），第三方日历普遍接受；本 App 导入侧在 DUE 存在时把它解析回
+    // startDate（见 _blockToTask），往返幂等。
+    // 保守取舍：无 DUE 的任务也写 DTSTART（此刻它会被导入侧按旧口径回退当
+    // dueDate，与第三方对「只有开始没有截止」的 VTODO 解读一致，不产生丢失）。
+    if (t.startDate != null) {
+      final s = t.startDate!;
+      buf.writeln('DTSTART;VALUE=DATE:'
+          '${s.year}${_pad2(s.month)}${_pad2(s.day)}');
+    }
     if (due != null) {
       buf.writeln('DUE:${_toIcsLocalTime(due)}');
     }
@@ -648,6 +660,16 @@ Task? _blockToTask(Map<String, String> b) {
   final title = _unescapeIcs(summary);
 
   DateTime? dueDate = _blockDueDate(b);
+  // P3-20（v2.9.9 审计）：DUE 存在时 DTSTART 不再是落点候选，而是开始日
+  //（本 App 导出侧 P3-20 写入的区间起点，第三方日历同语义）→ 解析为
+  // startDate；只取日期部分（第三方可能写带时刻的 DTSTART）。
+  // DUE 缺失时维持旧口径：DTSTART 由 _blockDueDate 回退当 dueDate，
+  // 不再重复解释为开始日（避免同一条既当截止又当开始）。
+  DateTime? startDate;
+  if (b['DUE'] != null && b['DTSTART'] != null) {
+    final sd = _parseIcsDateTime(b['DTSTART']!);
+    if (sd != null) startDate = DateTime(sd.year, sd.month, sd.day);
+  }
   // P2-1（v2.9.0 审计）：导入侧解析提醒段（VALARM/AALARM）→ reminderOffsetMin。
   // 无法迁移时保持 0（= 落点时刻提醒），并由 [parseIcs] 计入「提醒未迁移」如实提示。
   final reminderOffsetMin = _parseAlarmOffsetMin(b, dueDate) ?? 0;
@@ -820,6 +842,8 @@ Task? _blockToTask(Map<String, String> b) {
     priority: priority,
     category: category,
     dueDate: dueDate,
+    // P3-20（v2.9.9 审计）：DUE 存在时 DTSTART 解析为区间开始日。
+    startDate: startDate,
     status: done ? TaskStatus.done : TaskStatus.todo,
     completedAt: completedAt,
     note: note,

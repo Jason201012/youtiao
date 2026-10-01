@@ -29,9 +29,79 @@ bool kanbanWipBlocked(int todoCount, int limit) =>
     limit > 0 && todoCount >= limit;
 
 /// T2-3：全局「待办」计数（与状态分组待办泳道同口径：未删 + todo）。
+///
+/// P3-8（v2.9.9 审计）：口径说明——计数与「状态」分组下待办泳道展示的是**同一
+/// 集合**（全部未删 todo，含逾期 / 暂停 / 重复任务），WIP 拦截的就是「泳道放满」，
+/// 两者必须一致；分类 / 标签分组下 `dropStatus == null`，WIP 不生效。
 int kanbanTodoCountOf(TaskProvider provider) => provider.tasks
     .where((t) => t.deletedAt == null && t.status == TaskStatus.todo)
     .length;
+
+/// T2-3：WIP 上限编辑弹窗（步进器，0 = 不限）。
+///
+/// P3-6（v2.9.9 审计）：从 [_KanbanBoardState._editWipLimit] 抽成公开函数，
+/// 供设置页「看板待办上限」入口复用（同一弹窗、同一偏好键，不另造 UI）。
+/// 返回确认值（null = 取消）。
+///
+/// P2-6（v2.9.9 审计）：文案如实说明**生效范围**——WIP 校验在产品里只收口在
+/// 看板（拖入 / 勾选转回 / 列内新建）；首页 / 今日 / 详情 / 日历的取消完成与
+/// 批量操作不受限。旧文案「超限都会被拦截」暗示全站生效，与实现不符。
+Future<int?> showWipLimitEditor(BuildContext context, {required int initial}) {
+  var v = initial;
+  return showDialog<int>(
+    context: context,
+    builder: (c) => StatefulBuilder(
+      builder: (c, setD) => AlertDialog(
+        title: const Text('待办上限'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '看板「待办」列最多保留多少个任务（0 = 不限）。'
+              '在看板里拖入 / 勾选转回 / 列内新建都会被拦截'
+              '（仅看板生效，首页等其它入口不受限）。',
+              style: TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  onPressed: v > 0 ? () => setD(() => v--) : null,
+                  icon: const Icon(Symbols.remove_circle_outline),
+                  tooltip: '减',
+                ),
+                SizedBox(
+                  width: 56,
+                  child: Center(
+                    child: Text('$v',
+                        style: const TextStyle(
+                            fontSize: 20, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+                IconButton(
+                  onPressed: v < 99 ? () => setD(() => v++) : null,
+                  icon: const Icon(Symbols.add_circle_outline),
+                  tooltip: '加',
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, v),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
 
 /// 分类 / 标签（横向滚动）模式下每条泳道的**基准**宽度（逻辑像素）。
 ///
@@ -277,61 +347,9 @@ class _KanbanBoardState extends State<KanbanBoard> {
     });
   }
 
-  /// T2-3：WIP 上限编辑弹窗（步进器，0 = 不限）。
+  /// T2-3：WIP 上限编辑弹窗（复用公开的 [showWipLimitEditor]，设置页同款）。
   Future<void> _editWipLimit() async {
-    var v = _wipLimit;
-    final confirmed = await showDialog<int>(
-      context: context,
-      builder: (c) => StatefulBuilder(
-        builder: (c, setD) => AlertDialog(
-          title: const Text('待办上限'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                '「待办」列最多保留多少个任务（0 = 不限）。'
-                '超限后拖入 / 勾选转回 / 新建都会被拦截。',
-                style: TextStyle(fontSize: 13),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  IconButton(
-                    onPressed: v > 0 ? () => setD(() => v--) : null,
-                    icon: const Icon(Symbols.remove_circle_outline),
-                    tooltip: '减',
-                  ),
-                  SizedBox(
-                    width: 56,
-                    child: Center(
-                      child: Text('$v',
-                          style: const TextStyle(
-                              fontSize: 20, fontWeight: FontWeight.w700)),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: v < 99 ? () => setD(() => v++) : null,
-                    icon: const Icon(Symbols.add_circle_outline),
-                    tooltip: '加',
-                  ),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(c),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(c, v),
-              child: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
-    );
+    final confirmed = await showWipLimitEditor(context, initial: _wipLimit);
     if (confirmed != null) _setWipLimit(confirmed);
   }
 
@@ -427,6 +445,11 @@ class _KanbanBoardState extends State<KanbanBoard> {
           provider: provider,
           // T2-3：WIP 上限只约束「状态」分组的待办列；列内建卡预填维度透传。
           wipLimit: lane.dropStatus == TaskStatus.todo ? _wipLimit : 0,
+          // P1-3（v2.9.9 审计）：卡片勾选圈「已完成 → 待办」也受全局上限约束——
+          // 旧实现卡片只拿到**列级** wipLimit，而「已完成」列恒传 0，
+          // kanbanWipBlocked(count, 0) 恒 false → 勾选转回绕过上限，与拖入路径
+          // 口径不一致。列级 wipLimit 现仅供列内新建 / 拖入使用。
+          globalWipLimit: _wipLimit,
           category: lane.category,
           tag: lane.tag,
         ),
@@ -559,6 +582,11 @@ class _Column extends StatelessWidget {
   /// T2-3：本列的 WIP 上限（0 = 不限 / 不适用）；仅待办列会拿到 >0 的值。
   final int wipLimit;
 
+  /// P1-3（v2.9.9 审计）：**全局**「待办」上限（用户设置值）——卡片勾选圈的
+  /// 「已完成 → 待办」在任何列都可能发生，必须按全局值拦截，不能按所在列的
+  /// 列级 wipLimit（「已完成」列恒为 0）。
+  final int globalWipLimit;
+
   /// T2-3：列内「+」建卡的预填维度。
   final Category? category;
   final String? tag;
@@ -568,6 +596,7 @@ class _Column extends StatelessWidget {
     required this.tasks,
     required this.canDrop,
     required this.wipLimit,
+    required this.globalWipLimit,
     this.dropStatus,
     required this.provider,
     this.category,
@@ -670,7 +699,12 @@ class _Column extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               for (final t in tasks)
-                _KanbanCard(task: t, provider: provider, wipLimit: wipLimit),
+                _KanbanCard(
+                  task: t,
+                  provider: provider,
+                  wipLimit: wipLimit,
+                  globalWipLimit: globalWipLimit,
+                ),
               // T2-3（v2.9.2 功能增强）：列内快速建卡——「已完成」列没有
               // 「往里新建」的语义，不展示；其余列复用 TaskSheet 并预填维度。
               if (dropStatus != TaskStatus.done)
@@ -702,11 +736,17 @@ class _KanbanCard extends StatelessWidget {
   final Task task;
   final TaskProvider provider;
 
-  /// T2-3：所在列的 WIP 上限（0 = 不限 / 不适用）。勾选圈把已完成任务
-  /// 转回「待办」时同样受其约束，与拖拽落列同口径。
+  /// T2-3：所在列的 WIP 上限（0 = 不限 / 不适用）。列内新建 / 拖入路径使用。
   final int wipLimit;
+
+  /// P1-3（v2.9.9 审计）：全局「待办」上限——勾选圈「已完成 → 待办」用这个值
+  /// 拦截（列级 wipLimit 在「已完成」列恒为 0，旧实现据此被绕过）。
+  final int globalWipLimit;
   const _KanbanCard(
-      {required this.task, required this.provider, this.wipLimit = 0});
+      {required this.task,
+      required this.provider,
+      this.wipLimit = 0,
+      this.globalWipLimit = 0});
 
   /// P3-10（v2.9.4 审计）：改状态的两个入口都给出 10 秒撤销。
   ///
@@ -726,15 +766,17 @@ class _KanbanCard extends StatelessWidget {
     );
   }
 
-  /// T2-3：勾选圈改状态。done → todo 方向受 WIP 上限约束（与拖拽落列同口径）：
+  /// T2-3：勾选圈改状态。done → todo 方向受**全局** WIP 上限约束（P1-3，
+  /// v2.9.9 审计：旧实现用列级 wipLimit，而「已完成」列恒传 0 → 永不拦截，
+  /// 上限可被勾选转回绕过；现与拖拽落列同口径按全局值判）：
   /// 超限时提示并阻止，不静默放行。
   void _cycle(BuildContext context) {
     final next =
         task.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
     if (next == TaskStatus.todo &&
-        kanbanWipBlocked(kanbanTodoCountOf(provider), wipLimit)) {
+        kanbanWipBlocked(kanbanTodoCountOf(provider), globalWipLimit)) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('待办已满（上限 $wipLimit），先完成或移出其它待办'),
+        content: Text('待办已满（上限 $globalWipLimit），先完成或移出其它待办'),
         duration: const Duration(seconds: 3),
       ));
       return;
@@ -759,11 +801,17 @@ class _KanbanCard extends StatelessWidget {
     // else→'进行中'）。但 [TaskStatus] 只有 `todo` / `done` 两值（见
     // `task.dart:101`），`'进行中'` 分支不可达——是上一版三态枚举的残留。
     // 直接二元映射，避免给读者「还有 doing 状态」的错觉。
-    final to =
-        snapshot.status == TaskStatus.todo ? '已完成' : '待办';
+    //
+    // P3-23 / U3-3（v2.9.9 审计）：文案与 task_toggle_undo（首页 / 今日 / 详情 /
+    // 日历四入口）统一——旧文案「已移至「已完成」」与同一动作在其它入口的
+    // 「已完成「X」」两套说辞，同一动词两种措辞。现按勾选前状态映射：
+    // todo→已完成「标题」、done→已把「标题」移回待办。
+    final title = snapshot.title.isEmpty ? '(无标题)' : snapshot.title;
     showUndoSnackBar(
       context,
-      content: undoContent('已移至「$to」'),
+      content: undoContent(snapshot.status == TaskStatus.todo
+          ? '已完成「$title」'
+          : '已把「$title」移回待办'),
       // P2-2（v2.9.6 审计）：restoreTaskSnapshot 返回是否生效（任务已删除时
       // false），由唯一实现统一提示「撤销已失效」。
       onUndo: () async => provider.restoreTaskSnapshot(snapshot),
@@ -841,8 +889,12 @@ class _KanbanCard extends StatelessWidget {
           ),
           // P3-10（v2.9.4 审计）：预计时长此前只出现在任务详情 / 今日页 / 导出表，
           // 看板卡完全没有——排期时最需要「这件事大概要多久」的场景反而看不到。
-          // 条件同时容纳 dueHint / repeat / estimate 三者，任一存在才占这一行高度。
-          if (dueHint.isNotEmpty || task.isRepeating || task.hasEstimate) ...[
+          // 条件同时容纳 dueHint / repeat / estimate / 暂停态（P3-19）四者，
+          // 任一存在才占这一行高度。
+          if (dueHint.isNotEmpty ||
+              task.isRepeating ||
+              task.hasEstimate ||
+              task.pausedToday) ...[
             const SizedBox(height: 6),
             Row(
               children: [
@@ -857,6 +909,25 @@ class _KanbanCard extends StatelessWidget {
                       color: overdue ? AppColors.lightHigh : ext.meta,
                     ),
                   ),
+                // P3-19（v2.9.9 审计）：暂停中的待办卡此前没有任何暂停标识
+                // （首页任务行有「已暂停至 M/d」角标，看板漏掉）。与任务行同款
+                // 弱化样式补齐。
+                if (task.pausedToday) ...[
+                  if (dueHint.isNotEmpty || task.isRepeating)
+                    const SizedBox(width: 6),
+                  Icon(Symbols.pause_circle, size: 13, color: ext.meta),
+                  const SizedBox(width: 2),
+                  Text(
+                    task.pausedUntilDate == null
+                        ? '已暂停'
+                        : '已暂停至 ${task.pausedUntilDate!.month}/${task.pausedUntilDate!.day}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: ext.meta,
+                    ),
+                  ),
+                ],
                 if (task.hasEstimate) ...[
                   if (dueHint.isNotEmpty || task.isRepeating)
                     const SizedBox(width: 6),

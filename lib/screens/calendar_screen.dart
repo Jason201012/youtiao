@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/schedule_advisor.dart' show kDefaultEstimateMinutes;
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/services/lunar_calendar.dart';
@@ -368,10 +369,16 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final level = _level(count);
     final isToday = _sameDay(date, today);
     // T2-1/T2-2：当天到期 + 跨天区间覆盖的任务。
-    final dueTasks = _tasksOnDay(provider, date);
-    // T2-1：当日「计划占时」合计（未完成且带显式预估的任务，纯本地求和）。
-    final planMin = dueTasks.fold<int>(
-        0, (s, t) => s + (!t.done && t.hasEstimate ? t.estimateMinutes! : 0));
+    // P3-10（v2.9.9 审计）：区间带排前面——take(2) 的截断窗口里优先保住跨天
+    // 区间带（它承载的是整段任务的可见性；单条任务还有 +N 兜底）。
+    final spanTasks = _spanTasksOn(provider, date);
+    final dueTasks = [
+      ...spanTasks,
+      ..._dueTasksOn(provider, date),
+    ];
+    // T2-1 / P2-8 / P2-9（v2.9.9 审计）：当日「计划占时」合计改走单一口径
+    // [planMinutesOn]（与排程建议同源兜底、跨天只在首日计、暂停/跳过不计）。
+    final planMin = planMinutesOn(provider, date);
     final isFuture = date.isAfter(today);
     final focusMin =
         (Provider.of<FocusProvider>(context, listen: false).totalSecOn(date) / 60)
@@ -751,6 +758,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final dueTasks = _tasksOnDay(provider, d);
     final isToday = _sameDay(d, today);
     final track = isDark ? AppColors.darkTrack : AppColors.lightTrack;
+    // P3-9（v2.9.9 审计）：周视图补当日计划占时合计（月视图有、周视图此前没有）。
+    final planMin = planMinutesOn(provider, d);
     return DragTarget<Task>(
       // P3-2（v2.8.8 审计）：重复任务的 dueDate 只是占位，拖拽改期是「假成功」，
       // 故在投放侧也一并拒绝（兜底：即便有其它来源的拖拽也不放行）。
@@ -796,6 +805,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
               ),
             ),
             Divider(height: 1, color: track),
+            // P3-9（v2.9.9 审计）：当日计划占时合计（与月视图同款弱化样式）。
+            if (planMin > 0)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(6, 4, 6, 0),
+                child: Row(
+                  children: [
+                    Icon(Symbols.schedule, size: 10, color: ext.meta),
+                    const SizedBox(width: 2),
+                    Text('计划 ${_planLabel(planMin)}',
+                        style: TextStyle(fontSize: 10, color: ext.meta)),
+                  ],
+                ),
+              ),
             Expanded(
               child: dueTasks.isEmpty
                   ? Center(
@@ -832,29 +854,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
   }
 
-  /// T2-1 / T2-2（v2.9.2 功能增强）：日历某天应展示的任务 = 当天到期
-  /// （[TaskProvider.tasksDueOn]）+ 跨天区间覆盖的天。区间任务在其截止日已由
-  /// 到期列表收录，这里只补「起止之间的其余天」，天然去重；区间内按开始日排序。
-  List<Task> _tasksOnDay(TaskProvider provider, DateTime date) {
-    final due = provider.tasksDueOn(date);
-    final day = DateTime(date.year, date.month, date.day);
-    final span = provider.tasks
-        .where((t) {
-          if (t.deletedAt != null || t.dueDate == null || t.startDate == null) {
-            return false;
-          }
-          if (!_isSpanTask(t)) return false;
-          if (Task.isSameDay(t.dueDate!, day)) return false; // 截止日已在 due 列表
-          final s0 = DateTime(t.startDate!.year, t.startDate!.month,
-              t.startDate!.day);
-          final d0 =
-              DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
-          return !day.isBefore(s0) && !day.isAfter(d0);
-        })
-        .toList()
-      ..sort((a, b) => a.startDate!.compareTo(b.startDate!));
-    return [...due, ...span];
-  }
+  // P2-8 / P2-9 / P2-11 的当日任务与占时逻辑见文件尾部的顶层函数
+  //（_dueTasksOn / _spanTasksOn / _tasksOnDay / planMinutesOn）——纯
+  // 「provider + date → 结果」，不读 State 字段，顶层化后可不经 widget 直测。
 
   void _openDay(TaskProvider provider, DateTime date) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -874,6 +876,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
           builder: (ctx2, p, _) {
             // T2-1/T2-2：当天到期 + 跨天区间覆盖的任务。
             final tasks = _tasksOnDay(p, date);
+            // P3-9（v2.9.9 审计）：计数拆开——旧文案「到期 N 个」把跨天任务一并
+            // 计入（把「覆盖到当天」说成「当天到期」）；同时补当日计划占时合计。
+            final dueCount = _dueTasksOn(p, date).length;
+            final spanCount = tasks.length - dueCount;
+            final planMin = planMinutesOn(p, date);
             // U7：取 appColors 让暗色模式也能正确显示次要文本。
             final ext = appColors(ctx2);
             return Column(
@@ -897,10 +904,22 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               fontWeight: FontWeight.bold,
                               color: onBg)),
                       const SizedBox(width: 8),
-                      Text('到期 ${tasks.length} 个',
-                          // U7：用 ext.meta 替代硬编码的 lightMeta，否则暗色
-                          // 模式下「M 月 d 日」旁的次要文本仍是浅灰、读不清。
-                          style: TextStyle(fontSize: 13, color: ext.meta)),
+                      Text(
+                        spanCount > 0
+                            ? '到期 $dueCount 个 · 另有跨天 $spanCount 段'
+                            : '到期 $dueCount 个',
+                        // U7：用 ext.meta 替代硬编码的 lightMeta，否则暗色
+                        // 模式下「M 月 d 日」旁的次要文本仍是浅灰、读不清。
+                        style: TextStyle(fontSize: 13, color: ext.meta),
+                      ),
+                      if (planMin > 0) ...[
+                        const SizedBox(width: 10),
+                        Icon(Symbols.schedule, size: 12, color: ext.meta),
+                        const SizedBox(width: 2),
+                        Text('计划 ${_planLabel(planMin)}',
+                            style:
+                                TextStyle(fontSize: 12, color: ext.meta)),
+                      ],
                     ],
                   ),
                 ),
@@ -1017,6 +1036,73 @@ DateTime _weekStart(DateTime d) {
 bool _sameDay(DateTime a, DateTime b) =>
     a.year == b.year && a.month == b.month && a.day == b.day;
 
+/// P2-11（v2.9.9 审计）：当天到期任务——重复任务须 [Task.repeatsOn] 当天才
+/// 展示（repeatsOn 含 skipDates 判定：暂停中 / 已跳过的重复任务不再出现在
+/// 日历、不计占时）。旧实现只按 dueDate 匹配，暂停态的重复任务照常出现。
+///
+/// 顶层纯函数（provider + date → 结果，不读 State 字段），月格 / 周视图 /
+/// 日期弹层与单测共用；v2.9.9 验收轮自 `_CalendarScreenState` 上提。
+List<Task> _dueTasksOn(TaskProvider provider, DateTime date) {
+  final day = DateTime(date.year, date.month, date.day);
+  return provider.tasksDueOn(day).where((t) {
+    if (t.isRepeating && !t.repeatsOn(day)) return false;
+    return true;
+  }).toList();
+}
+
+/// T2-1 / T2-2（v2.9.2 功能增强）：跨天区间覆盖的天。区间任务在其截止日已由
+/// 到期列表收录，这里只补「起止之间的其余天」，天然去重；区间内按开始日排序。
+List<Task> _spanTasksOn(TaskProvider provider, DateTime date) {
+  final day = DateTime(date.year, date.month, date.day);
+  final span = provider.tasks
+      .where((t) {
+        if (t.deletedAt != null || t.dueDate == null || t.startDate == null) {
+          return false;
+        }
+        if (!_isSpanTask(t)) return false;
+        if (Task.isSameDay(t.dueDate!, day)) return false; // 截止日已在 due 列表
+        final s0 =
+            DateTime(t.startDate!.year, t.startDate!.month, t.startDate!.day);
+        final d0 =
+            DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
+        return !day.isBefore(s0) && !day.isAfter(d0);
+      })
+      .toList()
+    ..sort((a, b) => a.startDate!.compareTo(b.startDate!));
+  return span;
+}
+
+/// T2-1 / T2-2：日历某天应展示的任务 = 当天到期（[P2-11 过滤]）+ 跨天区间。
+List<Task> _tasksOnDay(TaskProvider provider, DateTime date) =>
+    [..._dueTasksOn(provider, date), ..._spanTasksOn(provider, date)];
+
+/// P2-8 / P2-9（v2.9.9 审计）：当日「计划占时」合计（单一口径，月视图 /
+/// 周视图 / 日期弹层共用）。顶层纯函数（provider + date → 结果），可不经
+/// widget 直测（v2.9.9 验收轮自 `_CalendarScreenState` 上提）。
+///
+/// - **P2-8**：未完成任务无预估时按 [kDefaultEstimateMinutes] 兜底——与排程
+///   建议（schedule_advisor）同一口径，此前日历只计有预估任务、两处「计划
+///   占时」不可比；
+/// - **P2-9**：跨天区间任务**只在首日**计入完整预估——旧实现区间覆盖到的
+///   每天各计一次完整值，N 天任务被计 N 次（日合计虚高）；
+/// - 已完成不计；暂停中的重复任务已在 [_dueTasksOn] 被过滤（P2-11）。
+int planMinutesOn(TaskProvider provider, DateTime date) {
+  final day = DateTime(date.year, date.month, date.day);
+  var total = 0;
+  for (final t in _dueTasksOn(provider, day)) {
+    if (t.done) continue;
+    total += t.estimateMinutes ?? kDefaultEstimateMinutes;
+  }
+  for (final t in _spanTasksOn(provider, day)) {
+    if (t.done) continue;
+    final s0 =
+        DateTime(t.startDate!.year, t.startDate!.month, t.startDate!.day);
+    if (s0 != day) continue; // P2-9：只在区间首日计入完整预估
+    total += t.estimateMinutes ?? kDefaultEstimateMinutes;
+  }
+  return total;
+}
+
 /// T2-2（v2.9.2 功能增强）：跨天区间任务判定——startDate 的日期部分**严格早于**
 /// dueDate 的日期部分（同日起止是「时段任务」，不算区间）。
 bool _isSpanTask(Task t) {
@@ -1036,10 +1122,14 @@ String _planLabel(int mins) {
   return h == h.roundToDouble() ? '${h.round()}h' : '${h.toStringAsFixed(1)}h';
 }
 
-bool _hasTime(DateTime? d) {
-  if (d == null) return false;
-  return d.hour != 0 || d.minute != 0;
-}
+/// T2-1：截止是否带「具体时刻」。
+///
+/// P2-10（v2.9.9 审计）：复用 [dueIsPureDateForm]（00:00 与 23:59 都是纯日期
+/// 形态）——旧实现只判 `hour != 0 || minute != 0`，长按新建预填的 23:59 被
+/// 误判为「带时刻」，任务条恒显示「起-止」时刻（如 23:29-23:59），与
+/// 「23:59 = 当天截止」的语义自相矛盾。判秒口径与 dueIsPureDateForm 一致
+/// （不判秒）。
+bool _hasTime(DateTime? d) => d != null && !dueIsPureDateForm(d);
 
 /// 完成数 → 热力等级（0~4）。
 int _level(int n) {

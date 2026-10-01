@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'gbk_codec.dart';
+
 /// 本地文件读写 + 系统分享辅助。
 ///
 /// 设计取舍：导出文件落在 App 私有文档目录（getApplicationDocumentsDirectory），
@@ -270,7 +272,11 @@ class DataIo {
             '${label}过大（${(size / 1048576).toStringAsFixed(1)} MB，上限 '
             '${(maxImportTextBytes / 1048576).round()} MB），可能不是有效文件');
       }
-      return PickedText.ok(await file.readAsString());
+      // P2-3（v2.9.9 审计）：改按字节读取 + BOM/UTF-8/GBK 解码链。此前
+      // readAsString() 默认 UTF-8，简体中文 Windows 上 Excel 另存的 GBK CSV
+      // 直接抛 FormatException →「读取表格文件失败」，而 Excel 恰是 CSV 导入
+      // 主用场景。解码链详见 gbk_codec.dart（严格离线，零依赖）。
+      return PickedText.ok(decodeTextFileBytes(await file.readAsBytes()));
     } catch (e) {
       return PickedText.error('读取${label}失败：$e');
     }
