@@ -23,11 +23,38 @@ class CsvImportRowError {
   const CsvImportRowError(this.row, this.reason);
 }
 
+/// P2-2（v3.0.0 审计）：单行「源是否**显式提供**」的字段元信息。
+///
+/// [Task] 的 priority / category / status 是非空字段，草稿层无法区分
+/// 「显式写了中/未完成」与「列缺失 / 单元格为空」——而「覆盖更新」的
+/// 字段级合并必须区分（未提供 → 保留原值，否则来源为空的 CSV 会把既有
+/// 任务的高优先级 / 工作分类 / 完成态重置为默认值）。null = 未提供。
+class CsvImportRowMeta {
+  final Priority? priority;
+  final Category? category;
+
+  /// 「状态」列解析结果（todo/done）；null = 源未提供状态列或该行为空。
+  final TaskStatus? status;
+
+  /// 「完成时间」列解析结果；仅在 status == done 时随行提供。
+  final DateTime? completedAt;
+
+  const CsvImportRowMeta({
+    this.priority,
+    this.category,
+    this.status,
+    this.completedAt,
+  });
+}
+
 /// CSV 导入解析结果：成功草稿 + 失败行报告 + 数据行总数（不含表头）。
 class CsvImportResult {
   final List<Task> tasks;
   final List<CsvImportRowError> errors;
   final int totalRows;
+
+  /// 与 [tasks] 逐行平行的「源是否提供」元信息（P2-2，见 [CsvImportRowMeta]）。
+  final List<CsvImportRowMeta> meta;
 
   /// P1-1（v2.9.9 审计）：被识别并**忽略**的非任务数据段数量。本 App 的 CSV
   /// 导出把任务 / 专注 / 习惯三张表依次拼接（各自带独立表头），旧实现把后续段
@@ -35,11 +62,17 @@ class CsvImportResult {
   /// 后续段的表头行即停止任务解析，被忽略的段数在此如实上报。
   final int skippedSections;
 
+  /// P2-6（v3.0.0 审计）：按「是否已删除 = 是」跳过的行数——回收站条目
+  /// 不再被当普通任务导入为活动任务（反向复活）。调用方如实提示。
+  final int skippedDeleted;
+
   const CsvImportResult({
     required this.tasks,
     required this.errors,
     required this.totalRows,
+    this.meta = const [],
     this.skippedSections = 0,
+    this.skippedDeleted = 0,
   });
   bool get hasErrors => errors.isNotEmpty;
 }
@@ -119,36 +152,75 @@ CsvImportResult parseTasksCsv(String raw) {
         ])
       : 6; // 无表头兜底第 7 列 = 预计（原被忽略，纯增强零破坏）。
 
+  // P2-6（v3.0.0 审计）：补解析导出 16 列中可机器还原的其余列——
+  // 「状态」「完成时间」随草稿落位；「是否已删除」= 是 → 该行跳过（回收站
+  // 条目不再反向复活为活动任务，按 skippedDeleted 如实计数）。
+  // 「重复规则 / 提醒 / 子任务 / 附件 / 累计专注」为人类可读的存档摘要
+  // （如子任务只有完成度计数、附件是文件名清单），不做反解析，由导入弹层
+  // 明示「仅存档」保真边界（U2-3）。
+  final iStatus = hasHeader ? colOf(['状态', 'status']) : null;
+  final iCompletedAt = hasHeader ? colOf(['完成时间', 'completedat']) : null;
+  final iDeleted = hasHeader ? colOf(['是否已删除', '已删除', 'deleted']) : null;
+
   final tasks = <Task>[];
+  final meta = <CsvImportRowMeta>[];
   final errors = <CsvImportRowError>[];
   var totalRows = 0;
   var skippedSections = 0;
+  var skippedDeleted = 0;
   // P1-1（v2.9.9 审计）：命中非任务段表头后置位——此后所有行都视为其它表的
   // 内容丢弃，只有再次命中段表头时继续计数（三表拼接：任务段 + 专注段 + 习惯段，
   // 计数如实反映被忽略的段数），绝不把段内数据行当任务解析。
   var skipping = false;
+
+  // P2-5（v3.0.0 审计）：段表头整行指纹——本 App 导出的非任务段表头（归一后）
+  // 前缀。旧判据只看首格 ==「日期/习惯」，任务段中间某行标题恰为「日期/习惯」
+  // 会把其后**全部任务行**静默截断；现在要求第二列也与段表头一致才认定换段
+  // （任务表的第二列是优先级/截止，与「开始时间/表情/打卡日期」不相交）。
+  bool isSectionHeaderRow(List<String> cells) {
+    String c(int i) => i < cells.length ? norm(cells[i]) : '';
+    final h0 = c(0);
+    if (h0 == '日期') return c(1) == '开始时间' && c(2) == '结束时间';
+    if (h0 == '习惯') return c(1) == '表情' || c(1) == '打卡日期';
+    return false;
+  }
 
   for (var r = 0; r < dataRows.length; r++) {
     final cells = dataRows[r];
     // 物理行号：表头占第 1 行；无表头时数据从第 1 行起。
     final physical = hasHeader ? r + 2 : r + 1;
     if (cells.every((c) => c.trim().isEmpty)) continue; // 全空行跳过
-    // P1-1（v2.9.9 审计）：三表拼接的导出文件，专注 / 习惯段的表头行首列是
-    // 「日期」/「习惯」——命中即认定任务段结束，进入跳过模式：后续行不再按
-    // 任务列解析造伪任务、不计错误。段数记入 [CsvImportResult.skippedSections]
-    // 由 UI 如实提示。首格恰好叫「日期/习惯」的任务表会被误判提前截断，属
-    // 可接受的保守取舍（宁可少导不可灌垃圾）。
-    final firstCell = norm(cells.first);
-    if (hasHeader && (firstCell == '日期' || firstCell == '习惯')) {
+    // P1-1（v2.9.9 审计）+ P2-5（v3.0.0 审计）：整行指纹命中才进入跳过模式
+    // （见 [isSectionHeaderRow]），段数记入 [CsvImportResult.skippedSections]。
+    if (hasHeader && isSectionHeaderRow(cells)) {
       skippedSections++;
       skipping = true;
       continue;
     }
     if (skipping) continue; // 非任务段的普通行（专注/习惯数据）：整体丢弃
+
+    // P3-3（v3.0.0 审计）：重复表头行（拼接两份任务段 / 复制粘贴含两行表头）
+    // 会被当数据行产出标题为「标题」的伪任务。判定：物理列上 ≥2 个已知列的
+    // 单元格恰等于该列的表头别名 → 视为表头行，跳过（普通数据行不会同时
+    // 「标题=标题 且 截止=截止时间」）。表头行不计入 totalRows。
+    if (hasHeader) {
+      var headerHits = 0;
+      cols.forEach((name, idx) {
+        if (idx < cells.length && norm(cells[idx]) == name) headerHits++;
+      });
+      if (headerHits >= 2) continue;
+    }
     totalRows++;
 
     String cell(int? idx) =>
         (idx == null || idx >= cells.length) ? '' : cells[idx].trim();
+
+    // P2-6（v3.0.0 审计）：回收站条目（是否已删除 = 是）不导入、如实计数。
+    final deletedRaw = cell(iDeleted).toLowerCase();
+    if (deletedRaw == '是' || deletedRaw == 'true' || deletedRaw == '1' || deletedRaw == 'yes') {
+      skippedDeleted++;
+      continue;
+    }
 
     final title = cell(iTitle);
     if (title.isEmpty) {
@@ -177,6 +249,27 @@ CsvImportResult parseTasksCsv(String raw) {
     final estimate = _parseEstimate(cell(iEstimate));
     final tags = _parseTags(cell(iTags));
 
+    // P2-2（v3.0.0 审计）：「是否提供」与「解析值」分开记录——单元格为空 /
+    // 列缺失 = 未提供（null），非空值按宽松解析（未知值回退默认，与
+    // Task.fromJson 同口径；此时视为「显式提供」）。
+    final prioRaw = cell(iPriority);
+    final catRaw = cell(iCategory);
+    final statusRaw = cell(iStatus);
+    final completedRaw = cell(iCompletedAt);
+    final parsedStatus = _parseStatus(statusRaw);
+    DateTime? completedAt;
+    if (completedRaw.isNotEmpty) {
+      completedAt = _parseDateTime(completedRaw);
+    }
+    meta.add(CsvImportRowMeta(
+      priority: prioRaw.isEmpty ? null : _parsePriority(prioRaw),
+      category: catRaw.isEmpty ? null : _parseCategory(catRaw),
+      status: parsedStatus,
+      // 完成时间仅在「已完成」行有意义；源未写完成时间时留空（覆盖合并
+      // 侧按 status 提供与否决定是否改写 completedAt）。
+      completedAt: parsedStatus == TaskStatus.done ? completedAt : null,
+    ));
+
     tasks.add(Task(
       id: '', // 新任务：由 addTask 分配 id
       title: title,
@@ -193,7 +286,9 @@ CsvImportResult parseTasksCsv(String raw) {
       tasks: tasks,
       errors: errors,
       totalRows: totalRows,
-      skippedSections: skippedSections);
+      meta: meta,
+      skippedSections: skippedSections,
+      skippedDeleted: skippedDeleted);
 }
 
 /// RFC 4180 子集 CSV 解析：引号包裹、双写转义、逗号 / CR / LF / CRLF、BOM 剥除。
@@ -282,6 +377,11 @@ int? _parseEstimate(String s) {
 }
 
 /// 标签：按中英文常见分隔符切分、去空、去重，保持顺序。
+///
+/// P3-2 / U3-4（v3.0.0 审计）：「、」同时是导出端的连接符与这里的切分符——
+/// **约定**：标签名本身请勿包含「、」等分隔符（导出端以「、」连接、导入端按
+/// `[,，、;；/|]` 切分，含分隔符的标签无法无损往返）；该约定已在导入弹层
+/// 的字段保真说明中向用户披露。
 List<String> _parseTags(String s) {
   if (s.trim().isEmpty) return const <String>[];
   final out = <String>[];
@@ -290,6 +390,20 @@ List<String> _parseTags(String s) {
     if (t.isNotEmpty && !out.contains(t)) out.add(t);
   }
   return out;
+}
+
+/// P2-6（v3.0.0 审计）：状态列宽松解析——导出端写「已完成 / 未完成」，
+/// 兼容英文与 1/0；空或未知值返回 null（= 源未提供，覆盖时保留原值）。
+TaskStatus? _parseStatus(String s) {
+  final v = s.trim().toLowerCase();
+  if (v.isEmpty) return null;
+  if (v == '已完成' || v == 'done' || v == '是' || v == '1' || v == 'true' || v == 'yes') {
+    return TaskStatus.done;
+  }
+  if (v == '未完成' || v == 'todo' || v == '否' || v == '0' || v == 'false' || v == 'no') {
+    return TaskStatus.todo;
+  }
+  return null;
 }
 
 /// 优先级宽松解析：未知值回退 [Priority.medium]（与 [Task.fromJson] 同口径）。

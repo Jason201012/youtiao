@@ -882,11 +882,19 @@ class TaskProvider extends ChangeNotifier {
   static const List<int> trashRetentionOptions = [7, 30, 90, -1];
   int _trashRetentionDays = 30;
   int get trashRetentionDays => _trashRetentionDays;
+
+  /// P3-20（v3.0.0 审计）：保留期值域归一（load 白名单 + 写入侧共用的唯一口径）。
+  /// ≤0 → -1（永不清理）；正天数原样保留（自定义天数语义自洽）。
+  static int _normalizeTrashRetention(int v) => v <= 0 ? -1 : v;
   /// 人类可读的保留期文案（含「永不」）。
+  /// P3-20（v3.0.0 审计）：判据统一为 `<= 0`（与清理/扫描两侧同口径）。
   String get trashRetentionLabel {
-    return _trashRetentionDays < 0 ? '永不' : '$_trashRetentionDays 天';
+    return _trashRetentionDays <= 0 ? '永不' : '$_trashRetentionDays 天';
   }
   Future<void> setTrashRetentionDays(int v) async {
+    // P3-20（v3.0.0 审计）：写入侧归一——≤0 一律收口为 -1（永不），杜绝
+    // 「0 = cutoff=now 清空回收站」的危险语义经任何入口写盘。
+    v = _normalizeTrashRetention(v);
     if (v == _trashRetentionDays) return;
     _trashRetentionDays = v;
     notifyListeners();
@@ -899,7 +907,11 @@ class TaskProvider extends ChangeNotifier {
   /// 按当前保留期移除过期的回收站条目；[persist]=true 时变更会落 SQLite。
   /// 返回是否发生了实际清理。被 load() 兜底与 setTrashRetentionDays 调用。
   bool _cleanupTrashIfNeeded({bool persist = false}) {
-    if (_trashRetentionDays < 0) return false; // 永不自动清理
+    // P3-20（v3.0.0 审计）：门槛从 `< 0` 收紧为 `<= 0`——「≤0 = 永不清理」
+    // 与体检侧（DataHealthService.scan 的 `> 0`）同口径。旧判据下「0」会执行
+    // 清理且 cutoff=now，把回收站全部条目判超期清空（0 仅可经手改备份写入，
+    // UI 值域只有 7/30/90/-1）；归一后 0 与负值同等安全。
+    if (_trashRetentionDays <= 0) return false; // 永不自动清理
     final cutoff = DateTime.now().subtract(Duration(days: _trashRetentionDays));
     final before = _trash.length;
     // P2-13：回收站到期自动清理此前只 removeWhere，不删附件目录
@@ -929,7 +941,7 @@ class TaskProvider extends ChangeNotifier {
   /// 0 = 今天到期（即将被清理），负数 = 已过期（理论上不应出现在列表中）。
   /// -1（永不清理）统一返回 99999。
   int trashRemainingDays(Task t) {
-    if (_trashRetentionDays < 0) return 99999;
+    if (_trashRetentionDays <= 0) return 99999; // P3-20（v3.0.0 审计）：≤0=永不
     if (t.deletedAt == null) return _trashRetentionDays; // 无删除时间视为新近
     final deletedDate = DateTime(t.deletedAt!.year, t.deletedAt!.month, t.deletedAt!.day);
     final today = DateTime.now();
@@ -1012,7 +1024,7 @@ class TaskProvider extends ChangeNotifier {
   ///    不参与判定，见 [_collectExistingAttachmentKeys]）。
   /// 动手前仍会尝试写一份自动快照兜底（失败不阻断——软删本身可反悔）。
   ///
-  /// [includeStaleTrash]=true：额外执行 **4. 超期回收站 → 彻底删除**（含附件
+  /// [includeStaleTrash]=true：**只**执行 4. 超期回收站 → 彻底删除（含附件
   /// 目录与通知，与 permanentDelete 同径，**不可逆**）。
   /// P2-12（v2.9.9 审计）：执行前**必须**拿到一份完整自动快照——`_writeAutoBackup`
   /// 体积超限时返回错误串而非抛异常，旧实现不看返回值也不看异常，快照缺失时
@@ -1023,17 +1035,24 @@ class TaskProvider extends ChangeNotifier {
   /// P1-5（v2.9.9 审计）：不可逆删除从「一键修复」拆出——必须由 UI 显式传
   /// [includeStaleTrash]=true 并先行二次确认，不再与可逆修复混在一次点击里。
   ///
+  /// P2-1（v3.0.0 审计）：旧实现把「可逆修复」（步骤 1–3）与「不可逆删除」
+  /// （步骤 4）并列在同一函数里，仅步骤 4 受门控——purge 路径会连带把重复
+  /// 任务软删、字段剔除（二次确认框未披露的**未告知数据变更**），且返回值把
+  /// 两类合计、UI 显示「已彻底删除 N 条」谎报。现在两条路径**互斥**：
+  /// purge 只跑步骤 4；返回值分列 `(permanentDeleted, reversibleFixed)`，
+  /// UI 按实际执行的路径取数。
+  ///
   /// P3-11（v2.9.9 审计）：返回值 = 实际处置的**任务条数**（重复组按移入回收站
   /// 的条数计，不再一组只计 1）；旧实现 `relatedIds.isEmpty` 分支不可达（扫描层
   /// 必然填充），已并入空组守卫。
-  Future<int> fixDataHealthIssues(
+  Future<({int permanentDeleted, int reversibleFixed})> fixDataHealthIssues(
     DataHealthReport report, {
     bool includeStaleTrash = false,
   }) async {
-    if (report.isHealthy) return 0;
-    var backupOk = false;
+    if (report.isHealthy) return (permanentDeleted: 0, reversibleFixed: 0);
     if (includeStaleTrash) {
       // P2-12：不可逆分支的前置门——快照必须完整成功。
+      var backupOk = false;
       try {
         backupOk = await _writeAutoBackup(DateTime.now()) == null;
       } catch (_) {
@@ -1045,14 +1064,27 @@ class TaskProvider extends ChangeNotifier {
             '为避免不可恢复的数据丢失已中止「彻底删除」。请先在'
             '「备份到文件」手动备份，或关闭加密后再试');
       }
-    } else {
-      // 可逆修复：快照尽力而为（软删可反悔），失败不阻断。
-      try {
-        await _writeAutoBackup(DateTime.now());
-      } catch (_) {
-        // 修复前快照失败不阻断：修复动作本身可反悔（重复任务软删），
-        // 快照链路异常已由 lastAutoBackupError 呈现。
+      // P2-1（v3.0.0 审计）：purge 路径**只**执行超期回收站彻底删除——
+      // 重复任务软删 / 空白子项与失效附件剔除属「可逆修复」，超出
+      // 「彻底清理超期回收站」按钮的语义，不再连带触发。
+      var permanent = 0;
+      for (final issue in report.issues) {
+        if (issue.type != DataHealthIssueType.staleTrash) continue;
+        if (_trash.indexWhere((x) => x.id == issue.taskId) < 0) continue;
+        permanentDelete(issue.taskId);
+        permanent++;
       }
+      notifyListeners();
+      _persist();
+      _syncTrashExpireNotice();
+      return (permanentDeleted: permanent, reversibleFixed: 0);
+    }
+    // 可逆修复：快照尽力而为（软删可反悔），失败不阻断。
+    try {
+      await _writeAutoBackup(DateTime.now());
+    } catch (_) {
+      // 修复前快照失败不阻断：修复动作本身可反悔（重复任务软删），
+      // 快照链路异常已由 lastAutoBackupError 呈现。
     }
     var fixed = 0;
     final (keys, uncertain) = await _collectExistingAttachmentKeys();
@@ -1116,20 +1148,12 @@ class TaskProvider extends ChangeNotifier {
     }
 
     // 4) 超期回收站：彻底删除（含附件目录、通知、撤销缓冲作废，同 permanentDelete）。
-    //    仅在 includeStaleTrash=true 且快照门通过时执行（P1-5 / P2-12）。
-    if (includeStaleTrash) {
-      for (final issue in report.issues) {
-        if (issue.type != DataHealthIssueType.staleTrash) continue;
-        if (_trash.indexWhere((x) => x.id == issue.taskId) < 0) continue;
-        permanentDelete(issue.taskId);
-        fixed++;
-      }
-    }
-
+    //    P2-1（v3.0.0 审计）：已上移到 purge 独立分支——可逆路径**不再**包含
+    //    不可逆删除，两条路径彻底互斥。
     notifyListeners();
     _persist();
     _syncTrashExpireNotice();
-    return fixed;
+    return (permanentDeleted: 0, reversibleFixed: fixed);
   }
 
   // ===== 通知总开关 =====
@@ -1281,7 +1305,12 @@ class TaskProvider extends ChangeNotifier {
     _dndEnabled = prefs.getBool(_kDndEnabled) ?? false;
     _dndStartHour = prefs.getInt(_kDndStart) ?? 22;
     _dndEndHour = prefs.getInt(_kDndEnd) ?? 7;
-    _trashRetentionDays = prefs.getInt(_kTrashRetention) ?? 30;
+    // P3-20（v3.0.0 审计）：读取侧归一（load 值域白名单）——合法值域为
+    // 7/30/90/-1 及其它正天数；0 与负值一律归一为 -1（永不清理）。旧实现
+    // 原样接受「0」，会在启动/午夜兜底清理时以 cutoff=now 清空整个回收站
+    // 且无快照（0 仅可经手改备份/历史残留写入，UI 值域不含 0）。
+    _trashRetentionDays = _normalizeTrashRetention(
+        prefs.getInt(_kTrashRetention) ?? 30);
     _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
     _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
     _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
@@ -1664,12 +1693,22 @@ class TaskProvider extends ChangeNotifier {
 
   /// 判断任务是否为「今天的事务」：未删除，且（无截止日期 / 截止日期为今天 / 今天为循环日）。
   /// 无截止日期视为当天，并始终跟随当前日期（跨天自动顺延到第二天）。
+  ///
+  /// P3-12（v3.0.0 审计）：与 today.dart 聚合（TodayAggregate._isEventToday）
+  /// 的修复口径同步——带 dueDate 的重复任务在其截止日还须今天是循环日
+  /// （repeatsOn 含 skipDates 判定），暂停中 / 已跳过当天的重复任务不再计入
+  /// 「当日事件」统计（todayEventTotal / todayCompleted / todayCompletionRate，
+  /// 消费点 board_screen）。旧实现恒按 dueDate 命中，与已修的今日聚合分叉；
+  /// 归一同样走 [dueCompareKey] 比较键真源，避免两处取键管道漂移。
   bool _isEventToday(Task t, DateTime now) {
     if (t.deletedAt != null) return false;
     final today = DateTime(now.year, now.month, now.day);
     if (t.dueDate != null) {
-      final d = DateTime(t.dueDate!.year, t.dueDate!.month, t.dueDate!.day);
-      if (d == today) return true;
+      final k = dueCompareKey(t.dueDate!);
+      if (DateTime(k.year, k.month, k.day) == today) {
+        if (t.isRepeating && !t.repeatsOn(today)) return false;
+        return true;
+      }
     } else if (!t.isRepeating) {
       // 非循环且无截止日期 → 视为当天（始终跟随当前日期，跨天自动顺延到第二天）
       return true;
@@ -2464,7 +2503,21 @@ class TaskProvider extends ChangeNotifier {
     final remaining = src.skipDates
         .where((s) => s.compareTo(_ymd(today)) < 0 || s.compareTo(endKey) > 0)
         .toList();
-    if (remaining.length == src.skipDates.length) return; // 窗口内无键，幂等
+    if (remaining.length == src.skipDates.length) {
+      // P2-3（v3.0.0 审计）：窗口内无循环日键 ≠ 无暂停窗口——「每周一任务在
+      // 周三暂停到周四」这类窗口不含循环日时，暂停侧不会新增 skipDates 键，
+      // 旧判据把「有窗口」当「无窗口」在此提前 return：pausedUntil 清不掉、
+      // 角标不消失，UI 却弹「已恢复」谎报成功。早退分支也必须清窗口字段并
+      // 重排提醒（skipDates 无变化，只动 pausedUntil）。
+      _tasks[i] = src.copyWith(pausedUntil: null);
+      if (_tasks[i].isRepeating) {
+        _cancelRemindersFor(_tasks[i].id);
+        _scheduleRemindersFor(_tasks[i]);
+      }
+      notifyListeners();
+      _persist();
+      return;
+    }
     _tasks[i] = src.copyWith(
       skipDates: Task.pruneHistory(remaining, now) ?? remaining,
       pausedUntil: null, // P1-4：窗口字段一并清除
@@ -2497,6 +2550,10 @@ class TaskProvider extends ChangeNotifier {
     _tasks[i] = _tasks[i].copyWith(
       repeatUntil: _ymd(yesterday),
       dueDate: null,
+      // P3-11（v3.0.0 审计）：结束重复时清暂停窗口字段——旧实现保留
+      // pausedUntil，日后重开重复（编辑改回无结束日期）会把旧暂停「复活」，
+      // 任务莫名不再出现且带着过期角标。
+      pausedUntil: null,
       status: markDone ? TaskStatus.done : null,
       completedAt: markDone ? now : null,
       doneDates: markDone ? _withDoneDate(_tasks[i], true, now) : null,
@@ -2626,22 +2683,62 @@ class TaskProvider extends ChangeNotifier {
   /// P0-3：iCal / CSV 导入幂等去重。
   /// [incoming] 为解析出的任务（其 id 已由解析层设为 youtiao UID 前缀，或无 UID 留空）；
   /// [uids] 为与 [incoming] 平行的原始 UID 列表（用于判断是否为 youtiao 来源）。
-  /// [skipExisting]=true 时，已存在的任务跳过（不新增）；[overwrite]=true 时对已存在任务
-  /// 以新内容覆盖更新（仍不新增）；[fingerprint]=true 时对「无 UID 的第三方 .ics」按
-  /// 「标题 + 截止日期」指纹去重（默认关闭，避免同名任务被误合并）。
+  /// [overwrite]=true 时对已存在任务以新内容覆盖更新（仍不新增）；[fingerprint]=true
+  /// 时对「无 UID 的第三方 .ics / CSV」按「标题 + 截止日期」指纹去重（默认关闭，
+  /// 避免同名任务被误合并）。
+  /// [statuses]/[priorities]/[categories]/[completedAts] 为与 [incoming] 平行的
+  /// 「源是否显式提供」元信息（P2-2，v3.0.0 审计；CSV 来自 [CsvImportRowMeta]，
+  /// iCal 侧按块内是否携带对应属性填写）：null = 未提供，覆盖时保留原值。
   /// 返回 {added, skipped, overwritten} 计数，供调用方展示导入报告。
+  ///
+  /// P3-4（v3.0.0 审计）：移除 `skipExisting` 死参数——该参数自 v2.9.2 引入起
+  /// 从未被函数体读取（overwrite=false 的默认路径本就是「命中即跳过」），留着
+  /// 只会误导调用方以为另有语义。
   ({int added, int skipped, int overwritten}) importDedup(
     List<Task> incoming,
     List<String?> uids, {
-    bool skipExisting = true,
     bool overwrite = false,
     bool fingerprint = false,
+    List<TaskStatus?> statuses = const [],
+    List<Priority?> priorities = const [],
+    List<Category?> categories = const [],
+    List<DateTime?> completedAts = const [],
   }) {
     var added = 0, skipped = 0, overwritten = 0;
+    T? pick<T>(List<T?> list, int i) => i < list.length ? list[i] : null;
     // P2-4（v2.9.9 审计）：新增行先收集、最后一次性插入落库——旧实现逐行
     // addTask，每行各自 notifyListeners + _persist + 提醒重排（N 倍写放大），
     // 且中途异常时已写入的行无法回滚（半写入）。
     final toAdd = <Task>[];
+    // P2-7（v3.0.0 审计）：全库指纹索引只建一次（O(n)），旧实现每条 incoming
+    // 对全库线性扫描并重复计算指纹（O(n×m)），数千行大表导入会秒级冻结 UI。
+    final Map<String, Task>? fpIndex = fingerprint
+        ? <String, Task>{
+            for (final t in _tasks) _fingerprintKey(t): t,
+          }
+        : null;
+    // U2-2（v3.0.0 审计）：批内指纹判重——旧实现只查库不含本批 toAdd，
+    // 同一文件内两行完全相同会双双导入（「跳过重复」承诺在批内不成立）。
+    // 跳过模式：后者丢弃计 skipped；覆盖模式：后者替换前者（后行为准）。
+    final batchFp = <String, int>{};
+    void addToBatch(Task t) {
+      if (fpIndex != null) {
+        final key = _fingerprintKey(t);
+        final idx = batchFp[key];
+        if (idx != null) {
+          if (overwrite) {
+            toAdd[idx] = t;
+          } else {
+            skipped++;
+          }
+          return;
+        }
+        batchFp[key] = toAdd.length;
+      }
+      toAdd.add(t);
+      added++;
+    }
+
     for (var i = 0; i < incoming.length; i++) {
       final task = incoming[i];
       final uid = i < uids.length ? uids[i] : null;
@@ -2659,27 +2756,43 @@ class TaskProvider extends ChangeNotifier {
           // 安全（P2-A）：id 撞上了用户已有的**另一条**真实任务（第三方 .ics 可枚举出
           // 小整数 id），但内容指纹不一致。此时绝不能按「覆盖」把真实任务改写掉——
           // 丢弃可疑 id，作为一条全新任务导入。
-          toAdd.add(task.copyWith(id: ''));
-          added++;
+          addToBatch(task.copyWith(id: ''));
           continue;
         }
       }
       if (existing == null &&
           fingerprint &&
           (uid == null || !uid.endsWith('@youtiao'))) {
-        existing = _matchByFingerprint(task);
+        existing = fpIndex![_fingerprintKey(task)];
       }
       if (existing == null) {
-        toAdd.add(task);
-        added++;
+        addToBatch(task);
       } else if (overwrite) {
         // P2-20：覆盖更新必须允许写入来源方的完成态，否则「外部日历已标记完成」
         // 的任务导回后仍显示未完成（updateTask 会强制回填旧 status/completedAt）。
         // P2-1（v2.9.9 审计）：覆盖前先做「来源为空保留原值」的字段级合并——
         // iCal 来源没有子任务 / 附件 / 标签 / 备注等本 App 独有字段，直接以
         // 来源方为准会把原任务这些数据整体清空。
-        final merged = _mergeOverwriteFields(existing, task);
-        if (_applyTaskUpdate(merged.copyWith(id: existing.id),
+        final merged = _mergeOverwriteFields(existing, task,
+            srcPriority: pick(priorities, i),
+            srcCategory: pick(categories, i));
+        // P2-2（v3.0.0 审计）：状态只在来源**显式提供**时改写——CSV / iCal
+        // 草稿恒产出 status=todo（源无状态列 / 无 STATUS 行），旧实现经
+        // allowStatusChange:true 把已完成任务重置为 todo。未提供时回填
+        // 旧完成态（completedAt 一并）。
+        final srcStatus = pick(statuses, i);
+        final mergedFinal = srcStatus == null
+            ? merged.copyWith(
+                status: existing.status, completedAt: existing.completedAt)
+            : merged.copyWith(
+                status: srcStatus,
+                completedAt: srcStatus == TaskStatus.done
+                    ? (pick(completedAts, i) ??
+                        task.completedAt ??
+                        existing.completedAt)
+                    : null,
+              );
+        if (_applyTaskUpdate(mergedFinal.copyWith(id: existing.id),
             allowStatusChange: true)) {
           overwritten++;
         }
@@ -2703,28 +2816,30 @@ class TaskProvider extends ChangeNotifier {
   /// **只在最后落库 / 通知一次**，消除逐行 addTask 的 N 倍写放大与半写入窗口。
   void _addTasksBulk(List<Task> tasks) {
     if (tasks.isEmpty) return;
+    // P2-7（v3.0.0 审计）：各分区 maxOrder 预取一次（O(n)）——旧实现每条
+    // 新增行都对全库 + 已备列表线性扫两遍求最大 order（O(n²)），数千行大表
+    // 落库阶段同样会卡 UI。滚动更新语义与旧实现逐条 max+1 完全等价。
+    final maxOrderBySection = <String, double>{};
+    for (final x in _tasks) {
+      final s = _sectionNameOf(x);
+      if (x.order > (maxOrderBySection[s] ?? 0)) maxOrderBySection[s] = x.order;
+    }
     final prepared = <Task>[];
     for (final t in tasks) {
       // P0-3 / 安全（P2-A）：与 addTask 同款 id 复用校验。
       final useId =
           _canReuseExternalId(t.id) ? t.id : (_idSeq++).toString();
+      // A1：落库时统一计算拼音首字母，保证所有新建入口都自动覆盖。
       var nt = t.copyWith(
         id: useId,
-        // A1：落库时统一计算拼音首字母，保证所有新建入口都自动覆盖。
         pinyinInitials: Task.computePinyinInitials(t.title),
       );
       // 落点到对应分区的末尾：取该分区现有最大 order + 1（含本批已排好的行）。
       final section = _sectionNameOf(nt);
-      double maxOrder = 0;
-      for (final x in _tasks) {
-        if (_sectionNameOf(x) == section && x.order > maxOrder) maxOrder = x.order;
-      }
-      for (final p in prepared) {
-        if (_sectionNameOf(p) == section && p.order > maxOrder) {
-          maxOrder = p.order;
-        }
-      }
-      prepared.add(nt.copyWith(order: maxOrder + 1));
+      final maxOrder = maxOrderBySection[section] ?? 0;
+      nt = nt.copyWith(order: maxOrder + 1);
+      maxOrderBySection[section] = maxOrder + 1;
+      prepared.add(nt);
     }
     // addTask 逐条 insert(0)：后插入的在最上。insertAll(0, reversed) 保持同序。
     _tasks.insertAll(0, prepared.reversed);
@@ -2737,8 +2852,25 @@ class TaskProvider extends ChangeNotifier {
   /// 附件 / 标签 / 备注等本 App 独有字段，旧实现「以来源方为准」会把原任务的
   /// 这些数据整体清空。规则：来源**为空 / 缺省**的字段保留原值；来源**显式
   /// 携带**的字段以来源为准（真正的「覆盖」）。status / completedAt 由
-  /// [_applyTaskUpdate] 的 `allowStatusChange` 管道处理，不在此列。
-  static Task _mergeOverwriteFields(Task old, Task src) {
+  /// [importDedup] 按「源是否显式提供状态」处理（P2-2，v3.0.0 审计），不在
+  /// 此列。
+  ///
+  /// P2-2 / P3-1（v3.0.0 审计）：
+  /// - priority / category 由调用方以可空 [srcPriority] / [srcCategory] 传入
+  ///   （null = 源未提供 → 保留原值）——旧实现草稿恒产出默认值（CSV→medium/
+  ///   life、iCal→medium/work），覆盖会把既有任务的「高/工作」重置为默认；
+  /// - 月度规则四字段**整套**采纳，判据为「源本身是否为 monthly」——旧实现
+  ///   只合并 monthlyDay 且把 1 当缺省（显式「每月 1 号」被吞），
+  ///   monthlyFromEnd / monthlyWeekday / monthlyWeekIndex 则从未合并
+  ///   （「每月最后一天」任务被月规则 iCal 覆盖后重置为「每月 N 号」）。
+  ///   源非 monthly（解析缺省 / 其它规则）→ 整套保留原值。
+  static Task _mergeOverwriteFields(
+    Task old,
+    Task src, {
+    Priority? srcPriority,
+    Category? srcCategory,
+  }) {
+    final srcMonthly = src.repeat == RepeatType.monthly;
     return src.copyWith(
       note: src.note.isEmpty ? old.note : src.note,
       tags: src.tags.isEmpty ? old.tags : src.tags,
@@ -2749,6 +2881,8 @@ class TaskProvider extends ChangeNotifier {
       doneDates: src.doneDates.isEmpty ? old.doneDates : src.doneDates,
       startDate: src.startDate ?? old.startDate,
       estimateMinutes: src.estimateMinutes ?? old.estimateMinutes,
+      priority: srcPriority ?? old.priority,
+      category: srcCategory ?? old.category,
       // 提醒偏移：来源无提醒段时为 0（=「未提供」），保留原值；显式「准时」
       // 由 VALARM TRIGGER=PT0S 表达（offset=0 且确有提醒段——该场景极罕见，
       // 宁可保留旧提醒也不误清）。
@@ -2766,17 +2900,14 @@ class TaskProvider extends ChangeNotifier {
           src.repeatUntil == null ? old.repeatUntil : src.repeatUntil,
       repeatMinute: src.repeatMinute ?? old.repeatMinute,
       repeatAnchor: src.repeatAnchor ?? old.repeatAnchor,
-      monthlyDay: src.monthlyDay == 1 ? old.monthlyDay : src.monthlyDay,
+      monthlyDay: srcMonthly ? src.monthlyDay : old.monthlyDay,
+      monthlyWeekday:
+          srcMonthly ? src.monthlyWeekday : old.monthlyWeekday,
+      monthlyWeekIndex:
+          srcMonthly ? src.monthlyWeekIndex : old.monthlyWeekIndex,
+      monthlyFromEnd:
+          srcMonthly ? src.monthlyFromEnd : old.monthlyFromEnd,
     );
-  }
-
-  /// 按「标题 + 截止日期」指纹查找现有任务（供无 UID 的第三方 .ics 去重）。
-  Task? _matchByFingerprint(Task task) {
-    final key = _fingerprintKey(task);
-    for (final t in _tasks) {
-      if (_fingerprintKey(t) == key) return t;
-    }
-    return null;
   }
 
   /// 任务指纹：标题 + 截止日期（date-only）。用于第三方 .ics / 无 UID 的 CSV 去重。
@@ -2823,7 +2954,15 @@ class TaskProvider extends ChangeNotifier {
             updated.repeatAnchor == null)
         ? updated.copyWith(repeatAnchor: _dateOnly(DateTime.now()))
         : updated;
-    _tasks[i] = anchored.copyWith(
+    // P3-11（v3.0.0 审计）：重复 → 不重复的编辑要清暂停窗口字段——旧实现
+    // 保留 pausedUntil，非重复任务误显「已暂停至 M/d」角标（pausedUntilDate
+    // 的显式分支不作 isRepeating 判定），且日后重开重复会「复活」旧暂停。
+    // skipDates 保留（历史跳过是统计口径，清掉会破坏完成/跳过记录）。
+    final declamped =
+        (old.isRepeating && anchored.repeat == RepeatType.none)
+            ? anchored.copyWith(pausedUntil: null)
+            : anchored;
+    _tasks[i] = declamped.copyWith(
       id: old.id,
       // P2-20：默认强制保留旧完成态（避免 UI 层误改），但「备份/日历覆盖更新」
       // 这类显式导入场景需要允许写入来源方的完成态，否则外部日历标记完成的任务

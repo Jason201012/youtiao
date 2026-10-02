@@ -476,8 +476,12 @@ class TaskDetailScreen extends StatelessWidget {
                             initialDate:
                                 DateTime.now().add(const Duration(days: 1)),
                             firstDate: DateTime.now(),
+                            // U3-2（v3.0.0 审计）：上限从 1 年放宽到 3 年——
+                            // 「暂停直到…」是长休学场景的合法入口，固定 1 年
+                            // 且无说明会让用户以为只支持一年。上限与
+                            // Task.pausedUntilDate 旧数据回退推导的扫描窗一致。
                             lastDate:
-                                DateTime.now().add(const Duration(days: 365)),
+                                DateTime.now().add(const Duration(days: 366 * 3)),
                           );
                           if (picked == null || !context.mounted) return;
                           // 快照取**操作时刻**的当前对象：暂停期间若他处又改过

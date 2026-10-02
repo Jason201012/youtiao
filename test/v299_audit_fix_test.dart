@@ -48,12 +48,15 @@ void main() {
   group('P1-1 三表拼接 CSV 分段识别', () {
     test('任务段后遇专注/习惯段表头即止，skippedSections 如实计数', () {
       // 本 App 导出把任务/专注/习惯三表依次拼接（各自带独立表头）。
+      // P2-5（v3.0.0 审计）：段表头样例改为与真实导出列定义一致
+      // （focusExportHeaders / habitExportHeaders / checkInExportHeaders）——
+      // 新判据要求整行指纹（首格 + 第二列）命中才认定换段。
       final csv = '标题,截止时间,优先级,分类,标签,备注,预计时长(分钟)\n'
           '写周报,2026-10-09,低,工作,,,\n'
-          '日期,总时长(分钟),专注任务,开始,结束\n'
-          '2026-10-01,25,写周报,10:00,10:25\n'
-          '习惯,打卡日,当前连击\n'
-          '喝水,2026-10-01,3\n';
+          '日期,开始时间,结束时间,计划时长(分),实际时长(分),是否完成,关联任务\n'
+          '2026-10-01,10:00,10:25,25,25.0,是,写周报\n'
+          '习惯,表情,创建时间,当前连续(天),最长连续(天),累计达标(天),提醒,每日目标,宽限日(天),是否归档\n'
+          '喝水,💧,2026-09-01 08:00,3,5,20,08:00,,0,否\n';
       final r = parseTasksCsv(csv);
       expect(r.tasks, hasLength(1), reason: '只解析任务段');
       expect(r.tasks.single.title, '写周报');
@@ -255,8 +258,11 @@ void main() {
       ]);
       final report = await p.scanDataHealth();
       expect(report.countOf(DataHealthIssueType.staleTrash), 1);
-      final fixed = await p.fixDataHealthIssues(report); // includeStaleTrash=false
-      expect(fixed, 0, reason: '可逆分支不处理超期回收站');
+      // P2-1（v3.0.0 审计）：返回值改为 record 分列（permanentDeleted /
+      // reversibleFixed），可逆路径只产生 reversibleFixed。
+      final r = await p.fixDataHealthIssues(report); // includeStaleTrash=false
+      expect(r.reversibleFixed, 0, reason: '可逆分支不处理超期回收站');
+      expect(r.permanentDeleted, 0);
       expect(p.trash, hasLength(1), reason: '回收站条目原样保留');
     });
 
@@ -356,8 +362,10 @@ void main() {
       final report = await p.scanDataHealth();
       expect(report.countOf(DataHealthIssueType.duplicateTask), 1);
       expect(report.issues.single.relatedIds, ['d2', 'd3', 'd4']);
-      final fixed = await p.fixDataHealthIssues(report);
-      expect(fixed, 3, reason: 'P3-11：按 relatedIds.length 计，不再一组只计 1');
+      // P2-1（v3.0.0 审计）：返回值改为 record 分列。
+      final r = await p.fixDataHealthIssues(report);
+      expect(r.reversibleFixed, 3, reason: 'P3-11：按 relatedIds.length 计，不再一组只计 1');
+      expect(r.permanentDeleted, 0, reason: '可逆路径绝不产生永久删除');
       expect(p.tasks.single.id, 'd1', reason: '锚点（组内首条）保留');
       expect(p.trash, hasLength(3));
     });

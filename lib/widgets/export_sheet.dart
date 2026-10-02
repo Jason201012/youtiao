@@ -344,7 +344,7 @@ class ExportSheet {
                 onPressed: () {
                   Navigator.pop(dctx);
                   _runImportDedup(provider, context, result,
-                      skipExisting: true, overwrite: false, fingerprint: false);
+                      overwrite: false, fingerprint: false);
                 },
                 child: const Text('跳过重复（推荐）'),
               ),
@@ -352,7 +352,7 @@ class ExportSheet {
                 onPressed: () {
                   Navigator.pop(dctx);
                   _runImportDedup(provider, context, result,
-                      skipExisting: false, overwrite: true, fingerprint: false);
+                      overwrite: true, fingerprint: false);
                 },
                 child: const Text('覆盖更新'),
               ),
@@ -360,7 +360,7 @@ class ExportSheet {
                 onPressed: () {
                   Navigator.pop(dctx);
                   _runImportDedup(provider, context, result,
-                      skipExisting: true, overwrite: false, fingerprint: true);
+                      overwrite: false, fingerprint: true);
                 },
                 child: const Text('模糊去重（标题+日期）'),
               ),
@@ -377,20 +377,25 @@ class ExportSheet {
   }
 
   /// P0-3：按选定策略执行 iCal 幂等导入，并以 SnackBar 展示新增/覆盖/跳过计数。
+  ///
+  /// P2-2（v3.0.0 审计）：iCal 解析层提供「源是否显式提供」元信息
+  /// （[IcsImportResult.meta]），透传给 [TaskProvider.importDedup]——覆盖更新
+  /// 只改写源显式携带的字段，缺省（无 PRIORITY/CATEGORIES/STATUS 行）保留原值。
   static Future<void> _runImportDedup(
     TaskProvider provider,
     BuildContext context,
     IcsImportResult result, {
-    required bool skipExisting,
     required bool overwrite,
     required bool fingerprint,
   }) async {
     final stats = provider.importDedup(
       result.tasks,
       result.uids,
-      skipExisting: skipExisting,
       overwrite: overwrite,
       fingerprint: fingerprint,
+      priorities: [for (final m in result.meta) m.priority],
+      categories: [for (final m in result.meta) m.category],
+      statuses: [for (final m in result.meta) m.status],
     );
     if (!context.mounted) return;
     final parts = <String>['新增 ${stats.added}'];
@@ -442,18 +447,27 @@ class ExportSheet {
       final result = await compute(parseTasksCsv, raw);
       // P3-1（v2.9.9 审计）：校验失败明细最多展示 3 条（旧实现只报首条，
       // 与「最多 3 条」的文档注释不符）；分段截断信息一并告知。
+      // P3-5（v3.0.0 审计）：被忽略的段数文案如实列举三段（专注/习惯/打卡）——
+      // 本 App 导出实为三个非任务段，旧文案只列两个。
       final errHead = result.errors.isEmpty
           ? ''
           : '；${result.errors.length} 行未通过校验被跳过（'
               '${result.errors.take(3).map((e) => '第 ${e.row} 行：${e.reason}').join('；')}'
               '${result.errors.length > 3 ? '…等' : ''}）';
       final sectionNote = result.skippedSections > 0
-          ? '；已忽略 ${result.skippedSections} 个非任务数据段（专注 / 习惯）'
+          ? '；已忽略 ${result.skippedSections} 个非任务数据段（专注 / 习惯 / 打卡）'
+          : '';
+      // P2-6（v3.0.0 审计）：回收站条目（是否已删除=是）不再导入为活动任务，
+      // 跳过数如实提示——旧实现把它们反向复活为活动任务。
+      final deletedNote = result.skippedDeleted > 0
+          ? '；${result.skippedDeleted} 条回收站条目已跳过（不导入已删除内容）'
           : '';
       if (result.tasks.isEmpty) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('未解析到可导入的任务$errHead$sectionNote')),
+            SnackBar(
+                content:
+                    Text('未解析到可导入的任务$errHead$sectionNote$deletedNote')),
           );
         }
         return;
@@ -463,12 +477,35 @@ class ExportSheet {
           context: context,
           builder: (dctx) => AlertDialog(
             title: const Text('选择导入方式'),
-            content: Text(
-              '共解析到 ${result.tasks.length} 条任务（数据行 ${result.totalRows} 行）'
-              '$errHead$sectionNote。'
-              // P1-2（v2.9.9 审计）：CSV 没有稳定 ID（草稿 id 为空），重复判定
-              // 一律按「标题 + 截止日期」指纹——必须如实告知判定依据。
-              '\nCSV 无稳定 ID：重复按「标题 + 截止日期」判定。',
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '共解析到 ${result.tasks.length} 条任务（数据行 ${result.totalRows} 行）'
+                    '$errHead$sectionNote$deletedNote。'
+                    // P1-2（v2.9.9 审计）：CSV 没有稳定 ID（草稿 id 为空），重复判定
+                    // 一律按「标题 + 截止日期」指纹——必须如实告知判定依据。
+                    '\nCSV 无稳定 ID：重复按「标题 + 截止日期」判定。',
+                  ),
+                  const SizedBox(height: 8),
+                  // U2-3 / P2-6（v3.0.0 审计）：字段保真边界如实披露——导出 16 列
+                  // 里只有部分可机器还原，其余为人类可读的存档摘要；用户把 CSV
+                  // 当迁移格式时必须先知道哪些列不会回来（迁移请用备份 JSON）。
+                  Text(
+                    '可导入列：标题、截止、开始、优先级、分类、标签、备注、'
+                    '预计、状态、完成时间。\n'
+                    '仅存档（导入不还原）：重复规则、提醒、子任务、附件、'
+                    '累计专注——迁移请用备份 JSON。\n'
+                    '标签以「、」等分隔，标签名本身请勿含分隔符。',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(dctx).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
             ),
             actions: [
               TextButton(
@@ -507,6 +544,10 @@ class ExportSheet {
   /// 默认推荐项反而整表制造副本。现收敛为两挡并**强制指纹去重**：跳过 =
   /// 命中「标题+截止」即跳过；覆盖 = 命中后更新（来源为空的字段保留原值，
   /// 见 TaskProvider.importDedup 的合并规则）。
+  ///
+  /// P2-2（v3.0.0 审计）：透传解析层元信息（[CsvImportResult.meta]）——
+  /// 覆盖更新只改写源显式携带的优先级/分类/状态；「是否已删除」行已在
+  /// 解析层跳过并计数。
   static Future<void> _runCsvImportDedup(
     TaskProvider provider,
     BuildContext context,
@@ -516,9 +557,12 @@ class ExportSheet {
     final stats = provider.importDedup(
       result.tasks,
       List<String?>.filled(result.tasks.length, null),
-      skipExisting: true,
       overwrite: overwrite,
       fingerprint: true, // P1-2：CSV 无 UID，必须走标题+截止指纹
+      priorities: [for (final m in result.meta) m.priority],
+      categories: [for (final m in result.meta) m.category],
+      statuses: [for (final m in result.meta) m.status],
+      completedAts: [for (final m in result.meta) m.completedAt],
     );
     if (!context.mounted) return;
     final parts = <String>['新增 ${stats.added}'];
@@ -526,10 +570,46 @@ class ExportSheet {
     if (stats.skipped > 0) parts.add('跳过 ${stats.skipped}');
     final failed = result.errors.isEmpty
         ? ''
-        : '（${result.errors.length} 行校验失败未导入，可修正后重导）';
+        : '（${result.errors.length} 行校验失败未导入）';
+    // U2-5（v3.0.0 审计）：失败行不再只报条数——完整清单（行号 + 原因，
+    // 可滚动）在结果对话框里给出，用户可按行号定位修正后定点重导。
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('CSV 导入完成：${parts.join('，')}$failed')),
     );
+    if (result.errors.isNotEmpty) {
+      await showDialog<void>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          title: Text('未导入的 ${result.errors.length} 行'),
+          content: SizedBox(
+            width: 320,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final e in result.errors)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text('第 ${e.row} 行：${e.reason}',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color:
+                                  Theme.of(dctx).colorScheme.onSurfaceVariant)),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dctx),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   static String _ts() {

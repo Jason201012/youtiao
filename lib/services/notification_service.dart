@@ -1666,7 +1666,17 @@ class NotificationService {
         playSound: false,
         autoCancel: true,
         // P3-22：通知完成的 10 秒窗口外仍可反悔——确认通知常驻「撤销」按钮。
-        actions: [AndroidNotificationAction(taskUndoActionId, '撤销')],
+        // U3-5 / P3-18（v3.0.0 审计）：`showsUserInterface: true`——点按 action
+        // 先拉起 App 前台再走 Flutter 端回调。旧实现不带该标记，App 被杀死后
+        // 点按是「死键」（后台隔离区无回调、无任何反馈）；拉起前台后即使快照
+        // 已随进程丢失，也会由 [_doTaskUndo] 的失效分支回「撤销已失效」提示。
+        actions: [
+          AndroidNotificationAction(
+            taskUndoActionId,
+            '撤销',
+            showsUserInterface: true,
+          ),
+        ],
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
         visibility: visibility,
       ),
@@ -1711,6 +1721,36 @@ class NotificationService {
       );
     } catch (e) {
       AppLog.d('[通知] 任务撤销确认通知失败 id=$taskId: $e');
+    }
+  }
+
+  /// U2-4 / P3-18（v3.0.0 审计）：通知「撤销」不可执行时的**如实反馈**——
+  /// 快照是进程内内存，杀进程/重启后丢失，旧实现静默早退（点按无任何反应，
+  /// 通知仍显示「已完成 ✓」）。现在在原通知位覆盖一条失效提示，绝不谎报。
+  Future<void> showTaskUndoInvalid(String taskId) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        _notifyIdOf(taskId),
+        '撤销已失效',
+        '应用重启后撤销窗口已过期，请打开应用查看任务状态',
+        detail,
+        payload: '$payloadTaskPrefix$taskId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 撤销失效提示通知失败 id=$taskId: $e');
     }
   }
 

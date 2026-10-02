@@ -23,6 +23,19 @@ const String kKanbanGroupModePrefsKey = 'kanban_group_mode';
 /// T2-3（v2.9.2 功能增强）：「待办」泳道进行中上限（WIP）的偏好键。0 = 不限。
 const String kKanbanWipLimitPrefsKey = 'kanban_wip_limit';
 
+/// P2-8 / U2-1（v3.0.0 审计）：看板待办上限的**运行态**单例。
+///
+/// 旧实现两入口只共享偏好键：看板仅在 `initState` 读一次 prefs 并缓存在
+/// State 私有字段，而看板 Tab 由 IndexedStack 保活——设置页改完上限后
+/// 回看板仍是旧值，须重启 App 才生效（「设置成功」是假象，保护静默失效）。
+/// 现在两入口读写同一 [ValueNotifier]：设置页写入后看板 State 经监听即时
+/// setState（prefs 仍是持久层，App 冷启动时由看板 initState 回填）。
+final ValueNotifier<int> kanbanWipLimitNotifier = ValueNotifier<int>(0);
+
+/// P3-10（v3.0.0 审计）：上限值域夹取的唯一口径（0..99，0 = 不限）——
+/// 弹窗步进器本就限 0..99，手改备份 / 未来新增入口统一在此收口。
+int clampWipLimit(int v) => v < 0 ? 0 : (v > 99 ? 99 : v);
+
 /// T2-3：待办超限判定（纯函数，供单测钉死）。[limit] <= 0 恒不拦。
 @visibleForTesting
 bool kanbanWipBlocked(int todoCount, int limit) =>
@@ -32,7 +45,12 @@ bool kanbanWipBlocked(int todoCount, int limit) =>
 ///
 /// P3-8（v2.9.9 审计）：口径说明——计数与「状态」分组下待办泳道展示的是**同一
 /// 集合**（全部未删 todo，含逾期 / 暂停 / 重复任务），WIP 拦截的就是「泳道放满」，
-/// 两者必须一致；分类 / 标签分组下 `dropStatus == null`，WIP 不生效。
+/// 两者必须一致。
+/// P3-9（v3.0.0 审计）：旧注释称「分类 / 标签分组下 WIP 不生效」与实现矛盾——
+/// 卡片 [_KanbanCard._cycle] 在所有分组模式都按 `globalWipLimit` 判全局上限
+/// （P1-3 的修复把「已完成→待办」的勾选转回纳入约束，本就不该随分组模式放宽）。
+/// 生效口径实为：**全局上限在所有分组生效；列级上限仅「状态」分组的待办列**
+/// （列内新建 / 拖入）。全局口径是 v2.9.9 P3-8 有意保持并已在文案中披露的行为。
 int kanbanTodoCountOf(TaskProvider provider) => provider.tasks
     .where((t) => t.deletedAt == null && t.status == TaskStatus.todo)
     .length;
@@ -322,29 +340,48 @@ class _KanbanBoardState extends State<KanbanBoard> {
     super.initState();
     _restoreMode();
     _restoreWipLimit();
+    // P2-8（v3.0.0 审计）：订阅运行态——设置页（或其它入口）改上限后本页
+    // 即时生效，不再需要重启 App。
+    kanbanWipLimitNotifier.addListener(_onWipLimitChanged);
+  }
+
+  @override
+  void dispose() {
+    kanbanWipLimitNotifier.removeListener(_onWipLimitChanged);
+    super.dispose();
+  }
+
+  /// P2-8：运行态变更 → 同步本地缓存字段（含 0..99 夹取）。
+  void _onWipLimitChanged() {
+    if (!mounted) return;
+    final v = clampWipLimit(kanbanWipLimitNotifier.value);
+    if (v == _wipLimit) return;
+    setState(() => _wipLimit = v);
   }
 
   /// T2-3：读取持久化的 WIP 上限（读取失败静默保持「不限」）。
   Future<void> _restoreWipLimit() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final v = prefs.getInt(kKanbanWipLimitPrefsKey) ?? 0;
+      final v = clampWipLimit(prefs.getInt(kKanbanWipLimitPrefsKey) ?? 0);
+      // P2-8：回填运行态单例（设置页先于看板访问时也能拿到持久值）。
+      if (kanbanWipLimitNotifier.value != v) kanbanWipLimitNotifier.value = v;
       if (!mounted || v == _wipLimit) return;
-      setState(() => _wipLimit = v < 0 ? 0 : v);
+      setState(() => _wipLimit = v);
     } catch (_) {
       // 偏好不可读：静默保持不限。
     }
   }
 
   /// T2-3：写入 WIP 上限（落盘失败不影响当次生效）。
+  /// P2-8：同步写运行态单例（listener 会 setState 本页）。
   void _setWipLimit(int v) {
-    final clamped = v < 0 ? 0 : v;
-    setState(() => _wipLimit = clamped);
+    final clamped = clampWipLimit(v);
+    kanbanWipLimitNotifier.value = clamped;
     SharedPreferences.getInstance().then((prefs) {
       return prefs.setInt(kKanbanWipLimitPrefsKey, clamped);
-    }).catchError((_) {
-      // 写入失败：仅本次不记忆。
-    });
+      // 写入失败：仅本次不记忆（setInt 为 Future<bool>，onError 须返回 bool）。
+    }).catchError((_) => false);
   }
 
   /// T2-3：WIP 上限编辑弹窗（复用公开的 [showWipLimitEditor]，设置页同款）。

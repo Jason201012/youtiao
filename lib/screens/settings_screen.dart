@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.0.0');
+      if (mounted) setState(() => _version = '3.0.1');
     }
   }
 
@@ -452,7 +452,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           style: const TextStyle(fontWeight: FontWeight.w600)),
                     ],
                   ),
-                  // P3-14（v2.9.9 审计）：逐条明细（最多 6 条，其余以计数收尾）。
+                  // P3-14（v2.9.9 审计）：逐条明细。
+                  // P3-21（v3.0.0 审计）：明细改**全量**列出——弹层内容本身在
+                  // SingleChildScrollView 内可滚动，截断到 6 条反而让用户在
+                  // 修复前无法核对全部将受影响的条目。
                   Padding(
                     padding: const EdgeInsets.only(left: 24, top: 2),
                     child: Column(
@@ -460,8 +463,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       children: [
                         for (final issue in report
                             .issues
-                            .where((i) => i.type == type)
-                            .take(6))
+                            .where((i) => i.type == type))
                           Padding(
                             padding: const EdgeInsets.only(top: 2),
                             child: Text('· ${issue.detail}',
@@ -474,7 +476,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         if (report.countOf(type) > 6)
                           Padding(
                             padding: const EdgeInsets.only(top: 2),
-                            child: Text('……及其余 ${report.countOf(type) - 6} 项',
+                            child: Text('共 ${report.countOf(type)} 项',
                                 style: TextStyle(
                                     fontSize: 12,
                                     color: Theme.of(dctx)
@@ -497,9 +499,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           if (staleCount > 0)
             // P1-5：不可逆动作独立按钮 + 独立确认，不再混入一键修复。
-            TextButton(
-              style: TextButton.styleFrom(
-                foregroundColor: Theme.of(dctx).colorScheme.error,
+            // U3-3（v3.0.0 审计）：破坏性动作从低强调 TextButton 升级为
+            // error 实心按钮——与主按钮同级但色相区分，避免窄屏换行挤压后
+            // 视觉层级弱、与「修复可逆问题」相邻易误触。
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(dctx).colorScheme.error,
+                foregroundColor: Theme.of(dctx).colorScheme.onError,
               ),
               onPressed: () => Navigator.of(dctx).pop('purge'),
               child: Text('彻底清理超期回收站（$staleCount 条，不可恢复）'),
@@ -514,7 +520,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (!ctx.mounted) return;
     if (chosen == 'fix') {
-      final fixed = await provider.fixDataHealthIssues(report);
+      // P2-1（v3.0.0 审计）：返回值分列——可逆路径只产生 reversibleFixed。
+      final fixed =
+          await provider.fixDataHealthIssues(report).then((r) => r.reversibleFixed);
       if (!ctx.mounted) return;
       // P1-5：结果提示按类型如实说明去向——可逆的指明「可在回收站找回」，
       // 不再笼统提示（对永久删除的条目该提示是误导）。
@@ -545,8 +553,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // U3-1（v3.0.0 审计）：去掉字面 `**`——Flutter Text 不解析
+                // Markdown，星号原样上屏疑似未完成渲染。
                 Text('以下 ${staleIssues.length} 条回收站条目已超过保留期，'
-                    '将**连同附件永久删除，无法恢复**：',
+                    '将连同附件永久删除，无法恢复：',
                     style: const TextStyle(fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
                 for (final i in staleIssues.take(10))
@@ -582,12 +592,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       if (confirmed != true || !ctx.mounted) return;
       try {
-        final deleted = await provider.fixDataHealthIssues(report,
+        // P2-1（v3.0.0 审计）：purge 路径只执行超期回收站彻底删除（可逆修复
+        // 不再连带触发），结果按 permanentDeleted 如实计数——旧实现把两类
+        // 合计显示「已彻底删除 N 条」，把软删/剔除条目谎报为永久删除。
+        final r = await provider.fixDataHealthIssues(report,
             includeStaleTrash: true);
         if (!ctx.mounted) return;
         ScaffoldMessenger.of(ctx).showSnackBar(
           SnackBar(
-            content: Text('已彻底删除 $deleted 条（含附件，不可恢复；'
+            content: Text('已彻底删除 ${r.permanentDeleted} 条（含附件，不可恢复；'
                 '删除前已自动备份一次，必要时可从备份找回）'),
           ),
         );
@@ -608,25 +621,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// P3-6（v2.9.9 审计）：看板「待办上限」设置页入口——读偏好 → 弹窗 → 写回。
   /// 与看板侧 [_KanbanBoardState] 共用 [showWipLimitEditor] 与
   /// [kKanbanWipLimitPrefsKey]，不另造第二份状态。
+  ///
+  /// P2-8 / U2-1（v3.0.0 审计）：写入后同步运行态单例 [kanbanWipLimitNotifier]
+  /// ——看板 Tab 由 IndexedStack 保活，只写 prefs 时已保活的看板 State 不感知，
+  /// 须重启 App 才生效（「设置成功」是假象）。
   Future<void> _editKanbanWipLimit(BuildContext context) async {
     final prefs = await SharedPreferences.getInstance();
-    final current = prefs.getInt(kKanbanWipLimitPrefsKey) ?? 0;
+    // P2-8：初值取看板侧已回填的运行态（先访问过看板时与 prefs 一致），
+    // 回退 prefs（设置页先访问的场景）。
+    final current = kanbanWipLimitNotifier.value != 0
+        ? kanbanWipLimitNotifier.value
+        : (prefs.getInt(kKanbanWipLimitPrefsKey) ?? 0);
     if (!mounted) return;
     final v = await showWipLimitEditor(context, initial: current);
     if (v == null || !mounted) return;
+    final clamped = clampWipLimit(v); // P3-10（v3.0.0 审计）：0..99 唯一口径
     try {
-      await prefs.setInt(kKanbanWipLimitPrefsKey, v < 0 ? 0 : v);
+      await prefs.setInt(kKanbanWipLimitPrefsKey, clamped);
     } catch (_) {
       // 写入失败：仅本次不记忆（与看板侧 _setWipLimit 同口径）。
       return;
     }
+    kanbanWipLimitNotifier.value = clamped; // P2-8：已保活的看板即时生效
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(v <= 0
+        content: Text(clamped <= 0
             ? '已取消看板待办上限'
-            : '看板待办上限已设为 $v（仅看板生效）'),
+            : '看板待办上限已设为 $clamped（仅看板生效）'),
       ),
     );
+    if (mounted) setState(() {}); // P3-10：刷新入口副标题上的当前值
   }
 
   /// P2-3：提醒时区候选（IANA id, 展示名）。'' = 跟随设备时区（默认）。
@@ -1419,11 +1443,14 @@ String _formatIdle(int seconds) {
                     const SizedBox(height: AppColors.contentGap),
                     // T3-4（v2.9.2 功能增强）：数据体检——常态数据健康扫描与
                     // 一键修复（纯本地：重复任务 / 空白子项 / 失效附件 / 超期回收站）。
+                    // P3-23（v3.0.0 审计）：副标题与拆分后的实现一致——一键修复
+                    // 只处理可逆问题；超期回收站走独立「彻底清理」入口（不可逆、
+                    // 二次确认），且平时由保留期规则在启动/午夜自动清理。
                     SettingsRow(
                       icon: Symbols.fact_check,
                       label: '数据体检',
-                      subtitle: '扫描重复任务、空白子项、失效附件引用与超期回收站，'
-                          '可一键修复（修复前自动备份一次）',
+                      subtitle: '扫描重复任务、空白子项、失效附件引用与超期回收站；'
+                          '一键修复仅处理可逆问题（修复前自动备份一次）',
                       onTap: () => _runDataHealthCheck(context),
                     ),
                     const SizedBox(height: AppColors.contentGap),
@@ -1441,12 +1468,21 @@ String _formatIdle(int seconds) {
                     // P3-6（v2.9.9 审计）：看板「待办上限」此前只埋在看板泳道头的
                     // 无语义 speed 图标后，可发现性差。设置页补一个显式入口，
                     // 与看板共用同一弹窗（showWipLimitEditor）与偏好键。
-                    SettingsRow(
-                      icon: Symbols.speed,
-                      label: '看板待办上限',
-                      subtitle: '限制看板「待办」列的任务数（0 = 不限）；'
-                          '看板内拖入 / 勾选转回 / 列内新建会被拦截',
-                      onTap: () => _editKanbanWipLimit(context),
+                    // P3-10（v3.0.0 审计）：副标题显示当前值——旧实现设置页不
+                    // 回显，用户无法确认已设置的上限；ValueListenableBuilder
+                    // 保证看板侧修改后此处同步刷新。
+                    ValueListenableBuilder<int>(
+                      valueListenable: kanbanWipLimitNotifier,
+                      builder: (context, wip, _) => SettingsRow(
+                        icon: Symbols.speed,
+                        label: '看板待办上限',
+                        subtitle: wip > 0
+                            ? '当前 $wip；限制看板「待办」列的任务数，'
+                                '看板内拖入 / 勾选转回 / 列内新建会被拦截'
+                            : '当前不限；限制看板「待办」列的任务数，'
+                                '看板内拖入 / 勾选转回 / 列内新建会被拦截',
+                        onTap: () => _editKanbanWipLimit(context),
+                      ),
                     ),
                     const SizedBox(height: 24),
                     // U17：把原「数据」巨组（15 项全混）拆成更清晰的子组——

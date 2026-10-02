@@ -999,7 +999,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                                       : null)),
                                           const SizedBox(height: 2),
                                           Text(
-                                            '${t.category.label}${t.dueDate != null ? " · ${DateFormat("HH:mm").format(t.dueDate!)}" : ""}',
+                                            // P3-16（v3.0.0 审计）：纯日期形态
+                                            // （00:00/23:59）不再显示「00:00」
+                                            // 式时刻，与 P2-10 的 _hasTime 判据
+                                            // 同源（月格/周视图口径一致）。
+                                            '${t.category.label}'
+                                            '${t.dueDate != null && _hasTime(t.dueDate) ? " · ${DateFormat("HH:mm").format(t.dueDate!)}" : ""}',
                                             // U7：同上。
                                             style: TextStyle(
                                                 fontSize: 12, color: ext.meta),
@@ -1052,6 +1057,12 @@ List<Task> _dueTasksOn(TaskProvider provider, DateTime date) {
 
 /// T2-1 / T2-2（v2.9.2 功能增强）：跨天区间覆盖的天。区间任务在其截止日已由
 /// 到期列表收录，这里只补「起止之间的其余天」，天然去重；区间内按开始日排序。
+///
+/// P3-13（v3.0.0 审计）：区间任务的中间日若落在该任务的跳过集合内
+/// （暂停窗口写入的循环日 / 单独跳过日）则不再显示——暂停中的重复「区间
+/// 任务」在中间日此前照常出现，与到期列表的 P2-11 过滤口径矛盾。非循环日
+/// 的中间日不在 skipDates 内，区间显示不受影响（保守过滤，不破坏现有
+/// 非暂停区间的展示）。
 List<Task> _spanTasksOn(TaskProvider provider, DateTime date) {
   final day = DateTime(date.year, date.month, date.day);
   final span = provider.tasks
@@ -1061,6 +1072,10 @@ List<Task> _spanTasksOn(TaskProvider provider, DateTime date) {
         }
         if (!_isSpanTask(t)) return false;
         if (Task.isSameDay(t.dueDate!, day)) return false; // 截止日已在 due 列表
+        // P3-13：该日被显式跳过（含暂停窗口内的循环日）→ 不显示。
+        if (t.isRepeating && t.skipDates.contains(Task.ymdKey(day))) {
+          return false;
+        }
         final s0 =
             DateTime(t.startDate!.year, t.startDate!.month, t.startDate!.day);
         final d0 =
@@ -1086,19 +1101,24 @@ List<Task> _tasksOnDay(TaskProvider provider, DateTime date) =>
 /// - **P2-9**：跨天区间任务**只在首日**计入完整预估——旧实现区间覆盖到的
 ///   每天各计一次完整值，N 天任务被计 N 次（日合计虚高）；
 /// - 已完成不计；暂停中的重复任务已在 [_dueTasksOn] 被过滤（P2-11）。
+///
+/// P3-14（v3.0.0 审计）：取值口径与排程建议**完全同源**——旧实现
+/// `estimateMinutes ?? kDefaultEstimateMinutes` 在「预估=0」（UI 不可产生，
+/// 仅手改备份 / iCal 可达）时计 0，而排程侧 hasEstimate（>0 才有效）计 30，
+/// 两处「计划占时」在病态数据上仍不可比。统一改走 [Task.hasEstimate]。
 int planMinutesOn(TaskProvider provider, DateTime date) {
   final day = DateTime(date.year, date.month, date.day);
   var total = 0;
   for (final t in _dueTasksOn(provider, day)) {
     if (t.done) continue;
-    total += t.estimateMinutes ?? kDefaultEstimateMinutes;
+    total += t.hasEstimate ? t.estimateMinutes! : kDefaultEstimateMinutes;
   }
   for (final t in _spanTasksOn(provider, day)) {
     if (t.done) continue;
     final s0 =
         DateTime(t.startDate!.year, t.startDate!.month, t.startDate!.day);
     if (s0 != day) continue; // P2-9：只在区间首日计入完整预估
-    total += t.estimateMinutes ?? kDefaultEstimateMinutes;
+    total += t.hasEstimate ? t.estimateMinutes! : kDefaultEstimateMinutes;
   }
   return total;
 }

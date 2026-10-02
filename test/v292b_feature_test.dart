@@ -52,13 +52,18 @@ void main() {
       final today = _today();
       // daily 重复但今天未被跳过。
       expect(_repeating(skipDates: const []).pausedToday, isFalse);
-      // 跳过的是别的日子。
+      // 改口径（v3.0.0 审计 P2-4）：回退推导改为「扫未来被跳过的循环日取
+      // 最大者」——旧口径要求「今天本身是被跳过的循环日」，v2.9.9 及更早
+      // 对 weekly/monthly/interval 的暂停在非循环日恒 null（角标与恢复入口
+      // 同时消失，P2-4 主诉）。孤立未来跳过日因此也会呈现暂停角标：旧数据
+      // 无显式字段无法区分「暂停」与「单次跳过」，**可恢复的误显远优于
+      // 不可见/不可恢复**（报告建议原文即此口径）。
       expect(
         _repeating(
                 skipDates: [Task.ymdKey(today.add(const Duration(days: 1)))])
             .pausedToday,
-        isFalse,
-        reason: '单独跳过未来日不构成「今天已暂停」',
+        isTrue,
+        reason: 'P2-4 新口径：未来存在被跳过的循环日 → 暂停中（可恢复）',
       );
       // 非重复任务即便 skipDates 残留今天（历史数据）也不是暂停态。
       final none = Task(
@@ -71,7 +76,7 @@ void main() {
       expect(none.pausedToday, isFalse);
     });
 
-    test('pausedUntilDate：连续跳过区间终点；孤立未来日不撑长区间', () {
+    test('pausedUntilDate：连续跳过区间终点取未来最大被跳过循环日（P2-4）', () {
       final today = _today();
       final t1 = _repeating(skipDates: [
         Task.ymdKey(today),
@@ -80,12 +85,17 @@ void main() {
       ]);
       expect(t1.pausedUntilDate, today.add(const Duration(days: 2)),
           reason: '从今天起连续 3 个循环日被跳过，终点 = 今天+2（含当天）');
-      // 今天 + 后天被跳过、明天没跳：区间到今天即断（孤立未来日不误撑）。
+      // 改口径（v3.0.0 审计 P2-4）：今天 + 后天被跳过、明天没跳 → 终点取
+      // **未来最后一个被跳过的循环日**（今天+2）。旧口径「孤立未来日不撑长
+      // 区间」把 weekly 暂停在非循环日的窗口推导压缩为当天，恢复清不干净
+      // 且非循环日恒 null（P2-4 主诉）；显式 pausedUntil 字段（v2.9.9+）不
+      // 走此回退推导，不受影响。
       final t2 = _repeating(skipDates: [
         Task.ymdKey(today),
         Task.ymdKey(today.add(const Duration(days: 2))),
       ]);
-      expect(t2.pausedUntilDate, today);
+      expect(t2.pausedUntilDate, today.add(const Duration(days: 2)),
+          reason: 'P2-4 新口径：未来最大被跳过循环日为窗口终点');
     });
 
     test('pauseRepeatsUntil：[today, until] 全部循环日写入 skipDates', () async {
@@ -106,7 +116,7 @@ void main() {
       expect(t.pausedToday, isTrue);
     });
 
-    test('resumeRepeats：只清暂停窗口（今天..窗口终点），窗口外孤立跳过保留',
+    test('resumeRepeats：清 [今天..窗口终点] 全部被跳过循环日，历史跳过保留',
         () async {
       final today = _today();
       final yesterday = today.add(const Duration(days: -1));
@@ -119,18 +129,21 @@ void main() {
       ]);
       p.resumeRepeats('r2');
       final t = p.tasks.firstWhere((x) => x.id == 'r2');
-      // 改口径（v2.9.9 审计 P2-5）：暂停态以显式 pausedUntil 窗口为真源后，
-      // 「恢复」收窄为**只清暂停窗口本身**（[今天..窗口终点]）。r2 无显式字段 →
-      // 回退推导窗口终点 = 今天（today+1 未被跳过即断），故只清今天。旧实现
-      // 「清今天及以后全部」会把 today+3 这类用户手动设置的孤立跳过日一并吃掉
-      // ——跳过同样是用户意图，不该被恢复动作误伤；历史跳过照旧保留。
+      // 改口径（v2.9.9 审计 P2-5）：「恢复」只清暂停窗口（[今天..窗口终点]），
+      // 历史跳过照旧保留。
+      // 再改口径（v3.0.0 审计 P2-4）：无显式字段时回退推导窗口终点 = 未来
+      // 最后一个被跳过的循环日（today+3）——旧推导把终点压缩为「今天起连续
+      // 被跳过的区间」（today+1 即断 → 终点=今天），老用户在循环日点「恢复」
+      // 只清 1 个键、未来循环日全部残留（P2-4b 主诉，报告定为本轮回归）。
+      // today+3 因此落在窗口内被一并清除：孤立跳过日本就有独立的「撤销跳过」
+      // 入口，恢复语义「回到暂停前」覆盖它属可接受代价。
       expect(
         t.skipDates,
         unorderedEquals([
           Task.ymdKey(yesterday),
-          Task.ymdKey(today.add(const Duration(days: 3))),
         ]),
-        reason: '恢复只清暂停窗口；历史与窗口外孤立跳过均保留',
+        reason: 'P2-4 新口径：窗口终点 = 未来最大被跳过循环日（today+3），'
+            '窗口内键全清；历史跳过保留',
       );
       expect(t.pausedToday, isFalse);
     });
@@ -479,10 +492,13 @@ void main() {
       expect(report.countOf(DataHealthIssueType.missingAttachment), 0,
           reason: '附件探测异常 → uncertain，不报失效');
 
-      final fixed = await p.fixDataHealthIssues(report);
-      expect(fixed, 3,
+      // P2-1（v3.0.0 审计）：返回值改为 record 分列（permanentDeleted /
+      // reversibleFixed）；可逆路径只产生 reversibleFixed。
+      final r = await p.fixDataHealthIssues(report);
+      expect(r.reversibleFixed, 3,
           reason: '重复组按实际移入回收站的条数计（d2/d3 共 2 条，P3-11）'
               ' + 空白子项 1 处；uncertain 附件不参与修复');
+      expect(r.permanentDeleted, 0);
 
       // 重复：保留首条 d1，d2/d3 移入回收站（可反悔）。
       expect(p.tasks.any((t) => t.id == 'd1'), isTrue);

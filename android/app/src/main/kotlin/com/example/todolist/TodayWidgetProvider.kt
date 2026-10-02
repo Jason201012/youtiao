@@ -248,6 +248,14 @@ class TodayWidgetProvider : AppWidgetProvider() {
         private fun isRecurrenceToday(obj: JSONObject, repeat: RepeatMode, today: String): Boolean {
             val until = obj.optString("repeatUntil", "")
             if (until.isNotEmpty() && today > until) return false
+            // 矩阵 C2（v3.0.0 审计）：显式暂停窗口——App 侧 v3.0.0 起对重复任务
+            // 写入 `pausedUntil`（'yyyy-MM-dd'，窗口终点含当天）。窗口内任何一天
+            // 都不该出现在小组件；旧实现只读 skipDates，窗口内的**循环日**虽被
+            // 覆盖，但非循环日（如「每周一任务」窗口内的周三）不在 skipDates 中，
+            // 桌件照常显示该任务，与 App 侧「暂停中不出现」口径不一致。窗口已过
+            // （today > 终点）不影响展示。
+            val paused = obj.optString("pausedUntil", "")
+            if (paused.isNotEmpty() && today <= paused) return false
             val skip = obj.optJSONArray("skipDates")
             if (skip != null) {
                 for (j in 0 until skip.length()) {

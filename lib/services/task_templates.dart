@@ -21,6 +21,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
 import 'package:todolist/state/task_provider.dart';
 
 /// 模板中的单个任务项。
@@ -475,8 +476,9 @@ class UserTemplateStore {
           final name = f.path.split(Platform.pathSeparator).last;
           final id = name.substring(0, name.length - '.json'.length);
           if (!isSafeTemplateId(id)) continue; // 非法文件名跳过
-          final m =
-              jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+          final m = jsonDecode(
+                  decodeTextFileBytes(await f.readAsBytes())) // P3-6（v3.0.0 审计）：共享解码链
+              as Map<String, dynamic>;
           out.add(UserTemplate.fromJson({...m, 'id': id}));
         } catch (_) {
           // 损坏的模板文件跳过，不阻断其余模板加载。

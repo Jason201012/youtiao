@@ -62,6 +62,17 @@ String decodeGbkBytes(List<int> bytes) {
 /// 2. 无 BOM：先按**严格** UTF-8 尝试（现代导出主流；GBK 双字节序列几乎必然
 ///    不是合法 UTF-8，非法即刻抛 FormatException 回退，不会产出 mojibake）；
 /// 3. 回退 GBK（简体中文 Windows Excel 另存 CSV 的实际编码）。
+///
+/// P3-7（v3.0.0 审计）：已知探测范围边界（均为启发式的定义性局限，目标
+/// 场景不受影响，此处理性化记录，不做投机扩展）：
+/// - **无 BOM 的 UTF-16** 不识别（极罕见：UTF-16 文件几乎都带 BOM）——
+///   无 BOM UTF-16 的 ASCII 部分带 0x00 字节，严格 UTF-8 必然失败，
+///   回退 GBK 会产出乱码；有 BOM 时走第 1 步无此问题。
+/// - **GB18030 四字节序列** 不支持（四字节区落在生僻字/少数民族文字），
+///   双字节部分按 GBK 解码正确；四字节序列会解出 U+FFFD。
+/// - GBK 回退依赖「整段非合法 UTF-8」：极端构造下 GBK 字节流恰好是合法
+///   UTF-8（需要精心挑选多组双字节序列，自然文本中概率趋近于零），
+///   会按 UTF-8 解码而非回退——产出正常字符串但非原意。
 String decodeTextFileBytes(List<int> bytes) {
   if (bytes.length >= 3 &&
       bytes[0] == 0xEF &&

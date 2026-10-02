@@ -710,7 +710,23 @@ class Task {
   /// 同步夹取）。无字段（旧数据 / 单独「跳过今天」）时回退旧「从今天起连续
   /// 被跳过的循环日」推导：单独跳过的孤立未来日不撑长区间，超过一年
   /// （滚动窗口量级）按封顶处理，防御手改备份写入超长列表时的死循环。
+  ///
+  /// P2-4（v3.0.0 审计）：回退推导从「要求今天本身是被跳过的循环日」改为
+  /// **扫未来 N 天内被跳过的循环日取最大者**——旧口径要求「今天 ∈ 循环日 ∧
+  /// 今天被跳过」，v2.9.9 及更早对 weekly/monthly/interval 任务执行的暂停，
+  /// 在非循环日查看时回退恒 null：角标与「恢复循环」入口同时消失（不可见、
+  /// 不可恢复）；且在循环日恢复时旧推导把窗口压缩为「当天」，只清一个键、
+  /// 未来循环日全部残留。新口径下窗口终点 = 未来最后一个被跳过的循环日，
+  /// [TaskProvider.resumeRepeats] 据此清 [今天, 终点] 内全部键（与 v2.9.8
+  /// 「清今天及以后」的旧恢复口径等价，但不误伤窗口外的过去历史记录）。
+  /// 已知取舍：孤立的单次「跳过某天」（无窗口语义）也会呈现暂停角标——
+  /// 旧数据无显式字段无法区分，可恢复的误显远优于不可见/不可恢复。
   DateTime? get pausedUntilDate {
+    // P3-11（v3.0.0 审计）：暂停窗口只对重复任务有语义——重复任务被编辑为
+    // 「不重复」后字段残留（或手改备份写入）时，显式分支会照常返回窗口终点，
+    // 非重复任务误显「已暂停至 M/d」角标且没有任何清除入口。在推导入口统一
+    // 守卫：非重复任务恒非暂停态。
+    if (!isRepeating) return null;
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final f = _parseYmdOrNull(pausedUntil);
@@ -725,14 +741,13 @@ class Task {
     }
     // —— 旧数据回退推导（v2.9.9 及更早的暂停 / 单独「跳过今天」）——
     if (!isRepeating || repeatEnded) return null;
-    if (!occursOnIgnoringSkip(today) || !skipDates.contains(ymdKey(today))) {
-      return null;
-    }
-    var last = today;
-    for (var i = 1; i <= 366; i++) {
-      final n = DateTime(today.year, today.month, today.day + i);
-      if (!occursOnIgnoringSkip(n) || !skipDates.contains(ymdKey(n))) break;
-      last = n;
+    // P3-11（v3.0.0 审计）：非重复任务不应持有该字段（编辑切「不重复」/
+    // 结束重复时已清）；此处为回退推导入口，repeatEnded 已排除退场任务。
+    // P2-4 扫描窗上限与「暂停直到」选择器上限一致（3 年）。
+    DateTime? last;
+    for (var i = 0; i <= 366 * 3; i++) {
+      final d = DateTime(today.year, today.month, today.day + i);
+      if (occursOnIgnoringSkip(d) && skipDates.contains(ymdKey(d))) last = d;
     }
     return last;
   }

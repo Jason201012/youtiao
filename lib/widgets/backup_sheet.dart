@@ -7,6 +7,7 @@ import 'package:todolist/models/checkin.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
+import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/backup_validator.dart';
 import 'package:todolist/services/backup_crypto.dart';
@@ -657,7 +658,10 @@ class BackupSheet {
         }
         return;
       }
-      final raw = await entry.file.readAsString();
+      // P3-6（v3.0.0 审计）：与其他文本读取路径共享同一解码链（BOM→严格 UTF-8
+      // →GBK 回退）——快照是本 App 写出的 UTF-8 JSON，GBK 风险为零，此处为
+      // 全应用「读文本文件」口径的一致性收口。
+      final raw = decodeTextFileBytes(await entry.file.readAsBytes());
       // L-08：加密快照（.enc.json）需先解密成明文，再走与明文快照一致的校验流程。
       String plaintext = raw;
       if (isEncryptedEnvelope(raw)) {

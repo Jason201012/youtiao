@@ -150,17 +150,30 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     // 真实落点，而不是录入侧的占位 dueDate（常常为 null）——否则 RRULE 无起点、
     // VALARM 也无从表达提醒时刻。
     final due = _exportDue(t);
-    // P3-20（v2.9.9 审计）：区间（span）任务的开始日写 `DTSTART;VALUE=DATE`，
-    // 置于 DUE 之前。此前开始日完全不出现在 .ics 里，「10-01 ~ 10-07」这类区间
-    // 导出到第三方日历后塌缩成单个截止日。VTODO 的 DTSTART 语义即开始（RFC 5545
+    // P3-20（v2.9.9 审计）：区间（span）任务的开始日写 `DTSTART`，置于 DUE
+    // 之前。此前开始日完全不出现在 .ics 里，「10-01 ~ 10-07」这类区间导出到
+    // 第三方日历后塌缩成单个截止日。VTODO 的 DTSTART 语义即开始（RFC 5545
     // §3.8.2.4），第三方日历普遍接受；本 App 导入侧在 DUE 存在时把它解析回
     // startDate（见 _blockToTask），往返幂等。
-    // 保守取舍：无 DUE 的任务也写 DTSTART（此刻它会被导入侧按旧口径回退当
-    // dueDate，与第三方对「只有开始没有截止」的 VTODO 解读一致，不产生丢失）。
-    if (t.startDate != null) {
+    // P3-17（v3.0.0 审计）：
+    // - **只在 DUE 存在时写 DTSTART**——旧实现「只有开始无截止」的任务也写
+    //   DTSTART，而本 App 导入侧对 DUE 缺失的块会把 DTSTART 回退当 dueDate，
+    //   往返后「开始」被凭空改写成「截止」。start-only 任务的开始日改走
+    //   `X-YOUTIAO-START` 扩展属性（第三方按 RFC 5545 §3.8.8.2 必须忽略 X-，
+    //   本 App 能读回，与 X-YOUTIAO-ESTIMATE-MINUTES 同族）。
+    // - 纯日期形态（00:00/23:59，与 dueIsPureDateForm 同判）写
+    //   `VALUE=DATE`；带时刻的时段开始写 DATE-TIME 全格式——旧实现一律
+    //   VALUE=DATE，时段任务的开始时分静默丢失。
+    if (t.startDate != null && due != null) {
       final s = t.startDate!;
-      buf.writeln('DTSTART;VALUE=DATE:'
-          '${s.year}${_pad2(s.month)}${_pad2(s.day)}');
+      if (dueIsPureDateForm(s)) {
+        buf.writeln('DTSTART;VALUE=DATE:'
+            '${s.year}${_pad2(s.month)}${_pad2(s.day)}');
+      } else {
+        buf.writeln('DTSTART:${_toIcsLocalTime(s)}');
+      }
+    } else if (t.startDate != null) {
+      buf.writeln('X-YOUTIAO-START:${_toIcsLocalTime(t.startDate!)}');
     }
     if (due != null) {
       buf.writeln('DUE:${_toIcsLocalTime(due)}');
@@ -347,6 +360,46 @@ String? _toRrule(Task t) {
   return 'RRULE:$base';
 }
 
+/// P2-2（v3.0.0 审计）：单个 VTODO 块「源是否**显式提供**」的字段元信息。
+/// [Task] 的 priority / category / status 非空，草稿恒产出解析缺省
+/// （medium / work / todo），覆盖合并需要区分「显式值」与「缺省」——
+/// null = 源未携带对应属性（覆盖时保留原值）。
+class IcsBlockMeta {
+  final Priority? priority;
+  final Category? category;
+  final TaskStatus? status;
+  const IcsBlockMeta({this.priority, this.category, this.status});
+}
+
+/// 从块提取 [IcsBlockMeta]：与 [_blockToTask] 的解析口径对齐，但保留
+/// 「属性是否存在」的判定（PRIORITY / CATEGORIES / STATUS 行缺失 → null）。
+IcsBlockMeta _blockMetaOf(Map<String, String> b) {
+  Priority? priority;
+  final pRaw = b['PRIORITY'];
+  final p = int.tryParse(pRaw ?? '');
+  if (pRaw != null && p != null) {
+    priority = p <= 3 ? Priority.high : p <= 6 ? Priority.medium : Priority.low;
+  }
+  Category? category;
+  final catsRaw = b['CATEGORIES'];
+  if (catsRaw != null) {
+    final first = catsRaw.split(',').first.trim();
+    category = first == '生活'
+        ? Category.life
+        : first == '学习'
+            ? Category.study
+            : Category.work;
+  }
+  TaskStatus? status;
+  final st = b['STATUS'];
+  if (st != null) {
+    status = st.trim().toUpperCase() == 'COMPLETED'
+        ? TaskStatus.done
+        : TaskStatus.todo;
+  }
+  return IcsBlockMeta(priority: priority, category: category, status: status);
+}
+
 /// .ics 导入结果：可入库任务 + 复杂重复被简化计数 + 失败计数 + 可读报告。
 class IcsImportResult {
   final List<Task> tasks;
@@ -368,6 +421,8 @@ class IcsImportResult {
   /// youtiao 导出的 UID 形如 `<数字id>@youtiao`，解析层已把对应任务 id 设为该数字 id，
   /// 故 [tasks] 中这些任务的 id 非空，可直接用于 [TaskProvider.importDedup] 的 UID 去重。
   final List<String?> uids;
+  /// P2-2（v3.0.0 审计）：与 [tasks] 平行的「源是否提供」元信息（[IcsBlockMeta]）。
+  final List<IcsBlockMeta> meta;
   const IcsImportResult({
     required this.tasks,
     required this.simplifiedRepeat,
@@ -378,6 +433,7 @@ class IcsImportResult {
     this.reminderMigrated = 0,
     this.reminderDropped = 0,
     this.uids = const [],
+    this.meta = const [],
   });
 }
 
@@ -446,6 +502,8 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
   // `<数字id>@youtiao`，解析层已把对应任务 id 设为该数字 id，故这些任务可直接用于
   // [TaskProvider.importDedup] 的 UID 去重；第三方 .ics 往往无 UID → null。
   final uids = <String?>[];
+  // P2-2（v3.0.0 审计）：与 [tasks] 平行的「源是否提供」元信息。
+  final meta = <IcsBlockMeta>[];
   var simplified = 0;
   var partial = 0;
   var failed = 0;
@@ -474,6 +532,8 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
         tasks.add(task);
         // 同步收集该块的原始 UID（可能是 null），保持与 tasks 平行。
         uids.add(b['UID']);
+        // P2-2（v3.0.0 审计）：同步收集「源是否提供」元信息，保持与 tasks 平行。
+        meta.add(_blockMetaOf(b));
         // P2-1（v2.9.0 审计）：统计提醒段的迁移结果——带提醒段但迁移不了的要如实
         // 告知用户「提醒不迁移」，而不是让它静默消失（旧实现整段忽略）。
         // P3-7（v2.9.1 审计）：重复任务的提醒时刻由 `repeatMinute`（当天时刻）表达，
@@ -517,6 +577,7 @@ IcsImportResult parseIcs(String content, {int maxItems = 500}) {
     reminderMigrated: reminderMigrated,
     reminderDropped: reminderDropped,
     uids: uids,
+    meta: meta,
   );
 }
 
@@ -665,10 +726,23 @@ Task? _blockToTask(Map<String, String> b) {
   // startDate；只取日期部分（第三方可能写带时刻的 DTSTART）。
   // DUE 缺失时维持旧口径：DTSTART 由 _blockDueDate 回退当 dueDate，
   // 不再重复解释为开始日（避免同一条既当截止又当开始）。
+  // P3-17（v3.0.0 审计）：start-only 任务的开始日改走 `X-YOUTIAO-START`
+  // 扩展属性（导出侧不再为无 DUE 的任务写 DTSTART，否则导入侧把 DTSTART
+  // 当 dueDate，往返后「开始」被改写成「截止」）；X- 优先、完整时刻保留。
   DateTime? startDate;
-  if (b['DUE'] != null && b['DTSTART'] != null) {
+  if (b['X-YOUTIAO-START'] != null) {
+    final sd = _parseIcsDateTime(b['X-YOUTIAO-START']!);
+    if (sd != null) startDate = sd;
+  } else if (b['DUE'] != null && b['DTSTART'] != null) {
     final sd = _parseIcsDateTime(b['DTSTART']!);
-    if (sd != null) startDate = DateTime(sd.year, sd.month, sd.day);
+    if (sd != null) {
+      // P3-17（v3.0.0 审计）：带时刻的 DTSTART 保留时分（时段区间的开始
+      // 时刻往返不再丢失）；纯日期形态（VALUE=DATE / 00:00）维持 date-only
+      //（与 v2.9.9 P3-20 的原行为一致，第三方 DATE-TIME 零点开始不添时刻语义）。
+      startDate = (sd.hour == 0 && sd.minute == 0)
+          ? DateTime(sd.year, sd.month, sd.day)
+          : sd;
+    }
   }
   // P2-1（v2.9.0 审计）：导入侧解析提醒段（VALARM/AALARM）→ reminderOffsetMin。
   // 无法迁移时保持 0（= 落点时刻提醒），并由 [parseIcs] 计入「提醒未迁移」如实提示。

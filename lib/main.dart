@@ -598,15 +598,23 @@ void _doComplete(NavigatorState nav, String? taskId) {
 /// P3-22（v2.9.9 审计）：通知「撤销」action——把该任务回滚到通知「完成」写入
 /// 前的快照（[TaskProvider.restoreTaskSnapshot]：先撤在途提醒再按快照重排，
 /// 与 App 内完成撤销唯一同构入口），成功后回「已撤销完成」确认通知。
-/// 无快照（进程重启 / 任务已删除）时早退不弹，绝不谎报成功。
+///
+/// U2-4 / P3-18（v3.0.0 审计）：不可执行时**如实反馈**——快照是进程内内存，
+/// 杀进程/重启后丢失（旧实现静默早退，点按无任何反应、通知仍显示「已完成 ✓」）；
+/// 回滚失败（任务已被删除）同样回失效提示。绝不谎报成功。
 /// 已知边界：完成到撤销之间若用户又在 App 内改过该任务，快照回滚会连同
 /// 那些改动一起还原——与撤销语义「回到完成前状态」一致，属预期行为。
 void _doTaskUndo(NavigatorState nav, String taskId) {
   final provider = Provider.of<TaskProvider>(nav.context, listen: false);
   final snapshot = _notifyCompleteSnapshots.remove(taskId);
-  if (snapshot == null) return;
+  if (snapshot == null) {
+    NotificationService.instance.showTaskUndoInvalid(taskId);
+    return;
+  }
   if (provider.restoreTaskSnapshot(snapshot)) {
     NotificationService.instance.showTaskUndoConfirm(taskId, snapshot.title);
+  } else {
+    NotificationService.instance.showTaskUndoInvalid(taskId);
   }
 }
 
