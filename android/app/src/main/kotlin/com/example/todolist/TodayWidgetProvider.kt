@@ -233,7 +233,8 @@ class TodayWidgetProvider : AppWidgetProvider() {
             }
         }
 
-        // ===== 重复判定（与 MidnightResetReceiver.isRecurrenceToday 完全一致）=====
+        // ===== 重复判定（与 MidnightResetReceiver.isRecurrenceToday 保持一致； =====
+        // ===== 月度规则以两侧 monthlyTargetDay 同款实现对齐，见 P2-4 修复）=====
         private fun parseRepeat(obj: JSONObject): RepeatMode {
             return when (obj.optString("repeat", null)) {
                 "daily" -> RepeatMode.DAILY
@@ -316,9 +317,21 @@ class TodayWidgetProvider : AppWidgetProvider() {
     }
 
     /** 每月重复在 [y]年[m]月的目标「日」(1-28/29/30/31)；与 Dart Task._baseRepeatsOn 一致。
+     *  P2-4（v3.0.1 审计）：补上 [monthlyFromEnd]（每月倒数第 N 天 / 最后一天）
+     *  分支——Dart 侧它优先级最高（task.dart _baseRepeatsOn），午夜重置层
+     *  （MidnightResetReceiver.monthlyTargetDay）v2.9.8 起已实现；桌件此前
+     *  缺失该分支，fromEnd 任务回落 monthlyDay（缺省 1）→ 每月 1 号错日显示、
+     *  真正的月末反而不出现（v3.0.1 改过本文件补 pausedUntil，仍未顺带补齐——
+     *  「只修点名处」通病的 Kotlin 侧复现）。与 MidnightResetReceiver.kt 同款实现。
+     *  - monthlyFromEnd > 0：倒数第 N 天（1 = 当月最后一天），优先级最高；
      *  - monthlyWeekday+monthlyWeekIndex 命中：第 N 个周几（idx=5 为最后一个）；
      *  - 否则用 monthlyDay（溢出夹到当月最后一天）。 */
     private fun monthlyTargetDay(obj: JSONObject, y: Int, m: Int): Int {
+        val fromEnd = obj.optInt("monthlyFromEnd", 0)
+        if (fromEnd > 0) {
+            val dim = daysInMonth(y, m)
+            return (dim - fromEnd + 1).coerceIn(1, dim)
+        }
         val wd = obj.optInt("monthlyWeekday", -1)
         val idx = obj.optInt("monthlyWeekIndex", -1)
         if (wd in 1..7 && idx in 1..5) {

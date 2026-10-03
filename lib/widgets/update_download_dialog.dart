@@ -217,7 +217,10 @@ class _DownloadBodyState extends State<_DownloadBody> {
               const SizedBox(height: 8),
               Text('下载或安装失败：\n$_error', style: theme.textTheme.bodySmall),
               const SizedBox(height: 6),
-              const Text('可改用浏览器下载安装。', style: TextStyle(fontSize: 12)),
+              // U2-3（v3.0.1 审计）：给出明确的手动下载路径，与底部「浏览器下载」
+              // 按钮呼应（旧文案「可改用浏览器下载安装」未说明会跳去哪里）。
+              const Text('可点击下方「浏览器下载」前往发布页手动下载安装包。',
+                  style: TextStyle(fontSize: 12)),
             ],
           ],
         ),

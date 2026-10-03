@@ -1234,6 +1234,11 @@ class NotificationService {
       // P2-1（v2.9.4 审计）：snooze 占用独立的 8 号槽，删习惯 / 重排时一并清掉，
       // 否则会留下一个「点进去找不到的习惯」的稍后提醒。
       await _plugin.cancel(habitSnoozeNotifyIdOf(id));
+      // P3-4（v3.0.1 审计）：打卡 / 撤销确认通知占用独立的 9 号槽
+      // （[habitConfirmNotifyIdOf]），此前从未被任何取消路径覆盖——删除 /
+      // 归档习惯后，通知栏里指向已不存在习惯的「已打卡 ✓ / 撤销」确认条
+      // 会永久残留。一并清掉。
+      await _plugin.cancel(habitConfirmNotifyIdOf(id));
     } catch (e) {
       AppLog.d('[通知] 取消习惯提醒失败 id=$id: $e');
     }
@@ -1880,7 +1885,10 @@ class NotificationService {
   /// 完全静默（既不暂存也不回报，与「打卡」会入队解锁后补执行的回报不一致）。
   /// 撤销是破坏性回退，不跨锁暂存——回一条提示通知如实说明，指引用户解锁后
   /// 在 App 内操作。固定 id=[lockedActionNotifyId]（1600000，独立于全部段位）。
-  Future<void> showLockedActionHint() async {
+  ///
+  /// P2-1（v3.0.1 审计）：文案按动作类型参数化——旧实现固定写「撤销打卡记录」，
+  /// 任务「完成撤销」命中该提示时话术错位（用户被告知去撤销打卡记录）。
+  Future<void> showLockedActionHint({bool taskUndo = false}) async {
     if (!enabled) return;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -1898,7 +1906,9 @@ class NotificationService {
       await _plugin.show(
         lockedActionNotifyId,
         '已锁定，未执行撤销',
-        '应用处于锁定状态。请解锁后在 App 内撤销打卡记录。',
+        taskUndo
+            ? '应用处于锁定状态。请解锁后在 App 内撤销该任务的完成。'
+            : '应用处于锁定状态。请解锁后在 App 内撤销打卡记录。',
         detail,
       );
     } catch (e) {

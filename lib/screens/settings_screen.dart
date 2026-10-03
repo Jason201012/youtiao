@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.0.1');
+      if (mounted) setState(() => _version = '3.0.2');
     }
   }
 

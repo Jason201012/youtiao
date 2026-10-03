@@ -339,14 +339,24 @@ class _MetaInfo extends StatelessWidget {
     // T2-5（v2.9.2 功能增强）：暂停角标——重复任务整段跳过期间，今天的
     // occurrence 不再出现（skipDates 既有语义），若没有任何可读状态，用户会
     // 以为任务被删了。角标给出暂停终点与隐含的恢复路径（详情页「恢复循环」）。
-    if (task.pausedUntilDate != null) {
+    // P3-2（v3.0.1 审计）：展示信息一次性取齐（推导态只扫一次窗口）；
+    // 回退推导态（无显式窗口字段，终点 = 最后一个被跳过的循环日）图标与
+    // 文案区分——「已跳过至 M/d」，不再把经「未来循环日预览」提前跳过某天
+    // （未发生暂停）误呈现为「已暂停至」。
+    final pause = task.pauseDisplay;
+    if (pause != null) {
       spans.add(WidgetSpan(
         alignment: PlaceholderAlignment.middle,
-        child: Icon(Symbols.pause_circle, size: 13, color: ext.meta),
+        child: Icon(
+          pause.derived ? Symbols.skip_next : Symbols.pause_circle,
+          size: 13,
+          color: ext.meta,
+        ),
       ));
       spans.add(TextSpan(
-        text: ' 已暂停至 '
-            '${task.pausedUntilDate!.month}/${task.pausedUntilDate!.day}',
+        text: pause.derived
+            ? ' 已跳过至 ${pause.end.month}/${pause.end.day}'
+            : ' 已暂停至 ${pause.end.month}/${pause.end.day}',
         style: TextStyle(
             fontSize: 12, fontWeight: FontWeight.w500, color: ext.meta),
       ));

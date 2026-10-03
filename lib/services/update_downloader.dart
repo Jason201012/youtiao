@@ -61,8 +61,11 @@ class UpdateDownloader {
     void Function(int received, int total)? onProgress,
   }) async {
     if (!UpdatePolicy.isAllowedApkUrl(url)) {
+      // U2-3（v3.0.1 审计）：纯安全术语（「仅限作者发布仓的 releases/download/
+      // 路径」）用户无法理解也无法自助。保留语义 + 给出可执行出路（弹窗底部
+      // 有「浏览器下载」按钮外跳发布页）。
       throw const ApkDownloadException(
-          '下载地址不在允许范围（仅限作者发布仓的 releases/download/ 路径）');
+          '下载地址暂不可用（可能为发布仓调整），请改用「浏览器下载」手动下载');
     }
     await target.parent.create(recursive: true);
     await _clearUpdatesDir(target.parent);

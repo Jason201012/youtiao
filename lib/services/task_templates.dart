@@ -198,12 +198,25 @@ class TemplateItem {
       (j['title'] as String?) ?? '',
       _catFromName(j['category']),
       _prioFromName(j['priority']),
-      j['dueInDays'] as int?,
+      // P3-3（v3.0.1 审计）：同族硬转型顺手收口——字符串 / 小数此前同样
+      // 抛错中断整份模板加载。相对天数夹到 ±100 年（fromTask 产出可为负
+      // ——逾期任务另存为模板——故下界不可为 0）。
+      Task.clampIntOrNullJson(j['dueInDays'], -36500, 36500),
       tags: tags is List ? List<String>.from(tags.whereType<String>()) : const <String>[],
       repeat: RepeatType.values.asNameMap()[j['repeat'] as String?] ?? RepeatType.none,
       repeatWeekdays: wd is List ? List<int>.from(wd.whereType<int>()) : const <int>[],
-      repeatInterval: j['repeatInterval'] as int? ?? 2,
-      repeatMinute: j['repeatMinute'] as int?,
+      // P3-3（v3.0.1 审计）：与 [Task.fromJson] 同口径夹取（repeatInterval
+      // 1..365 / repeatMinute 0..1439 / monthlyWeekday 1..7 / monthlyWeekIndex
+      // 1..5 / monthlyFromEnd 0..31）——v2.9.7 只补了 monthlyDay 一项，兄弟
+      // 字段此前仍是裸 `as int?` / 无夹取：字符串 / 小数抛错中断**整份模板**
+      // 加载；monthlyWeekday=9 / monthlyFromEnd=99 套用后产出永不命中 /
+      // 非法的月规则任务。模板 JSON 是不可信输入（同文件对 estimateMinutes /
+      // reminderOffsetMin 已做白名单夹取，口径见各自注释）。
+      // repeatInterval 缺省沿用 TemplateItem 构造默认 2（与 Task.fromJson
+      // 缺省 1 不同——历史内置模板的「每隔 N 天」项均显式携带，缺省只影响
+      // 手写极简模板，保持旧行为零迁移）。
+      repeatInterval: Task.clampIntJson(j['repeatInterval'], 1, 365, 2),
+      repeatMinute: Task.clampIntOrNullJson(j['repeatMinute'], 0, 1439),
       repeatUntil: j['repeatUntil'] as String?,
       // 新P3-4（v2.9.7 审计）：与 [Task.fromJson] 同口径夹取（1..31，缺省 1）——
       // 此前 `as int?` 硬转型无 clamp：字段为字符串/小数时抛错中断**整份模板**
@@ -211,9 +224,9 @@ class TemplateItem {
       // 「每月 0 号」任务并落库。模板 JSON 是不可信输入（同文件对
       // estimateMinutes / reminderOffsetMin 已做白名单夹取，此处补齐）。
       monthlyDay: Task.clampIntJson(j['monthlyDay'], 1, 31, 1),
-      monthlyWeekday: j['monthlyWeekday'] as int?,
-      monthlyWeekIndex: j['monthlyWeekIndex'] as int?,
-      monthlyFromEnd: j['monthlyFromEnd'] as int? ?? 0,
+      monthlyWeekday: Task.clampIntOrNullJson(j['monthlyWeekday'], 1, 7),
+      monthlyWeekIndex: Task.clampIntOrNullJson(j['monthlyWeekIndex'], 1, 5),
+      monthlyFromEnd: Task.clampIntJson(j['monthlyFromEnd'], 0, 31, 0),
       // P2-4：与 [Task.fromJson] 同区间夹取（1..43200 分钟），越界视为未设——
       // 模板 JSON 同样是「不可信输入」（可被手改 / 来自他人 / 传输损坏）。
       estimateMinutes: _clampEstimateMinutes(j['estimateMinutes']),

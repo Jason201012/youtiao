@@ -864,6 +864,9 @@ class _KanbanCard extends StatelessWidget {
     final done = task.status == TaskStatus.done;
     final dueHint = _dueHint(task);
     final overdue = dueHint == '逾期' && !done;
+    // P3-2（v3.0.1 审计）：暂停展示一次性取齐——推导态每次调用都全量扫
+    // 3 年窗口，build 内只算一次、下方角标复用局部值。
+    final pause = task.pauseDisplay;
 
     final content = Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -927,11 +930,12 @@ class _KanbanCard extends StatelessWidget {
           // P3-10（v2.9.4 审计）：预计时长此前只出现在任务详情 / 今日页 / 导出表，
           // 看板卡完全没有——排期时最需要「这件事大概要多久」的场景反而看不到。
           // 条件同时容纳 dueHint / repeat / estimate / 暂停态（P3-19）四者，
-          // 任一存在才占这一行高度。
+          // 任一存在才占这一行高度。（P3-2：暂停判据复用上方局部 pause，
+          // 不再走 pausedToday 重复扫窗。）
           if (dueHint.isNotEmpty ||
               task.isRepeating ||
               task.hasEstimate ||
-              task.pausedToday) ...[
+              pause != null) ...[
             const SizedBox(height: 6),
             Row(
               children: [
@@ -949,15 +953,22 @@ class _KanbanCard extends StatelessWidget {
                 // P3-19（v2.9.9 审计）：暂停中的待办卡此前没有任何暂停标识
                 // （首页任务行有「已暂停至 M/d」角标，看板漏掉）。与任务行同款
                 // 弱化样式补齐。
-                if (task.pausedToday) ...[
+                // P3-2（v3.0.1 审计）：回退推导态（无显式窗口字段，终点 =
+                // 最后一个被跳过的循环日）文案与图标区分——「已跳过至 M/d」，
+                // 不再把提前跳过未来循环日误呈现为「已暂停至」。
+                if (pause != null) ...[
                   if (dueHint.isNotEmpty || task.isRepeating)
                     const SizedBox(width: 6),
-                  Icon(Symbols.pause_circle, size: 13, color: ext.meta),
+                  Icon(
+                    pause.derived ? Symbols.skip_next : Symbols.pause_circle,
+                    size: 13,
+                    color: ext.meta,
+                  ),
                   const SizedBox(width: 2),
                   Text(
-                    task.pausedUntilDate == null
-                        ? '已暂停'
-                        : '已暂停至 ${task.pausedUntilDate!.month}/${task.pausedUntilDate!.day}',
+                    pause.derived
+                        ? '已跳过至 ${pause.end.month}/${pause.end.day}'
+                        : '已暂停至 ${pause.end.month}/${pause.end.day}',
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w500,

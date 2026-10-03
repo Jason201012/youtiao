@@ -170,6 +170,9 @@ class TaskDetailScreen extends StatelessWidget {
     // 但日后规则改成覆盖该日时会被永久静默跳过，且用户被「已跳过今天这一次」的
     // 成功文案误导（假成功）。这里据此禁用按钮并改文案。
     final canSkipToday = task.isRepeating && task.occursOnIgnoringSkip(DateTime.now());
+    // P3-2（v3.0.1 审计）：暂停展示一次性取齐——推导态每次调用都全量扫
+    // 3 年窗口，build 内只算一次、下方「恢复循环」按钮复用局部值。
+    final pause = task.pauseDisplay;
     // T1-1：预估 vs 实际的偏差文案（与今日排程建议共用同一 pure 函数，口径不漂移）。
     // P2-3（v2.9.3 审计）：重复任务的 [Task.focusedMinutes] 是历史累计专注，
     // 与「单次预估」不可比（恒显「可能低估」），故重复任务不展示偏差提示。
@@ -506,6 +509,10 @@ class TaskDetailScreen extends StatelessWidget {
                         label: const Text('暂停直到…'),
                       ),
                       // T2-5：暂停中给出显式恢复入口（提前恢复不必等到期）。
+                      // P3-2（v3.0.1 审计）：回退推导态（无显式窗口字段，终点 =
+                      // 最后一个被跳过的循环日，语义实为「跳过」）文案区分——
+                      // 「已跳过至 M/d，点按恢复」，不再与实际效果「撤销跳过」
+                      // 语义互斥（旧文案「已暂停至」暗示存在暂停窗口）。
                       if (task.pausedToday)
                         OutlinedButton.icon(
                           onPressed: () {
@@ -522,11 +529,13 @@ class TaskDetailScreen extends StatelessWidget {
                           },
                           icon: const Icon(Symbols.play_circle, size: 18),
                           label: Text(
-                            task.pausedUntilDate == null
+                            pause == null
                                 ? '恢复循环'
-                                : '已暂停至 '
-                                    '${task.pausedUntilDate!.month}/'
-                                    '${task.pausedUntilDate!.day}，点按恢复',
+                                : pause.derived
+                                    ? '已跳过至 ${pause.end.month}/'
+                                        '${pause.end.day}，点按恢复'
+                                    : '已暂停至 ${pause.end.month}/'
+                                        '${pause.end.day}，点按恢复',
                           ),
                         ),
                       OutlinedButton.icon(

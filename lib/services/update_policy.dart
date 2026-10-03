@@ -54,19 +54,29 @@ class UpdatePolicy {
   ///
   /// 只校验 host 是不够的：`https://gitee.com/<任意人>/<任意仓>/releases/download/...`
   /// 都会命中 host 白名单，攻击者只需自己注册一个 Gitee 账号上传恶意 APK 即可。
+  ///
+  /// P1-1（v3.0.1 审计）：发布仓迁移 releases-3 → releases-4（releases-3 附件
+  /// 配额满）时只改了 update.json、漏改本清单——所有已装版本的应用内下载
+  /// 100% 被白名单拒绝，更新分发链整体断裂。换仓必须**清单与客户端双侧同步**；
+  /// `test/v301_audit_fix_test.dart` 的发版护栏会读取仓库根 update.json 断言
+  /// 两个 URL 都落在本清单内，未来换仓漏改此处 CI 直接红。
   static const List<String> apkUrlPrefixes = <String>[
     'https://gitee.com/jason1012/youtiao/releases/download/',
     'https://gitee.com/jason1012/youtiao-releases/releases/download/',
     'https://gitee.com/jason1012/youtiao-releases-2/releases/download/',
     'https://gitee.com/jason1012/youtiao-releases-3/releases/download/',
+    'https://gitee.com/jason1012/youtiao-releases-4/releases/download/',
   ];
 
-  /// 发行版页面（releaseUrl）前缀白名单：只允许作者三个发布仓的 releases 页。
+  /// 发行版页面（releaseUrl）前缀白名单：只允许作者各发布仓的 releases 页。
   static const List<String> releaseUrlPrefixes = <String>[
     'https://gitee.com/jason1012/youtiao/releases',
     'https://gitee.com/jason1012/youtiao-releases/releases',
     'https://gitee.com/jason1012/youtiao-releases-2/releases',
     'https://gitee.com/jason1012/youtiao-releases-3/releases',
+    // P1-1（v3.0.1 审计）：与 apkUrlPrefixes 同步补 releases-4——否则清单
+    // releaseUrl 被静默丢弃，「浏览器下载」兜底外跳回落旧仓 -3 的 tag 页。
+    'https://gitee.com/jason1012/youtiao-releases-4/releases',
   ];
 
   /// 主机白名单（含子域）。Gitee 附件下载会 302 到 `foruda.gitee.com` 之类的

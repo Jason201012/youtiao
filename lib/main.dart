@@ -81,6 +81,15 @@ final List<String> _pendingCompleteTaskIds = [];
 /// 打卡是幂等正向操作，解锁后直接补打、无需确认（与「完成」任务的确认框不同）。
 final List<String> _pendingHabitCheckInIds = [];
 
+/// P2-1（v3.0.1 审计）：冷启动时点击通知「撤销」action 先于导航器就绪到达，
+/// 暂存任务 id，待 MainScaffold 首帧 / 解锁后经 [_flushPendingIntents] 走
+/// [_doTaskUndo] 正路消费——旧实现与「已锁定」合并处理，冷启动（导航器未就绪
+/// ≠ 已锁定）直接回「已锁定」提示且话术错位（任务撤销提示"撤销打卡记录"），
+/// 而 v3.0.0 新增的「撤销已失效」反馈在该主场景永不可达。入队后快照缺失时
+/// 由 [_doTaskUndo] 失效分支如实回报。锁定期间不消费（撤销是破坏性回退，
+/// 不跨锁执行——与既有口径一致，见 [_flushPendingIntents]）。
+final List<String> _pendingUndoTaskIds = [];
+
 /// 冷启动时由「分享」入口转发过来的文本 + 来源包名，先于导航器就绪到达，待首帧后弹出预填录入层。
 class _PendingShare {
   final String text;
@@ -439,13 +448,20 @@ void _handleNotificationAction(String? actionId, String? payload) {
     // P3-22（v2.9.9 审计）：通知「完成」确认条上的「撤销」——用完成前快照整体
     // 回滚（与 App 内完成撤销同构），回成功确认通知。撤销是破坏性回退，
     // 锁定期间不跨锁执行，回提示通知（与 habitUndoActionId 同口径）。
+    // P2-1（v3.0.1 审计）：**冷启动（导航器未就绪）≠ 已锁定**——旧实现把
+    // state == null 与锁定合并走「已锁定」提示，而用户可能根本没开应用锁，
+    // 且任务撤销被提示去「撤销打卡记录」（话术错位）。现在区分三态：
+    // 就绪 → 直接执行；已锁定 → 按动作类型参数化的提示；冷启动 → 入队，
+    // 首帧后走 [_doTaskUndo] 正路（快照随进程丢失 → 「撤销已失效」如实反馈）。
     final taskId = NotificationService.parseTaskId(payload);
     if (taskId == null) return;
     final state = _navigatorKey.currentState;
     if (state != null && !_isAppLocked) {
       _doTaskUndo(state, taskId);
+    } else if (state != null) {
+      NotificationService.instance.showLockedActionHint(taskUndo: true);
     } else {
-      NotificationService.instance.showLockedActionHint();
+      _enqueue(_pendingUndoTaskIds, taskId);
     }
     return;
   }
@@ -462,6 +478,10 @@ void _doHabitUndo(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
   if (habit == null) return;
+  // P2-3（v3.0.1 审计）：归档习惯禁止一切打卡写入（含回退）——归档语义 =
+  // 退场。早退而非放行，否则 setCheckInValue 的 archived 守卫会静默拦截
+  // 写入，而这里的 .then 仍会弹「已撤销」确认通知（谎报）。
+  if (habit.archived) return;
   final current = hp.todayValue(habit);
   if (current <= 0) return; // 无记录可撤：无写入即无回报
   hp
@@ -499,6 +519,10 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
   if (habit == null) return;
+  // P2-3（v3.0.1 审计）：归档习惯不再接受打卡写入（含通知 action 兜底）——
+  // 正常路径下归档时已撤全部提醒（updateHabit → cancelHabitReminder），
+  // 此处防的是系统延迟投递的在途旧闹钟。
+  if (habit.archived) return;
   final now = DateTime.now();
   // P3-7：休息日不写记录。如实回报「今天不是计划打卡日」而不是谎称已打卡。
   if (!habit.shouldCheckInOn(now)) {
@@ -1041,6 +1065,12 @@ class _MainScaffoldState extends State<MainScaffold>
     // U3：习惯「打卡」action——幂等正向，直接补打、无需确认框。
     while (_pendingHabitCheckInIds.isNotEmpty) {
       _doHabitCheckIn(state, _pendingHabitCheckInIds.removeAt(0));
+    }
+    // P2-1（v3.0.1 审计）：冷启动暂存的「撤销」action——首帧 / 解锁后消费，
+    // 走 [_doTaskUndo] 正路：快照仍在则正常回滚，快照随进程丢失则回
+    // 「撤销已失效」如实反馈。不再落入「已锁定」误报分支。
+    while (_pendingUndoTaskIds.isNotEmpty) {
+      _doTaskUndo(state, _pendingUndoTaskIds.removeAt(0));
     }
   }
 

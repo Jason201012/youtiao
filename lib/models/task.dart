@@ -743,6 +743,11 @@ class Task {
     if (!isRepeating || repeatEnded) return null;
     // P3-11（v3.0.0 审计）：非重复任务不应持有该字段（编辑切「不重复」/
     // 结束重复时已清）；此处为回退推导入口，repeatEnded 已排除退场任务。
+    // P3-2（v3.0.1 审计）早退：推导窗口终点只能来自「被跳过的循环日」，
+    // skipDates 为空时结果恒为 null——无跳过记录的重复任务此前每次构建
+    // 行 / 角标都全量扫 3 年（1098 天），列表 / 看板任务多时是可避免的
+    // 重复计算。语义与逐位等价（空列表时循环体一次都不命中）。
+    if (skipDates.isEmpty) return null;
     // P2-4 扫描窗上限与「暂停直到」选择器上限一致（3 年）。
     DateTime? last;
     for (var i = 0; i <= 366 * 3; i++) {
@@ -750,6 +755,24 @@ class Task {
       if (occursOnIgnoringSkip(d) && skipDates.contains(ymdKey(d))) last = d;
     }
     return last;
+  }
+
+  /// P3-2（v3.0.1 审计）：暂停展示信息一次性取齐——`(end: 终点, derived: 是否
+  /// 回退推导)`；非暂停态返回 null。
+  ///
+  /// 回退推导态（无显式 [pausedUntil] 字段，窗口终点 = 未来最后一个被跳过的
+  /// 循环日）语义实为「跳过」而非「暂停」——UI 据此区分文案（「已跳过至 M/d」
+  /// vs「已暂停至 M/d」），不再把「经未来循环日预览提前跳过某天」（未发生
+  /// 任何暂停）误呈现为暂停态；「恢复循环」按钮的实际效果（撤销该次跳过）
+  /// 与文案口径随之对齐。UI 侧应改用本 getter 替代「判空 + 取值」分次调用
+  /// [pausedUntilDate]——推导态每次调用都全量扫 3 年，分次调用成倍放大。
+  ({DateTime end, bool derived})? get pauseDisplay {
+    final end = pausedUntilDate;
+    if (end == null) return null;
+    // 显式字段存在（含已过窗口被上面的分支消化）→ 非推导态；[pausedUntil]
+    // 由 fromJson 的 _sanitizeYmd 保证「要么 null、要么合法 yyyy-MM-dd」，
+    // 不存在「有值但不可解析」的中间态，故直接按裸字段判空即可。
+    return (end: end, derived: pausedUntil == null);
   }
 
   /// [repeatsOn] 的「纯日历」判定：重复规则 + 结束日期，**不含** [skipDates]。
@@ -901,6 +924,14 @@ class Task {
   /// 一律回退 [fallback]，不再裸 `as int?` 硬转型中断整份模板加载）。
   static int clampIntJson(dynamic v, int min, int max, int fallback) =>
       _clampInt(v, min, max, fallback);
+
+  /// P3-3（v3.0.1 审计）：可空字段的公开 JSON 夹取助手（[clampIntJson] 的
+  /// 可空版，同 [Task._clampIntOrNull] 口径）——非 num / 越界返回 null
+  /// （=「未设置」），供 TemplateItem.fromJson 的 monthlyWeekday /
+  /// monthlyWeekIndex / repeatMinute / dueInDays 等可空字段与 [Task.fromJson]
+  /// 同源，不再裸 `as int?` 硬转型。
+  static int? clampIntOrNullJson(dynamic v, int min, int max) =>
+      _clampIntOrNull(v, min, max);
 
   /// F-7：历史日期列表（[doneDates] / [skipDates]）的滚动保留窗口（天）。
   ///

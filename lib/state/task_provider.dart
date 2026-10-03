@@ -2706,6 +2706,23 @@ class TaskProvider extends ChangeNotifier {
   }) {
     var added = 0, skipped = 0, overwritten = 0;
     T? pick<T>(List<T?> list, int i) => i < list.length ? list[i] : null;
+    // P2-2（v3.0.1 审计）：新建导入路径同样应用「源显式提供」的状态 / 完成时间
+    // ——v3.0.0 的 meta 管道只接了覆盖分支，新建分支用的 8 列草稿
+    // （task_import_service 只把 parsedStatus/completedAt 写进 meta）不带
+    // status/completedAt，空库 / 换机迁移后「已完成」全部静默变回待办、完成
+    // 时间全部丢失，与弹层「可导入列：…状态、完成时间」的白纸承诺矛盾。
+    // 口径与覆盖分支一致：源显式 done → 写 completedAt（源未提供时保留草稿值，
+    // 草稿恒 null）；源显式 todo → 完成时间清空；源未提供 → 草稿原样。
+    Task applySrcMeta(Task t, int i) {
+      final st = pick(statuses, i);
+      if (st == null) return t;
+      return t.copyWith(
+        status: st,
+        completedAt: st == TaskStatus.done
+            ? (pick(completedAts, i) ?? t.completedAt)
+            : null,
+      );
+    }
     // P2-4（v2.9.9 审计）：新增行先收集、最后一次性插入落库——旧实现逐行
     // addTask，每行各自 notifyListeners + _persist + 提醒重排（N 倍写放大），
     // 且中途异常时已写入的行无法回滚（半写入）。
@@ -2756,7 +2773,8 @@ class TaskProvider extends ChangeNotifier {
           // 安全（P2-A）：id 撞上了用户已有的**另一条**真实任务（第三方 .ics 可枚举出
           // 小整数 id），但内容指纹不一致。此时绝不能按「覆盖」把真实任务改写掉——
           // 丢弃可疑 id，作为一条全新任务导入。
-          addToBatch(task.copyWith(id: ''));
+          // P2-2（v3.0.1 审计）：同属「新建导入」，meta 状态 / 完成时间一并应用。
+          addToBatch(applySrcMeta(task, i).copyWith(id: ''));
           continue;
         }
       }
@@ -2766,14 +2784,19 @@ class TaskProvider extends ChangeNotifier {
         existing = fpIndex![_fingerprintKey(task)];
       }
       if (existing == null) {
-        addToBatch(task);
+        // P2-2（v3.0.1 审计）：新建导入应用 meta 状态 / 完成时间（见 applySrcMeta）。
+        addToBatch(applySrcMeta(task, i));
       } else if (overwrite) {
         // P2-20：覆盖更新必须允许写入来源方的完成态，否则「外部日历已标记完成」
         // 的任务导回后仍显示未完成（updateTask 会强制回填旧 status/completedAt）。
         // P2-1（v2.9.9 审计）：覆盖前先做「来源为空保留原值」的字段级合并——
         // iCal 来源没有子任务 / 附件 / 标签 / 备注等本 App 独有字段，直接以
         // 来源方为准会把原任务这些数据整体清空。
-        final merged = _mergeOverwriteFields(existing, task,
+        // P3-5（v3.0.1 审计）：合并基准取**当前**库内对象——fpIndex / existing
+        // 命中的可能是本批次早前行覆盖写入前的旧快照（二者均不随
+        // _applyTaskUpdate 刷新），以旧对象为基准会吞掉前一行刚写入的字段。
+        final current = byId(existing.id) ?? existing;
+        final merged = _mergeOverwriteFields(current, task,
             srcPriority: pick(priorities, i),
             srcCategory: pick(categories, i));
         // P2-2（v3.0.0 审计）：状态只在来源**显式提供**时改写——CSV / iCal
@@ -2783,18 +2806,25 @@ class TaskProvider extends ChangeNotifier {
         final srcStatus = pick(statuses, i);
         final mergedFinal = srcStatus == null
             ? merged.copyWith(
-                status: existing.status, completedAt: existing.completedAt)
+                status: current.status, completedAt: current.completedAt)
             : merged.copyWith(
                 status: srcStatus,
                 completedAt: srcStatus == TaskStatus.done
                     ? (pick(completedAts, i) ??
                         task.completedAt ??
-                        existing.completedAt)
+                        current.completedAt)
                     : null,
               );
-        if (_applyTaskUpdate(mergedFinal.copyWith(id: existing.id),
-            allowStatusChange: true)) {
+        final updated = mergedFinal.copyWith(id: current.id);
+        if (_applyTaskUpdate(updated, allowStatusChange: true)) {
           overwritten++;
+          // P3-5（v3.0.1 审计）：指纹索引同步刷新——覆盖可能改写标题 / 截止，
+          // 摘除旧键、新键指向合并后对象，批内后续行命中的是最新状态而非
+          // 陈旧快照（同一文件两行命中同一库中任务时不再以前一行的前置态合并）。
+          if (fpIndex != null) {
+            fpIndex.remove(_fingerprintKey(existing));
+            fpIndex[_fingerprintKey(updated)] = updated;
+          }
         }
       } else {
         skipped++;
@@ -2879,6 +2909,11 @@ class TaskProvider extends ChangeNotifier {
           src.attachments.isEmpty ? old.attachments : src.attachments,
       skipDates: src.skipDates.isEmpty ? old.skipDates : src.skipDates,
       doneDates: src.doneDates.isEmpty ? old.doneDates : src.doneDates,
+      // P3-1（v3.0.1 审计）：显式暂停窗口补进字段保护清单——CSV / iCal 草稿
+      // 不携带该字段（恒 null），旧行为经 copyWith 基底把暂停中任务的显式
+      // 窗口清成 null（窗口含循环日时降级为回退推导展示，不含时暂停直接
+      // 消失）。与 skipDates 同族处理：源为空保留原值。
+      pausedUntil: src.pausedUntil ?? old.pausedUntil,
       startDate: src.startDate ?? old.startDate,
       estimateMinutes: src.estimateMinutes ?? old.estimateMinutes,
       priority: srcPriority ?? old.priority,

@@ -116,6 +116,12 @@ class AchievementContext {
     }
 
     // —— 习惯侧：连续达成周目标的最大周数（取各习惯上限）——
+    // P3-6（v3.0.1 审计，口径确认项）：`habit.habits` 为**全量含归档**——
+    // 归档一个连续 100 天的习惯后，成就墙「最长连续」仍显示 100（删除才会掉）。
+    // 这是**有意保留**的历史口径：归档不清历史数据（打卡记录 / 热力图 /
+    // streak 均保留），成就是对「历史最高达成」的记录，随归档消失等于篡改
+    // 已解锁成就。与 [HabitProvider.habitCount]（注释同口径「含归档」）一致；
+    // 若未来决定排除归档，改走 `habit.activeHabits` 并同步更新本注释。
     int maxGoalWeeks = 0;
     for (final h in habit.habits) {
       final w = habit.consecutiveGoalWeeks(h);
@@ -130,6 +136,8 @@ class AchievementContext {
     // N 个计划日」后与取值更不同义。现取值链与详情页 longestStreak 同源
     // （[HabitProvider.longestStreak]：单习惯 + 计划日 + 宽限日），
     // 「计划日」措辞随之成立。
+    // P3-6（v3.0.1 审计）：遍历源同样**含归档**，口径与上方 maxGoalWeeks
+    // 一致（见彼处注释，不再重复）。
     int maxStreak = 0;
     for (final h in habit.habits) {
       final s = habit.longestStreak(h);

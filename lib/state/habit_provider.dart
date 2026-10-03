@@ -433,7 +433,14 @@ class HabitProvider extends ChangeNotifier {
   /// 所有「+1 / 设置数量 / 撤卡」入口都收敛到这里，保证：
   /// 1. 只有一处写盘与重排逻辑，不会再出现「某个入口忘记重排提醒」的经典缺陷；
   /// 2. 值被夹在 [0, [Habit.maxDailyTarget]]，负数与天文数字都不会污染数据。
+  ///
+  /// P2-3（v3.0.1 审计）：归档习惯守卫——归档语义 = 退场（「不再出现在今日
+  /// 打卡与提醒中」），此前归档习惯的详情页写按钮全部可用、通知 action 也
+  /// 能写入，统计与成就仍被改动，与归档提示语自相矛盾。UI 侧已对归档行 /
+  /// 详情页禁用写按钮，此处兜底拦截**全部程序化入口**（在途旧闹钟、未来
+  /// 新增入口）：直接返回，不写、不落盘、不重排。
   Future<void> setCheckInValue(Habit habit, DateTime day, int value) async {
+    if (habit.archived) return;
     final v = value.clamp(0, Habit.maxDailyTarget);
     final k = CheckIn.dateKey(day);
     final idx = _checkIns

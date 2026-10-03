@@ -131,6 +131,19 @@ void showHabitRestDayHint(BuildContext context) {
   );
 }
 
+/// P2-3（v3.0.1 审计）：归档习惯点击写入口的统一反馈——归档语义 = 退场，
+/// provider 层（[HabitProvider.setCheckInValue] 的 archived 守卫）会拦截全部
+/// 写入；归档行的动作区已替换为「已归档」占位（见 _HabitTile），此提示供
+/// 未来入口兜底，避免「点按无反应」。
+void showHabitArchivedHint(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(
+      content: Text('已归档 · 恢复归档后可继续打卡'),
+      duration: Duration(seconds: 3),
+    ),
+  );
+}
+
 String _fmtMinute(int minute) {
   final h = minute ~/ 60;
   final m = minute % 60;
@@ -747,7 +760,25 @@ class _HabitTile extends StatelessWidget {
     // 长按设数量作为等价入口保留。
     // P3-3 / U2-6（v2.9.4 审计）：休息日禁用「✎ / +1」并改提示文案，与今日卡
     // 「今天不打卡」一致（补卡入口仍在详情弹层里，计划外补记不受影响）。
-    final action = quantified
+    // P2-3（v3.0.1 审计）：归档行动作区整体替换为「已归档」占位——归档语义
+    // = 退场，此前的「✎ / +1 / 打卡圆圈」在归档折叠区里全部可用（provider
+    // 守卫落地前可真实写入，落地后则是静默无反应），与详情页「已归档」提示
+    // 自相矛盾。左侧整块仍可点开详情（恢复归档的入口在那里）；占位 chip
+    // 本身可点，给出与休息日 U2-2 同款的统一反馈。
+    final action = habit.archived
+        ? Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showHabitArchivedHint(context),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Symbols.archive, size: 14, color: ext.meta),
+                const SizedBox(width: 4),
+                Text('已归档', style: TextStyle(fontSize: 12, color: ext.meta)),
+              ]),
+            ),
+          )
+        : quantified
         ? Padding(
             padding: const EdgeInsets.only(right: 6),
             child: Row(
@@ -1731,7 +1762,11 @@ class _HabitDetailSheet extends StatelessWidget {
     final todayRatio = habit.progressRatioOf(todayValue);
     // P3-3 / U2-6（v2.9.4 审计）：今天是否计划内打卡（与列表行、今日卡同口径）。
     // 休息日禁用「设置数量 / 今日达标 / 清空今日 / +1」，避免一键写入计划外记录。
+    // P2-3（v3.0.1 审计）：归档习惯同样禁写——归档语义 = 退场，此前同屏
+    // 一面显示「该习惯已归档，不再出现在今日打卡与提醒中」，一面全部写按钮
+    // 可点且真实写入（统计与成就仍被改动）。归档优先于休息日判定。
     final restDay = !habit.shouldCheckInOn(DateTime.now());
+    final writeBlocked = habit.archived || restDay;
 
     return SafeArea(
       top: false,
@@ -1936,7 +1971,9 @@ class _HabitDetailSheet extends StatelessWidget {
                       const SizedBox(height: 6),
                       // P3-3 / U2-6（v2.9.4 审计）：休息日说明 + 三个写入口全部禁用
                       // （「设置数量」「今日达标」会一键写入计划外记录）。
-                      if (restDay)
+                      // P2-3（v3.0.1 审计）：归档时改显下方「已归档」说明行，
+                      // 本行（引导去用「补卡」）不再出现——补卡入口同样已禁用。
+                      if (restDay && !habit.archived)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 6),
                           child: Text(
@@ -1947,7 +1984,7 @@ class _HabitDetailSheet extends StatelessWidget {
                       Row(
                         children: [
                           TextButton.icon(
-                            onPressed: restDay
+                            onPressed: writeBlocked
                                 ? null
                                 // P3-8（v2.9.5 审计）：详情弹层这处「设置数量」同样
                                 // 直调 provider 层、绕过庆祝包装。列表侧两处已改，
@@ -1965,7 +2002,7 @@ class _HabitDetailSheet extends StatelessWidget {
                               // P3-9（v2.9.4 审计）：此前此路径绕过庆祝，与「+1」/打卡
                               // 入口不一致（用户「今日达标」看不到反馈，以为没生效）。
                               // 统一走 completeTodayTargetWithCelebration。
-                              onPressed: restDay
+                              onPressed: writeBlocked
                                   ? null
                                   : () => completeTodayTargetWithCelebration(
                                       context, hp, habit),
@@ -1978,7 +2015,7 @@ class _HabitDetailSheet extends StatelessWidget {
                               // 已达标 8/8 一键归零会连带连续天数、周目标回退，
                               // 而同屏的「设置数量」要过对话框。改为撤销式保护：
                               // 立即清空 + 10 秒内可原值放回（与删除习惯对齐）。
-                              onPressed: restDay
+                              onPressed: writeBlocked
                                   ? null
                                   : () => _clearTodayWithUndo(context, hp),
                               icon: const Icon(Symbols.undo, size: 16),
@@ -2035,7 +2072,9 @@ class _HabitDetailSheet extends StatelessWidget {
                       // U15 的「已打卡先确认再撤」口径。
                       // P3-3 / U2-6（v2.9.4 审计）：休息日禁用主按钮（补卡入口不受限），
                       // 避免同屏既说「今天不打卡」又提供一个一键写入的按钮。
-                      onPressed: restDay
+                      // P2-3（v3.0.1 审计）：归档同样禁用主按钮与补卡（原实现
+                      // 只看 restDay，归档习惯三个写按钮全部可点且真实写入）。
+                      onPressed: writeBlocked
                           ? null
                           : quantified
                               ? () =>
@@ -2049,18 +2088,24 @@ class _HabitDetailSheet extends StatelessWidget {
                           : (isCheckedToday ? Icons.check : Icons.add)),
                       // 新U3-7（v2.9.7 审计）：文案同值但此前是裸字面量，改走
                       // 共享常量 kHabitRestDayLabel，与列表 chip / 今日页同真源。
-                      label: Text(restDay
-                          ? kHabitRestDayLabel
-                          : quantified
-                              ? (metToday ? '+1（已达标）' : '+1')
-                              : (isCheckedToday ? '今日已打卡' : '打卡')),
+                      label: Text(habit.archived
+                          ? '已归档'
+                          : restDay
+                              ? kHabitRestDayLabel
+                              : quantified
+                                  ? (metToday ? '+1（已达标）' : '+1')
+                                  : (isCheckedToday ? '今日已打卡' : '打卡')),
                     ),
                   ),
                   const SizedBox(width: 12),
                   // U3：补卡入口——热力图纯展示，过去漏卡的唯一补救路径此前不存在。
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () => _backfillCheckIn(context, hp),
+                      // P2-3（v3.0.1 审计）：归档禁用补卡（写入侧 setCheckInValue
+                      // 守卫兜底）。
+                      onPressed: habit.archived
+                          ? null
+                          : () => _backfillCheckIn(context, hp),
                       icon: const Icon(Symbols.event_available),
                       label: const Text('补卡'),
                     ),
@@ -2082,8 +2127,14 @@ class _HabitDetailSheet extends StatelessWidget {
                     children: [
                       Icon(Symbols.archive, size: 16, color: ext.meta),
                       const SizedBox(width: 6),
-                      Text('该习惯已归档，不再出现在今日打卡与提醒中',
-                          style: TextStyle(fontSize: 12, color: ext.meta)),
+                      // P2-3（v3.0.1 审计）：补「恢复归档后可继续打卡」——写按钮
+                      // 现已随归档禁用，说明行同步交代恢复路径，消除
+                      // 「文案说退场、按钮可写入」的同屏矛盾。
+                      Expanded(
+                        child: Text(
+                            '该习惯已归档，不再出现在今日打卡与提醒中 · 恢复归档后可继续打卡',
+                            style: TextStyle(fontSize: 12, color: ext.meta)),
+                      ),
                     ],
                   ),
                 ),
