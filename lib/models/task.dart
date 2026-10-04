@@ -933,6 +933,14 @@ class Task {
   static int? clampIntOrNullJson(dynamic v, int min, int max) =>
       _clampIntOrNull(v, min, max);
 
+  /// P3-1（v3.0.2 审计）：[repeatUntil] 净化的公开版（[_sanitizeRepeatUntil]
+  /// 同口径）——合法 yyyy-MM-dd 原样返回；null / 非串 / 长度不对 / 数值越界
+  /// 一律返回 null（=「无限循环」）。供 TemplateItem.fromJson 等外部解析面
+  /// 复用：模板 JSON 是不可信输入，非法串若原样透传，会在 repeatsOn 内被
+  /// _parseYmd 回退 1970 → isRepeatEnded 恒真 → 套用产出的任务被静默视为
+  /// 「已结束」（不再循环不再提醒），与 F-8 在备份路径修掉的缺陷同型。
+  static String? sanitizeRepeatUntilJson(dynamic v) => _sanitizeRepeatUntil(v);
+
   /// F-7：历史日期列表（[doneDates] / [skipDates]）的滚动保留窗口（天）。
   ///
   /// 二者此前只增不清、无上限：一个使用数年的「每天」任务会累积上千条字符串，

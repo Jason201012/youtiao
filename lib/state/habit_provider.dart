@@ -474,6 +474,16 @@ class HabitProvider extends ChangeNotifier {
     if (_sameDayKey(day, DateTime.now()) && isTargetMetOn(habit, day)) {
       NotificationService.instance.cancelHabitSnooze(habit.id);
     }
+    // P3-3（v3.0.2 审计）：**今天的打卡被撤到 0 时，一并撤掉 9 号槽确认通知**。
+    // 通知打卡产生的「已打卡 ✓ / 撤销」确认条（[showHabitCheckedConfirm] /
+    // [showHabitUndoConfirm]，独立 9 号槽）在 App 内撤卡后内容已失真（仍称
+    // 「已打卡 ✓」且带可点「撤销」），用户再次打卡后点它会误退新卡。P3-4
+    // （v3.0.1 审计）只在删除 / 归档路径清理，此为同一修复原则的另一半。
+    // 仅「今天 + 实际删除了记录」（走到此处必已删除，见上方早退）才清：
+    // 补昨天 / 前天的撤卡与展示中的今日确认条无关，不动。
+    if (v <= 0 && _sameDayKey(day, DateTime.now())) {
+      NotificationService.instance.cancelHabitConfirm(habit.id);
+    }
     _notifyHabitsChanged();
   }
 

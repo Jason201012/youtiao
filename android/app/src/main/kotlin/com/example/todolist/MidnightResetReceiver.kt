@@ -236,8 +236,16 @@ class MidnightResetReceiver : BroadcastReceiver() {
         if (dbFile != null && dbFile.exists()) {
             val path = dbFile.absolutePath
             resetDailyTasksSqlite(path)
-            // 回收站自动清理：删除早于保留期的过期条目
-            cleanupTrashSqlite(path, readTrashRetention(context))
+            // 回收站自动清理：删除早于保留期的过期条目。
+            // P2-2（v3.0.2 审计）：捕获返回的过期 id 列表并**接线** F-5（v2.8.5 审计）
+            // 补写的 [cleanupExpiredTrashResources]——该函数自 v2.8.6 引入起全仓零调用，
+            // 原生路径的「到期即销毁」只删 trash 表记录，附件目录 / 展示态通知从未
+            // 清理，attachments/<taskId>/ 孤儿目录无限累积（与 Dart 侧
+            // TaskProvider._cleanupTrashIfNeeded 的「三件事一体」口径不一致）。
+            val expired = cleanupTrashSqlite(path, readTrashRetention(context))
+            if (expired.isNotEmpty()) {
+                cleanupExpiredTrashResources(context, expired)
+            }
             return
         }
         // 回退路径：旧版 SP（tasks JSON 整体）
@@ -317,12 +325,17 @@ class MidnightResetReceiver : BroadcastReceiver() {
      * F-5（v2.8.5 审计）：对原生路径清理掉的过期回收站任务，补齐与 Dart 侧
      * TaskProvider._cleanupTrashIfNeeded 一致的「到期即销毁」其余两件事。
      * 双端口径注释（防再次漂移，改动时必须两侧同步）：
-     *  1) 附件目录：`attachments/<taskId>/` 整目录递归删除（目录名与 Dart
-     *     AttachmentService 的 `_attachmentsDirName = "attachments"` 一致）。
+     *  1) 附件目录：`attachments/<taskId>/` 整目录递归删除。
+     *     P2-2（v3.0.2 审计）口径修正：Dart 侧 AttachmentService 的**全部**访问器
+     *     （dirFor / stagingDir / removeDir / promoteStaging / scanAll / _planOrphans）
+     *     均为「_base()（<docs>/attachments）再拼一段 _attachmentsDirName」——真实布局
+     *     是 <docs>/attachments/attachments/<taskId>/ 双层嵌套，自 v2.6.9（e0c81c4）
+     *     引入附件功能起从未变过。旧注释声称的单层路径（app_flutter/attachments/<taskId>）
+     *     从未命中真实目录（F-5 的第二个「未接线」形态）。现双层为主、单层兜底
+     *     （幂等，防未知历史布局），全部尝试删除。
      *     Dart 的 `getApplicationDocumentsDirectory()` 在 Android 上实际返回
      *     **`dataDir/app_flutter`**（path_provider 2.x，`dataDir` 即
-     *     `applicationInfo.dataDir`，与 `filesDir` 是兄弟目录），故两个候选根
-     *     都尝试删除，幂等。
+     *     `applicationInfo.dataDir`，与 `filesDir` 是兄弟目录）。
      *  2) 通知 id 段（与 Dart NotificationService 完全一致，均为 int32）：
      *     - 一次性截止提醒 = 任务数字 id 本身；
      *     - 重复提醒 = 1600000000 + (id % 30000000) * 8 + 0..7；
@@ -334,9 +347,11 @@ class MidnightResetReceiver : BroadcastReceiver() {
         val nm = runCatching {
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         }.getOrNull()
-        // 附件根目录候选（path_provider 在 Android 的文档目录是 dataDir/app_flutter，
-        // 与 filesDir 是兄弟目录；保留 filesDir 直下作为兜底路径，两处幂等清理）：
+        // 附件根目录候选：双层（真实布局，见上方口径修正）为主，单层兜底；
+        // 同一 id 在多处尝试删除是幂等的，不会误删兄弟任务目录。
         val attachmentRoots = listOf(
+            File(File(File(context.applicationInfo.dataDir, "app_flutter"), "attachments"), "attachments"),
+            File(File(context.filesDir, "attachments"), "attachments"),
             File(File(context.applicationInfo.dataDir, "app_flutter"), "attachments"),
             File(context.filesDir, "attachments"),
         )

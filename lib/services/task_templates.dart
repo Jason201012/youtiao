@@ -194,8 +194,16 @@ class TemplateItem {
   factory TemplateItem.fromJson(Map<String, dynamic> j) {
     final wd = j['repeatWeekdays'];
     final tags = j['tags'];
+    // P3-1（v3.0.2 审计）：字符串字段同族收口——title / repeat / note 此前
+    // 裸 `as String?` 硬转型，非字符串值（手改 / 外部模板的 `"title":123`）
+    // 抛错中断**整份模板**加载且无任何失效提示（该模板从列表静默消失）。
+    // 改为 `is String` 判型回退默认值，与同文件 category / priority 的容错
+    // 口径一致。
+    final title = j['title'] is String ? j['title'] as String : '';
+    final repeatStr = j['repeat'] is String ? j['repeat'] as String : null;
+    final noteRaw = j['note'] is String ? j['note'] as String : '';
     return TemplateItem(
-      (j['title'] as String?) ?? '',
+      title,
       _catFromName(j['category']),
       _prioFromName(j['priority']),
       // P3-3（v3.0.1 审计）：同族硬转型顺手收口——字符串 / 小数此前同样
@@ -203,8 +211,15 @@ class TemplateItem {
       // ——逾期任务另存为模板——故下界不可为 0）。
       Task.clampIntOrNullJson(j['dueInDays'], -36500, 36500),
       tags: tags is List ? List<String>.from(tags.whereType<String>()) : const <String>[],
-      repeat: RepeatType.values.asNameMap()[j['repeat'] as String?] ?? RepeatType.none,
-      repeatWeekdays: wd is List ? List<int>.from(wd.whereType<int>()) : const <int>[],
+      repeat: RepeatType.values.asNameMap()[repeatStr] ?? RepeatType.none,
+      // P3-1（v3.0.2 审计）：repeatWeekdays 与 [Task.fromJson] 完整同口径
+      // （whereType<int>() + 1..7 过滤 + 去重 + 升序）。旧实现只 whereType
+      // 不过滤不去重：`"repeatWeekdays":[9,3,3]` 套用后产出的每周任务
+      // repeatsOn 永不命中（与 F-8 注释里 monthlyWeekday=9 的哑任务同型）。
+      repeatWeekdays: wd is List
+          ? (wd.whereType<int>().where((d) => d >= 1 && d <= 7).toSet().toList()
+            ..sort())
+          : const <int>[],
       // P3-3（v3.0.1 审计）：与 [Task.fromJson] 同口径夹取（repeatInterval
       // 1..365 / repeatMinute 0..1439 / monthlyWeekday 1..7 / monthlyWeekIndex
       // 1..5 / monthlyFromEnd 0..31）——v2.9.7 只补了 monthlyDay 一项，兄弟
@@ -217,7 +232,12 @@ class TemplateItem {
       // 手写极简模板，保持旧行为零迁移）。
       repeatInterval: Task.clampIntJson(j['repeatInterval'], 1, 365, 2),
       repeatMinute: Task.clampIntOrNullJson(j['repeatMinute'], 0, 1439),
-      repeatUntil: j['repeatUntil'] as String?,
+      // P3-1（v3.0.2 审计）：repeatUntil 接净化（[Task.sanitizeRepeatUntilJson]，
+      // 与备份路径 [Task.fromJson] 的 F-8 同口径）——非法串此前原样透传，
+      // 被 _parseYmd 回退 1970 → isRepeatEnded 恒真，套用产出的任务被 App
+      // 静默视为「已结束」（不再循环不再提醒）。清空（=无限循环）比「视为
+      // 已结束」更安全。
+      repeatUntil: Task.sanitizeRepeatUntilJson(j['repeatUntil']),
       // 新P3-4（v2.9.7 审计）：与 [Task.fromJson] 同口径夹取（1..31，缺省 1）——
       // 此前 `as int?` 硬转型无 clamp：字段为字符串/小数时抛错中断**整份模板**
       // 加载；旧模板 / 手改 / 外部模板的 `monthlyDay = 0` 套用后会产出
@@ -232,11 +252,12 @@ class TemplateItem {
       estimateMinutes: _clampEstimateMinutes(j['estimateMinutes']),
       // P3-10：与 [Task.fromJson] 同一原则——模板 JSON 是不可信输入。
       // 备注归一化换行（模板项标题也做同样处理），提前量夹到 0..1440。
-      note: (j['note'] as String? ?? '')
-          .replaceAll(RegExp(r'[\r\n]+'), ' ')
-          .trim(),
+      // P3-1（v3.0.2 审计）：非字符串值不再抛错（见 title 处注释），回退空串。
+      note: noteRaw.replaceAll(RegExp(r'[\r\n]+'), ' ').trim(),
+      // P3-1（v3.0.2 审计）顺手收口：reminderOffsetMin 此前残留裸 `as num?`
+      // 硬转型（字符串值抛错中断整份模板），改走与兄弟整型字段同一助手。
       reminderOffsetMin:
-          ((j['reminderOffsetMin'] as num?)?.toInt() ?? 0).clamp(0, 1440),
+          Task.clampIntOrNullJson(j['reminderOffsetMin'], 0, 1440) ?? 0,
     );
   }
 
@@ -475,7 +496,17 @@ class UserTemplateStore {
   /// 安全（P1-A）：以**文件名为 id 的权威来源**——即便 JSON 内容里躺着
   /// `../../backup/auto/2026-08-28` 这样的恶意 id，也永远不会进入内存模型，
   /// 后续的编辑 / 删除 / 覆盖都只会作用于该文件自身。
-  static Future<List<UserTemplate>> loadAll() async {
+  ///
+  /// P3-1（v3.0.2 审计）：损坏文件不再纯静默——新入口 [loadAllWithBroken]
+  /// 附带**损坏文件数**供 UI 给可见提示（U3-2「模板损坏静默消失」）；本方法
+  /// 保持原签名（返回纯列表），既有调用点行为逐位不变。
+  static Future<List<UserTemplate>> loadAll() async =>
+      (await loadAllWithBroken()).templates;
+
+  /// [loadAll] 的完整版：附带损坏（JSON 解析失败 / 字段异常）被跳过的文件数。
+  /// 全目录枚举失败（目录不存在等）返回空列表 + 0（不视为损坏）。
+  static Future<({List<UserTemplate> templates, int broken})>
+      loadAllWithBroken() async {
     try {
       final d = await _dir();
       final files = d
@@ -484,6 +515,7 @@ class UserTemplateStore {
           .where((f) => f.path.endsWith('.json'))
           .toList();
       final out = <UserTemplate>[];
+      var broken = 0;
       for (final f in files) {
         try {
           final name = f.path.split(Platform.pathSeparator).last;
@@ -494,13 +526,16 @@ class UserTemplateStore {
               as Map<String, dynamic>;
           out.add(UserTemplate.fromJson({...m, 'id': id}));
         } catch (_) {
-          // 损坏的模板文件跳过，不阻断其余模板加载。
+          // 损坏的模板文件跳过，不阻断其余模板加载；计数供 UI 提示（P3-1，v3.0.2 审计）。
+          broken++;
         }
       }
       out.sort((a, b) => a.name.compareTo(b.name));
-      return out;
+      return (templates: out, broken: broken);
     } catch (_) {
-      return const [];
+      // 显式类型实参：裸 `const []` 在 record 字面量字段位会推断为 List<dynamic>，
+      // 与声明返回类型 List<UserTemplate> 不符（编译错误）。
+      return (templates: const <UserTemplate>[], broken: 0);
     }
   }
 

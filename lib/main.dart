@@ -90,6 +90,14 @@ final List<String> _pendingHabitCheckInIds = [];
 /// 不跨锁执行——与既有口径一致，见 [_flushPendingIntents]）。
 final List<String> _pendingUndoTaskIds = [];
 
+/// P2-1（v3.0.2 审计）：习惯「撤销」action 的冷启动入队——v3.0.2 的 P2-1 修复
+/// 只接了**任务**侧（[_pendingUndoTaskIds]），同一回调、同一 `state == null`
+/// 缺陷在习惯侧原样保留：冷启动点撤销被误报「已锁定」（用户可能根本没开应用锁）
+/// 且动作被静默丢弃。与任务侧不同，习惯撤销**不需要内存快照**（[_doHabitUndo]
+/// 只按 DB 现值 -1），首帧后补执行完全可行、是正收益。锁定期间不消费
+/// （撤销是破坏性回退，不跨锁执行——与任务侧同口径，见 [_flushPendingIntents]）。
+final List<String> _pendingHabitUndoIds = [];
+
 /// 冷启动时由「分享」入口转发过来的文本 + 来源包名，先于导航器就绪到达，待首帧后弹出预填录入层。
 class _PendingShare {
   final String text;
@@ -434,13 +442,20 @@ void _handleNotificationAction(String? actionId, String? payload) {
     // 对称（原实现 8/8 误触即清零丢 7 个单位）。
     // 新U3-1（v2.9.7 审计）：锁定期间不再完全静默——回一条提示通知（撤销是
     // 破坏性回退，不跨锁暂存；须解锁后在 App 内操作）。
+    // P2-1（v3.0.2 审计）：**冷启动（导航器未就绪）≠ 已锁定**——旧实现把
+    // state == null 与锁定合并走「已锁定」提示，而用户可能根本没开应用锁，
+    // 且撤销被静默丢弃。v3.0.2 已为任务侧做了同款三态区分，习惯侧此轮对齐：
+    // 就绪 → 直接执行；已锁定 → 参数化提示；冷启动 → 入队，首帧后走
+    // [_doHabitUndo] 正路（无快照依赖，按 DB 现值 -1，补执行可成功）。
     final habitId = NotificationService.parseHabitId(payload);
     if (habitId == null) return;
     final state = _navigatorKey.currentState;
     if (state != null && !_isAppLocked) {
       _doHabitUndo(state, habitId);
-    } else {
+    } else if (state != null) {
       NotificationService.instance.showLockedActionHint();
+    } else {
+      _enqueue(_pendingHabitUndoIds, habitId);
     }
     return;
   }
@@ -585,9 +600,25 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
       NotificationService.instance.snoozeTaskReminder(task, delay: delay);
     }
   } else if (habitId != null) {
-    final habit = Provider.of<HabitProvider>(ctx, listen: false).byId(habitId);
+    final hp = Provider.of<HabitProvider>(ctx, listen: false);
+    final habit = hp.byId(habitId);
     if (habit != null) {
-      NotificationService.instance.snoozeHabitReminder(habit, delay: delay);
+      // P3-2（v3.0.2 审计）：已达标不再排「稍后提醒」——P2-7（v2.9.5）只覆盖
+      // 「先 snooze → 后达标」方向（达标时撤**已挂的** 8 号槽），反方向「已达标
+      // 后点展示中的旧通知上的稍后提醒」仍会排回一条新提醒：同一条通知上
+      // 「打卡」按钮有达标守卫（回「已达标」确认），「稍后提醒」没有。习惯侧
+      // 与任务侧不同（完成即撤展示通知，该场景不可达），达标提醒仍挂在通知栏。
+      // 早退时经 9 号槽回一条覆盖式确认（如实回报当日进度，不静默——用户知道
+      // 为什么 10 分钟后不会再响）；归档侧守卫在 snoozeHabitReminder 入口。
+      if (hp.isTargetMetToday(habit)) {
+        NotificationService.instance.showHabitCheckedConfirm(
+          habit,
+          value: hp.todayValue(habit),
+          target: habit.effectiveTarget,
+        );
+      } else {
+        NotificationService.instance.snoozeHabitReminder(habit, delay: delay);
+      }
     }
   }
 }
@@ -1069,8 +1100,20 @@ class _MainScaffoldState extends State<MainScaffold>
     // P2-1（v3.0.1 审计）：冷启动暂存的「撤销」action——首帧 / 解锁后消费，
     // 走 [_doTaskUndo] 正路：快照仍在则正常回滚，快照随进程丢失则回
     // 「撤销已失效」如实反馈。不再落入「已锁定」误报分支。
+    // U3-3（v3.0.2 审计）：与「完成」入队后先弹确认框不同，两类「撤销」入队
+    // 解锁后**直接执行、不再确认**——口径在此固化：「完成」是经由通知新表达的
+    // 写入意图（冷启动可能是对旧通知的误触，写入前值得一次确认）；而「撤销」
+    // 本身就是用户已明确表达的回退意图（点的是确认条上的「撤销」按钮），且
+    // 两条路径都有天然护栏：任务侧快照缺失时如实回「已失效」，习惯侧无记录时
+    // 早退无写入。保护力度不对称属有意设计，防下一轮审计再报。
     while (_pendingUndoTaskIds.isNotEmpty) {
       _doTaskUndo(state, _pendingUndoTaskIds.removeAt(0));
+    }
+    // P2-1（v3.0.2 审计）：习惯「撤销」action 与任务侧同款入队——首帧 / 解锁后
+    // 消费，走 [_doHabitUndo] 正路（无快照依赖，按 DB 现值 -1，冷启动补执行
+    // 可成功；记录已不存在 / 习惯已归档时其内部守卫早退，不会谎报）。
+    while (_pendingHabitUndoIds.isNotEmpty) {
+      _doHabitUndo(state, _pendingHabitUndoIds.removeAt(0));
     }
   }
 

@@ -1288,6 +1288,13 @@ class TaskProvider extends ChangeNotifier {
       // 兜底清理：App 启动时按保留期移除过期回收站条目（原生 MidnightResetReceiver
       // 负责「App 已关闭」的每日 00:00 清理，这里覆盖 App 已开、长期未跨午夜边界的情况）。
       _cleanupTrashIfNeeded(persist: true);
+      // P2-2（v3.0.2 审计）：启动兜底——清理「整目录孤儿」附件。原生午夜路径
+      // 的 cleanupExpiredTrashResources 自 v2.8.6 起漏接线（本轮已补），历史漏删
+      // 的 attachments/<taskId>/ 在 Dart 侧已无记录可见，正常清理永久错过；此处
+      // 按「目录名不在 tasks ∪ trash」删除整目录孤儿，防再次漏接沉淀。只删
+      // 整目录孤儿（无误伤面），文件级无主文件仍归「清理无主文件」显式语义。
+      // 全程吞异常，失败不影响启动，也不在此 await（不阻塞首帧）。
+      AttachmentService.deleteOrphanTaskDirs([..._tasks, ..._trash]);
       _syncTrashExpireNotice(); // P1-12：启动时兜底重排过期预告通知
       // 已有数据，或用户已做过首启示例决策（含「从零开始」）：标记已预置，
       // 日后即便任务库被清空也不再复活示例。

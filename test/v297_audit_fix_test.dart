@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -154,7 +155,7 @@ void main() {
 
   // ── P2-6：补卡判据（provider 直断言）────────────────────────
   group('P2-6 setCheckInValue 只对「写入今天且达标」撤 snooze', () {
-    test('撤卡（值 0）不触发 cancel；补历史日达标不触发 cancel', () async {
+    test('撤卡（值 0）不撤在途 snooze（8 号槽）；补历史日达标不触发 cancel', () async {
       const ch = MethodChannel('dexterous.com/flutter/local_notifications');
       final calls = <MethodCall>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -171,6 +172,14 @@ void main() {
           weekdays: const [],
           dailyTarget: 2);
       final h = hp.habits.firstWhere((x) => x.title == '撤卡不撤snooze');
+      // flutter_local_notifications 新版 cancel 的 arguments 是 Map（{'id':...}），
+      // 裸比较恒不命中——与 v301 的 cancelIdOf 同款双形态防御提取。
+      int? cancelIdOf(MethodCall c) {
+        final a = c.arguments;
+        if (a is int) return a;
+        if (a is Map) return a['id'] as int?;
+        return null;
+      }
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
       final yesterday = today.subtract(const Duration(days: 1));
@@ -179,8 +188,29 @@ void main() {
       expect(calls.where((c) => c.method == 'cancel'), isNotEmpty);
       calls.clear();
       await hp.setCheckInValue(h, today, 0); // 撤卡（写今天但不达标）
-      expect(calls.where((c) => c.method == 'cancel'), isEmpty,
-          reason: '未达标不清（P2-7 原口径保留）');
+      // P3-3（v3.0.2 审计）改口径：旧断言把「值 0 → cancel 调用全空」钉为正确
+      // 行为；P3-3 落地后「今日值降 0」必须撤 9 号槽确认通知（「已打卡 ✓ / 撤销」
+      // 确认条已失真）。P2-6 原口径「未达标不清」专指 **8 号槽在途 snooze**，
+      // 判据收窄而非放松：断言改为按槽位 id 精确判定。
+      expect(
+        calls.where((c) =>
+            c.method == 'cancel' &&
+            cancelIdOf(c) ==
+                NotificationService.habitSnoozeNotifyIdOf(h.id)),
+        isEmpty,
+        reason: 'P2-6/P2-7 原口径保留：未达标不撤在途 snooze（8 号槽）',
+      );
+      expect(
+        calls.where((c) =>
+            c.method == 'cancel' &&
+            cancelIdOf(c) ==
+                NotificationService.habitConfirmNotifyIdOf(h.id)),
+        isNotEmpty,
+        reason: 'P3-3（v3.0.2 审计）：今日值降 0 → 9 号槽「已打卡 ✓」确认条失真，必须撤',
+      );
+      // P3-3：今日降 0 已记一条 9 号槽 confirm-cancel，清空后再验证「补历史日」
+      // 独立场景（末段断言的是补历史日本身不产生 cancel，不含上一段残留）。
+      calls.clear();
       await hp.setCheckInValue(h, yesterday, 2); // 补历史日达标
       expect(calls.where((c) => c.method == 'cancel'), isEmpty,
           reason: 'P2-6：历史日达标与今天在途 snooze 无关');

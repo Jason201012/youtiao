@@ -54,8 +54,17 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
   }
 
   Future<void> _reload() async {
-    final list = await UserTemplateStore.loadAll();
-    if (mounted) setState(() => _user = list);
+    final r = await UserTemplateStore.loadAllWithBroken();
+    if (!mounted) return;
+    setState(() => _user = r.templates);
+    // P3-1（v3.0.2 审计）/ U3-2：损坏模板此前从列表静默消失，用户无从知晓
+    // 原因。加载失败数 > 0 时给一条可见提示（SnackBar，不打断浏览）。
+    if (r.broken > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            '${r.broken} 个模板文件已损坏，已跳过；可删除后重新导入'),
+      ));
+    }
   }
 
   Future<void> _import(BuildContext ctx) async {

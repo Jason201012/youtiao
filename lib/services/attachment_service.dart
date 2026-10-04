@@ -595,6 +595,49 @@ static Future<Map<String, List<AttachmentFileEntry>>> scanAll() async {
     return plan.bytes;
   }
 
+  /// P2-2（v3.0.2 审计）：启动兜底——只清理「整目录孤儿」并返回删除的目录数。
+  ///
+  /// 背景：原生午夜路径（MidnightResetReceiver.cleanupTrashSqlite）自 v2.8.6 起
+  /// 才接线 cleanupExpiredTrashResources 删附件目录；此前（或该路径再漏接时）被
+  /// 原生删掉 trash 记录的任务，其附件目录在 Dart 侧已无任何记录可见，正常清理
+  /// 路径永久错过、无限累积。本方法按「目录名不在 [tasks]（含回收站）中」判定
+  /// 整目录孤儿并递归删除，防同类漏接再次沉淀。
+  ///
+  /// 目录层级口径（防再次漂移）：与全文件访问器一致——经 [_base()]
+  /// （`<docs>/attachments`）再拼一段 [_attachmentsDirName]，即扫描
+  /// **`<docs>/attachments/attachments/`**（双层嵌套，自 v2.6.9 起从未变过）。
+  ///
+  /// 与 [deleteOrphans] 的语义边界：这里**只删整目录孤儿**（任务记录已不存在，
+  /// 删了绝无误伤）；「任务还在、元数据缺文件」的文件级无主文件仍属「清理无主
+  /// 文件」的显式语义，须用户在设置页确认后执行，不在启动时静默处理。
+  /// `_staging` 残留由既有链路（[staleStagingMaxAge]）管理，此处不碰。
+  /// 全部异常吞掉（启动兜底绝不阻断主流程），失败项留给手动清理兜底。
+  static Future<int> deleteOrphanTaskDirs(List<Task> tasks) async {
+    var removed = 0;
+    try {
+      final known = tasks.map((t) => t.id).toSet();
+      final base = await _base();
+      final root = Directory('${base.path}/$_attachmentsDirName');
+      if (!await root.exists()) return 0;
+      await for (final e in root.list()) {
+        if (e is! Directory) continue;
+        final name = e.path.split(Platform.pathSeparator).last;
+        if (name == _stagingDirName) continue; // staging 归既有链路管
+        if (!_isSafeSegment(name)) continue; // 防御：非白名单目录不动
+        if (known.contains(name)) continue; // 任务记录仍在（含回收站）→ 保留
+        try {
+          await e.delete(recursive: true);
+          removed++;
+        } catch (_) {
+          // 单目录删除失败不阻断其余扫描。
+        }
+      }
+    } catch (_) {
+      // path_provider 不可用 / 目录枚举失败：启动兜底静默放弃。
+    }
+    return removed;
+  }
+
   /// 按 MIME 推导一个兜底扩展名（仅当源文件无扩展名时使用）。
   static String _extFromMime(String mime) {
     if (mime.startsWith('image/')) return '.${mime.split('/').last}';

@@ -1263,6 +1263,23 @@ class NotificationService {
     }
   }
 
+  /// P3-3（v3.0.2 审计）：**只**清掉某习惯的 9 号槽确认通知（「已打卡 ✓ / 撤销」）。
+  ///
+  /// 复现：通知提醒点「打卡」→ 9 号槽确认条「已打卡 ✓ / 撤销」→ 在 App 内
+  /// 取消打卡（当日值降 0）→ 确认条仍显示「已打卡 ✓」且带可点的「撤销」；
+  /// 用户之后再次打卡后点旧确认条的「撤销」，会再把刚打的卡退掉。P3-4
+  /// （v3.0.1 审计）只在删除 / 归档路径清了 9 号槽（[cancelHabitReminder]），
+  /// App 内撤卡路径漏掉——本轮补齐。与 [cancelHabitSnooze] 同款「只清指定
+  /// 槽位」的最小取消：0..8 号落点由重排逻辑自己接管，不做全清全挂的
+  /// 平台往返抖动。
+  Future<void> cancelHabitConfirm(String id) async {
+    try {
+      await _plugin.cancel(habitConfirmNotifyIdOf(id));
+    } catch (e) {
+      AppLog.d('[通知] 取消习惯确认通知失败 id=$id: $e');
+    }
+  }
+
   /// 稍后提醒（snooze）：在 [delay] 后重新弹出该任务提醒。
   ///
   /// F11：使用独立的 [_snoozeNotifyIdOf] 段位，不再复用一次性「截止提醒」的
@@ -1333,6 +1350,14 @@ class NotificationService {
   /// 3. **补回 action 按钮**（稍后提醒 / 打卡）——snooze 后仍可二次顺延或直接打卡。
   Future<bool> snoozeHabitReminder(Habit habit,
       {Duration delay = const Duration(minutes: 10)}) async {
+    // P3-2（v3.0.2 审计）：已归档习惯不再排「稍后提醒」（归档语义 = 退场，
+    // 与 _doHabitCheckIn 的归档守卫同口径；防的是系统延迟投递的在途旧闹钟）。
+    // 「今日已达标」守卫需要 HabitProvider 的当日打卡数据（通知层不持有
+    // provider，不做反向依赖），由唯一调用点 main._doSnooze 把关并如实回报。
+    if (habit.archived) {
+      AppLog.d('[通知] 未 snooze 习惯 id=${habit.id}：已归档');
+      return false;
+    }
     if (!enabled) {
       AppLog.d('[通知] 未 snooze 习惯 id=${habit.id}：通知总开关关闭');
       return false;
