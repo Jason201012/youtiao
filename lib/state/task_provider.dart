@@ -912,19 +912,30 @@ class TaskProvider extends ChangeNotifier {
     // 清理且 cutoff=now，把回收站全部条目判超期清空（0 仅可经手改备份写入，
     // UI 值域只有 7/30/90/-1）；归一后 0 与负值同等安全。
     if (_trashRetentionDays <= 0) return false; // 永不自动清理
-    final cutoff = DateTime.now().subtract(Duration(days: _trashRetentionDays));
+    // P3-3（v3.0.3 审计）：到期判定三处口径统一为 **date-only**（本处 /
+    // [trashRemainingDays] 的预告口径 / MidnightResetReceiver.cleanupTrashSqlite），
+    // 并在双端注释中固化。统一判据：dateOnly(deletedAt) <= today − N，即
+    // 「删除日起整保留 N 天」，于「删除日 + N」当天 00:00（原生午夜重置）或
+    // 该日首次触发本方法的时机（打开 App / 改保留期）清理。旧实现此处用
+    // 「精确时刻」（now − N 天），与 Kotlin 的「date-only 严格小于」在删除时刻
+    // 上相差至多约 1 天——同一条目在 App 内打开已判过期、午夜路径却还保留
+    // （或反之）。trashRemainingDays == 1 ⇔ 明天 00:00 删除（与预告一致）。
+    final now = DateTime.now();
+    final cutoff = DateTime(now.year, now.month, now.day)
+        .subtract(Duration(days: _trashRetentionDays));
     final before = _trash.length;
+    bool expiredEntry(Task t) {
+      final d = t.deletedAt;
+      if (d == null) return false; // 无删除时间视为新近，保留
+      final dd = DateTime(d.year, d.month, d.day);
+      return !dd.isAfter(cutoff); // date-only 比较：deletedDate <= cutoff
+    }
+
     // P2-13：回收站到期自动清理此前只 removeWhere，不删附件目录
     // （对比 permanentDelete / clearTrash 都有 AttachmentService.removeDir），
     // 导致 attachments/<taskId>/ 成孤儿目录持续占空间，也与「到期即销毁」的隐私预期不符。
-    final expired = _trash
-        .where((t) => t.deletedAt != null && t.deletedAt!.isBefore(cutoff))
-        .map((t) => t.id)
-        .toList();
-    _trash.removeWhere((t) {
-      if (t.deletedAt == null) return false; // 无删除时间视为新近，保留
-      return t.deletedAt!.isBefore(cutoff);
-    });
+    final expired = _trash.where(expiredEntry).map((t) => t.id).toList();
+    _trash.removeWhere(expiredEntry);
     for (final id in expired) {
       NotificationService.instance.cancel(id);
       NotificationService.instance.cancelRepeatReminder(id);
@@ -937,9 +948,13 @@ class TaskProvider extends ChangeNotifier {
 
   // ===== P1-12：回收站过期预告 =====
 
-  /// 某条回收站任务的剩余保留天数（按日期口径，与原生 MidnightResetReceiver 一致）。
-  /// 0 = 今天到期（即将被清理），负数 = 已过期（理论上不应出现在列表中）。
-  /// -1（永不清理）统一返回 99999。
+  /// 某条回收站任务的剩余保留天数。
+  /// P3-3（v3.0.3 审计）口径固化（三处统一为 date-only，与
+  /// [_cleanupTrashIfNeeded] / 原生 MidnightResetReceiver.cleanupTrashSqlite 一致）：
+  /// remaining = N − elapsed。remaining == 1 ⇔「明天 00:00 被原生午夜重置删除」
+  /// （[trashExpiringTomorrow] 同判）；remaining == 0 ⇔ 删除日 + N 当天，正常
+  /// 路径下已先于展示被 [_cleanupTrashIfNeeded] 清理。负数 = 已过期（理论上
+  /// 不应出现在列表中）。-1（永不清理）统一返回 99999。
   int trashRemainingDays(Task t) {
     if (_trashRetentionDays <= 0) return 99999; // P3-20（v3.0.0 审计）：≤0=永不
     if (t.deletedAt == null) return _trashRetentionDays; // 无删除时间视为新近
@@ -3830,10 +3845,25 @@ class TaskProvider extends ChangeNotifier {
     NotificationService.instance.cancelRepeatReminder(id);
   }
 
-  /// 重复任务完成态变更后（toggleDone / setStatus / 取消完成）重排其重复提醒。
-  /// 仅当任务仍「未过截止日」才挂；具体「是否跳过今日」由通知服务依据
-  /// [Task.done] + [Task.completedAt] 是否为今天自行判断（当天已完成→挂明天）。
+  /// 重复任务完成态变更后（setStatus / toggleDone / restoreTaskSnapshot /
+  /// markOccurrenceDone / unmarkOccurrenceDone 五入口共用）重排其重复提醒。
+  ///
+  /// P2-2（v3.0.3 审计）完成族收口：**先撤后挂**（与 [skipOccurrence] 同款）。
+  /// 旧实现只 `scheduleRepeatReminder` 重排，留下三重缺口——
+  /// ① 今天已响的展示通知不撤：插件 `zonedSchedule` 同 id 只更新系统闹钟与
+  ///    调度缓存、不撤已展示通知，而重排只取消「尾部多余槽位」（0 号槽恰在
+  ///    新列表范围内）→ 通知栏残留「提醒 + 已完成 ✓」两条矛盾通知，残留提醒
+  ///    的「稍后提醒」还可对已完成任务再排提醒；
+  /// ② 已挂的 snooze（独立段）完全不受重排管辖——snooze 挂起后完成，10 分钟后
+  ///    已完成的任务照常弹提醒（与习惯侧 P2-7 v2.9.5 修复场景完全同构）；
+  /// ③ repeatUntil 已过（[shouldScheduleRepeatReminder] = false）时什么都不做，
+  ///    旧闹钟与展示通知全部残留。
+  /// 现统一先 `_cancelRemindersFor`（[NotificationService.cancel] 含 snooze 段 +
+  /// [NotificationService.cancelRepeatReminder] 撤 0..7 槽并作废落点签名缓存）
+  /// 再按新状态重挂。入口守卫另见 `snoozeTaskReminder`（done / repeatEnded 早退）
+  /// 与 main._doSnooze（done 覆盖式如实回报）。
   void _rescheduleRepeatOnCompletion(Task t) {
+    _cancelRemindersFor(t.id); // P2-2（v3.0.3 审计）：先撤展示槽位 + snooze 段
     // P1-2：门槛统一收口到 [shouldScheduleRepeatReminder]（interval 不再受 dueDate 限制）。
     if (shouldScheduleRepeatReminder(t)) {
       NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);

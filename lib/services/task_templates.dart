@@ -416,11 +416,17 @@ class UserTemplate {
     // 安全（P1-A）：id 直接用作文件名（`<documents>/templates/user/<id>.json`），
     // 外部 JSON 携带的 id 必须过白名单，非法则重新分配——杜绝 `../../backup/auto/...`
     // 这类路径穿越覆盖 App 私有文档目录内的任意 .json（含自动备份快照）。
+    // P3-1（v3.0.3 审计）：四处元数据安全转型（is String 判型回退），与同文件
+    // TemplateItem.fromJson 的同轮收口对齐——旧实现四处裸 `as String?`，外部 /
+    // 手改 JSON 的元数据为非字符串值（{"name":123} / {"icon":42}）时抛 TypeError，
+    // 整份模板被 loadAllWithBroken 计为损坏（U3-2 提示后仍「可见但不可用」，
+    // 用户只能手动删除重导）。现按字段回退默认值，模板其余部分照常可用。
     return UserTemplate(
-      id: sanitizeTemplateId(j['id'] as String?),
-      name: (j['name'] as String?) ?? '未命名模板',
-      description: (j['description'] as String?) ?? '',
-      iconName: (j['icon'] as String?) ?? 'checklist',
+      id: sanitizeTemplateId(j['id'] is String ? j['id'] as String : null),
+      name: j['name'] is String ? j['name'] as String : '未命名模板',
+      description:
+          j['description'] is String ? j['description'] as String : '',
+      iconName: j['icon'] is String ? j['icon'] as String : 'checklist',
       items: items.length > UserTemplateStore.maxItems
           ? items.sublist(0, UserTemplateStore.maxItems)
           : items,

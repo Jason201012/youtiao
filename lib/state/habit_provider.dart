@@ -481,8 +481,24 @@ class HabitProvider extends ChangeNotifier {
     // （v3.0.1 审计）只在删除 / 归档路径清理，此为同一修复原则的另一半。
     // 仅「今天 + 实际删除了记录」（走到此处必已删除，见上方早退）才清：
     // 补昨天 / 前天的撤卡与展示中的今日确认条无关，不动。
-    if (v <= 0 && _sameDayKey(day, DateTime.now())) {
-      NotificationService.instance.cancelHabitConfirm(habit.id);
+    //
+    // U3-1（v3.0.3 审计）：9 号槽确认条**内容新鲜度**——今日值的非归零变化
+    // 同样覆盖式刷新确认条（同 id、Importance.low 无声不刷屏）：通知打卡
+    // 「已记 1/8」后 App 内改到 5/8，旧确认条仍显示 1/8 属内容失真。任何今日
+    // 写入都以最新进度覆盖（「撤销 = −1」语义随最新一次写入保持有效）；归零
+    // 走 cancel 分支（v3.0.3 口径不变）。补昨天 / 前天的写入与展示中的今日
+    // 确认条无关，不动。取「任何今日写入都覆盖」而非「弱化文案」：保留
+    // P2-2（v2.9.3）确立的「已记 x/y · 未达标」如实进度回报。
+    if (_sameDayKey(day, DateTime.now())) {
+      if (v <= 0) {
+        NotificationService.instance.cancelHabitConfirm(habit.id);
+      } else {
+        NotificationService.instance.showHabitCheckedConfirm(
+          habit,
+          value: v,
+          target: habit.effectiveTarget,
+        );
+      }
     }
     _notifyHabitsChanged();
   }

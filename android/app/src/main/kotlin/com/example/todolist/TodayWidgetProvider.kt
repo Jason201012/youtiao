@@ -14,6 +14,7 @@ import android.view.View
 import android.widget.RemoteViews
 import org.json.JSONObject
 import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * 桌面小组件（4×2）：展示「今日相关」任务列表（未完成 且 [循环命中今天 ∨ 一次性任务今天到期 ∨ 已逾期]）。
@@ -301,20 +302,23 @@ class TodayWidgetProvider : AppWidgetProvider() {
             return if (dow == Calendar.SUNDAY) 7 else dow - 1
         }
 
+        /** 两个 yyyy-MM-dd 相差的整天数（b - a）。
+         *  P3-2（v3.0.3 审计）：锚定 **UTC** 解析，免 DST 回拨日（23 小时日）整除
+         *  86400000 off-by-one；与 MidnightResetReceiver.dayDiff 同款口径。 */
         private fun dayDiff(a: String, b: String): Long {
             val pa = a.split("-")
             val pb = b.split("-")
             if (pa.size < 3 || pb.size < 3) return 0L
-            val ca = Calendar.getInstance().apply {
+            val ca = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
                 set(pa[0].toInt(), pa[1].toInt() - 1, pa[2].toInt(), 0, 0, 0)
                 set(Calendar.MILLISECOND, 0)
             }
-            val cb = Calendar.getInstance().apply {
+            val cb = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
                 set(pb[0].toInt(), pb[1].toInt() - 1, pb[2].toInt(), 0, 0, 0)
                 set(Calendar.MILLISECOND, 0)
             }
-        return ((cb.timeInMillis - ca.timeInMillis) / (24 * 60 * 60 * 1000L))
-    }
+            return ((cb.timeInMillis - ca.timeInMillis) / (24 * 60 * 60 * 1000L))
+        }
 
     /** 每月重复在 [y]年[m]月的目标「日」(1-28/29/30/31)；与 Dart Task._baseRepeatsOn 一致。
      *  P2-4（v3.0.1 审计）：补上 [monthlyFromEnd]（每月倒数第 N 天 / 最后一天）

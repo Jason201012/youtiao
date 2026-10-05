@@ -69,7 +69,11 @@ final List<String> _pendingWidgetTaskIds = [];
 /// 用空串占位以复用 [_enqueue] 的容量上限逻辑。
 final List<String> _pendingWidgetQuickAdds = [];
 
-/// 冷启动时点击通知「稍后提醒」action 先于导航器就绪到达，暂存任务/习惯 id（并行两队列，成对消费）。
+/// 冷启动时点击通知「稍后提醒」action 先于导航器就绪到达，暂存任务/习惯 id。
+/// P2-1（v3.0.3 审计）：并行两队列**各自独立消费**（[flushSnoozeQueues]）——
+/// 旧注释「成对消费」的成对取头设计与 [_doSnooze] 的 task 优先分支直接冲突：
+/// 任务与习惯同时暂存时，习惯 id 被取出后落进 else 分支被静默丢弃
+/// （用户点了「稍后提醒」，解锁后永远等不到第二次提醒，且无任何反馈）。
 final List<String> _pendingSnoozeTaskIds = [];
 final List<String> _pendingSnoozeHabitIds = [];
 
@@ -499,15 +503,21 @@ void _doHabitUndo(NavigatorState nav, String habitId) {
   if (habit.archived) return;
   final current = hp.todayValue(habit);
   if (current <= 0) return; // 无记录可撤：无写入即无回报
-  hp
-      .adjustCheckInValue(habit, DateTime.now(), -1)
-      .catchError((_) => false)
-      .then((_) {
+  // P3-4（v3.0.3 审计）：按写入结果回报——写入失败（异常）不得谎报「已撤销」。
+  // adjustCheckInValue 返回 Future<void>（无布尔结果），用 then(成功才回报) +
+  // catchError(失败只记日志) 分路径实现。与 v2.9.7 P3-6「早退仍弹确认 =
+  // 不实回报」同主题，本条是该口径在**写入失败面**的收口（旧实现 .then
+  // 无条件弹确认）。
+  hp.adjustCheckInValue(habit, DateTime.now(), -1).then((_) {
     NotificationService.instance.showHabitUndoConfirm(
       habit,
       value: hp.todayValue(habit),
       target: habit.effectiveTarget,
     );
+  }).catchError((_) {
+    // 写入失败：如实不报成功。id 用插值（AppLog.d release 为 no-op，
+    // 纯常量实参会被 AOT 整体消除；插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
+    AppLog.d('[通知] 撤销写入失败 id=${habit.id}，不回报「已撤销」');
   });
 }
 
@@ -570,22 +580,34 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
     // 与 App 内「+1」按钮完全一致；想一键达标可在 App 里点「今日达标」。
     //
     // 顺带把确认通知的文案对齐：`0 → 1` 时显示「已记 1/8 · 未达标」是如实回报。
-    final op = hp.adjustCheckInValue(habit, now, 1);
-    // 异步写入：内部走 setCheckInValue（落盘 + 重排提醒/挽留 + 撤掉挂起的稍后提醒）；
-    // 失败静默（通知 action 不可弹错误）。
-    op.catchError((_) => false).then((_) {
+    // 异步写入：内部走 setCheckInValue（落盘 + 重排提醒/挽留 + 撤掉挂起的稍后提醒）。
+    // P3-4（v3.0.3 审计）：按写入结果回报——旧实现 .then **无条件**弹确认，
+    // DB 写入异常时通知栏谎报「已记 x/y」。adjustCheckInValue 返回 Future<void>
+    //（无布尔结果），用 then(成功才回报) + catchError(失败只记日志) 分路径。
+    hp.adjustCheckInValue(habit, now, 1).then((_) {
       // 按完成后的真实进度回报（+1 后通常未达标 → 如实显示「已记 x/y」）。
       NotificationService.instance.showHabitCheckedConfirm(
         habit,
         value: hp.todayValue(habit),
         target: habit.effectiveTarget,
       );
+    }).catchError((_) {
+      // 写入失败：不报成功（通知 action 不可弹错误提示）。id 用插值（同上：
+      // 纯常量实参被 AOT 消除，插值模板片段必进快照）。
+      AppLog.d('[通知] 打卡写入失败 id=${habit.id}，不回报「已记 x/y」');
     });
     return;
   }
-  // 异步打卡：checkInOnDay 内部持久化 + 重排今日提醒/挽留；失败静默。
-  hp.checkInOnDay(habit, now).catchError((_) => false);
-  NotificationService.instance.showHabitCheckedConfirm(habit);
+  // 异步打卡：checkInOnDay 内部持久化 + 重排今日提醒/挽留。
+  // P3-4（v3.0.3 审计）：旧实现 fire-and-forget 后**立即**弹「已打卡 ✓」——
+  // 写入失败（DB 异常，罕见）时通知栏说打了、App 内查无记录，用户无从察觉。
+  // checkInOnDay 返回 Future<void>（无布尔结果），用 then(成功才回报) +
+  // catchError(失败只记日志) 分路径：失败不报成功（与量化分支同口径）。
+  hp.checkInOnDay(habit, now).then((_) {
+    NotificationService.instance.showHabitCheckedConfirm(habit);
+  }).catchError((_) {
+    AppLog.d('[通知] 打卡写入失败 id=${habit.id}，不回报「已打卡 ✓」');
+  });
 }
 
 /// 用 task/habit id 从 Provider 取实体并触发稍后提醒调度。
@@ -597,7 +619,19 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
   if (taskId != null) {
     final task = provider.byId(taskId);
     if (task != null) {
-      NotificationService.instance.snoozeTaskReminder(task, delay: delay);
+      // P2-2（v3.0.3 审计）：任务侧完成态守卫。v3.0.2 报告旧批注「任务侧完成
+      // 即撤展示通知、该场景不可达」经插件源码核实**仅对非重复任务成立**——
+      // 重复任务完成族的展示通知 / snooze 清理缺口已由
+      // TaskProvider._rescheduleRepeatOnCompletion 收口，此处防的是**历史残留
+      // 通知**（昨天/更早未清理、或收口前已挂出）被点「稍后提醒」：已完成时
+      // 在原「已完成 ✓」确认位覆盖式如实回报、不排新提醒（与习惯侧 v3.0.3
+      // 达标守卫同构）；「重复已结束」（repeatEnded）在 snoozeTaskReminder
+      // 服务层入口早退（静默，罕见且无自然回报文案）。
+      if (task.done) {
+        NotificationService.instance.showCompletedConfirm(taskId, task.title);
+      } else {
+        NotificationService.instance.snoozeTaskReminder(task, delay: delay);
+      }
     }
   } else if (habitId != null) {
     final hp = Provider.of<HabitProvider>(ctx, listen: false);
@@ -607,7 +641,8 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
       // 「先 snooze → 后达标」方向（达标时撤**已挂的** 8 号槽），反方向「已达标
       // 后点展示中的旧通知上的稍后提醒」仍会排回一条新提醒：同一条通知上
       // 「打卡」按钮有达标守卫（回「已达标」确认），「稍后提醒」没有。习惯侧
-      // 与任务侧不同（完成即撤展示通知，该场景不可达），达标提醒仍挂在通知栏。
+      // 无「完成」语义（打卡可达标但展示中的提醒不撤），达标提醒仍挂在通知栏；
+      // 任务侧的旧批注断言已失效（见上方 taskId 分支的 P2-2 注释）。
       // 早退时经 9 号槽回一条覆盖式确认（如实回报当日进度，不静默——用户知道
       // 为什么 10 分钟后不会再响）；归档侧守卫在 snoozeHabitReminder 入口。
       if (hp.isTargetMetToday(habit)) {
@@ -620,6 +655,30 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
         NotificationService.instance.snoozeHabitReminder(habit, delay: delay);
       }
     }
+  }
+}
+
+/// P2-1（v3.0.3 审计）：「稍后提醒」双队列的统一消费入口——**两队列各自独立
+/// 逐条清空**，绝不跨队列配对。旧实现「成对取头」（任务队列头 + 习惯队列头
+/// 一起交给 [_doSnooze]）与其内部 `if (taskId != null) … else if (habitId != null)`
+/// 的 task 优先分支直接冲突：任务与习惯同时暂存时，习惯 id 被取出后直接落进
+/// else、静默丢弃（第 2 轮循环两队列皆空，永远不会再消费）。现任务侧先清、
+/// 习惯侧后清，[doSnooze] 每次只收到「单侧非空」的参数。
+/// [taskQueue] / [habitQueue] 仅供回归测试注入（默认用真队列）；
+/// 暴露为 `@visibleForTesting` 供交叉矩阵用例钉死消费契约。
+@visibleForTesting
+void flushSnoozeQueues(
+  void Function(String? taskId, String? habitId) doSnooze, {
+  List<String>? taskQueue,
+  List<String>? habitQueue,
+}) {
+  final tasks = taskQueue ?? _pendingSnoozeTaskIds;
+  final habits = habitQueue ?? _pendingSnoozeHabitIds;
+  while (tasks.isNotEmpty) {
+    doSnooze(tasks.removeAt(0), null);
+  }
+  while (habits.isNotEmpty) {
+    doSnooze(null, habits.removeAt(0));
   }
 }
 
@@ -1062,17 +1121,10 @@ class _MainScaffoldState extends State<MainScaffold>
       _pendingWidgetQuickAdds.removeAt(0);
       QuickEntrySheet.show(state.context);
     }
-    // 通知「稍后提醒」action（任务 / 习惯 id 成对消费）。
-    while (
-        _pendingSnoozeTaskIds.isNotEmpty || _pendingSnoozeHabitIds.isNotEmpty) {
-      final tId = _pendingSnoozeTaskIds.isEmpty
-          ? null
-          : _pendingSnoozeTaskIds.removeAt(0);
-      final hId = _pendingSnoozeHabitIds.isEmpty
-          ? null
-          : _pendingSnoozeHabitIds.removeAt(0);
-      _doSnooze(state, tId, hId);
-    }
+    // 通知「稍后提醒」action——两队列独立消费（P2-1，v3.0.3 审计，见
+    // [flushSnoozeQueues]：成对取头会在 _doSnooze 的 task 优先分支下静默
+    // 丢弃习惯侧）。
+    flushSnoozeQueues((taskId, habitId) => _doSnooze(state, taskId, habitId));
     // 系统分享文本（含来源）。
     while (_pendingShares.isNotEmpty) {
       final s = _pendingShares.removeAt(0);

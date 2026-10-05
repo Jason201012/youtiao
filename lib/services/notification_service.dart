@@ -190,6 +190,16 @@ class NotificationService {
 
   /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
   /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
+  ///
+  /// U3-2（v3.0.3 审计）口径固化（防后续轮次按缺陷重复上报）：点「稍后提醒」
+  /// 后原通知**会**随 action 点击自动消散——flutter_local_notifications 17.2.4
+  /// 的 `AndroidNotificationAction.cancelNotification` **默认即 true**（Dart 侧
+  /// 经 method_channel_mappers 序列化进 action 参数 → 原生
+  /// ActionBroadcastReceiver.onReceive 按 CANCEL_NOTIFICATION extra 撤掉承载
+  /// 该 action 的通知；showsUserInterface 路径由
+  /// processForegroundNotificationAction 同样处理），无需显式设参。审计报告
+  /// 「均未设 cancelNotification: true → 原通知仍留在通知栏」的前提与插件实际
+  /// 默认不符，特此注释钉死。
   static List<AndroidNotificationAction> get _taskActions => [
         AndroidNotificationAction(snoozeActionId, '稍后提醒'),
         AndroidNotificationAction(completeActionId, '完成'),
@@ -203,6 +213,9 @@ class NotificationService {
   /// U2-4（v2.9.6 审计）：标签随量化语义变化——量化习惯的「打卡」动作实际是
   /// **+1**（U2-6 之后恒 +1，不再一键顶满），原标签「打卡」让用户分不清是
   /// 「+1」还是「达标」。量化习惯改显「记 1 个」；布尔习惯维持「打卡」。
+  ///
+  /// U3-2（v3.0.3 审计）：cancelNotification 口径同 [_taskActions] 注释
+  /// （插件 17.2.4 默认 true，action 点击即撤原通知，无需显式设参）。
   static List<AndroidNotificationAction> habitActionsFor(Habit habit) => [
         AndroidNotificationAction(snoozeActionId, '稍后提醒'),
         AndroidNotificationAction(
@@ -1288,6 +1301,19 @@ class NotificationService {
   /// 使 snooze 后的通知仍可二次 snooze、仍可在通知栏直接完成。
   Future<bool> snoozeTaskReminder(Task task,
       {Duration delay = const Duration(minutes: 10), bool playSound = true}) async {
+    // P2-2（v3.0.3 审计）：完成态守卫——已完成 / 重复已结束的任务不再排
+    // 「稍后提醒」。对照（全部已有清理）：非重复任务完成 `cancel(id)` 顺带撤
+    // snooze 段（F11）；重复任务完成族自 v3.0.3 起经
+    // TaskProvider._rescheduleRepeatOnCompletion「先撤后挂」收口；习惯达标侧
+    // 有 cancelHabitSnooze（P2-7 v2.9.5）+ main._doSnooze 达标守卫（v3.0.3）。
+    // 此处防的是**历史残留通知 / 在途展示**被点的场景（报告场景 C：昨天/更早
+    // 的提醒挂在通知栏，任务此刻已完成或重复已结束）。守卫置于 enabled 之前，
+    // 与 habit 侧「archived 先于 enabled」同序。
+    if (task.done || task.repeatEnded) {
+      AppLog.d('[通知] 未 snooze id=${task.id}：'
+          '${task.done ? '任务已完成' : '重复已结束'}，不排「稍后提醒」');
+      return false;
+    }
     if (!enabled) {
       AppLog.d('[通知] 未 snooze id=${task.id}：通知总开关关闭');
       return false;

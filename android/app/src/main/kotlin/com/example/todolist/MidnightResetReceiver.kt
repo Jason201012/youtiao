@@ -14,6 +14,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * 每日任务「当天 00:00 自动重置」接收器（运行于 :guard 进程，与 ScheduledNotificationReceiver 一致）。
@@ -282,14 +283,17 @@ class MidnightResetReceiver : BroadcastReceiver() {
 
     /** 直接打开 SQLite 清理 [trash] 表：删除 deletedAt（JSON data 内）早于保留期的条目。
      * 与 Dart TaskProvider._cleanupTrashIfNeeded 一致；保留期天数由 [retentionDays] 传入，
-     * 负数表示「永不自动清理」。data 列存完整 Task JSON，deletedAt 为 ISO 时间戳。
+     * ≤ 0 表示「永不自动清理」（对齐 Dart _normalizeTrashRetention 的 P3-20 口径）。
+     * data 列存完整 Task JSON，deletedAt 为 ISO 时间戳。
      * F-5（v2.8.5 审计）：返回被清理的 id 列表，交由 [cleanupExpiredTrashResources]
      * 补齐 Dart 侧到期即销毁的其余动作（删附件目录、取消通知）——原生路径此前只删
      * 库记录，产生孤儿附件目录，与 Dart 侧口径不一致。 */
     private fun cleanupTrashSqlite(dbPath: String, retentionDays: Int): List<String> {
-        if (retentionDays < 0) return emptyList() // 永不自动清理
+        if (retentionDays <= 0) return emptyList() // P3-20 口径：保留期 ≤ 0 = 永不自动清理
         // S10 修复：经 withGuardDb 打开，带 WAL + busy_timeout + SQLITE_BUSY 重试与失败日志。
         return withGuardDb(dbPath) { db ->
+            // 锚点保持**本地**时区（与 Dart DateTime.now() 同为「本地的今天」；勿改 UTC，
+            // 凌晨 0-8 点会把「今天」错成昨天——见 dayDiff 的 UTC 口径注释）。
             val cutoff = Calendar.getInstance().apply {
                 add(Calendar.DAY_OF_MONTH, -retentionDays)
             }
@@ -307,8 +311,11 @@ class MidnightResetReceiver : BroadcastReceiver() {
                     val dataStr = it.getString(1)
                     val obj = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
                     val del = datePart(obj.opt("deletedAt")) ?: continue
-                    // 按 yyyy-MM-dd 字典序比较，早于 cutoffStr 视为过期
-                    if (del < cutoffStr) expired.add(id)
+                    // P3-3（v3.0.3 审计）date-only 统一口径：deletedDate <= cutoff 即过期
+                    //（保留 N 整天：deletedAt 日期 = 今天−N 的条目今天删除，与 Dart 侧
+                    // _cleanupTrashIfNeeded / trashRemainingDays / trashExpiringTomorrow
+                    // 一致；原严格 `<` 会比 Dart 多保留一天，双端口径漂移）。
+                    if (del <= cutoffStr) expired.add(id)
                 }
             }
             for (id in expired) {
@@ -500,15 +507,21 @@ class MidnightResetReceiver : BroadcastReceiver() {
         return if (dow == Calendar.SUNDAY) 7 else dow - 1
     }
 
-    /** 两个 yyyy-MM-dd 相差的整天数（b - a）。按字符串逐段转毫秒，避免时区干扰。 */
+    /** 两个 yyyy-MM-dd 相差的整天数（b - a）。
+     *  P3-2（v3.0.3 审计）：锚定 **UTC** 解析——原实现用本地时区 Calendar，DST 回拨日
+     *  （当日只有 23 小时）毫秒差整除 86400000 会 off-by-one。date-only 差值与任何时区
+     *  无关，UTC 无 DST、恒为 24 小时日，是最稳锚点（与 Dart 侧 v2.9.1 同款口径）。
+     *  ⚠️ 本文件 [cleanupTrashSqlite] 的 cutoff 锚点保持**本地**时区（与 Dart
+     *  DateTime.now() 同锚「本地的今天」），勿一并改 UTC（凌晨 0-8 点会把
+     *  「今天」错成昨天）——UTC 化仅适用于 date-only 纯差值场景。 */
     private fun dayDiff(a: String, b: String): Long {
         val pa = a.split("-"); val pb = b.split("-")
         if (pa.size < 3 || pb.size < 3) return 0L
-        val ca = Calendar.getInstance().apply {
+        val ca = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
             set(pa[0].toInt(), pa[1].toInt() - 1, pa[2].toInt(), 0, 0, 0)
             set(Calendar.MILLISECOND, 0)
         }
-        val cb = Calendar.getInstance().apply {
+        val cb = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
             set(pb[0].toInt(), pb[1].toInt() - 1, pb[2].toInt(), 0, 0, 0)
             set(Calendar.MILLISECOND, 0)
         }
