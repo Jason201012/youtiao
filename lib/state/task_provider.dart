@@ -921,8 +921,13 @@ class TaskProvider extends ChangeNotifier {
     // 上相差至多约 1 天——同一条目在 App 内打开已判过期、午夜路径却还保留
     // （或反之）。trashRemainingDays == 1 ⇔ 明天 00:00 删除（与预告一致）。
     final now = DateTime.now();
-    final cutoff = DateTime(now.year, now.month, now.day)
-        .subtract(Duration(days: _trashRetentionDays));
+    // P3-2（v3.0.4 审计）：**构造器日历减法**替代 subtract(Duration)——
+    // DateTime(y, m, d - N) 按日历字段进位/借位，不经时长运算；DST 切换日的
+    // ±1h 会把「date-only 边界」推到 23:00 / 次日 01:00，与 Kotlin 侧（v3.0.3
+    // P3-2 已 UTC 化的 dayDiff）再度分叉。中国无夏令时，国内零感知；自定义
+    // IANA 时区（提醒时区设置）指向 DST 地区时三端口径才会一致。
+    // _trashRetentionDays 此处必 > 0（≤0 已在上方早退），无 day - 0 语义问题。
+    final cutoff = DateTime(now.year, now.month, now.day - _trashRetentionDays);
     final before = _trash.length;
     bool expiredEntry(Task t) {
       final d = t.deletedAt;
@@ -961,7 +966,14 @@ class TaskProvider extends ChangeNotifier {
     final deletedDate = DateTime(t.deletedAt!.year, t.deletedAt!.month, t.deletedAt!.day);
     final today = DateTime.now();
     final todayDate = DateTime(today.year, today.month, today.day);
-    final elapsed = todayDate.difference(deletedDate).inDays;
+    // P3-2（v3.0.4 审计）：**UTC 日历差**替代本地 difference().inDays——两端
+    // date-only 各构 UTC 时间戳后取整天数差，恒为精确日历日；本地时区下
+    // difference 是绝对时长，DST 切换日 ±1h 会让截断除法偏差 1 天（与
+    // _cleanupTrashIfNeeded 的日历减法口径分叉）。
+    final elapsed = DateTime.utc(todayDate.year, todayDate.month, todayDate.day)
+        .difference(DateTime.utc(
+            deletedDate.year, deletedDate.month, deletedDate.day))
+        .inDays;
     return _trashRetentionDays - elapsed;
   }
 
@@ -1453,6 +1465,18 @@ class TaskProvider extends ChangeNotifier {
     final today = _ymd(DateTime.now());
     final dayChanged = _lastResetDay != today;
     _lastResetDay = today;
+    // P3-3（v3.0.4 审计）：跨天分支补一次回收站清理（与原生午夜清理同口径）。
+    // 旧行为：进程存活跨 00:00 时，原生 MidnightResetReceiver.cleanupTrashSqlite
+    // 已删除过期 trash 行 + 附件目录，但本 Provider 的内存 _trash 不重载
+    // （_cleanupTrashIfNeeded 只在 load() 冷启动与 setTrashRetentionDays 触发）；
+    // 此后任意编辑触发 _persist 的按 id 差量 upsert 会把已删行**复活**回 DB
+    // （附件已被原生删除，条目空壳），且每次 persist 持续复活——「到期即销毁」
+    // 被违背，直至下次冷启动才自愈。此处与 load / setTrashRetentionDays 同口径
+    // 补清理 + 同步预告通知。
+    if (dayChanged) {
+      _cleanupTrashIfNeeded(persist: true);
+      _syncTrashExpireNotice();
+    }
     final changed = _resetDailyIfNeeded();
     if (_notificationsEnabled) _rescheduleOneShotReminders();
     // F-2：习惯打卡提醒同样是一次性闹钟，需在每次守护周期补挂（见 [onGuardTick]）。
@@ -2222,9 +2246,15 @@ class TaskProvider extends ChangeNotifier {
     if (identical(_tasks[i], snapshot)) return true;
     _tasks[i] = snapshot;
     // 与 setStatus 保持同一套副作用口径：状态变了，提醒与重复锚点要跟着重排。
-    _cancelRemindersFor(snapshot.id); // P2-4（v2.9.6 审计）：先撤在途，再重排
+    // P2-4（v2.9.6 审计）：先撤在途，再重排。
+    // U3-3（v3.0.4 审计）：重复任务分支此前在 _rescheduleRepeatOnCompletion 内
+    // **再撤一次**——同一操作双重撤提醒，幂等无害但属无谓的插件 IPC 往返，也让
+    // 「谁负责撤」的读代码心智负担变重。现 cancelCurrent: false，撤的唯一责任点
+    // 收口到本入口这一次（对非重复任务同样必要：_reconcileDeadlineOnCompletion
+    // 从不 cancel，「改期已挂明日闹钟 → 撤销回逾期快照」的幽灵提醒场景靠入口撤兜住）。
+    _cancelRemindersFor(snapshot.id);
     if (_tasks[i].isRepeating) {
-      _rescheduleRepeatOnCompletion(_tasks[i]);
+      _rescheduleRepeatOnCompletion(_tasks[i], cancelCurrent: false);
     } else {
       _reconcileDeadlineOnCompletion(_tasks[i]);
     }
@@ -2364,7 +2394,10 @@ class TaskProvider extends ChangeNotifier {
     );
     _tasks[i] = _clearSkipFor(next, d);
     if (_tasks[i].isRepeating) {
-      _rescheduleRepeatOnCompletion(_tasks[i]);
+      // P2-2（v3.0.4 审计）：仅今日变更才撤当前调度——未来日标记完成不再波及
+      // 今日展示中的提醒 / 挂起的 snooze / 确认条（snooze 撤得掉、不重建，
+      // 属静默丢失）。见 _rescheduleRepeatOnCompletion 的 cancelCurrent 说明。
+      _rescheduleRepeatOnCompletion(_tasks[i], cancelCurrent: isToday);
     }
     notifyListeners();
     _persist();
@@ -2386,7 +2419,8 @@ class TaskProvider extends ChangeNotifier {
       completedAt: (isToday && cur.done) ? null : cur.completedAt,
     );
     if (_tasks[i].isRepeating) {
-      _rescheduleRepeatOnCompletion(_tasks[i]);
+      // P2-2（v3.0.4 审计）：同 markOccurrenceDone，仅今日变更才撤当前调度。
+      _rescheduleRepeatOnCompletion(_tasks[i], cancelCurrent: isToday);
     }
     notifyListeners();
     _persist();
@@ -2399,6 +2433,9 @@ class TaskProvider extends ChangeNotifier {
     final i = _tasks.indexWhere((t) => t.id == taskId);
     if (i == -1) return;
     final d = day ?? DateTime.now();
+    final now = DateTime.now();
+    final isToday =
+        d.year == now.year && d.month == now.month && d.day == now.day;
     final ymd = _ymd(DateTime(d.year, d.month, d.day));
     if (_tasks[i].skipDates.contains(ymd)) return; // 已跳过，幂等
     // F-7：跳过日期在其 occurrence 过去后即无用途，统一走滚动保留窗口清掉。
@@ -2415,8 +2452,10 @@ class TaskProvider extends ChangeNotifier {
     // 列表层生效、07:00 提醒照响，与 occurrence_sheet 的「已跳过」标记自相矛盾。
     // 现对所有重复类型统一重排（daily/weekly/monthly 的 OS 周期闹钟会被
     // 通知服务按新的 skipDates 重新计算首个落点）。
+    // P2-2（v3.0.4 审计）：仅今日跳过才撤当前调度（与 markOccurrenceDone 同型
+    // 门控）——未来日跳过不再波及今日展示中的提醒 / 挂起的 snooze / 确认条。
     if (updated.isRepeating) {
-      _cancelRemindersFor(updated.id);
+      if (isToday) _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(updated);
     }
     notifyListeners();
@@ -2432,6 +2471,9 @@ class TaskProvider extends ChangeNotifier {
     final i = _tasks.indexWhere((t) => t.id == taskId);
     if (i == -1) return;
     final d = day ?? DateTime.now();
+    final now = DateTime.now();
+    final isToday =
+        d.year == now.year && d.month == now.month && d.day == now.day;
     final ymd = _ymd(DateTime(d.year, d.month, d.day));
     if (!_tasks[i].skipDates.contains(ymd)) return; // 未跳过，幂等
     // F-7：顺带把已过期的跳过日期一并清掉（历史版本可能留下超期条目）。
@@ -2441,8 +2483,9 @@ class TaskProvider extends ChangeNotifier {
       skipDates: Task.pruneHistory(remaining, d) ?? remaining,
     );
     _tasks[i] = updated;
+    // P2-2（v3.0.4 审计）：同 skipOccurrence，仅今日变更才撤当前调度。
     if (updated.isRepeating) {
-      _cancelRemindersFor(updated.id);
+      if (isToday) _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(updated);
     }
     notifyListeners();
@@ -3057,6 +3100,22 @@ class TaskProvider extends ChangeNotifier {
     if (remindersChanged) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(_tasks[i]);
+    }
+    // P3-1（v3.0.4 审计）：**导入覆盖翻转完成态时对账提醒**（完成族的第 6 个
+    // 写入者）。importDedup 覆盖分支（allowStatusChange: true）可以改写已有任务
+    // 的完成态（CSV / Excel / iCal 带状态列），但 remindersChanged 判定不含
+    // status——todo→done 的一次性截止提醒不撤（到点对已完成任务弹提醒，一次性
+    // 任务永不自愈）；done→todo 的提醒不重挂（需重启 App 才恢复）。此处与完成族
+    // 五入口同口径：重复任务走「先撤后挂」，非重复走取消 / 恢复截止提醒。
+    // allowStatusChange 为 false 的常规编辑路径 status 恒等于 old.status，不触发；
+    // 与 remindersChanged 同时命中时完成族撤挂幂等重入（多一次 IPC，可接受）。
+    final statusChanged = allowStatusChange && anchored.status != old.status;
+    if (statusChanged) {
+      if (_tasks[i].isRepeating) {
+        _rescheduleRepeatOnCompletion(_tasks[i]);
+      } else {
+        _reconcileDeadlineOnCompletion(_tasks[i]);
+      }
     }
     return true;
   }
@@ -3848,6 +3907,16 @@ class TaskProvider extends ChangeNotifier {
   /// 重复任务完成态变更后（setStatus / toggleDone / restoreTaskSnapshot /
   /// markOccurrenceDone / unmarkOccurrenceDone 五入口共用）重排其重复提醒。
   ///
+  /// [cancelCurrent]（P2-2，v3.0.4 审计）：是否先撤该任务**当前**的全部调度。
+  /// 「整体完成态切换」（setStatus / toggleDone——今日 occurrence 必受影响）
+  /// 与导入覆盖对账（P3-1）保持默认 true；**occurrence 级入口**
+  /// （markOccurrenceDone / unmarkOccurrenceDone / skipOccurrence /
+  /// unskipOccurrence 的未来日操作）传 false——「在预览里标记 3 天后完成」
+  /// 语义上不涉及今天，旧实现的无条件撤会把今日展示中的提醒、今日挂起的
+  /// 「稍后提醒」（snooze 撤得掉、不重建，静默丢失）与今日「已完成 ✓」确认条
+  /// 一并撤掉。不撤时仅重挂：`_repeatContentSig` 含 doneDates/skipDates，
+  /// 未来日变更会令签名变化 → 落点重算真实下发，不会被 armed 缓存挡住。
+  ///
   /// P2-2（v3.0.3 审计）完成族收口：**先撤后挂**（与 [skipOccurrence] 同款）。
   /// 旧实现只 `scheduleRepeatReminder` 重排，留下三重缺口——
   /// ① 今天已响的展示通知不撤：插件 `zonedSchedule` 同 id 只更新系统闹钟与
@@ -3862,8 +3931,10 @@ class TaskProvider extends ChangeNotifier {
   /// [NotificationService.cancelRepeatReminder] 撤 0..7 槽并作废落点签名缓存）
   /// 再按新状态重挂。入口守卫另见 `snoozeTaskReminder`（done / repeatEnded 早退）
   /// 与 main._doSnooze（done 覆盖式如实回报）。
-  void _rescheduleRepeatOnCompletion(Task t) {
-    _cancelRemindersFor(t.id); // P2-2（v3.0.3 审计）：先撤展示槽位 + snooze 段
+  void _rescheduleRepeatOnCompletion(Task t, {bool cancelCurrent = true}) {
+    if (cancelCurrent) {
+      _cancelRemindersFor(t.id); // P2-2（v3.0.3 审计）：先撤展示槽位 + snooze 段
+    }
     // P1-2：门槛统一收口到 [shouldScheduleRepeatReminder]（interval 不再受 dueDate 限制）。
     if (shouldScheduleRepeatReminder(t)) {
       NotificationService.instance.scheduleRepeatReminder(t, playSound: _soundEnabled);

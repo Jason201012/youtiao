@@ -29,14 +29,17 @@ import 'test_helpers.dart';
 /// - **P3-3** 回收站到期判定 date-only 统一口径：deletedAt 日期 = 今天−N 当天
 ///   删除（原 Dart 精确时刻口径会晚于该口径、Kotlin date-only 严格小于会早于它，
 ///   三处漂移收拢为一）；边界 remaining == 1 ⇔ 明天 00:00 原生午夜重置删除；
-/// - **U3-1** 9 号槽确认条内容新鲜度：今日值的任何非归零变化都覆盖式刷新
-///   （同 id show），归零走 cancel，补昨天/前天的写入不触发。
+/// - **U3-1** 9 号槽确认条内容新鲜度——**已被 v3.0.4 U2-1 推翻并收口**：
+///   「今日任何非零写入都覆盖式 show」让 App 内打卡也弹常驻通知（无中生有），
+///   v3.0.4 收口为「App 内打卡不生成 / 刷新确认条（show 唯一点在通知 action
+///   回调），归零仍清失真条（P3-3 v3.0.2 保留）」；本文件的 U3-1 用例已按
+///   v3.0.4 口径改写断言。
 ///
 /// 不落用例：**P3-2**（Kotlin `dayDiff` UTC 化 / `cleanupTrashSqlite` 口径，
 /// 无 Dart 测试面，真机复核建议见报告）；**P3-4**（main._doHabitUndo /
-/// _doHabitCheckIn 的 then(成功才回报) + catchError(失败只记日志) 接线——
-/// adjustCheckInValue / checkInOnDay 返回 Future<void> 无布尔结果，main.dart
-/// 顶层私有回调库外不可达，与 v3.0.2 轮同判）；**U3-2**
+/// _doHabitCheckIn 的按写入结果回报接线——v3.0.4 P2-1 起 adjustCheckInValue /
+/// checkInOnDay 已返回 bool，main.dart 顶层私有回调库外不可达，与 v3.0.2 轮
+/// 同判）；**U3-2**
 /// （cancelNotification 注释固化口径——插件 17.2.4 默认即 true，无行为面）；
 /// **P3-3 Kotlin 侧**（`del <= cutoffStr` / `retentionDays <= 0`，同 P3-2 无测试面）。
 void main() {
@@ -341,8 +344,14 @@ void main() {
         reason: 'remaining == 1 ⇔ 明天 00:00 被原生午夜重置删除（与预告一致）');
   });
 
-  // ── U3-1：9 号槽确认条内容新鲜度 ──────────────────────────────────
-  test('U3-1：今日量化打卡值变化覆盖式刷新确认条；归零走 cancel；补昨天不触发',
+  // ── U3-1 → U2-1（v3.0.4 审计）：确认条触发面收口 ────────────────────
+  // v3.0.3 U3-1 把「今日任何非零写入都覆盖式 show」落在 provider，触发面从
+  // 通知 action 扩张到全部 App 内打卡（零打扰 → 每习惯一条常驻通知，且属
+  // 「无中生有」）。v3.0.4 U2-1 判其为缺陷并收口：App 内写入不再生成/刷新
+  // 确认条（show 唯一点在通知 action 回调 main._doHabitCheckIn / _doHabitUndo，
+  // 按 P2-1 写入结果回报）；本用例按新口径改断言——归零仍清失真条（P3-3
+  // v3.0.2 保留）、补昨天不动。
+  test('U2-1（v3.0.4）：App 内打卡不再生成/刷新确认条；归零仍清失真条；补昨天不动',
       () async {
     final hp = HabitProvider();
     await hp.load();
@@ -355,27 +364,29 @@ void main() {
     );
     final habit = hp.habits.single;
 
-    // 今日值 1 → 5：确认条必须以最新进度覆盖（旧实现只有归零才动 9 号槽，
-    // 「已记 1/8」的旧确认条残留且带可点撤销入口）。
+    // 今日值 1 → 5：不得再 show（旧 v3.0.3 行为覆盖式刷新确认条——被 U2-1
+    // 判为「无中生有」的常驻通知污染，收口到通知 action 回调）。
     await hp.setCheckInValue(habit, DateTime.now(), 1);
     notifCalls.clear();
     await hp.setCheckInValue(habit, DateTime.now(), 5);
-    final shows = notifCalls.where((c) => c.method == 'show').toList();
-    expect(shows, isNotEmpty, reason: '今日值的非归零变化必须覆盖式刷新确认条');
-    expect(
-      shows.any((c) =>
-          argsIdOf(c) == NotificationService.habitConfirmNotifyIdOf(habit.id)),
-      isTrue,
-      reason: '刷新必须落在 9 号槽（同 id 覆盖，不新增通知）',
-    );
+    expect(notifCalls.where((c) => c.method == 'show'), isEmpty,
+        reason: 'App 内打卡不生成/刷新确认条（确认条唯一 show 点在通知 action 回调）');
 
-    // 补昨天的写入与展示中的今日确认条无关，不动。
+    // 补昨天的写入不动任何 9 号槽通知。
     notifCalls.clear();
     await hp.setCheckInValue(
         habit, today().subtract(const Duration(days: 1)), 6);
     expect(notifCalls.where((c) => c.method == 'show'), isEmpty);
+    expect(
+      notifCalls.where((c) =>
+          c.method == 'cancel' &&
+          cancelIdOf(c) ==
+              NotificationService.habitConfirmNotifyIdOf(habit.id)),
+      isEmpty,
+      reason: '补昨天与展示中的今日确认条无关，cancel 也不得触发',
+    );
 
-    // 今日归零仍走 cancel 分支（v3.0.3 口径不变），且不得再 show。
+    // 今日归零仍走 cancel 分支（P3-3 v3.0.2 口径保留），且不得 show。
     await hp.setCheckInValue(habit, DateTime.now(), 0);
     expect(
       notifCalls.any((c) =>

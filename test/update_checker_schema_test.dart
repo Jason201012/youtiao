@@ -4,7 +4,9 @@ import 'package:todolist/services/update_checker.dart';
 /// 清单 schema 回归测试（S4 / S5 / L-01 / L-04 / L-13）。
 /// 锁定：update.json 用 `releaseNotes` 键、兜底 releaseUrl 指向当前 APK 仓。
 /// v2.7.8：APK 仓由 youtiao-releases-2 切到 youtiao-releases-3（旧仓附件配额已满），
+/// v3.0.1 再切 youtiao-releases-4（releases-3 配额满，只读保留），
 /// 兜底 URL 必须随仓迁移同步更新，否则「查看更新详情」会指向不存在的 tag 页。
+/// P3-4（v3.0.4 审计）：兜底断言同步切 releases-4（旧断言编码了已迁移的旧仓）。
 ///
 /// L-01 / L-04 / L-13：清单属**不可信输入**（Gitee 可能被篡改 / 作者账号可能被盗），
 /// 所有字段在解析阶段即被裁剪或丢弃，这里逐条固化该行为。
@@ -35,10 +37,12 @@ void main() {
       expect(UpdateChecker.parseManifest(const <String, dynamic>{}), isNull);
     });
 
-    test('releaseUrl 缺省时兜底到 youtiao-releases-3（S5 回归 / v2.7.8 换仓）', () {
+    test('releaseUrl 缺省时兜底到 youtiao-releases-4（S5 回归 / 换仓同步，P3-4 v3.0.4）',
+        () {
       final info = UpdateChecker.parseManifest({'version': '2.6.7'});
       expect(info, isNotNull);
-      expect(info!.releaseUrl, contains('youtiao-releases-3'));
+      expect(info!.releaseUrl, contains('youtiao-releases-4'));
+      expect(info.releaseUrl, isNot(contains('youtiao-releases-3')));
       expect(info.releaseUrl, isNot(contains('youtiao-releases/')));
     });
 
@@ -52,13 +56,14 @@ void main() {
           'https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.6.7');
     });
 
-    test('L-04：非白名单 releaseUrl 被丢弃，回退到兜底值', () {
+    test('L-04：非白名单 releaseUrl 被丢弃，回退到兜底值（P3-4 v3.0.4：兜底 = releases-4）',
+        () {
       final info = UpdateChecker.parseManifest({
         'version': '2.6.7',
         'releaseUrl': 'https://example.com/evil',
       });
       expect(info, isNotNull);
-      expect(info!.releaseUrl, contains('gitee.com/jason1012/youtiao-releases-3'));
+      expect(info!.releaseUrl, contains('gitee.com/jason1012/youtiao-releases-4'));
     });
 
     test('tag 缺省时由 version 推导为 v 前缀', () {

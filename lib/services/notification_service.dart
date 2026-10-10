@@ -576,10 +576,48 @@ class NotificationService {
   }
 
   /// 从 payload 解析习惯 id；非习惯类通知返回 null。
+  ///
+  /// U2-2（v3.0.4 审计）：确认条 payload 自本版起携带展示日（`<id>|<dateKey>`），
+  /// 供「撤销」action 校验日期防错日写入；本方法剥离日期后缀，兼容无日期的
+  /// 旧版 payload（习惯提醒 / snooze 通知 payload 恒为 `<id>`）。
   static String? parseHabitId(String? payload) {
+    final entity = parseHabitEntity(payload);
+    if (entity == null) return null;
+    return habitEntityId(entity);
+  }
+
+  /// U2-2（v3.0.4 审计）：取 habit payload 的**实体部分**（去前缀）——
+  /// `<id>` 或 `<id>|<dateKey>`；非习惯类通知返回 null。
+  static String? parseHabitEntity(String? payload) {
     if (payload == null || !payload.startsWith(payloadHabitPrefix)) return null;
     return payload.substring(payloadHabitPrefix.length);
   }
+
+  /// U2-2（v3.0.4 审计）：从实体部分解析习惯 id（剥离 `|<dateKey>` 后缀）。
+  static String habitEntityId(String entity) {
+    final i = entity.indexOf('|');
+    return i == -1 ? entity : entity.substring(0, i);
+  }
+
+  /// U2-2（v3.0.4 审计）：从实体部分解析确认条展示日（dateKey；无后缀 /
+  /// 空后缀 → null = 旧版 payload，调用方按「今日」宽容处理）。
+  static String? habitEntityDate(String entity) {
+    final i = entity.indexOf('|');
+    if (i == -1) return null;
+    final d = entity.substring(i + 1);
+    return d.isEmpty ? null : d;
+  }
+
+  /// U2-2（v3.0.4 审计）：构造带展示日的实体部分（`<id>|<dateKey>`）。
+  /// 冷启动暂存队列（_pendingHabitUndoIds）复用本格式携带日期。
+  static String habitEntityWithDate(String habitId, String dateKey) =>
+      '$habitId|$dateKey';
+
+  /// U2-2（v3.0.4 审计）：确认条展示日的 dateKey（yyyy-MM-dd，与
+  /// CheckIn.dateKey 同格式）。showHabitCheckedConfirm / showHabitUndoConfirm
+  /// 的 payload 用它标记「这条回报属于哪一天」。
+  static String habitConfirmDateKey(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   /// 读取当前通知权限状态（Android 13+ 才有效；旧版本恒为 true）。
   /// 返回 null = 平台不支持该查询。
@@ -1876,7 +1914,10 @@ class NotificationService {
         // P3-22（v2.9.9 审计）顺手修：确认通知挂着「撤销」action 却不带 payload
         // ——action 点击回传 payload 为空，parseHabitId 解析失败、撤销分支永远
         // 不可达（U2-4 落地时的同型漏配）。补上 habit: 前缀 payload 打通。
-        payload: '$payloadHabitPrefix${habit.id}',
+        // U2-2（v3.0.4 审计）：payload 追加展示日（`<id>|<dateKey>`）——跨天
+        // 残留的确认条被点「撤销」时，处理端校验日期不符即拒绝错日写入。
+        payload:
+            '$payloadHabitPrefix${habitEntityWithDate(habit.id, habitConfirmDateKey(DateTime.now()))}',
       );
     } catch (e) {
       AppLog.d('[通知] 习惯打卡确认通知失败 id=${habit.id}: $e');
@@ -1925,10 +1966,84 @@ class NotificationService {
         '已撤销 1 次打卡',
         body,
         detail,
-        payload: '$payloadHabitPrefix${habit.id}',
+        // U2-2（v3.0.4 审计）：payload 追加展示日（同 showHabitCheckedConfirm）。
+        payload:
+            '$payloadHabitPrefix${habitEntityWithDate(habit.id, habitConfirmDateKey(DateTime.now()))}',
       );
     } catch (e) {
       AppLog.d('[通知] 习惯撤销确认通知失败 id=${habit.id}: $e');
+    }
+  }
+
+  /// U2-2（v3.0.4 审计）：确认条「撤销」action 的日期校验失败回执——payload
+  /// 携带的展示日不是今天（跨天残留 / 重启后旧条），拒绝错日写入并**如实提示**
+  /// 而非静默早退（旧实现「点了没用」）。同 9 号槽覆盖式刷新，内容过期的旧
+  /// 确认条一并被本提示覆盖。
+  Future<void> showHabitConfirmExpired(String habitId) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        habitConfirmNotifyIdOf(habitId),
+        '该确认已过期',
+        '这是昨天的打卡确认，撤销操作请在应用内进行',
+        detail,
+        payload: '$payloadHabitPrefix$habitId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 确认过期提示通知失败 id=$habitId: $e');
+    }
+  }
+
+  /// U3-1（v3.0.4 审计）：「稍后提醒」action 不可执行时的**如实反馈**——
+  /// 实体已删除 / 重复已结束 / 服务层守卫早退（返回 false）时，旧实现在
+  /// 通知场景下静默 return，用户点「10 分钟后提醒」毫无反应。通知 action
+  /// 无法弹 SnackBar，覆盖式确认条是通知场景唯一可用的反馈形态（本仓 U 系
+  /// 多轮确立的口径）。
+  ///
+  /// [id] 为原始实体 id：任务侧挂任务段（[_notifyIdOf]），习惯侧挂 9 号槽
+  /// （[habitConfirmNotifyIdOf]）——两段位互不重叠，已删实体也不冲突。
+  /// [title] 可选（实体仍在时带标题）；已删实体缺省通用文案。
+  Future<void> showSnoozeUnavailableConfirm(String id, {String? title, bool isHabit = false}) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        isHabit ? _chHabit : _chSound,
+        isHabit ? '习惯提醒' : '任务提醒',
+        channelDescription:
+            isHabit ? '每日习惯打卡提醒' : '任务截止时间提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        isHabit ? habitConfirmNotifyIdOf(id) : _notifyIdOf(id),
+        '提醒已结束',
+        title != null && title.isNotEmpty
+            ? '$title · 不会再响，请打开应用查看'
+            : '该提醒已不再有效，请打开应用查看',
+        detail,
+        payload: isHabit
+            ? '$payloadHabitPrefix$id'
+            : '$payloadTaskPrefix$id',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 稍后提醒不可用提示通知失败 id=$id: $e');
     }
   }
 

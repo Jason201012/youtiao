@@ -196,8 +196,11 @@ class UpdateChecker {
       // v2.7.8：APK 仓切到 youtiao-releases-3（releases-2 附件配额已满）。
       // 优先取清单里的 releaseUrl（服务端可随时换仓而无需改 App），兜底值仅用于
       // 旧版清单缺少该键时——换仓时必须同步更新这里，否则「查看更新详情」会 404。
+      // P3-4（v3.0.4 审计）：兜底同步切 releases-4——v3.0.1 起 APK 仓已迁
+      // youtiao-releases-4（releases-3 附件配额满，只读保留），apkUrl 白名单
+      // （update_policy）已收口 releases-4，兜底 releaseUrl 与之保持一致。
       releaseUrl: releaseUrl ??
-          'https://gitee.com/jason1012/youtiao-releases-3/releases/tag/$tag',
+          'https://gitee.com/jason1012/youtiao-releases-4/releases/tag/$tag',
       apkSha256: apkSha256,
     );
   }
