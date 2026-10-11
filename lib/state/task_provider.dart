@@ -1582,7 +1582,13 @@ class TaskProvider extends ChangeNotifier {
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
   /// 捕获写盘异常并输出，避免「变更仅存于内存、重启即回退」被静默吞掉。
-  Future<void> _persist() async {
+  ///
+  /// P2-1（v3.0.5 审计）：返回落盘是否成功。旧实现吞掉 DB 异常后 Future 正常
+  /// 完成，任务侧通知「完成 / 撤销完成」action 无从得知落盘结果，无条件弹
+  /// 「已完成 ✓」——与习惯侧 P2-1（v3.0.4 审计）完全同构的缺口。现透传给
+  /// [setStatus] / [toggleDone] / [restoreTaskSnapshotPersisted]，由
+  /// main._doComplete / _doTaskUndo 按结果分支（失败不谎报）。
+  Future<bool> _persist() async {
     if (_dbLoadFailed) {
       // S13 修复：安全模式下禁止向可疑数据库落盘，避免用内存态覆盖尚可抢救的坏库。
       // 仅持久化偏好到 SharedPreferences（与任务库解耦、风险低）；任务变更仅存内存、
@@ -1592,15 +1598,19 @@ class TaskProvider extends ChangeNotifier {
       } catch (_) {
         // 偏好落盘失败也无妨，安全模式下本就不依赖持久化。
       }
-      return;
+      // P2-1（v3.0.5 审计）：安全模式下任务**未**落盘（重启即回退），如实返回
+      // false——通知 action 据此不弹「已完成 ✓」谎报。
+      return false;
     }
     try {
       await _persistSettings();
       await LocalDatabase.instance.replaceTasks(_tasks, _trash);
       // 任务变更后主动刷新桌面小组件（今日任务列表），不必等系统定时刷新兜底。
       requestWidgetRefresh();
+      return true;
     } catch (e, s) {
       AppLog.d('TaskProvider 持久化失败（变更仅存于内存，重启将回退）：$e\n$s');
+      return false;
     }
   }
 
@@ -2192,11 +2202,16 @@ class TaskProvider extends ChangeNotifier {
   void refreshAfterPrefs() => notifyListeners();
 
   /// 把任务在 待办/已完成 之间移动（看板拖拽 / 点击切换）。
-  void setStatus(String id, TaskStatus s) {
+  ///
+  /// P2-1（v3.0.5 审计）：返回落盘是否成功（任务不存在 = false；已是请求态 =
+  /// true 幂等早退）。既有调用方均为 fire-and-forget（不 await），签名从 void
+  /// 改为 Future<bool> 对它们零影响；通知「完成」action（main._doComplete）按
+  /// 本结果决定是否弹「已完成 ✓」，DB 异常不再谎报成功。
+  Future<bool> setStatus(String id, TaskStatus s) async {
     final i = _tasks.indexWhere((t) => t.id == id);
-    if (i == -1) return;
+    if (i == -1) return false;
     final cur = _tasks[i];
-    if (cur.status == s) return;
+    if (cur.status == s) return true; // 已是请求态：无需写入（幂等，与习惯侧同口径）
     final now = DateTime.now();
     var next = cur.copyWith(
       status: s,
@@ -2215,7 +2230,7 @@ class TaskProvider extends ChangeNotifier {
       _reconcileDeadlineOnCompletion(_tasks[i]);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 按 id 取任务（详情页实时读取用）。找不到返回 null。
@@ -2244,6 +2259,29 @@ class TaskProvider extends ChangeNotifier {
     final i = _tasks.indexWhere((t) => t.id == snapshot.id);
     if (i == -1) return false;
     if (identical(_tasks[i], snapshot)) return true;
+    _installTaskSnapshot(snapshot, i);
+    _persist();
+    return true;
+  }
+
+  /// P2-1（v3.0.5 审计）：通知「撤销完成」action 专用——应用快照并**等待落盘
+  /// 结果**。返回值语义：false = 任务不存在（快照失效）**或**落盘失败；
+  /// true = 快照已应用且落盘成功。App 内撤销横幅继续用 [restoreTaskSnapshot]
+  /// （bool = 是否存在，内存撤销已生效即可撤销，持久化失败走日志口径不弹窗），
+  /// 通知场景按本结果决定是否弹「已撤销完成」——DB 异常不再谎报成功。
+  Future<bool> restoreTaskSnapshotPersisted(Task snapshot) async {
+    final i = _tasks.indexWhere((t) => t.id == snapshot.id);
+    if (i == -1) return false;
+    if (identical(_tasks[i], snapshot)) return true;
+    _installTaskSnapshot(snapshot, i);
+    return _persist();
+  }
+
+  /// P2-1（v3.0.5 审计）：[restoreTaskSnapshot] 与
+  /// [restoreTaskSnapshotPersisted] 的共用安装体（内存替换 + 提醒重排 +
+  /// notifyListeners）。撤提醒 / 重排的唯一责任点保持收口在两个公开入口
+  /// （U3-3，v3.0.4 审计：cancelCurrent: false，撤一轮）。
+  void _installTaskSnapshot(Task snapshot, int i) {
     _tasks[i] = snapshot;
     // 与 setStatus 保持同一套副作用口径：状态变了，提醒与重复锚点要跟着重排。
     // P2-4（v2.9.6 审计）：先撤在途，再重排。
@@ -2259,8 +2297,6 @@ class TaskProvider extends ChangeNotifier {
       _reconcileDeadlineOnCompletion(_tasks[i]);
     }
     notifyListeners();
-    _persist();
-    return true;
   }
 
   /// 切换某任务的某个子任务勾选态，并持久化。
@@ -2275,9 +2311,11 @@ class TaskProvider extends ChangeNotifier {
     _persist();
   }
 
-  void toggleDone(String id) {
+  /// P2-1（v3.0.5 审计）：返回落盘是否成功（任务不存在 = false）。既有调用方
+  /// 均为 fire-and-forget，签名变化对它们零影响。
+  Future<bool> toggleDone(String id) async {
     final i = _tasks.indexWhere((t) => t.id == id);
-    if (i == -1) return;
+    if (i == -1) return false;
     final now = DateTime.now();
     final willDone = !_tasks[i].done;
     var next = _tasks[i].copyWith(
@@ -2301,7 +2339,7 @@ class TaskProvider extends ChangeNotifier {
       _reconcileDeadlineOnCompletion(_tasks[i]);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 切换任务置顶/星标状态：置顶任务在所属分区内固定排最前（优先于手动 order）。
@@ -3096,7 +3134,14 @@ class TaskProvider extends ChangeNotifier {
         old.monthlyWeekIndex != anchored.monthlyWeekIndex ||
         old.monthlyFromEnd != anchored.monthlyFromEnd ||
         old.repeatUntil != anchored.repeatUntil ||
-        !_listEq(old.skipDates, anchored.skipDates);
+        !_listEq(old.skipDates, anchored.skipDates) ||
+        // P3-3（v3.0.5 审计）：导入覆盖改写 doneDates（来源完成历史与本库不一致
+        // 且 status 恰好未变）时，旧判定两个都不命中 → 不立即重排，重复提醒
+        // 落点陈旧 ≤15 分钟（靠 _repeatContentSig 守护自愈）。落点计算依赖
+        // isDoneOn 过滤（notification_service），doneDates 与 skipDates 同在
+        // 「一切会影响提醒触发时刻/是否触发」的字段族，补入同口径比对。常规
+        // 编辑路径 copyWith 不触碰 doneDates（恒等），本判定不会引入额外重排。
+        !_listEq(old.doneDates, anchored.doneDates);
     if (remindersChanged) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(_tasks[i]);

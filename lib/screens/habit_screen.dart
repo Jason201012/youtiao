@@ -155,6 +155,15 @@ String _fmtMinute(int minute) {
 /// 先记录「打卡前最长连续」与「是否已达标」，变更后若本次是**新增达标**且当前连续
 /// 已超过此前最长，即触发全屏庆祝。供习惯列表圆圈与详情弹层共用。
 ///
+/// P3-2（v3.0.5 审计）：App 内写入口的落盘失败如实反馈——provider 已回滚内存
+/// （UI 显示的即已落盘的），此处仅提示用户写入未保存、可重试（旧实现全部
+/// 忽略 provider 返回的 bool，落盘失败时 App 内照样乐观显示成功）。
+void showCheckInPersistFailedHint(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('写入失败：数据未保存，请重试')),
+  );
+}
+
 /// T1-2：判定基准由「是否已打卡」改为「是否已达成当日目标」——量化习惯在喝到第 8
 /// 杯那一刻（而不是第 1 杯）才该庆祝；布尔习惯两者等价，行为不变。
 Future<void> checkInWithCelebration(
@@ -164,7 +173,12 @@ Future<void> checkInWithCelebration(
 ) async {
   final wasMet = hp.isTargetMetToday(habit);
   final longestBefore = hp.longestStreak(habit);
-  await hp.toggleCheckInToday(habit);
+  final ok = await hp.toggleCheckInToday(habit);
+  if (!context.mounted) return;
+  if (!ok) {
+    showCheckInPersistFailedHint(context);
+    return;
+  }
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
 }
 
@@ -176,7 +190,12 @@ Future<void> incrementWithCelebration(
 ) async {
   final wasMet = hp.isTargetMetToday(habit);
   final longestBefore = hp.longestStreak(habit);
-  await hp.adjustCheckInValue(habit, DateTime.now(), 1);
+  final ok = await hp.adjustCheckInValue(habit, DateTime.now(), 1);
+  if (!context.mounted) return;
+  if (!ok) {
+    showCheckInPersistFailedHint(context);
+    return;
+  }
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
 }
 
@@ -201,7 +220,12 @@ Future<void> completeTodayTargetWithCelebration(
 ) async {
   final wasMet = hp.isTargetMetToday(habit);
   final longestBefore = hp.longestStreak(habit);
-  await hp.completeTodayTarget(habit);
+  final ok = await hp.completeTodayTarget(habit);
+  if (!context.mounted) return;
+  if (!ok) {
+    showCheckInPersistFailedHint(context);
+    return;
+  }
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
 }
 
@@ -270,10 +294,10 @@ Future<void> showCheckInUndoSnackBar(
     failureHint: '撤销已失效：这条记录之后已被再次修改',
     onUndo: () async {
       // P3-2：只有「当前仍是操作后的状态（0）」才回写，不覆盖用户后续操作。
+      // P3-2（v3.0.5 审计）：回写结果透传——落盘失败按「撤销已失效」如实反馈。
       final cur = hp.checkInValueOn(habit, day);
       if (cur != 0) return false;
-      hp.setCheckInValue(habit, day, previous);
-      return true;
+      return hp.setCheckInValue(habit, day, previous);
     },
   );
 }
@@ -305,8 +329,13 @@ Future<void> toggleHabitWithUndo(
   // P3-1：操作发生时就固化 date-only，撤销不再取「点击撤销那一刻」。
   final day = _dateOnlyNow();
   final previous = hp.todayValue(habit);
-  await hp.toggleCheckInToday(habit);
+  // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不给撤销横幅（取消未生效）。
+  final ok = await hp.toggleCheckInToday(habit);
   if (!context.mounted) return;
+  if (!ok) {
+    showCheckInPersistFailedHint(context);
+    return;
+  }
 
   // P3-1 / P3-2 / U2-4 / U3-4：统一走共享撤销实现（日期固化 + 覆盖校验 +
   // 不再 hideCurrentSnackBar 以保留队列 + 超时反馈）。
@@ -411,7 +440,10 @@ Future<void> promptHabitTodayQuantity(
     hint: '目标 ${habit.effectiveTarget}；填 0 = 清空今日记录',
   );
   if (v == null) return;
-  await hp.setCheckInValue(habit, DateTime.now(), v);
+  // P3-2（v3.0.5 审计）：「设置数量」对话框消费落盘结果，失败如实提示
+  //（provider 已回滚内存，不再乐观显示成功）。
+  final ok = await hp.setCheckInValue(habit, DateTime.now(), v);
+  if (!ok && context.mounted) showCheckInPersistFailedHint(context);
 }
 
 /// 打开单习惯详情弹层（含该习惯自己的热力图、连续天数与分享入口）。
@@ -1610,10 +1642,15 @@ class _HabitDetailSheet extends StatelessWidget {
         ),
       );
       if (action == 'undo') {
-        await hp.setCheckInValue(habit, picked, 0);
+        // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不再谎报「已撤销」。
+        final ok = await hp.setCheckInValue(habit, picked, 0);
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('已撤销 $dayLabel 的打卡')),
+            SnackBar(
+              content: Text(ok
+                  ? '已撤销 $dayLabel 的打卡'
+                  : '写入失败：数据未保存，请重试'),
+            ),
           );
         }
       } else if (action == 'edit') {
@@ -1632,8 +1669,13 @@ class _HabitDetailSheet extends StatelessWidget {
         // 不改变今日达标态，调用为 no-op，无需按日期分支。
         final wasMet = hp.isTargetMetToday(habit);
         final longestBefore = hp.longestStreak(habit);
-        await hp.setCheckInValue(habit, picked, v);
+        // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不再谎报「已更新」。
+        final ok = await hp.setCheckInValue(habit, picked, v);
         if (context.mounted) {
+          if (!ok) {
+            showCheckInPersistFailedHint(context);
+            return;
+          }
           await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(v == 0 ? '已撤销 $dayLabel 的打卡' : '已把 $dayLabel 更新为 $v')),
@@ -1665,8 +1707,13 @@ class _HabitDetailSheet extends StatelessWidget {
     // 却毫无反馈，用户以为没生效。补庆祝包装（对过去日期为 no-op，见上）。
     final wasMet = hp.isTargetMetToday(habit);
     final longestBefore = hp.longestStreak(habit);
-    await hp.checkInOnDay(habit, picked, value: value);
+    // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不再谎报「已补」。
+    final ok = await hp.checkInOnDay(habit, picked, value: value);
     if (context.mounted) {
+      if (!ok) {
+        showCheckInPersistFailedHint(context);
+        return;
+      }
       await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1702,7 +1749,10 @@ class _HabitDetailSheet extends StatelessWidget {
       ),
     );
     if (confirmed == true) {
-      await hp.uncheckInOnDay(habit, DateTime.now());
+      // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不再静默（provider 已回滚内存，
+      // 打卡记录原样保留）。
+      final ok = await hp.uncheckInOnDay(habit, DateTime.now());
+      if (!ok && context.mounted) showCheckInPersistFailedHint(context);
     }
   }
 
@@ -1723,8 +1773,13 @@ class _HabitDetailSheet extends StatelessWidget {
     final day = _dateOnlyNow();
     final previous = hp.todayValue(habit);
     if (previous <= 0) return;
-    await hp.clearToday(habit);
+    // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不给撤销横幅（清空未生效）。
+    final ok = await hp.clearToday(habit);
     if (!context.mounted) return;
+    if (!ok) {
+      showCheckInPersistFailedHint(context);
+      return;
+    }
     await showCheckInUndoSnackBar(
       context,
       hp: hp,
@@ -2307,7 +2362,9 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     }
     setState(() => _saving = true);
     final hp = context.read<HabitProvider>();
-    await hp.updateHabit(
+    // P3-2（v3.0.5 审计）：按落盘结果反馈——失败时编辑层停留、如实提示
+    //（provider 已回滚内存），不再 pop 后谎报「已保存」。
+    final ok = await hp.updateHabit(
       widget.habit,
       title: title,
       weekdays: _weekdays.toList()..sort(),
@@ -2320,6 +2377,13 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       graceDays: _graceDays,
     );
     if (!mounted) return;
+    if (!ok) {
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('保存失败：数据未落盘，请重试')),
+      );
+      return;
+    }
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('已保存「$title」')),
@@ -2364,6 +2428,15 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     if (confirmed != true) return;
     final snapshot = await hp.deleteHabit(widget.habit.id);
     if (!mounted) return;
+    // P3-2（v3.0.5 审计）：snapshot == null = 删除未生效（habit 不存在或落盘
+    // 失败——provider 已回滚内存，习惯仍在），如实提示并留在编辑层，不谎报
+    // 「习惯已删除」（旧实现 null 也照走删除文案 + 无撤销按钮）。
+    if (snapshot == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('删除未生效，请重试')),
+      );
+      return;
+    }
     // 关闭编辑层 + 其下的详情弹层，回到习惯列表（删除后详情已无意义）。
     navigator.pop();
     navigator.pop();

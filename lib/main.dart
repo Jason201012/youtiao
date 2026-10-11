@@ -17,6 +17,7 @@ import 'package:todolist/services/secure_window.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/models/attachment.dart';
+import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
@@ -508,15 +509,27 @@ void _handleNotificationAction(String? actionId, String? payload) {
 void _doHabitUndo(NavigatorState nav, String habitId, {String? confirmDate}) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
-  if (habit == null) return;
+  // U3-1（v3.0.5 审计）：已删 / 已归档不再静默——覆盖式回执「习惯已结束」。
+  // 正常路径删除/归档已撤提醒，此防系统延迟投递的在途旧闹钟被点（通知随
+  // action 消散、毫无反应 = 「点了没用」，与 _doSnooze 已删分支同口径）。
+  if (habit == null) {
+    NotificationService.instance.showHabitEndedConfirm(habitId);
+    return;
+  }
   // P2-3（v3.0.1 审计）：归档习惯禁止一切打卡写入（含回退）——归档语义 =
   // 退场。早退而非放行，否则 setCheckInValue 的 archived 守卫会静默拦截
   // 写入，而这里的 .then 仍会弹「已撤销」确认通知（谎报）。
-  if (habit.archived) return;
+  if (habit.archived) {
+    NotificationService.instance.showHabitEndedConfirm(habitId);
+    return;
+  }
   // U2-2（v3.0.4 审计）：过期确认拒绝错日写入，覆盖式如实提示。
+  // U3-2（v3.0.5 审计）：文案回显 payload 实际展示日（旧实现写死「昨天」，
+  // 冷启动残留场景下可能已是数天前，失实）。
   if (confirmDate != null &&
       confirmDate != NotificationService.habitConfirmDateKey(DateTime.now())) {
-    NotificationService.instance.showHabitConfirmExpired(habitId);
+    NotificationService.instance
+        .showHabitConfirmExpired(habitId, dateKey: confirmDate);
     return;
   }
   final current = hp.todayValue(habit);
@@ -532,6 +545,11 @@ void _doHabitUndo(NavigatorState nav, String habitId, {String? confirmDate}) {
       // 纯常量实参会被 AOT 整体消除；插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
       AppLog.d('[通知] 撤销写入失败 id=${habit.id}，不回报「已撤销」');
       return;
+    }
+    // U2-1（v3.0.5 审计）：登记「9 号槽已有确认条」，供 App 内后续写入
+    // 覆盖刷新（内容新鲜度折中方案，见 HabitProvider.setCheckInValue）。
+    if (NotificationService.instance.enabled) {
+      hp.markConfirmShown(habit.id);
     }
     NotificationService.instance.showHabitUndoConfirm(
       habit,
@@ -562,14 +580,45 @@ void _doHabitUndo(NavigatorState nav, String habitId, {String? confirmDate}) {
 /// 跨到休息日仍带 action，用户一点就写入了计划外记录（且不庆祝，与全站口径脱节）。
 /// 复现路径：给「每周一三五」的习惯设 21:00 提醒 → 某天改成「每周二四」
 /// → 周一 21:00 的旧闹钟照响 → 点「打卡」。
+/// U2-1（v3.0.5 审计）：通知 action 路径的确认条 show 统一包装——show 前登记
+/// 「9 号槽已有确认条」内存标记（仅通知总开关开启时；见
+/// [HabitProvider.markConfirmShown]），供 [HabitProvider.setCheckInValue] 的
+/// 今日非零写入覆盖刷新——恢复 v3.0.3 U3-1 的内容新鲜度（「通知打卡已记 1/8
+/// → App 内改到 5/8」确认条不再停在 1/8），同时保持 v3.0.4 U2-1「无中生有」
+/// 的消除：标记不存在时 App 内写入仍不生成任何确认条。
+void _markAndShowHabitConfirm(
+  HabitProvider hp,
+  Habit habit, {
+  int? value,
+  int? target,
+}) {
+  if (NotificationService.instance.enabled) {
+    hp.markConfirmShown(habit.id);
+  }
+  NotificationService.instance.showHabitCheckedConfirm(
+    habit,
+    value: value,
+    target: target,
+  );
+}
+
 void _doHabitCheckIn(NavigatorState nav, String habitId) {
   final hp = Provider.of<HabitProvider>(nav.context, listen: false);
   final habit = hp.byId(habitId);
-  if (habit == null) return;
+  // U3-1（v3.0.5 审计）：已删不再静默——覆盖式回执「习惯已结束」（防在途
+  // 旧闹钟被点后毫无反应，与 _doSnooze 已删分支同口径）。
+  if (habit == null) {
+    NotificationService.instance.showHabitEndedConfirm(habitId);
+    return;
+  }
   // P2-3（v3.0.1 审计）：归档习惯不再接受打卡写入（含通知 action 兜底）——
   // 正常路径下归档时已撤全部提醒（updateHabit → cancelHabitReminder），
   // 此处防的是系统延迟投递的在途旧闹钟。
-  if (habit.archived) return;
+  // U3-1（v3.0.5 审计）：早退同时覆盖式回执「习惯已结束」，不再静默。
+  if (habit.archived) {
+    NotificationService.instance.showHabitEndedConfirm(habitId);
+    return;
+  }
   final now = DateTime.now();
   // P3-7：休息日不写记录。如实回报「今天不是计划打卡日」而不是谎称已打卡。
   if (!habit.shouldCheckInOn(now)) {
@@ -586,11 +635,7 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
     if (current >= habit.effectiveTarget) {
       // U2-1：已达标时不再写入（此前 completeTodayTarget 自身会早退，
       // 这里显式早退是为了不再弹一次「已打卡」确认覆盖掉用户原有通知）。
-      NotificationService.instance.showHabitCheckedConfirm(
-        habit,
-        value: current,
-        target: habit.effectiveTarget,
-      );
+      _markAndShowHabitConfirm(hp, habit, value: current);
       return;
     }
     // U2-6（v2.9.5 审计）：**0 记录也只 +1**，不再一键顶满目标。
@@ -618,7 +663,10 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
         return;
       }
       // 按完成后的真实进度回报（+1 后通常未达标 → 如实显示「已记 x/y」）。
-      NotificationService.instance.showHabitCheckedConfirm(
+      // U2-1（v3.0.5 审计）：show 前登记确认条标记（覆盖刷新折中，见
+      // _markAndShowHabitConfirm）。
+      _markAndShowHabitConfirm(
+        hp,
         habit,
         value: hp.todayValue(habit),
         target: habit.effectiveTarget,
@@ -638,7 +686,8 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
       AppLog.d('[通知] 打卡写入失败 id=${habit.id}，不回报「已打卡 ✓」');
       return;
     }
-    NotificationService.instance.showHabitCheckedConfirm(habit);
+    // U2-1（v3.0.5 审计）：show 前登记确认条标记（同上）。
+    _markAndShowHabitConfirm(hp, habit);
   }).catchError((_) {
     AppLog.d('[通知] 打卡写入失败 id=${habit.id}，不回报「已打卡 ✓」');
   });
@@ -668,6 +717,13 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
       // 达标守卫同构）。
       if (task.done) {
         NotificationService.instance.showCompletedConfirm(taskId, task.title);
+      } else if (task.repeatEnded) {
+        // U3-2（v3.0.5 审计）：重复已结束——「不会再响」文案在本分支完全成立
+        // （确实无未来落点），走现文案回执；调度异常分支见下方区分。
+        NotificationService.instance.showSnoozeUnavailableConfirm(
+          taskId,
+          title: task.title,
+        );
       } else {
         // U3-1（v3.0.4 审计）：服务层守卫早退（repeatEnded / 总开关关闭 /
         // 调度异常）返回 false 时覆盖式回执「提醒已结束」，不再静默。
@@ -675,9 +731,14 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
             .snoozeTaskReminder(task, delay: delay)
             .then((ok) {
           if (!ok) {
+            // U3-2（v3.0.5 审计）：走到此处的 false 只剩调度异常（done /
+            // repeatEnded 已上方预拦截；总开关关闭时回执自身早退）——重复
+            // 任务的既有 8 槽落点仍挂在外、下个周期照响，文案改「顺延失败」
+            // 不谎报「不会再响」。
             NotificationService.instance.showSnoozeUnavailableConfirm(
               taskId,
               title: task.title,
+              rescheduleFailed: true,
             );
           }
         });
@@ -699,10 +760,22 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
       // 早退时经 9 号槽回一条覆盖式确认（如实回报当日进度，不静默——用户知道
       // 为什么 10 分钟后不会再响）；归档侧守卫在 snoozeHabitReminder 入口。
       if (hp.isTargetMetToday(habit)) {
-        NotificationService.instance.showHabitCheckedConfirm(
+        // U2-1（v3.0.5 审计）：show 前登记确认条标记（覆盖刷新折中，
+        // 见 _markAndShowHabitConfirm）。
+        _markAndShowHabitConfirm(
+          hp,
           habit,
           value: hp.todayValue(habit),
           target: habit.effectiveTarget,
+        );
+      } else if (habit.archived) {
+        // U3-2（v3.0.5 审计）：已归档——提醒已全部撤、确实「不会再响」，
+        // 走现文案回执（原实现经 snoozeHabitReminder 早退由统一 false 分支
+        // 回报，文案与失败原因无区分）。
+        NotificationService.instance.showSnoozeUnavailableConfirm(
+          habitId,
+          title: habit.title,
+          isHabit: true,
         );
       } else {
         // U3-1（v3.0.4 审计）：服务层守卫早退（archived / 总开关关闭 /
@@ -711,10 +784,13 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
             .snoozeHabitReminder(habit, delay: delay)
             .then((ok) {
           if (!ok) {
+            // U3-2（v3.0.5 审计）：false 只剩调度异常（archived 已上方预拦截；
+            // 总开关关闭时回执自身早退）——文案改「顺延失败」不谎报「不会再响」。
             NotificationService.instance.showSnoozeUnavailableConfirm(
               habitId,
               title: habit.title,
               isHabit: true,
+              rescheduleFailed: true,
             );
           }
         });
@@ -773,31 +849,52 @@ void _doComplete(NavigatorState nav, String? taskId) {
   }
   _notifyCompleteSnapshots[taskId] = task;
   // 标记完成（内部会取消其一次性截止提醒，避免完成后仍弹；重复任务则跳过今日）。
-  provider.setStatus(taskId, TaskStatus.done);
-  // 覆盖式确认通知：用任务通知 id，用户一眼可见「已完成」，且不会叠加新通知。
-  NotificationService.instance.showCompletedConfirm(taskId, task.title);
+  // P2-1（v3.0.5 审计）：按落盘结果回报——旧实现 fire-and-forget 后**无条件**
+  // 弹「已完成 ✓」，DB 写入失败时通知栏说完成、重启后任务复活为未完成，与
+  // 习惯侧 P2-1（v3.0.4 审计）完全同构（setStatus 同步改内存 + _persist 吞异常）。
+  // 现 setStatus 透传落盘结果：失败只记日志、不弹确认（与习惯侧同口径）；
+  // 快照保留——用户仍可走「撤销」路径回滚内存态。
+  provider.setStatus(taskId, TaskStatus.done).then((ok) {
+    if (!ok) {
+      // id 用插值（AppLog.d release 为 no-op，纯常量实参会被 AOT 整体消除；
+      // 插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
+      AppLog.d('[通知] 完成写入失败 id=$taskId，不回报「已完成 ✓」');
+      return;
+    }
+    // 覆盖式确认通知：用任务通知 id，用户一眼可见「已完成」，且不会叠加新通知。
+    NotificationService.instance.showCompletedConfirm(taskId, task.title);
+  });
 }
 
 /// P3-22（v2.9.9 审计）：通知「撤销」action——把该任务回滚到通知「完成」写入
-/// 前的快照（[TaskProvider.restoreTaskSnapshot]：先撤在途提醒再按快照重排，
-/// 与 App 内完成撤销唯一同构入口），成功后回「已撤销完成」确认通知。
+/// 前的快照（[TaskProvider.restoreTaskSnapshotPersisted]：先撤在途提醒再按
+/// 快照重排，与 App 内完成撤销唯一同构入口），成功后回「已撤销完成」确认通知。
 ///
 /// U2-4 / P3-18（v3.0.0 审计）：不可执行时**如实反馈**——快照是进程内内存，
 /// 杀进程/重启后丢失（旧实现静默早退，点按无任何反应、通知仍显示「已完成 ✓」）；
 /// 回滚失败（任务已被删除）同样回失效提示。绝不谎报成功。
 /// 已知边界：完成到撤销之间若用户又在 App 内改过该任务，快照回滚会连同
 /// 那些改动一起还原——与撤销语义「回到完成前状态」一致，属预期行为。
-void _doTaskUndo(NavigatorState nav, String taskId) {
+///
+/// P2-1（v3.0.5 审计）：改用 [TaskProvider.restoreTaskSnapshotPersisted]——
+/// 旧 restoreTaskSnapshot 返回的 bool 语义是「任务是否存在」而非「是否落盘」，
+/// 落盘失败照样弹「已撤销完成」（重启后完成态复活）。现三分支：落盘成功 →
+/// 确认；任务已删 → 「已失效」；落盘失败 → 只记日志不弹确认（内存撤销已生效，
+/// 既不谎报持久化、也不误报「已失效」，与习惯侧同口径）。
+Future<void> _doTaskUndo(NavigatorState nav, String taskId) async {
   final provider = Provider.of<TaskProvider>(nav.context, listen: false);
   final snapshot = _notifyCompleteSnapshots.remove(taskId);
   if (snapshot == null) {
     NotificationService.instance.showTaskUndoInvalid(taskId);
     return;
   }
-  if (provider.restoreTaskSnapshot(snapshot)) {
+  final ok = await provider.restoreTaskSnapshotPersisted(snapshot);
+  if (ok) {
     NotificationService.instance.showTaskUndoConfirm(taskId, snapshot.title);
-  } else {
+  } else if (provider.byId(taskId) == null) {
     NotificationService.instance.showTaskUndoInvalid(taskId);
+  } else {
+    AppLog.d('[通知] 撤销完成落盘失败 id=$taskId，不回报「已撤销」');
   }
 }
 
@@ -867,6 +964,17 @@ void main() async {
   await _safeLoad(theme, 'ThemeProvider');
   final habit = HabitProvider();
   await _safeLoad(habit, 'HabitProvider');
+  // P3-1（v3.0.5 审计）：冷启动跨天残留清理。load() 把跨天基线置为当天
+  // （_lastResetDay = today），首次 checkDailyReset 的 dayChanged 恒 false，
+  // onDayChanged 不触发——U2-2（v3.0.4 审计）的进程存活跨午夜清理覆盖不到
+  // 「昨天挂的确认条今天冷启动」场景（Android 通知跨进程重启保留）。启动链路
+  // 直接清一次 9 号槽（cancel 不受通知总开关管辖，与 onDayChanged 同口径）；
+  // 错日写入面已有 payload 日期校验兜底，此处消除的是过期内容本身的展示。
+  try {
+    habit.cancelAllConfirmNotifications();
+  } catch (e) {
+    AppLog.d('[HabitProvider] 冷启动清理确认条失败：$e');
+  }
   final onboarding = OnboardingProvider();
   await _safeLoad(onboarding, 'OnboardingProvider');
   final appLock = AppLockProvider();

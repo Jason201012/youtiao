@@ -1979,8 +1979,14 @@ class NotificationService {
   /// 携带的展示日不是今天（跨天残留 / 重启后旧条），拒绝错日写入并**如实提示**
   /// 而非静默早退（旧实现「点了没用」）。同 9 号槽覆盖式刷新，内容过期的旧
   /// 确认条一并被本提示覆盖。
-  Future<void> showHabitConfirmExpired(String habitId) async {
+  ///
+  /// U3-2（v3.0.5 审计）：[dateKey] 为 payload 携带的展示日（`yyyy-MM-dd`），
+  /// 文案按实际日期回显——旧实现写死「昨天」，在 P3-1（v3.0.5 审计）描述的
+  /// 冷启动残留场景下该条可能已是 3 天前的，文案失实；解析失败 / 缺省时退回
+  /// 「之前」的中性表述。
+  Future<void> showHabitConfirmExpired(String habitId, {String? dateKey}) async {
     if (!enabled) return;
+    final shown = _formatDateKeyCn(dateKey);
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
         _chHabit,
@@ -1997,12 +2003,58 @@ class NotificationService {
       await _plugin.show(
         habitConfirmNotifyIdOf(habitId),
         '该确认已过期',
-        '这是昨天的打卡确认，撤销操作请在应用内进行',
+        shown != null
+            ? '这是 $shown 的打卡确认，撤销操作请在应用内进行'
+            : '这是之前的打卡确认，撤销操作请在应用内进行',
         detail,
         payload: '$payloadHabitPrefix$habitId',
       );
     } catch (e) {
       AppLog.d('[通知] 确认过期提示通知失败 id=$habitId: $e');
+    }
+  }
+
+  /// `yyyy-MM-dd` → 「M月d日」（U3-2，v3.0.5 审计：过期确认文案回显实际日期）。
+  /// 非 `yyyy-MM-dd` 形态（旧 payload / 异常值）返回 null，由调用方退回中性文案。
+  static String? _formatDateKeyCn(String? dateKey) {
+    if (dateKey == null) return null;
+    final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(dateKey);
+    if (m == null) return null;
+    final month = int.parse(m.group(2)!);
+    final day = int.parse(m.group(3)!);
+    return '$month月$day日';
+  }
+
+  /// U3-1（v3.0.5 审计）：习惯**已删除 / 已归档**时「打卡 / 撤销」action 的
+  /// 覆盖式回执。正常路径删除 / 归档时已撤全部提醒，此防系统延迟投递的**在途
+  /// 旧闹钟**（P2-3，v3.0.1 审计自述的防御场景）仍带着 action 落地被点——
+  /// 旧实现静默 return，通知随 action 消散，「点了没用」正是 U3-1 口径要消灭
+  /// 的体验（与 _doSnooze 已删分支的覆盖式回执同构）。同 9 号槽覆盖，残留的
+  /// 旧确认条一并被本提示覆盖。
+  Future<void> showHabitEndedConfirm(String habitId) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        habitConfirmNotifyIdOf(habitId),
+        '习惯已结束',
+        '该习惯已删除或已归档，不再记录打卡',
+        detail,
+        payload: '$payloadHabitPrefix$habitId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 习惯已结束提示通知失败 id=$habitId: $e');
     }
   }
 
@@ -2015,7 +2067,14 @@ class NotificationService {
   /// [id] 为原始实体 id：任务侧挂任务段（[_notifyIdOf]），习惯侧挂 9 号槽
   /// （[habitConfirmNotifyIdOf]）——两段位互不重叠，已删实体也不冲突。
   /// [title] 可选（实体仍在时带标题）；已删实体缺省通用文案。
-  Future<void> showSnoozeUnavailableConfirm(String id, {String? title, bool isHabit = false}) async {
+  ///
+  /// U3-2（v3.0.5 审计）：[rescheduleFailed] 区分失败原因——「不会再响」只在
+  /// 实体已删 / 重复已结束（确实无未来落点）分支成立；**调度异常**返回 false
+  /// 时重复任务的未来落点仍挂在外（snooze 失败不影响既有 8 槽预挂），下个
+  /// 周期照响，文案改「顺延失败」不谎报。调用方（main._doSnooze）已把
+  /// done / repeatEnded / archived 预拦截，走到本回执的 false 属异常分支。
+  Future<void> showSnoozeUnavailableConfirm(String id,
+      {String? title, bool isHabit = false, bool rescheduleFailed = false}) async {
     if (!enabled) return;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -2035,7 +2094,7 @@ class NotificationService {
         isHabit ? habitConfirmNotifyIdOf(id) : _notifyIdOf(id),
         '提醒已结束',
         title != null && title.isNotEmpty
-            ? '$title · 不会再响，请打开应用查看'
+            ? '$title · ${rescheduleFailed ? '顺延失败，请打开应用查看' : '不会再响，请打开应用查看'}'
             : '该提醒已不再有效，请打开应用查看',
         detail,
         payload: isHabit

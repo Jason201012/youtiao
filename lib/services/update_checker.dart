@@ -152,7 +152,9 @@ class UpdateChecker {
   /// 将 Gitee 上的 update.json 反序列化为 [UpdateInfo]。
   /// 清单 schema 约定（与发版脚本 _publish_v266.py 对齐）：
   ///   version / apkUrl / apkSha256 / releaseNotes 为必填或可选；
-  ///   releaseUrl 缺省时兜底到 youtiao-releases-3（v2.7.8 起的新 APK 仓）。
+  ///   releaseUrl 缺省时兜底到 youtiao-releases-4（U3-3，v3.0.5 审计：注释
+  ///   与 202-203 行实现同步——v3.0.1 起 APK 仓已迁 releases-4，本注释此前
+  ///   仍写 releases-3，随下次触碰顺手修正）。
   /// 解析失败（缺 version）返回 null。
   static UpdateInfo? parseManifest(Map<String, dynamic> data) {
     final version = _str(data['version']).trim();

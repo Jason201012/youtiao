@@ -20,6 +20,33 @@ class HabitProvider extends ChangeNotifier {
   final List<Habit> _habits = [];
   final List<CheckIn> _checkIns = [];
 
+  /// U2-1（v3.0.5 审计）：本会话 9 号槽确认条存在性的**内存近似**——
+  /// habitId → 确认条展示日（dateKey）。通知 action 路径每次 show 确认条后
+  /// 由 main 调 [markConfirmShown] 登记；[setCheckInValue] 的今日非零写入据此
+  /// 判断「是否已有确认条可覆盖刷新」（恢复 v3.0.3 U3-1 的内容新鲜度，同时
+  /// 保持 v3.0.4 U2-1「无中生有」的消除）。进程重启即清空——重启后的通知栏
+  /// 残留由 P3-1（v3.0.5 审计）的冷启动清理兜住；跨天标记经 [_confirmShownToday]
+  /// 自然失效。
+  final Map<String, String> _confirmShownMarks = <String, String>{};
+
+  /// U2-1（v3.0.5 审计）：通知 action 路径 show 确认条后登记（见
+  /// [_confirmShownMarks]）。仅供 main 的通知 action 回调调用。
+  void markConfirmShown(String habitId) =>
+      _confirmShownMarks[habitId] = CheckIn.dateKey(DateTime.now());
+
+  /// U2-1（v3.0.5 审计）：该习惯本会话是否有**今天的**确认条标记；
+  /// 跨天标记顺带清除（昨天的确认条在跨天路径已被 cancel，标记不该再命中）。
+  bool _confirmShownToday(String habitId) {
+    final today = CheckIn.dateKey(DateTime.now());
+    final marked = _confirmShownMarks[habitId];
+    if (marked == null) return false;
+    if (marked != today) {
+      _confirmShownMarks.remove(habitId);
+      return false;
+    }
+    return true;
+  }
+
   /// 进程内自增序号，叠加到习惯 id 上，避免同一毫秒内连续建习惯时 id 撞车
   /// （撞 id 会导致 _memHabits 按 id 存 Map 时后者覆盖前者，静默丢习惯，
   /// 且两个习惯对象的打卡会串号）。与 [NotificationService._habitSlotOf] 用
@@ -212,8 +239,21 @@ class HabitProvider extends ChangeNotifier {
     _habits.removeAt(idx);
     _checkIns.removeWhere((c) => c.habitId == id);
     await NotificationService.instance.cancelHabitReminder(id);
-    await _persistHabits();
-    await _persistCheckIns();
+    final okHabits = await _persistHabits();
+    final okCheckIns = await _persistCheckIns();
+    if (!okHabits || !okCheckIns) {
+      // P3-2（v3.0.5 审计）：落盘失败回滚内存（删除不生效）——旧实现删除静默
+      // 丢弃落盘结果：UI 显示已删、DB 里还在，重启后「复活」，且调用方无从
+      // 察觉。回滚后返回 null，UI 据此如实提示而非谎报「习惯已删除」。
+      _habits.insert(idx, snapshot.habit);
+      _checkIns.addAll(snapshot.checkIns);
+      // 已撤的提醒按恢复后的状态重挂（与 persist 失败前撤空对冲）。
+      if (!snapshot.habit.archived && snapshot.habit.reminderMinute != null) {
+        _rescheduleReminder(snapshot.habit);
+      }
+      notifyListeners();
+      return null;
+    }
     notifyListeners();
     _notifyHabitsChanged();
     return snapshot;
@@ -424,8 +464,10 @@ class HabitProvider extends ChangeNotifier {
   /// 抹掉当天全部累计（3/8 → 0/8），且绕开了写盘收口（落盘/重排/挽留重排全靠
   /// 手工补齐，正是「某个入口忘记重排」的经典温床）。委托后行为与旧实现逐位等价
   /// （布尔习惯 0/1 互换），量化习惯的整日撤销语义保持不变但走统一路径。
-  Future<void> toggleCheckInToday(Habit habit) async {
-    await setCheckInValue(habit, DateTime.now(), isCheckedToday(habit) ? 0 : 1);
+  /// P3-2（v3.0.5 审计）：透传 [setCheckInValue] 的落盘结果（App 内写入口
+  /// 据此如实反馈，不再忽略 bool）。
+  Future<bool> toggleCheckInToday(Habit habit) async {
+    return setCheckInValue(habit, DateTime.now(), isCheckedToday(habit) ? 0 : 1);
   }
 
   /// T1-2：在指定日把累计量调整为 [value]（0 → 删除记录，即撤卡）。
@@ -448,16 +490,35 @@ class HabitProvider extends ChangeNotifier {
     final k = CheckIn.dateKey(day);
     final idx = _checkIns
         .indexWhere((c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
+    // P3-2（v3.0.5 审计）：写前留存旧记录与写入形态，落盘失败时回滚内存——
+    // 旧实现先改内存再落盘、失败不回滚，App 内 UI 乐观显示成功、重启静默回退。
+    final CheckIn? previous = idx == -1 ? null : _checkIns[idx];
+    final bool added = idx == -1 && v > 0;
     if (v <= 0) {
       if (idx == -1) return true; // 本就无记录 → 无操作，不触发无谓的落盘与重排
       _checkIns.removeAt(idx);
-    } else if (idx == -1) {
+    } else if (added) {
       _checkIns.add(CheckIn.forDay(habit.id, day, value: v));
     } else {
       if (_checkIns[idx].value == v) return true; // 值未变 → 无操作
       _checkIns[idx] = _checkIns[idx].withValue(v);
     }
     final ok = await _persistCheckIns(); // P2-1（v3.0.4 审计）：透传落盘结果
+    if (!ok) {
+      // P3-2（v3.0.5 审计）：落盘失败回滚内存改动，保证「UI 显示的即已落盘的」。
+      // 按 habitId + dateKey 定位（await 期间下标可能漂移），回滚后不发
+      // _notifyHabitsChanged（状态已还原，挽留等派生调度无需重排）。
+      final cur = _checkIns.indexWhere(
+          (c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
+      if (added) {
+        if (cur != -1) _checkIns.removeAt(cur);
+      } else if (previous != null && cur != -1) {
+        _checkIns[cur] = previous;
+      }
+      _confirmShownMarks.remove(habit.id);
+      notifyListeners();
+      return false;
+    }
     notifyListeners();
     _rescheduleReminder(habit);
     // P2-7（v2.9.5 审计）：**达标后撤掉挂起的「稍后提醒」**。
@@ -485,15 +546,27 @@ class HabitProvider extends ChangeNotifier {
     // 仅「今天 + 实际删除了记录」（走到此处必已删除，见上方早退）才清：
     // 补昨天 / 前天的撤卡与展示中的今日确认条无关，不动。
     //
-    // U2-1（v3.0.4 审计）：**App 内打卡不再生成 / 刷新确认条**。v3.0.3 U3-1
-    // 把「今日任何非零写入都覆盖式 show」落地在本方法，触发面从「通知 action」
-    // 扩张到全部 App 内打卡（习惯页圆圈 / +1 / 今日达标 / 设置数量）——这些
-    // 路径以前零通知打扰，现在每个习惯每次打卡都生成一条需手动划掉的常驻
-    // 通知（「无中生有」，发布说明的「覆盖式刷新」措辞与行为不符）。现把
-    // 确认条的唯一 show 点收口回通知 action 回调（main 按 P2-1 写入结果回报），
-    // 本方法只保留 v<=0 的失真清理（cancel 不是生成，不受触发面争议影响）。
-    if (_sameDayKey(day, DateTime.now()) && v <= 0) {
-      NotificationService.instance.cancelHabitConfirm(habit.id);
+    // U2-1（v3.0.4 审计）：**App 内打卡不再「无中生有」生成确认条**。v3.0.3
+    // U3-1 的「今日任何非零写入都覆盖式 show」让 App 内打卡也弹常驻通知，
+    // v3.0.4 把 show 收口回通知 action 回调（main 按 P2-1 写入结果回报）。
+    //
+    // U2-1（v3.0.5 审计）：**恢复折中方案——仅当 9 号槽已有确认条时覆盖刷新**。
+    // v3.0.4 的收口把「内容新鲜度」一并砍掉：「通知打卡已记 1/8 → App 内改到
+    // 5/8」后确认条停在 1/8（失真窗口持续到归零 / 跨天），撤销预期错位回归。
+    // 「是否已有确认条」用本会话通知 action 生成过的**内存标记**近似
+    // （[markConfirmShown]，见字段注释）——标记不存在时不 show，保持「无中生有」
+    // 的消除；归零仍走 cancel（失真清理，P3-3 v3.0.2 口径保留）。
+    if (_sameDayKey(day, DateTime.now())) {
+      if (v <= 0) {
+        _confirmShownMarks.remove(habit.id);
+        NotificationService.instance.cancelHabitConfirm(habit.id);
+      } else if (_confirmShownToday(habit.id)) {
+        NotificationService.instance.showHabitCheckedConfirm(
+          habit,
+          value: v,
+          target: habit.effectiveTarget,
+        );
+      }
     }
     _notifyHabitsChanged();
     return ok;
@@ -510,14 +583,16 @@ class HabitProvider extends ChangeNotifier {
       setCheckInValue(habit, day, checkInValueOn(habit, day) + delta);
 
   /// T1-2：一键把当日累计量顶到每日目标（「今日达标」按钮）。已达标则无操作。
-  Future<void> completeTodayTarget(Habit habit) async {
+  /// P3-2（v3.0.5 审计）：透传落盘结果（幂等早退 = true，与习惯侧同口径）。
+  Future<bool> completeTodayTarget(Habit habit) async {
     final v = checkInValueOn(habit, DateTime.now());
-    if (v >= habit.effectiveTarget) return;
-    await setCheckInValue(habit, DateTime.now(), habit.effectiveTarget);
+    if (v >= habit.effectiveTarget) return true;
+    return setCheckInValue(habit, DateTime.now(), habit.effectiveTarget);
   }
 
   /// T1-2：撤销当日全部累计量（量化习惯的「撤卡」）。
-  Future<void> clearToday(Habit habit) =>
+  /// P3-2（v3.0.5 审计）：透传落盘结果。
+  Future<bool> clearToday(Habit habit) =>
       setCheckInValue(habit, DateTime.now(), 0);
 
   /// F10：按当前打卡状态重排某习惯的每日提醒（未设提醒 / 已归档则跳过）。
@@ -545,7 +620,12 @@ class HabitProvider extends ChangeNotifier {
   ///   于是「建习惯时忘了设提醒」= 永远没有入口补设（提醒 chip 不存在）。
   /// - **每日目标量**（[dailyTarget] / [clearDailyTarget]，T1-2）。
   /// - **宽限日**（[graceDays]）。
-  Future<void> updateHabit(
+  ///
+  /// P3-2（v3.0.5 审计）：返回落盘是否成功——落盘失败回滚内存（`_habits[idx]`
+  /// 还原为 [old]），提醒调度在失败分支不触碰（UI 显示的即已落盘的）。习惯
+  /// 元数据（改名 / 改提醒 / 归档）此前落盘失败无任何反馈，编辑层据本结果
+  /// 如实提示。
+  Future<bool> updateHabit(
     Habit habit, {
     String? title,
     String? emoji,
@@ -560,7 +640,7 @@ class HabitProvider extends ChangeNotifier {
     int? graceDays,
   }) async {
     final idx = _habits.indexWhere((h) => h.id == habit.id);
-    if (idx == -1) return;
+    if (idx == -1) return false; // P3-2（v3.0.5 审计）：目标不存在 = 未生效
     final old = _habits[idx];
     // P3-10（v2.9.4 审计）：weeklyGoal 上界与「**更新后**的计划天数」联动。
     // 必须在 copyWith 之前算出生效 weekdays——用户在同一次编辑里把「每天」改成
@@ -589,7 +669,13 @@ class HabitProvider extends ChangeNotifier {
       graceDays: graceDays?.clamp(0, 3),
     );
     _habits[idx] = updated;
-    await _persistHabits();
+    final ok = await _persistHabits();
+    if (!ok) {
+      // P3-2（v3.0.5 审计）：落盘失败回滚内存（编辑不生效），不触碰提醒调度。
+      _habits[idx] = old;
+      notifyListeners();
+      return false;
+    }
     // 提醒相关字段（时刻 / 星期 / 归档）任一变化都影响调度，统一重排。
     // P2-1（v2.9.3 审计）：增补 [dailyTarget] 变化——达标门槛改变会改变「今天
     // 是否已达标」，从而决定当天落点是否该被跳过（例如目标 8→3 时，已记 5 个
@@ -614,6 +700,7 @@ class HabitProvider extends ChangeNotifier {
     }
     notifyListeners();
     _notifyHabitsChanged();
+    return true;
   }
 
   /// 两个 int 列表是否逐元素相等（星期 / 归档比较用）。
@@ -629,7 +716,8 @@ class HabitProvider extends ChangeNotifier {
   ///
   /// T1-2 起委托给 [setCheckInValue]（值 0 = 删除记录）：单一真源，量化习惯
   /// 「撤卡」与布尔习惯「取消打卡」走同一条路径。
-  Future<void> uncheckInOnDay(Habit habit, DateTime day) =>
+  /// P3-2（v3.0.5 审计）：透传落盘结果。
+  Future<bool> uncheckInOnDay(Habit habit, DateTime day) =>
       setCheckInValue(habit, day, 0);
 
   /// 在指定日期打卡（用于补打卡 / 历史回溯），已存在则忽略。

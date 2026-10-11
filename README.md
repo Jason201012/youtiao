@@ -6,7 +6,7 @@
 
 开源协议 **[MIT](LICENSE)**
 
-> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额按仓 1 GB）。发布仓依次承接：≤v2.4.0 在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**，v2.4.1~v2.7.7 在 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**，**v2.7.8 起在 [youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**。点此直达最新版 👉 [v2.8.4 下载](https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.4)
+> ⬇️ **最新安装包请到专用仓库下载**：本仓库已停止上传 APK（Gitee 附件配额按仓 1 GB）。发布仓依次承接：≤v2.4.0 在 **[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**，v2.4.1~v2.7.7 在 **[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**，v2.7.8~v3.0.0 在 **[youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**（已满，只读保留），**v3.0.1 起在 [youtiao-releases-4](https://gitee.com/jason1012/youtiao-releases-4/releases)**。点此直达**全部发行版列表（最新）** 👉 <https://gitee.com/jason1012/youtiao-releases-4/releases>
 
 ## ✨ 功能特性
 
@@ -121,10 +121,10 @@ App 内的更新流程已内置同一道校验（下载后比对 `update.json` �
 
 - ≤ v2.4.0：**[youtiao-releases](https://gitee.com/jason1012/youtiao-releases/releases)**（配额已满）
 - v2.4.1 ~ v2.7.7：**[youtiao-releases-2](https://gitee.com/jason1012/youtiao-releases-2/releases)**（配额已满）
-- **v2.7.8 起：[youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**（当前）
+- v2.7.8 ~ v3.0.0：**[youtiao-releases-3](https://gitee.com/jason1012/youtiao-releases-3/releases)**（配额已满，只读保留）
+- **v3.0.1 起：[youtiao-releases-4](https://gitee.com/jason1012/youtiao-releases-4/releases)**（当前）
 
-- 📥 最新版 `v2.8.4`（versionCode 105）下载：<https://gitee.com/jason1012/youtiao-releases-3/releases/tag/v2.8.4>
-- 全部发行版列表（最新）：<https://gitee.com/jason1012/youtiao-releases-3/releases>
+- 📥 全部发行版列表（最新）：<https://gitee.com/jason1012/youtiao-releases-4/releases>（U2-2，v3.0.5 审计：改用**不带硬编码版本号**的稳定链接，发版无需同步改 README）
 
 ## 📁 项目结构
 
