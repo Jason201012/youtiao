@@ -9,6 +9,7 @@ import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 // ui_durations 的 kUndoWindow 已收进 undo_snack_bar（P3-4），本文件不再直接用时删 import。
 import 'package:todolist/widgets/undo_snack_bar.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 // T2-3（v2.9.2 功能增强）：列内「+」快速建卡复用 TaskSheet（分类 / 标签自动预填）。
 import 'package:todolist/widgets/new_task_sheet.dart';
 // U2-4（v2.9.5 审计）：卡片单击进任务详情（此前单击直接改状态，全屏无详情入口）。
@@ -678,7 +679,7 @@ class _Column extends StatelessWidget {
           ? (d) => d.data.status != dropStatus
           : (_) => false,
       onAcceptWithDetails: accept
-          ? (d) {
+          ? (d) async {
               // T2-3（v2.9.2 功能增强）：拖入「待办」超限拦截——先放行悬停
               // 视觉（onWillAccept 不掺 WIP，让用户知道落点是合法目标），
               // 接收时再校验并给出明确原因，比悬停即拒绝更有反馈。
@@ -694,7 +695,16 @@ class _Column extends StatelessWidget {
               }
               // P3-10（v2.9.4 审计）：拖拽改状态同样给出撤销。d.data 是被拖的
               // 那份 Task 快照（拖拽开始时捕获），可直接用作回滚源。
-              provider.setStatus(snapshot.id, dropStatus!);
+              //
+              // U2-1（v3.0.6 审计）：消费落盘结果——旧实现 fire-and-forget
+              // 后无条件弹状态撤销横幅，DB 异常时看板照显新状态、重启回退
+              // （与通知面 P2-1，v3.0.5 审计同构）。失败提示先入队、横幅
+              // 紧随（async 闭包使提示先于横幅可见）；撤销回调改走
+              // taskUndoAction 的落盘语义（不再复用「撤销已失效」）。
+              final ok = await provider.setStatus(snapshot.id, dropStatus!);
+              if (!ok && context.mounted) {
+                showTaskPersistFailedHint(context);
+              }
               if (context.mounted) {
                 _KanbanCard._showStatusUndo(context, provider, snapshot);
               }
@@ -807,7 +817,10 @@ class _KanbanCard extends StatelessWidget {
   /// v2.9.9 审计：旧实现用列级 wipLimit，而「已完成」列恒传 0 → 永不拦截，
   /// 上限可被勾选转回绕过；现与拖拽落列同口径按全局值判）：
   /// 超限时提示并阻止，不静默放行。
-  void _cycle(BuildContext context) {
+  ///
+  /// U2-1（v3.0.6 审计）：消费落盘结果——DB 异常时旧实现照弹撤销横幅、
+  /// 看板照显新状态，重启回退（与通知面 P2-1 同构）。失败提示先于横幅。
+  Future<void> _cycle(BuildContext context) async {
     final next =
         task.status == TaskStatus.todo ? TaskStatus.done : TaskStatus.todo;
     if (next == TaskStatus.todo &&
@@ -819,8 +832,13 @@ class _KanbanCard extends StatelessWidget {
       return;
     }
     final snapshot = task;
-    provider.setStatus(task.id, next);
-    _showStatusUndo(context, provider, snapshot);
+    final ok = await provider.setStatus(task.id, next);
+    if (!ok && context.mounted) {
+      showTaskPersistFailedHint(context);
+    }
+    if (context.mounted) {
+      _showStatusUndo(context, provider, snapshot);
+    }
   }
 
   /// 改状态后的撤销提示。[snapshot] 是 [TaskProvider.setStatus] 变更前的快照。
@@ -849,9 +867,11 @@ class _KanbanCard extends StatelessWidget {
       content: undoContent(snapshot.status == TaskStatus.todo
           ? '已完成「$title」'
           : '已把「$title」移回待办'),
-      // P2-2（v2.9.6 审计）：restoreTaskSnapshot 返回是否生效（任务已删除时
-      // false），由唯一实现统一提示「撤销已失效」。
-      onUndo: () async => provider.restoreTaskSnapshot(snapshot),
+      // U2-1（v3.0.6 审计）：改走 taskUndoAction（restoreTaskSnapshotPersisted
+      // 落盘语义三分支）。旧实现用 restoreTaskSnapshot 的「存在」语义：
+      // 任务已删 → false → 「撤销已失效」正确，但落盘失败同样返回 false，
+      // 把内存里已生效的撤销误报为失效（P3-1 同款错位）。
+      onUndo: taskUndoAction(context, provider, [snapshot]),
     );
   }
 

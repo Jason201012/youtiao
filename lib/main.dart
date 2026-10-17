@@ -498,8 +498,11 @@ void _handleNotificationAction(String? actionId, String? payload) {
 /// 新U2-2（v2.9.7 审计）：由 `setCheckInValue(..., 0)`（清零）改为
 /// `adjustCheckInValue(..., -1)`（-1 对称）；走 setCheckInValue 唯一写入口，
 /// 落盘 + 重排 + 挽留重排全部一致生效。
-/// 新P3-6（v2.9.7 审计）：今天本无记录时**早退且不弹确认**——原实现
+/// 新P3-6（v2.9.7 审计）：今天本无记录时**不弹「已撤销」确认**——原实现
 /// `setCheckInValue` 内部早退后仍弹「已撤销今日打卡 · 记录已清空」，属不实回报。
+/// U3-2（v3.0.6 审计）：该分支从「静默早退」改为覆盖式回执
+/// 「今天没有可撤销的记录」——不谎报与不静默是两件事，与打卡侧 restDay
+/// 回执对齐（见 _doHabitUndo 本体）。
 ///
 /// U2-2（v3.0.4 审计）：[confirmDate] 为确认条 payload 携带的**展示日**
 /// （dateKey，`NotificationService.habitEntityDate` 解析；旧版 payload /
@@ -533,7 +536,15 @@ void _doHabitUndo(NavigatorState nav, String habitId, {String? confirmDate}) {
     return;
   }
   final current = hp.todayValue(habit);
-  if (current <= 0) return; // 无记录可撤：无写入即无回报
+  // U3-2（v3.0.6 审计）：无记录可撤不再静默——覆盖式回执与打卡侧休息日
+  // 回执（showHabitCheckedConfirm restDay: true）对齐。v2.9.7 P3-6
+  // 「无写入即无回报」的本意是「不谎报已撤销」，而非「点了没反应」；
+  // U3-1（v3.0.5 审计）已确立「通知 action 不可静默」口径，本分支是该
+  // 口径下漏 review 的最后一处（已删 / 已归档两处上轮已补）。
+  if (current <= 0) {
+    NotificationService.instance.showHabitUndoNoRecordConfirm(habitId);
+    return;
+  }
   // P3-4（v3.0.3 审计）：按写入结果回报——写入失败（异常）不得谎报「已撤销」。
   // P2-1（v3.0.4 审计）：旧实现依赖 Future reject 走 .catchError，而
   // _persistCheckIns 吞掉 DB 异常后 Future 正常完成——失败分支不可达（死代码），
@@ -881,6 +892,14 @@ void _doComplete(NavigatorState nav, String? taskId) {
 /// 落盘失败照样弹「已撤销完成」（重启后完成态复活）。现三分支：落盘成功 →
 /// 确认；任务已删 → 「已失效」；落盘失败 → 只记日志不弹确认（内存撤销已生效，
 /// 既不谎报持久化、也不误报「已失效」，与习惯侧同口径）。
+///
+/// P3-1（v3.0.6 审计）：落盘失败分支补齐两件事——旧实现把快照先 remove
+/// 再判结果，失败时①用户零反馈（通知栏仍是「已完成 ✓」，点了没动静）；
+/// ②快照永久丢失，再点「撤销」只会得到「撤销已失效」，把实际已生效的
+/// 内存撤销误报为失效（与 [_doComplete] 失败分支保留快照的口径自相矛盾）。
+/// 现在：任务仍在时**归还快照**（restoreTaskSnapshotPersisted 的 identical
+/// 分支已改为真正重试落盘，第二次撤销可成功），并覆盖式回执
+/// 「撤销未保存」（提示挂同款撤销 action 供直接重试），不复用「已失效」。
 Future<void> _doTaskUndo(NavigatorState nav, String taskId) async {
   final provider = Provider.of<TaskProvider>(nav.context, listen: false);
   final snapshot = _notifyCompleteSnapshots.remove(taskId);
@@ -894,7 +913,13 @@ Future<void> _doTaskUndo(NavigatorState nav, String taskId) async {
   } else if (provider.byId(taskId) == null) {
     NotificationService.instance.showTaskUndoInvalid(taskId);
   } else {
-    AppLog.d('[通知] 撤销完成落盘失败 id=$taskId，不回报「已撤销」');
+    // P3-1（v3.0.6 审计）：落盘失败但任务仍在——内存撤销实际已生效（任务
+    // 已回待办、提醒已重排、UI 已刷新）。归还快照保住第二次撤销机会，
+    // 并如实回执；id 用插值（AppLog.d release 为 no-op，纯常量实参会被
+    // AOT 整体消除；插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
+    _notifyCompleteSnapshots[taskId] = snapshot;
+    NotificationService.instance.showTaskUndoNotSaved(taskId, snapshot.title);
+    AppLog.d('[通知] 撤销完成落盘失败 id=$taskId，快照已归还待重试');
   }
 }
 

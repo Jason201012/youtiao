@@ -16,6 +16,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/undo_snack_bar.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 
 class OccurrenceSheet {
   static Future<void> show(
@@ -102,11 +103,16 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     // F1：之前 `updateTask(copyWith(status:done))` 路径被 _applyTaskUpdate 强制
     // 回填旧 status，写入静默丢失、UI 无变化。这里走 provider 显式 occurrence
     // 入口，等价于 toggleDone：doneDates 落点 + 重排提醒。
-    if (_isDone(d)) {
-      widget.provider.unmarkOccurrenceDone(_task.id, d);
-    } else {
-      widget.provider.markOccurrenceDone(_task.id, d);
-    }
+    //
+    // U2-1（v3.0.6 审计）：消费落盘结果——DB 异常时旧实现无条件 _refresh()
+    // （UI 已显示完成），重启回退（与通知面 P2-1 同构）。provider 不做内存
+    // 回滚，失败仅提示「数据未保存」。
+    final Future<bool> result = _isDone(d)
+        ? widget.provider.unmarkOccurrenceDone(_task.id, d)
+        : widget.provider.markOccurrenceDone(_task.id, d);
+    result.then((ok) {
+      if (!ok && context.mounted) showTaskPersistFailedHint(context);
+    });
     _refresh();
   }
 

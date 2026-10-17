@@ -264,23 +264,28 @@ class HomeScreenState extends State<HomeScreen> {
     // P2-7：勾选前的逐条快照（撤销 = 整体快照回滚，不用反向 toggleDone——
     // 那会写新的 completedAt / doneDates，无法精确还原）。
     final snapshots = [for (final id in ids) provider.byId(id)!];
-    for (final id in ids) {
-      provider.toggleDone(id);
-    }
+    // U2-1（v3.0.6 审计）：消费批量落盘结果——旧实现循环里 fire-and-forget
+    // 后无条件弹「已完成 N 项任务」，DB 异常时列表照显完成、重启回退
+    // （与通知面 P2-1 同构）。方法签名保持同步（main 的命令面板 / 快捷键
+    // 落地路径依赖 int 返回值），故用 Future.wait + .then：失败提示先入队、
+    // 撤销横幅紧随其后，用户先看到「写入失败」再看到横幅。撤销改走落盘语义
+    // （taskUndoAction 三分支，不再复用「撤销已失效」误报落盘失败）。
     if (ids.isNotEmpty) {
       _exitSelect();
-      showUndoSnackBar(
-        context,
-        content: undoContent('已完成 ${ids.length} 项任务'),
-        onUndo: () async {
-          var ok = true;
-          for (final s in snapshots) {
-            if (!provider.restoreTaskSnapshot(s)) ok = false;
-          }
-          return ok;
-        },
-      );
     }
+    Future.wait(ids.map((id) => provider.toggleDone(id))).then((results) {
+      if (!mounted) return;
+      if (results.contains(false)) {
+        showTaskPersistFailedHint(context);
+      }
+      if (ids.isNotEmpty) {
+        showUndoSnackBar(
+          context,
+          content: undoContent('已完成 ${ids.length} 项任务'),
+          onUndo: taskUndoAction(context, provider, snapshots),
+        );
+      }
+    });
     return ids.length;
   }
 

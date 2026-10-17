@@ -1848,6 +1848,49 @@ class NotificationService {
     }
   }
 
+  /// P3-1（v3.0.6 审计）：通知「撤销」**落盘失败但内存撤销已生效**时的如实
+  /// 回执。旧实现此分支只记日志：通知栏仍显示「已完成 ✓」、点按后条目毫无
+  /// 变化，用户不知道回滚到底发生没有；且快照已被 remove，再点「撤销」只会
+  /// 得到「撤销已失效」——把实际已生效的内存撤销误报为失效（与 _doComplete
+  /// 失败分支保留快照的口径自相矛盾）。现在 main._doTaskUndo 已归还快照，
+  /// 本提示挂同款「撤销」action（重试语义）供直接再点一次：
+  /// [TaskProvider.restoreTaskSnapshotPersisted] 的 identical 分支会真正
+  /// 重试落盘。文案与「已撤销完成」「撤销已失效」都不同，三分支各表其事。
+  Future<void> showTaskUndoNotSaved(String taskId, String title) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        // 与 showCompletedConfirm 同款 action：快照已归还，重试即再次撤销。
+        actions: [
+          AndroidNotificationAction(
+            taskUndoActionId,
+            '重试',
+            showsUserInterface: true,
+          ),
+        ],
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        _notifyIdOf(taskId),
+        '撤销未保存',
+        '${title.isNotEmpty ? title : '无标题任务'} · 已在应用内撤销，但保存失败，请重试',
+        detail,
+        payload: '$payloadTaskPrefix$taskId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 撤销未保存提示通知失败 id=$taskId: $e');
+    }
+  }
+
   /// U3：通知「打卡」action 后的覆盖式确认通知：用习惯提醒 id 段位（日 0）弹出
   /// 「已打卡 ✓」，不刷屏不叠加。payload 置空避免点开跳转。
   /// 习惯打卡确认通知（覆盖式，同 id 不刷屏）。
@@ -2055,6 +2098,39 @@ class NotificationService {
       );
     } catch (e) {
       AppLog.d('[通知] 习惯已结束提示通知失败 id=$habitId: $e');
+    }
+  }
+
+  /// U3-2（v3.0.6 审计）：习惯「撤销」action 今天**无记录可撤**时的覆盖式
+  /// 回执。旧实现 `current <= 0` 静默早退（点了毫无反应），与打卡侧休息日
+  /// 回执（[showHabitCheckedConfirm] 的 restDay: true「今天不打卡」）不对称。
+  /// v2.9.7 P3-6「无写入即无回报」的本意是「不谎报已撤销」，而非「点了
+  /// 没反应」——U3-1（v3.0.5 审计）已确立「通知 action 不可静默」，此处
+  /// 补齐同口径。落 9 号槽覆盖；不挂撤销 action（无记录可撤）。
+  Future<void> showHabitUndoNoRecordConfirm(String habitId) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        habitConfirmNotifyIdOf(habitId),
+        '今天没有可撤销的记录',
+        '该习惯今日暂无打卡记录，无需撤销',
+        detail,
+        payload: '$payloadHabitPrefix$habitId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 无记录可撤提示通知失败 id=$habitId: $e');
     }
   }
 

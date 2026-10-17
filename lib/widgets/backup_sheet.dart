@@ -475,7 +475,11 @@ class BackupSheet {
       // 仅当备份含习惯/打卡字段时才恢复，避免老备份把现有习惯清空。
       if (data['habits'] is List || data['check_ins'] is List) {
         try {
-          await habitProvider.restoreFromJson(data);
+          // U2-1（v3.0.6 审计）：消费 restoreFromJson 的落盘结果——旧实现
+          // Future<void> 忽略：本步写库失败时 UI 仍报「已恢复」，重启后恢复的
+          // 习惯/打卡静默丢失。并入既有 failures 机制如实告知。
+          final ok = await habitProvider.restoreFromJson(data);
+          if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
         } catch (e) {
           failures.add('习惯/打卡（$e）');
         }
@@ -766,7 +770,9 @@ class BackupSheet {
       }
       if (data['habits'] is List || data['check_ins'] is List) {
         try {
-          await habitProvider.restoreFromJson(data);
+          // U2-1（v3.0.6 审计）：同 _doRestore——消费落盘结果并入 failures。
+          final ok = await habitProvider.restoreFromJson(data);
+          if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
         } catch (e) {
           failures.add('习惯/打卡（$e）');
         }

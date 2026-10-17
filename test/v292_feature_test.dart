@@ -546,8 +546,10 @@ void main() {
           repeat: RepeatType.weekly,
           weekdays: const [1, 3],
           repeatMinute: 21 * 60));
-      final created =
-          await hp.addHabitFromDraft(draft, emoji: '📚', colorValue: 0xFF112233);
+      // U2-1（v3.0.6 审计）：addHabitFromDraft 返回类型改为 Habit?（落盘失败
+      // 回滚内存并返回 null），成功路径非空。
+      final created = (await hp.addHabitFromDraft(draft,
+              emoji: '📚', colorValue: 0xFF112233))!;
 
       final back = hp.byId(created.id)!;
       expect(back.title, '背单词');

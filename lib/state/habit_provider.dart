@@ -111,7 +111,14 @@ class HabitProvider extends ChangeNotifier {
   }
 
   /// 新建习惯（自动生成 id 与时间戳）。
-  Future<void> addHabit({
+  ///
+  /// U2-1（v3.0.6 审计）：返回落盘是否成功，失败**回滚内存**——旧实现
+  /// `Future<void>` 忽略 `_persistHabits()` 结果：新建的习惯仅存内存，
+  /// 重启即丢，UI 却显示成功（与任务侧 P2-1，v3.0.5 审计同构）。回滚口径
+  /// 与 [deleteHabit] / [updateHabit] / [setCheckInValue]（P3-2，v3.0.5
+  /// 审计）一致，调用方（_AddHabitSheet）据此停留编辑层并如实提示，
+  /// 重试不会造出重复习惯。
+  Future<bool> addHabit({
     required String title,
     required String emoji,
     required int colorValue,
@@ -145,7 +152,13 @@ class HabitProvider extends ChangeNotifier {
       createdAt: DateTime.now(),
     );
     _habits.add(h);
-    await _persistHabits();
+    // U2-1（v3.0.6 审计）：落盘失败回滚内存并返回 false（见方法注释）。
+    final ok = await _persistHabits();
+    if (!ok) {
+      _habits.removeWhere((x) => x.id == h.id);
+      notifyListeners();
+      return false;
+    }
     // 若设置了提醒，立即调度每日打卡提醒（失败静默，不影响建习惯）。
     if (reminderMinute != null) {
       await NotificationService.instance.scheduleHabitReminder(h);
@@ -156,6 +169,7 @@ class HabitProvider extends ChangeNotifier {
     // 推送——「新建了晚间提醒的习惯，当晚却没收到」正是这条缺失的表现。
     // 兄弟方法 [addHabitFromDraft] / [updateHabit] / [deleteHabit] 均已触发。
     _notifyHabitsChanged();
+    return true;
   }
 
   /// 生成全局唯一习惯 id（时间戳 + 进程内自增序号，避免同毫秒撞 id）。
@@ -167,7 +181,12 @@ class HabitProvider extends ChangeNotifier {
   /// 与 [addHabit] 的差别只有「字段来自哪里」：这里由 [HabitDraft.fromTask]
   /// 统一给出（标题 / 打卡星期 / 提醒时刻 / 周目标），UI 只负责 emoji 与颜色，
   /// 从而保证「转习惯」在不同入口（任务详情、未来的右键菜单）行为一致。
-  Future<Habit> addHabitFromDraft(
+  ///
+  /// U2-1（v3.0.6 审计）：落盘失败回滚内存并返回 **null**——旧实现
+  /// `Future<Habit>` 忽略 `_persistHabits()` 结果，任务详情页照弹
+  /// 「已转为习惯」并询问是否删除原任务（把用户往数据丢失上引）。返回
+  /// null 与 [restoreHabit] 的「未生效」同型，调用方按失败分支走。
+  Future<Habit?> addHabitFromDraft(
     HabitDraft draft, {
     required String emoji,
     required int colorValue,
@@ -191,7 +210,12 @@ class HabitProvider extends ChangeNotifier {
       createdAt: DateTime.now(),
     );
     _habits.add(h);
-    await _persistHabits();
+    final ok = await _persistHabits();
+    if (!ok) {
+      _habits.removeWhere((x) => x.id == h.id);
+      notifyListeners();
+      return null;
+    }
     if (h.reminderMinute != null) {
       await NotificationService.instance.scheduleHabitReminder(h);
     }
@@ -201,13 +225,30 @@ class HabitProvider extends ChangeNotifier {
   }
 
   /// 更新某习惯的每日提醒时间（null = 取消提醒）。先取消旧提醒，再按新值调度/保持静默。
-  Future<void> setReminder(Habit habit, int? minute) async {
+  ///
+  /// U2-1（v3.0.6 审计）：返回落盘是否成功，失败**回滚内存且不动通知**——
+  /// 旧实现 `Future<void>` 忽略 `_persistHabits()` 结果：改提醒时间仅存
+  /// 内存，重启回退，而系统闹钟已按新时刻重挂（内存/通知/DB 三处口径
+  /// 分裂）。回滚后旧提醒仍在，与恢复后的习惯状态天然一致。
+  Future<bool> setReminder(Habit habit, int? minute) async {
     final updated =
         habit.copyWith(reminderMinute: minute, clearReminder: minute == null);
     final idx = _habits.indexWhere((h) => h.id == habit.id);
-    if (idx == -1) return;
+    if (idx == -1) return false;
+    // U2-1（v3.0.6 审计）：回滚到**列表当前对象**而非调用方实参。调用方的
+    // [habit] 可能是过期快照——「先成功改过一次提醒、再改第二次且落盘失败」
+    // 时实参仍是改之前的对象，按实参回滚会把第一次已落盘的改动一并抹掉
+    // （v306 回归测试实证：reminderMinute 540 → null）。与 [updateHabit] 的
+    // `old = _habits[idx]` 同口径。
+    final old = _habits[idx];
     _habits[idx] = updated;
-    await _persistHabits();
+    final ok = await _persistHabits();
+    if (!ok) {
+      // U2-1（v3.0.6 审计）：回滚内存（编辑不生效），通知保持原样。
+      _habits[idx] = old;
+      notifyListeners();
+      return false;
+    }
     // 取消旧的（无论改/删都先清干净），再按新值重新挂。
     // P2-1（v2.9.3 审计）：调度判据与其他四处统一为「达标」口径——
     // 今天已达标则跳过今日落点，避免「喝满 8 杯后补设提醒，当晚仍弹『该打卡啦』」。
@@ -221,6 +262,7 @@ class HabitProvider extends ChangeNotifier {
     // 提醒时刻/取消提醒会改变「今天是否已达标」之外的可提醒习惯集，
     // 晚间简报的明日预告必须按新时刻重排，否则推送的是旧时刻的预告。
     _notifyHabitsChanged();
+    return true;
   }
 
   /// 删除习惯及其全部打卡记录（同时取消其提醒通知）。
@@ -238,7 +280,13 @@ class HabitProvider extends ChangeNotifier {
     );
     _habits.removeAt(idx);
     _checkIns.removeWhere((c) => c.habitId == id);
-    await NotificationService.instance.cancelHabitReminder(id);
+    // P3-2（v3.0.6 审计）：撤提醒挪到**落盘成功之后**——旧实现先
+    // cancelHabitReminder（0..7 每日落点 + 8 号 snooze + 9 号确认条）再落盘，
+    // 失败回滚只按 reminderMinute 重挂每日提醒，漏掉 9 号确认条：删除失败
+    // 但用户刚收到的「已记 x/y · 撤销」确认条永久消失（内存态回滚了、
+    // 通知态没回滚，与本轮 P3-2「回滚后状态与落盘前一致」的目标自相矛盾）。
+    // 与任务侧 P2-2（v3.0.5 审计）「先撤后挂按门控」是同族顺序问题——现在
+    // 失败路径根本不动通知，成功路径才撤，彻底消除「先撤后落盘」。
     final okHabits = await _persistHabits();
     final okCheckIns = await _persistCheckIns();
     if (!okHabits || !okCheckIns) {
@@ -247,13 +295,12 @@ class HabitProvider extends ChangeNotifier {
       // 察觉。回滚后返回 null，UI 据此如实提示而非谎报「习惯已删除」。
       _habits.insert(idx, snapshot.habit);
       _checkIns.addAll(snapshot.checkIns);
-      // 已撤的提醒按恢复后的状态重挂（与 persist 失败前撤空对冲）。
-      if (!snapshot.habit.archived && snapshot.habit.reminderMinute != null) {
-        _rescheduleReminder(snapshot.habit);
-      }
+      // P3-2（v3.0.6 审计）：通知未被触碰，无需重挂（旧实现在此按
+      // reminderMinute 补挂每日提醒、漏 9 号槽——现已无撤可补）。
       notifyListeners();
       return null;
     }
+    await NotificationService.instance.cancelHabitReminder(id);
     notifyListeners();
     _notifyHabitsChanged();
     return snapshot;
@@ -263,17 +310,34 @@ class HabitProvider extends ChangeNotifier {
   ///
   /// 幂等：若同 id 习惯已存在（例如用户删后又自己重建了同一条）则不做任何改动、
   /// 返回 null，避免把撤销变成「制造重复习惯」。提醒按恢复后的状态重挂。
+  ///
+  /// U2-1（v3.0.6 审计）：落盘失败也回滚（习惯与本次放回的打卡一并撤下）
+  /// 并返回 null——旧实现忽略两个 persist 结果，撤销仅存内存，重启后习惯
+  /// 「没恢复」而用户已看到撤销成功。返回 null 现覆盖两种「未生效」：
+  /// 同 id 已重建 / 落盘失败，调用方统一按失败提示（habit_screen 的
+  /// failureHint 已相应改为「撤销未生效：请重试」）。
   Future<Habit?> restoreHabit(DeletedHabit snapshot) async {
     if (byId(snapshot.habit.id) != null) return null;
     final at = snapshot.index.clamp(0, _habits.length);
     _habits.insert(at, snapshot.habit);
     // 打卡记录逐条去重后放回（同 id 记录已随删除一并移除，这里的去重是防御性的）。
     final existing = _checkIns.map((c) => c.id).toSet();
+    final added = <String>[];
     for (final c in snapshot.checkIns) {
-      if (existing.add(c.id)) _checkIns.add(c);
+      if (existing.add(c.id)) {
+        _checkIns.add(c);
+        added.add(c.id);
+      }
     }
-    await _persistHabits();
-    await _persistCheckIns();
+    // U2-1（v3.0.6 审计）：落盘失败回滚（见方法注释）。
+    final okHabits = await _persistHabits();
+    final okCheckIns = await _persistCheckIns();
+    if (!okHabits || !okCheckIns) {
+      _habits.removeWhere((h) => h.id == snapshot.habit.id);
+      _checkIns.removeWhere((c) => added.contains(c.id));
+      notifyListeners();
+      return null;
+    }
     if (!snapshot.habit.archived && snapshot.habit.reminderMinute != null) {
       _rescheduleReminder(snapshot.habit);
     }
@@ -1031,7 +1095,14 @@ class HabitProvider extends ChangeNotifier {
 
   /// 从备份 JSON 恢复：仅恢复备份中实际存在的部分（[habits] / [check_ins]）。
   /// 老备份无这两个键时不触碰现有习惯，避免「恢复任务备份反而清空习惯」。
-  Future<void> restoreFromJson(Map<String, dynamic> data) async {
+  ///
+  /// U2-1（v3.0.6 审计）：返回落盘是否成功——旧实现 `Future<void>` 忽略
+  /// 两个 persist 结果，backup_sheet 的 failures 机制拿不到本步结果：
+  /// 「任务恢复了、习惯/打卡写库失败」时 UI 仍报「已恢复」，重启后恢复的
+  /// 习惯静默丢失。**不做内存回滚**：恢复是整体替换，回滚需保留旧全集且
+  /// 通知已按恢复集重排（DB 异常属极端场景，优先保证「用户所见 = 内存态」
+  /// 与失败如实告知，由调用方把失败并入恢复结果对话框）。
+  Future<bool> restoreFromJson(Map<String, dynamic> data) async {
     if (data['habits'] is List) {
       final habitsList = data['habits'] as List;
 
@@ -1073,8 +1144,8 @@ class HabitProvider extends ChangeNotifier {
         ..addAll(
             checkList.map((e) => CheckIn.fromJson(e as Map<String, dynamic>)));
     }
-    await _persistHabits();
-    await _persistCheckIns();
+    final okHabits = await _persistHabits();
+    final okCheckIns = await _persistCheckIns();
     notifyListeners();
     // P3-3（v2.9.3 审计）：补触发「习惯/打卡变动」回调——恢复可能整体替换习惯
     // 与打卡集，23:00 挽留等内容必须按恢复后的口径重排。
@@ -1086,6 +1157,10 @@ class HabitProvider extends ChangeNotifier {
     // setCheckInValue（含 toggle / adjust / complete / clear / checkInOnDay /
     // uncheckInOnDay 的委托）/ deleteHabit / restoreHabit / restoreFromJson。
     _notifyHabitsChanged();
+    // U2-1（v3.0.6 审计）：透传落盘结果（见方法注释；无 habits / check_ins
+    // 两个键时两个 persist 仍会执行——旧备份恢复只有任务时也走全量写，
+    // 结果同样如实回报）。
+    return okHabits && okCheckIns;
   }
 
   // ===== 导出列单一真源（P2-5，v2.9.3 审计）=====

@@ -892,12 +892,21 @@ Future<void> _convertToHabit(BuildContext context, Task task) async {
   );
   if (confirm != true) return;
 
-  await habit.addHabitFromDraft(
+  // U2-1（v3.0.6 审计）：消费落盘结果——null = 创建未生效（provider 已回滚
+  // 内存）。旧实现忽略 addHabitFromDraft 的结果：转换落盘失败时照弹
+  // 「已转为习惯」并询问是否删除原任务，把用户往数据丢失上引。
+  final created = await habit.addHabitFromDraft(
     draft,
     emoji: '✅',
     colorValue: brandColor,
   );
   if (!context.mounted) return;
+  if (created == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('写入失败：数据未保存，请重试')),
+    );
+    return;
+  }
 
   final remove = await showDialog<bool>(
     context: context,

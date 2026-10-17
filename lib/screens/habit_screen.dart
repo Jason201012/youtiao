@@ -993,9 +993,13 @@ class _ReminderChip extends StatelessWidget {
             initialTime: TimeOfDay(hour: cur ~/ 60, minute: cur % 60),
           );
           if (picked != null) {
-            context
-                .read<HabitProvider>()
-                .setReminder(habit, picked.hour * 60 + picked.minute);
+            // U2-1（v3.0.6 审计）：消费落盘结果——DB 异常时旧实现改时间仅存
+            // 内存、系统闹钟已按新时刻重挂，三处口径分裂。失败回滚内存 +
+            // 不动通知，此处如实提示。
+            final hp = context.read<HabitProvider>();
+            final ok =
+                await hp.setReminder(habit, picked.hour * 60 + picked.minute);
+            if (!ok && context.mounted) showCheckInPersistFailedHint(context);
           }
         },
         onLongPress: () async {
@@ -1025,7 +1029,9 @@ class _ReminderChip extends StatelessWidget {
             ),
           );
           if (confirmed == true) {
-            await hp.setReminder(habit, null);
+            // U2-1（v3.0.6 审计）：同 onTap——消费落盘结果，失败如实提示。
+            final ok = await hp.setReminder(habit, null);
+            if (!ok && context.mounted) showCheckInPersistFailedHint(context);
           }
         },
         child: Container(
@@ -1533,19 +1539,28 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             width: double.infinity,
             height: 48,
             child: FilledButton(
-              onPressed: () {
+              onPressed: () async {
                 final title = _titleCtl.text.trim();
                 if (title.isEmpty) return;
-                context.read<HabitProvider>().addHabit(
-                      title: title,
-                      emoji: _emoji,
-                      colorValue: _colorValue,
-                      weekdays: _weekdays.toList(),
-                      reminderMinute: _reminderMinute,
-                      weeklyGoal: _weeklyGoal,
-                      dailyTarget: _dailyTarget,
-                      graceDays: _graceDays,
-                    );
+                // U2-1（v3.0.6 审计）：消费落盘结果——失败停留编辑层并如实
+                // 提示（provider 已回滚内存，重试不会造出重复习惯）。旧实现
+                // fire-and-forget 后直接 pop：新建的习惯仅存内存，重启即丢，
+                // 用户却已看到它出现在列表里。
+                final hp = context.read<HabitProvider>();
+                final ok = await hp.addHabit(
+                  title: title,
+                  emoji: _emoji,
+                  colorValue: _colorValue,
+                  weekdays: _weekdays.toList(),
+                  reminderMinute: _reminderMinute,
+                  weeklyGoal: _weeklyGoal,
+                  dailyTarget: _dailyTarget,
+                  graceDays: _graceDays,
+                );
+                if (!ok) {
+                  if (context.mounted) showCheckInPersistFailedHint(context);
+                  return;
+                }
                 Navigator.pop(context);
               },
               child: const Text('添加'),
@@ -2450,11 +2465,18 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     // 唯一实现统一提示「撤销已失效」。
     showUndoSnackBar(
       context,
-      content: undoContent(snapshot?.undoLabel ?? '习惯已删除'),
-      // snapshot == null（删除未发生）时不给撤销按钮，与旧行为一致。
-      onUndo: snapshot == null
-          ? null
-          : () async => (await hp.restoreHabit(snapshot)) != null,
+      // U3-1（v3.0.6 审计）：原为 `snapshot?.undoLabel ?? '习惯已删除'` +
+      // `snapshot == null ? null : (...)`——上方 `if (snapshot == null)` 提前
+      // 返回后两者成死分支（invalid_null_aware_operator +
+      // unnecessary_null_comparison 两条 warning，打破项目「0 warning」声明）。
+      // 控制流已保证非空，直写。
+      content: undoContent(snapshot.undoLabel),
+      onUndo: () async => (await hp.restoreHabit(snapshot)) != null,
+      // U2-1（v3.0.6 审计）：null 现覆盖两种「未生效」——同 id 已重建 /
+      // 落盘失败已回滚（restoreHabit 新增失败回滚）。旧默认文案
+      // 「撤销已失效：该操作已不可恢复」对落盘失败不实（重试即可），
+      // 改为对两者都准确的「撤销未生效：请重试」。
+      failureHint: '撤销未生效：请重试',
     );
   }
 

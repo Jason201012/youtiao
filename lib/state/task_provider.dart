@@ -2269,10 +2269,17 @@ class TaskProvider extends ChangeNotifier {
   /// true = 快照已应用且落盘成功。App 内撤销横幅继续用 [restoreTaskSnapshot]
   /// （bool = 是否存在，内存撤销已生效即可撤销，持久化失败走日志口径不弹窗），
   /// 通知场景按本结果决定是否弹「已撤销完成」——DB 异常不再谎报成功。
+  ///
+  /// P3-1（v3.0.6 审计）：identical 早退分支改为**真正重试落盘**——旧实现
+  /// 「已安装过即 return true」假设「装了就是落了」，而 DB 异常路径下首次
+  /// 安装后 `_persist()` 返回 false、`_tasks[i]` 恰是快照对象本身，main
+  /// 归还快照后的第二次撤销会命中 identical 直接拿到 true：用户得到
+  /// 「已撤销完成」的假确认，库里仍是完成态。重复调用本应只是多写一遍相同
+  /// 状态（幂等），改为重试后成功路径行为不变、失败路径不再假成功。
   Future<bool> restoreTaskSnapshotPersisted(Task snapshot) async {
     final i = _tasks.indexWhere((t) => t.id == snapshot.id);
     if (i == -1) return false;
-    if (identical(_tasks[i], snapshot)) return true;
+    if (identical(_tasks[i], snapshot)) return _persist();
     _installTaskSnapshot(snapshot, i);
     return _persist();
   }
@@ -2412,12 +2419,17 @@ class TaskProvider extends ChangeNotifier {
   /// - P3-3（v2.9.0 审计）：[day] 若已在 [Task.skipDates] 中，则**原子地撤销跳过**
   ///   ——「跳过」与「完成」互斥，不允许同一天双态并存（否则撤销跳过之后当天仍被
   ///   判为已完成，提醒不回弹，UI 对用户说谎）。
-  void markOccurrenceDone(String taskId, DateTime day) {
+  ///
+  /// U2-1（v3.0.6 审计）：返回落盘是否成功（任务不存在 = false；已是完成态 =
+  /// true 幂等早退）。旧实现 void + fire-and-forget `_persist()`，
+  /// occurrence_sheet 的「标记完成」无条件 `_refresh()`——DB 异常时 UI 已显示
+  /// 完成、重启回退，与任务侧 P2-1（v3.0.5 审计）同构。调用方按结果给 SnackBar。
+  Future<bool> markOccurrenceDone(String taskId, DateTime day) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final cur = _tasks[i];
     final d = DateTime(day.year, day.month, day.day);
-    if (cur.isDoneOn(d)) return; // 幂等
+    if (cur.isDoneOn(d)) return true; // 幂等
     final now = DateTime.now();
     final isToday = d.year == now.year && d.month == now.month && d.day == now.day;
     // P3-3（v2.9.0 审计）：完成与跳过是**互斥**状态，这里与 skipDates 原子互斥——
@@ -2438,17 +2450,19 @@ class TaskProvider extends ChangeNotifier {
       _rescheduleRepeatOnCompletion(_tasks[i], cancelCurrent: isToday);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// F1 配套：取消某循环日的完成记录（从 [Task.doneDates] 移除）。
   /// 若 [day] 为今天且任务当前为已完成，则一并取消完成态并恢复今日提醒。
-  void unmarkOccurrenceDone(String taskId, DateTime day) {
+  ///
+  /// U2-1（v3.0.6 审计）：同 [markOccurrenceDone] 透传落盘结果。
+  Future<bool> unmarkOccurrenceDone(String taskId, DateTime day) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final cur = _tasks[i];
     final d = DateTime(day.year, day.month, day.day);
-    if (!cur.doneDates.contains(_ymd(d))) return; // 幂等
+    if (!cur.doneDates.contains(_ymd(d))) return true; // 幂等
     final now = DateTime.now();
     final isToday = d.year == now.year && d.month == now.month && d.day == now.day;
     _tasks[i] = cur.copyWith(
@@ -2461,7 +2475,7 @@ class TaskProvider extends ChangeNotifier {
       _rescheduleRepeatOnCompletion(_tasks[i], cancelCurrent: isToday);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 本次跳过：把 [day]（默认今天）追加进任务的 [Task.skipDates]。
