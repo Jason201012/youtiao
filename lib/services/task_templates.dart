@@ -577,15 +577,26 @@ class UserTemplateStore {
 /// 把 [template] 套用为真实任务并加入 [provider]。每项按相对天数计算截止时间
 /// （date-only，落在 09:00）；重复项按规则生成重复任务，interval 以今天为锚点避免首日逾期。
 /// 返回实际创建的任务数量。
-int applyTemplate(TaskProvider provider, BuiltInTemplate template) =>
+///
+/// P2-2（v3.0.7 审计）：随 [TaskProvider.addTask] 异步化——[TaskProvider.addTask]
+/// 落盘失败会回滚内存并返回 null（不计入创建数）。返回值改为 `Future<int>`，
+/// 调用方据此如实反馈「已创建 N 项」。
+Future<int> applyTemplate(
+        TaskProvider provider, BuiltInTemplate template) async =>
     applyTemplateItems(provider, template.items);
 
 /// 把用户模板 [t] 套用为真实任务并加入 [provider]。
-int applyUserTemplate(TaskProvider provider, UserTemplate t) =>
+///
+/// P2-2（v3.0.7 审计）：同 [applyTemplate] 异步化。
+Future<int> applyUserTemplate(TaskProvider provider, UserTemplate t) async =>
     applyTemplateItems(provider, t.items);
 
 /// 套用一组 [TemplateItem] 为真实任务（内置 / 用户模板共用）。
-int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
+///
+/// P2-2（v3.0.7 审计）：随 addTask 异步化——落盘失败的任务已被 provider 回滚
+/// 内存（addTask 返回 null），不计入创建数，调用方拿到的数字即真实落库数。
+Future<int> applyTemplateItems(
+    TaskProvider provider, List<TemplateItem> items) async {
   final today = DateTime.now();
   final base = DateTime(today.year, today.month, today.day);
   var created = 0;
@@ -597,7 +608,7 @@ int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
     // interval 锚点设为今天（date-only），保证「从今天起每 N 天」循环、首日不逾期。
     final anchor =
         item.repeat == RepeatType.interval ? base : null;
-    provider.addTask(Task(
+    final t = await provider.addTask(Task(
       id: '',
       title: item.title,
       category: item.category,
@@ -627,7 +638,8 @@ int applyTemplateItems(TaskProvider provider, List<TemplateItem> items) {
       reminderOffsetMin: due == null ? 0 : item.reminderOffsetMin,
       tags: List.from(item.tags),
     ));
-    created++;
+    // P2-2（v3.0.7 审计）：null = 该条落盘失败已被回滚，不计入创建数。
+    if (t != null) created++;
   }
   return created;
 }

@@ -107,16 +107,23 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     // U2-1（v3.0.6 审计）：消费落盘结果——DB 异常时旧实现无条件 _refresh()
     // （UI 已显示完成），重启回退（与通知面 P2-1 同构）。provider 不做内存
     // 回滚，失败仅提示「数据未保存」。
+    // P3-3（v3.0.7 审计）：false 双义拆开（byId 判空给第二句文案）。
     final Future<bool> result = _isDone(d)
         ? widget.provider.unmarkOccurrenceDone(_task.id, d)
         : widget.provider.markOccurrenceDone(_task.id, d);
     result.then((ok) {
-      if (!ok && context.mounted) showTaskPersistFailedHint(context);
+      if (!ok && context.mounted) {
+        if (widget.provider.byId(_task.id) == null) {
+          showTaskMissingHint(context);
+        } else {
+          showTaskPersistFailedHint(context, provider: widget.provider);
+        }
+      }
     });
     _refresh();
   }
 
-  void _skip(DateTime d, {bool defer = false}) {
+  Future<void> _skip(DateTime d, {bool defer = false}) async {
     // P2-2：所有重复类型都走 provider.skipOccurrence（内部已统一重排提醒），
     // 不再用 updateTask 写 skipDates，避免 reminder 链路与列表标记脱节。
     if (_isSkipped(d)) return;
@@ -125,8 +132,11 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       // F-2（v2.8.5 审计）：若 newDay 本身就是循环日，provider 只会 skip 本次、
       // **不建副本**（返回 null）——否则目标日循环提醒 + 副本一次性提醒双响，
       // 且循环完成后副本仍挂着。文案与撤销动作据此分支。
+      // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化——
+      // 落盘失败时副本已被 provider 回滚内存（返回 null），横幅按「无副本」
+      // 分支如实显示（跳过本身仍已生效，另有 skip 撤销可回）。
       final newDay = d.add(const Duration(days: 1));
-      final copy = widget.provider.rescheduleOnceOccurrence(
+      final copy = await widget.provider.rescheduleOnceOccurrence(
         _task.id,
         newDay,
         origDay: d,
@@ -158,11 +168,29 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
             // 新P3-8（v2.9.7 审计）：返回**真实结果**——源任务在 10 秒窗口内
             // 被他处删除时（byId == null），副本清理与「取消跳过」都无从谈起
             // （unskipOccurrence 对不存在的源任务静默 no-op），不能谎报成功。
+            // P2-2（v3.0.7 审计）：discardTask / unskipOccurrence 均已透传落盘
+            // 结果——按 consumeUndoWrite 拆开 false 双义（实体已不在 = 真失效；
+            // 实体仍在 = 内存已生效、仅未持久化，弹「写入失败」并按成功返回）。
             if (widget.provider.byId(_task.id) == null) return false;
+            var persisted = true;
             if (copy != null) {
-              widget.provider.discardTask(copy.id);
+              final ok = await widget.provider.discardTask(copy.id);
+              if (!ok && widget.provider.byId(copy.id) != null) {
+                return false; // 副本仍在列表：移除未生效（真失效）
+              }
+              if (!ok) persisted = false; // 副本已不在：幂等或未持久化
             }
-            widget.provider.unskipOccurrence(_task.id, day: d);
+            final unskipOk = await widget.provider.unskipOccurrence(
+              _task.id,
+              day: d,
+            );
+            if (!unskipOk && widget.provider.byId(_task.id) == null) {
+              return false; // 源任务已消失：真失效
+            }
+            if (!unskipOk) persisted = false;
+            if (!persisted && context.mounted) {
+              showTaskPersistFailedHint(context, provider: widget.provider);
+            }
             _deferSkipped.remove(Task.ymdKey(d));
             _refresh();
             return true;
@@ -184,7 +212,17 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     //
     // U2-4 / P3-10：不再 `hideCurrentSnackBar()`——`ScaffoldMessenger` 自带
     // 队列，主动 hide 等于亲手丢掉前一条撤销机会。
-    widget.provider.skipOccurrence(_task.id, day: d);
+    // P2-2（v3.0.7 审计）：skipOccurrence 透传落盘结果——失败弹「写入失败」
+    // 提示（内存跳过已生效、全量写自愈），横幅与撤销照常给。
+    widget.provider.skipOccurrence(_task.id, day: d).then((ok) {
+      if (!ok && context.mounted) {
+        if (widget.provider.byId(_task.id) == null) {
+          showTaskMissingHint(context);
+        } else {
+          showTaskPersistFailedHint(context, provider: widget.provider);
+        }
+      }
+    });
     _refresh();
     final dayLabel = '${d.month}月${d.day}日';
     // P3-5（v2.9.5 审计）：改走唯一实现——补上「窗口超时已结束」提示，
@@ -194,11 +232,15 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       content: undoContent('已跳过 $dayLabel 这一次'),
       onUndo: () async {
         // 新P3-8（v2.9.7 审计）：源任务已被他处删除时返回 false（见 defer 分支注）。
+        // P2-2（v3.0.7 审计）：unskipOccurrence 透传落盘结果（consumeUndoWrite
+        // 拆 false 双义）。
         if (widget.provider.byId(_task.id) == null) return false;
-        widget.provider.unskipOccurrence(_task.id, day: d);
-        _deferSkipped.remove(Task.ymdKey(d));
-        _refresh();
-        return true;
+        return consumeUndoWrite(
+          context,
+          widget.provider,
+          _task.id,
+          widget.provider.unskipOccurrence(_task.id, day: d),
+        );
       },
     );
   }
@@ -210,7 +252,16 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
   /// 用户无法仅撤销跳过、只能走间接路径。这里给它一个独立入口。
   void _unskip(DateTime d) {
     if (!_isSkipped(d)) return; // 未跳过，幂等
-    widget.provider.unskipOccurrence(_task.id, day: d);
+    // P2-2（v3.0.7 审计）：同 _skip 消费落盘结果。
+    widget.provider.unskipOccurrence(_task.id, day: d).then((ok) {
+      if (!ok && context.mounted) {
+        if (widget.provider.byId(_task.id) == null) {
+          showTaskMissingHint(context);
+        } else {
+          showTaskPersistFailedHint(context, provider: widget.provider);
+        }
+      }
+    });
     // P3-6：撤销后不再有「经『移到下一天』跳过」的痕迹。
     _deferSkipped.remove(Task.ymdKey(d));
     _refresh();

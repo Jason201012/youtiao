@@ -48,6 +48,9 @@ import 'package:todolist/theme/ui_durations.dart';
 /// 用户点了却毫无反应。抛出的异常按失败处理（一律不向上传播）。
 typedef UndoAction = Future<bool> Function();
 
+/// 失败提示上挂的动作（P2-1，v3.0.7 审计：给「请重试」一个可点的载体）。
+typedef UndoFailureAction = ({String label, VoidCallback onPressed});
+
 /// 展示一条带撤销的底部提示。
 ///
 /// [onUndo] 为 null 时只展示提示（无 action 按钮、不做超时追加提示）。
@@ -61,6 +64,14 @@ typedef UndoAction = Future<bool> Function();
 /// [failureHint] 为撤销失效（onUndo 返回 false / 抛错）时的提示文案；缺省 =
 /// 统一口径「撤销已失效：该操作已不可恢复」。习惯打卡侧传入带细节的文案
 /// （新P3-2，v2.9.7 审计：委托唯一实现的同时保留「已被再次修改」的语义）。
+///
+/// [failureAction] 为失败提示上挂的可选动作（P2-1，v3.0.7 审计）——撤销
+/// action 一经点按、横幅即被框架关闭，快照只存在于闭包内，「请重试」四个字
+/// 在没有载体时是虚假承诺（习惯删除撤销实测：横幅一关快照与重试入口一同
+/// 销毁）。传了本参数时失败提示带按钮，点击回调由调用方提供（如重新调一次
+/// `restoreHabit`），提示时长同步放宽到 [kUndoWindowSeconds] 秒，给用户
+/// 足够的反应时间。返回 false 的两种成因（真失效 / 落盘失败但内存已生效）
+/// 由调用方在 onUndo 内自行分支，本参数只负责「有按钮可点」。
 ///
 /// 返回该提示的控制器，便于调用方在需要时（如页面销毁）主动收起。
 
@@ -85,6 +96,7 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason> showUndoSnackBar(
   UndoAction? onUndo,
   String? expiredHint,
   String? failureHint,
+  UndoFailureAction? failureAction,
 }) {
   final messenger = ScaffoldMessenger.of(context);
   var undoPressed = false;
@@ -119,7 +131,17 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason> showUndoSnackBar(
                       content: Text(
                         failureHint ?? '撤销已失效：该操作已不可恢复',
                       ),
-                      duration: const Duration(seconds: 2),
+                      // P2-1（v3.0.7 审计）：挂了重试动作时把时长放宽到撤销
+                      // 窗口同量级——2 秒不够用户读完并点按，载体形同虚设。
+                      duration: failureAction == null
+                          ? const Duration(seconds: 2)
+                          : Duration(seconds: kUndoWindowSeconds),
+                      action: failureAction == null
+                          ? null
+                          : SnackBarAction(
+                              label: failureAction.label,
+                              onPressed: failureAction.onPressed,
+                            ),
                     ),
                   );
                 }

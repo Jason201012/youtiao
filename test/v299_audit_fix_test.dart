@@ -288,10 +288,12 @@ void main() {
     test('P2-5 恢复只清暂停窗口：区间内键清空、显式字段复位', () async {
       final p = await _buildWith([_repeating(id: 'r1', skipDates: const [])]);
       final until = _today().add(const Duration(days: 5));
-      final eff = p.pauseRepeatsUntil('r1', until);
-      expect(eff, until, reason: '正常场景生效终点 = 指定日');
+      // P2-2（v3.0.7 审计）：pauseRepeatsUntil 返回 `(until, saved)` 具名记录。
+      final r = await p.pauseRepeatsUntil('r1', until);
+      expect(r.until, until, reason: '正常场景生效终点 = 指定日');
+      expect(r.saved, isTrue, reason: '落盘成功 → saved=true');
       expect(p.tasks.single.pausedToday, isTrue);
-      p.resumeRepeats('r1');
+      await p.resumeRepeats('r1');
       final t = p.tasks.single;
       expect(t.skipDates, isEmpty, reason: '窗口 [今天..until] 内的键全部清空');
       expect(t.pausedUntil, isNull, reason: 'P1-4 显式窗口字段随恢复一并清除');
@@ -304,9 +306,9 @@ void main() {
         _repeating(id: 'r2', skipDates: const [])
             .copyWith(repeatUntil: Task.ymdKey(untilRepeat)),
       ]);
-      final eff =
-          p.pauseRepeatsUntil('r2', _today().add(const Duration(days: 100)));
-      expect(eff, untilRepeat, reason: '生效终点被夹到重复结束日');
+      final r = await p.pauseRepeatsUntil(
+          'r2', _today().add(const Duration(days: 100)));
+      expect(r.until, untilRepeat, reason: '生效终点被夹到重复结束日');
       final t = p.tasks.single;
       expect(t.pausedUntil, Task.ymdKey(untilRepeat));
       // skipDates 只写到 repeatUntil（今天..repeatUntil 共 11 个循环日）。
@@ -320,15 +322,16 @@ void main() {
       );
     });
 
-    test('P3-4 已结束重复：pause 幂等返回 null、不产生副作用', () async {
+    test('P3-4 已结束重复：pause 无操作返回 null、不产生副作用', () async {
       final p = await _buildWith([
         _repeating(id: 'r3', skipDates: const []).copyWith(
             repeatUntil:
                 Task.ymdKey(_today().add(const Duration(days: -1)))),
       ]);
-      final eff =
-          p.pauseRepeatsUntil('r3', _today().add(const Duration(days: 3)));
-      expect(eff, isNull, reason: '重复已结束 → 不空写暂停窗口');
+      final r = await p.pauseRepeatsUntil(
+          'r3', _today().add(const Duration(days: 3)));
+      expect(r.until, isNull, reason: '重复已结束 → 不空写暂停窗口');
+      expect(r.saved, isTrue, reason: '无操作 ≠ 失败（幂等早退口径，v3.0.5 固化）');
       final t = p.tasks.single;
       expect(t.skipDates, isEmpty);
       expect(t.pausedUntil, isNull);

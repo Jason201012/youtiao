@@ -364,8 +364,9 @@ void main() {
           skipDates: const [],
         ),
       ]);
+      // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化。
       final copy =
-          p.rescheduleOnceOccurrence('1', DateTime(2026, 9, 13))!;
+          (await p.rescheduleOnceOccurrence('1', DateTime(2026, 9, 13)))!;
       expect(copy.dueDate, DateTime(2026, 9, 13, 7, 0));
       expect(copy.repeat, RepeatType.none);
       expect(copy.isRepeating, isFalse);

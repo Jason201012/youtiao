@@ -111,7 +111,9 @@ void main() {
       ]);
       final newDay = origDay.add(const Duration(days: 1)); // 周六，非循环日
 
-      final copy = p.rescheduleOnceOccurrence('1', newDay, origDay: origDay);
+      // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化。
+      final copy =
+          await p.rescheduleOnceOccurrence('1', newDay, origDay: origDay);
       expect(copy, isNotNull);
       expect(copy!.id, isNot('1'));
       expect(p.byId('1')!.skipDates, contains('2026-09-11'));
@@ -119,8 +121,8 @@ void main() {
       expect(p.byId('2'), isNotNull, reason: '无关的同名任务必须原封不动');
 
       // 撤销：按副本 id 移除 + 归还 skipDates（原实现在此步说谎）。
-      p.discardTask(copy.id);
-      p.unskipOccurrence('1', day: origDay);
+      await p.discardTask(copy.id);
+      await p.unskipOccurrence('1', day: origDay);
 
       expect(p.byId(copy.id), isNull, reason: '副本应被精确删除');
       expect(p.byId('2'), isNotNull, reason: '同名任务不得被误删');
@@ -129,7 +131,9 @@ void main() {
 
     test('任务不存在时 rescheduleOnceOccurrence 安全返回 null', () async {
       final p = await buildWith([mk('1', repeat: RepeatType.daily)]);
-      expect(p.rescheduleOnceOccurrence('nope', origDay.add(const Duration(days: 1))),
+      expect(
+          await p.rescheduleOnceOccurrence(
+              'nope', origDay.add(const Duration(days: 1))),
           isNull);
     });
 

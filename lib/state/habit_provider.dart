@@ -288,15 +288,28 @@ class HabitProvider extends ChangeNotifier {
     // 与任务侧 P2-2（v3.0.5 审计）「先撤后挂按门控」是同族顺序问题——现在
     // 失败路径根本不动通知，成功路径才撤，彻底消除「先撤后落盘」。
     final okHabits = await _persistHabits();
-    final okCheckIns = await _persistCheckIns();
-    if (!okHabits || !okCheckIns) {
-      // P3-2（v3.0.5 审计）：落盘失败回滚内存（删除不生效）——旧实现删除静默
-      // 丢弃落盘结果：UI 显示已删、DB 里还在，重启后「复活」，且调用方无从
-      // 察觉。回滚后返回 null，UI 据此如实提示而非谎报「习惯已删除」。
+    // P3-5（v3.0.7 审计）：两段式落盘**首段失败即短路**，不再写次段——旧实现
+    // 两段都写，四种组合里有两种留下「告知与库内状态相反」的部分成功态：
+    // ① habits❌/checkins✅ → 库里习惯还在、打卡全没（用户看到「删除未生效」，
+    // 重启后习惯带着空白历史回来）；② habits✅/checkins❌ → 孤儿打卡记录。
+    // 短路后只剩组合②（危害远小于①：重试一次删除即可清掉孤儿记录），且内存
+    // 全量回滚与告知口径一致（「删除未生效，请重试」）。与 restoreFromJson
+    // 「整体替换、不做内存回滚」的论证并不矛盾——那是单段全量替换，本方法是
+    // 两段独立写，注释里早已承认两段式不可回滚补偿（见 restoreFromJson 注释）。
+    if (!okHabits) {
       _habits.insert(idx, snapshot.habit);
       _checkIns.addAll(snapshot.checkIns);
       // P3-2（v3.0.6 审计）：通知未被触碰，无需重挂（旧实现在此按
       // reminderMinute 补挂每日提醒、漏 9 号槽——现已无撤可补）。
+      notifyListeners();
+      return null;
+    }
+    final okCheckIns = await _persistCheckIns();
+    if (!okCheckIns) {
+      // 首段已落库（库里习惯已删）、次段失败：内存同样全量回滚，用户得到
+      // 「删除未生效」的如实告知；孤儿打卡记录由重试删除时清掉。
+      _habits.insert(idx, snapshot.habit);
+      _checkIns.addAll(snapshot.checkIns);
       notifyListeners();
       return null;
     }
@@ -316,8 +329,23 @@ class HabitProvider extends ChangeNotifier {
   /// 「没恢复」而用户已看到撤销成功。返回 null 现覆盖两种「未生效」：
   /// 同 id 已重建 / 落盘失败，调用方统一按失败提示（habit_screen 的
   /// failureHint 已相应改为「撤销未生效：请重试」）。
+  ///
+  /// P2-1（v3.0.7 审计）：落盘失败时把快照**暂存**进 [_pendingRestore]——撤销
+  /// action 点按后横幅即被框架关闭，快照原本只活在该闭包里：习惯已从内存与
+  /// 数据库同时移除（deleteHabit 早已成功落盘），数据实际不可恢复，而文案
+  /// 承诺的「请重试」在物理上不存在入口。现由 [retryRestoreHabit] 从暂存区
+  /// 重新恢复， habit_screen 的失败提示挂「再试一次」action 调用它——与通知侧
+  /// `showTaskUndoNotSaved` 的「重试」载体对齐。成功恢复或同 id 已重建（早退
+  /// 分支不暂存）时清空暂存。
+  ///
+  /// P3-5（v3.0.7 审计）：同 [deleteHabit] 首段失败即短路次段，把「部分成功」
+  /// 面从 2 种收窄到 1 种（仅剩首段成功/次段失败：库里习惯已复活、打卡未写，
+  /// 重试撤销即可补上）。
   Future<Habit?> restoreHabit(DeletedHabit snapshot) async {
-    if (byId(snapshot.habit.id) != null) return null;
+    if (byId(snapshot.habit.id) != null) {
+      _pendingRestore = null; // 同 id 已重建：真失效，无可重试之物
+      return null;
+    }
     final at = snapshot.index.clamp(0, _habits.length);
     _habits.insert(at, snapshot.habit);
     // 打卡记录逐条去重后放回（同 id 记录已随删除一并移除，这里的去重是防御性的）。
@@ -331,19 +359,48 @@ class HabitProvider extends ChangeNotifier {
     }
     // U2-1（v3.0.6 审计）：落盘失败回滚（见方法注释）。
     final okHabits = await _persistHabits();
-    final okCheckIns = await _persistCheckIns();
-    if (!okHabits || !okCheckIns) {
+    if (!okHabits) {
       _habits.removeWhere((h) => h.id == snapshot.habit.id);
       _checkIns.removeWhere((c) => added.contains(c.id));
       notifyListeners();
+      _pendingRestore = snapshot; // P2-1（v3.0.7 审计）：暂存快照供重试
       return null;
     }
+    final okCheckIns = await _persistCheckIns();
+    if (!okCheckIns) {
+      _habits.removeWhere((h) => h.id == snapshot.habit.id);
+      _checkIns.removeWhere((c) => added.contains(c.id));
+      notifyListeners();
+      _pendingRestore = snapshot; // P2-1（v3.0.7 审计）：暂存快照供重试
+      return null;
+    }
+    _pendingRestore = null;
     if (!snapshot.habit.archived && snapshot.habit.reminderMinute != null) {
       _rescheduleReminder(snapshot.habit);
     }
     notifyListeners();
     _notifyHabitsChanged();
     return snapshot.habit;
+  }
+
+  /// P2-1（v3.0.7 审计）：[restoreHabit] 落盘失败后暂存的删除快照（单槽位）。
+  /// 只由失败路径写入、成功路径与同 id 重建早退时清空；重试入口见
+  /// [retryRestoreHabit]。
+  DeletedHabit? _pendingRestore;
+
+  /// 当前暂存的待恢复快照（null = 无）。供 UI 在失败提示挂「再试一次」前
+  /// 判断载体是否仍在（快照不会因提示条超时消失而丢失）。
+  DeletedHabit? get pendingRestore => _pendingRestore;
+
+  /// P2-1（v3.0.7 审计）：重试恢复——从 [_pendingRestore] 重新走一遍
+  /// [restoreHabit]。返回恢复后的习惯；仍失败（含暂存已空）时返回 null，
+  /// 快照继续暂存（restoreHabit 失败路径会重新写入），用户可再次重试。
+  /// 与通知侧 `showTaskUndoNotSaved` 的「重试」action 同口径：给「请重试」
+  /// 一个真实可点的载体，而不是让用户去找一个不存在的按钮。
+  Future<Habit?> retryRestoreHabit() async {
+    final snap = _pendingRestore;
+    if (snap == null) return null;
+    return restoreHabit(snap);
   }
 
   /// App 启动时调度全部习惯的提醒（仅对已设提醒时间的活动习惯）。

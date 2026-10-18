@@ -188,6 +188,13 @@ class NotificationService {
   /// （restoreTaskSnapshot）。仅任务类确认通知（task: 前缀 payload）携带。
   static const String taskUndoActionId = 'task_undo';
 
+  /// P3-1（v3.0.7 审计）：「完成未保存」回执上的「重试」action——`_doComplete`
+  /// 落盘失败时内存完成态已生效、仅缺持久化，而 `setStatus` 的幂等早退分支
+  /// 不会再写盘（v3.0.5 固化口径：幂等早退 = true），直接重调 setStatus 会拿到
+  /// 假成功。故由 main._doRetrySave 显式走 [TaskProvider.persistNow]（当前
+  /// 内存态整体写库）。仅任务类通知（task: 前缀 payload）携带。
+  static const String taskRetrySaveActionId = 'task_retry_save';
+
   /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
   /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
   ///
@@ -1891,6 +1898,51 @@ class NotificationService {
     }
   }
 
+  /// P3-1（v3.0.7 审计）：通知「完成」action **落盘失败**时的覆盖式回执。
+  /// 旧实现此分支只记日志（`AppLog.d(...); return;`）：而 `setStatus` 在落盘前
+  /// 已执行 `_reconcileDeadlineOnCompletion → cancel(t.id)`，**源提醒通知已被
+  /// 撤下**——用户点「完成」→ 通知消失 → 无任何后续，只能进 App 自己核对；
+  /// 安全模式下 `_persist()` 恒 false，此路径 100% 触发。且 v3.0.6 已给撤销侧
+  /// 补了 `showTaskUndoNotSaved`，同一文件内「撤销有回执、完成只日志」的口径
+  /// 不对称（main.dart:671 的注释「通知 action 不可弹错误提示」也已被
+  /// showTaskUndoNotSaved 自证过时——项目自 v3.0.5 U3-1 的口径是「通知 action
+  /// **不可静默**」）。现同 id 替换位、同款「重试」action（走
+  /// [taskRetrySaveActionId] → main._doRetrySave → persistNow 真正重试落盘），
+  /// 与 showTaskUndoNotSaved 完全同构。
+  Future<void> showCompleteNotSaved(String taskId, String title) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chSound,
+        '任务提醒',
+        channelDescription: '任务截止时间提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        actions: [
+          AndroidNotificationAction(
+            taskRetrySaveActionId,
+            '重试',
+            showsUserInterface: true,
+          ),
+        ],
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        _notifyIdOf(taskId),
+        '完成未保存',
+        '${title.isNotEmpty ? title : '无标题任务'} · 已在应用内完成，但保存失败，请重试',
+        detail,
+        payload: '$payloadTaskPrefix$taskId',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 完成未保存提示通知失败 id=$taskId: $e');
+    }
+  }
+
   /// U3：通知「打卡」action 后的覆盖式确认通知：用习惯提醒 id 段位（日 0）弹出
   /// 「已打卡 ✓」，不刷屏不叠加。payload 置空避免点开跳转。
   /// 习惯打卡确认通知（覆盖式，同 id 不刷屏）。
@@ -2131,6 +2183,91 @@ class NotificationService {
       );
     } catch (e) {
       AppLog.d('[通知] 无记录可撤提示通知失败 id=$habitId: $e');
+    }
+  }
+
+  /// P3-1（v3.0.7 审计）：通知「打卡」action **落盘失败**时的覆盖式回执（量化 /
+  /// 布尔两条写入路径共用）。旧实现 `!ok` 分支只记日志：确认条不弹、失败回执
+  /// 不弹，用户点了「记 1 个 / 打卡」毫无后续（与撤销侧 `_doHabitUndo` 的
+  /// 静默同族）。现落 9 号槽覆盖式回执，并挂 [habitActionsFor]（「记 1 个 /
+  /// 打卡」+「稍后提醒」）——habit provider 的 `setCheckInValue` 落盘失败会
+  /// **回滚内存**（v3.0.5 P3-2），故重试是干净的再次 +1，不会双计。
+  /// [value] / [target] 为调用方透传的当日进度（量化习惯展示「已记 x/y」，
+  /// 与 [showHabitCheckedConfirm] 同口径；失败态内存已回滚，展示写入前进度）。
+  Future<void> showHabitCheckInNotSaved(
+    Habit habit, {
+    int? value,
+    int? target,
+  }) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        actions: habitActionsFor(habit),
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        habitConfirmNotifyIdOf(habit.id),
+        '打卡未保存',
+        '${habit.emoji} ${habit.title} · 保存失败，点右侧按钮重试'
+            '${value != null && target != null ? '（当前 $value/$target）' : ''}',
+        detail,
+        payload: '$payloadHabitPrefix${habit.id}',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 打卡未保存提示通知失败 id=${habit.id}: $e');
+    }
+  }
+
+  /// P3-1（v3.0.7 审计）：通知「撤销打卡」action **落盘失败**时的覆盖式回执。
+  /// 同 [showHabitCheckInNotSaved] 补齐静默分支；挂 [habitUndoActionId]
+  /// 「重试」（payload 带展示日，与确认条撤销同路由），`setCheckInValue` 失败
+  /// 已回滚内存，重试 = 干净的再次 -1，不会重复回退。
+  Future<void> showHabitUndoNotSaved(
+    Habit habit, {
+    int? value,
+    int? target,
+  }) async {
+    if (!enabled) return;
+    final detail = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _chHabit,
+        '习惯提醒',
+        channelDescription: '每日习惯打卡提醒',
+        importance: Importance.low,
+        priority: Priority.low,
+        playSound: false,
+        autoCancel: true,
+        actions: [
+          AndroidNotificationAction(
+            habitUndoActionId,
+            '重试',
+            showsUserInterface: true,
+          ),
+        ],
+        visibility: visibility,
+      ),
+    );
+    try {
+      await _plugin.show(
+        habitConfirmNotifyIdOf(habit.id),
+        '撤销未保存',
+        '${habit.emoji} ${habit.title} · 已回退但保存失败，请重试'
+            '${value != null && target != null ? '（当前 $value/$target）' : ''}',
+        detail,
+        payload:
+            '$payloadHabitPrefix${habitEntityWithDate(habit.id, habitConfirmDateKey(DateTime.now()))}',
+      );
+    } catch (e) {
+      AppLog.d('[通知] 撤销未保存提示通知失败 id=${habit.id}: $e');
     }
   }
 

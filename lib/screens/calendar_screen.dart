@@ -139,13 +139,25 @@ class _CalendarScreenState extends State<CalendarScreen> {
     // 提醒重排一并交回 provider，调用方不必自己记得重排（漏一次就是静默丢提醒）。
     final provider = Provider.of<TaskProvider>(context, listen: false);
     final updated = task.copyWith(dueDate: newDue);
-    provider.updateTask(updated);
+    // P2-2（v3.0.7 审计）：updateTask 透传落盘结果——失败弹提示（内存改期
+    // 已生效、全量写自愈），撤销横幅照常给。
+    final ok = await provider.updateTask(updated);
+    if (!ok && mounted) {
+      if (provider.byId(task.id) == null) {
+        showTaskMissingHint(context);
+      } else {
+        showTaskPersistFailedHint(context, provider: provider);
+      }
+    }
     showUndoSnackBar(
       context,
       content: undoContent('已改期至 ${DateFormat('M月d日').format(newDue)}'),
       // P2-2（v2.9.6 审计）：restoreTaskSnapshot 返回是否生效（任务已删除时
       // false），由唯一实现统一提示「撤销已失效」。
-      onUndo: () async => provider.restoreTaskSnapshot(task),
+      // P2-2②（v3.0.7 审计）：撤销改走 taskUndoAction 三分支（落盘语义，
+      // 落盘失败不再误报「撤销已失效」；restoreTaskSnapshot 的「存在语义」
+      // 恒返 true 会把失败当成功）。
+      onUndo: taskUndoAction(context, provider, [task]),
     );
   }
 

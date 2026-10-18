@@ -427,7 +427,21 @@ class TaskDetailScreen extends StatelessWidget {
                                 final n0 = DateTime.now();
                                 final opDay =
                                     DateTime(n0.year, n0.month, n0.day);
-                                provider.skipOccurrence(task.id, day: opDay);
+                                // P2-2（v3.0.7 审计）：消费落盘结果——失败弹提示
+                                // （内存跳过已生效、全量写自愈），横幅照常给。
+                                // P3-3（v3.0.7 审计）：false 双义拆开。
+                                provider
+                                    .skipOccurrence(task.id, day: opDay)
+                                    .then((ok) {
+                                  if (!ok && context.mounted) {
+                                    if (provider.byId(task.id) == null) {
+                                      showTaskMissingHint(context);
+                                    } else {
+                                      showTaskPersistFailedHint(context,
+                                          provider: provider);
+                                    }
+                                  }
+                                });
                                 Navigator.pop(context);
                                 // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`
                                 // ——`ScaffoldMessenger` 自带队列（后一条排在前一条
@@ -458,9 +472,15 @@ class TaskDetailScreen extends StatelessWidget {
                                     if (provider.byId(task.id) == null) {
                                       return false;
                                     }
-                                    provider.unskipOccurrence(task.id,
-                                        day: opDay);
-                                    return true;
+                                    // P2-2（v3.0.7 审计）：unskipOccurrence
+                                    // 透传落盘结果（consumeUndoWrite 拆双义）。
+                                    return consumeUndoWrite(
+                                      context,
+                                      provider,
+                                      task.id,
+                                      provider.unskipOccurrence(task.id,
+                                          day: opDay),
+                                    );
                                   },
                                 );
                               }
@@ -490,19 +510,37 @@ class TaskDetailScreen extends StatelessWidget {
                           // 快照取**操作时刻**的当前对象：暂停期间若他处又改过
                           // 任务，撤销按暂停前状态整体回滚（与看板 _cycle 同构）。
                           final snapshot = provider.byId(task.id);
-                          // P3-3（v2.9.9 审计）：提示用**实际生效**的暂停终点——
+                          // P3-3（v3.9.9 审计）：提示用**实际生效**的暂停终点——
                           // 所选日晚于重复结束日时 Provider 会夹到 repeatUntil，
                           // 旧文案按用户选择的日期报，夸大暂停范围。
-                          final eff =
-                              provider.pauseRepeatsUntil(task.id, picked);
-                          if (eff == null || !context.mounted) return;
+                          // P2-2（v3.0.7 审计）：pauseRepeatsUntil 返回
+                          // `(until, saved)`——saved=false 时先弹写入失败提示
+                          // （内存暂停已生效、全量写自愈），横幅与撤销照常给。
+                          final r = await provider.pauseRepeatsUntil(
+                              task.id, picked);
+                          final eff = r.until;
+                          if (eff == null) {
+                            if (!r.saved && context.mounted) {
+                              showTaskPersistFailedHint(context,
+                                  provider: provider);
+                            }
+                            return;
+                          }
+                          if (!context.mounted) return;
+                          if (!r.saved) {
+                            showTaskPersistFailedHint(context,
+                                provider: provider);
+                          }
                           showUndoSnackBar(
                             context,
                             content: undoContent('已暂停「${task.title}」'
                                 '至 ${eff.month}月${eff.day}日'),
-                            onUndo: () async => snapshot == null
-                                ? false
-                                : provider.restoreTaskSnapshot(snapshot),
+                            // P2-2②（v3.0.7 审计）：撤销从「存在语义」的
+                            // restoreTaskSnapshot 迁到 taskUndoAction 三分支
+                            // （落盘失败不再误报「撤销已失效」，一行换一行）。
+                            onUndo: snapshot == null
+                                ? null
+                                : taskUndoAction(context, provider, [snapshot]),
                           );
                         },
                         icon: const Icon(Symbols.pause_circle, size: 18),
@@ -515,16 +553,30 @@ class TaskDetailScreen extends StatelessWidget {
                       // 语义互斥（旧文案「已暂停至」暗示存在暂停窗口）。
                       if (task.pausedToday)
                         OutlinedButton.icon(
-                          onPressed: () {
+                          onPressed: () async {
                             final snapshot = provider.byId(task.id);
-                            provider.resumeRepeats(task.id);
+                            // P2-2（v3.0.7 审计）：resumeRepeats 透传落盘结果。
+                            final ok = await provider.resumeRepeats(task.id);
+                            if (!ok && context.mounted) {
+                              if (provider.byId(task.id) == null) {
+                                showTaskMissingHint(context);
+                              } else {
+                                showTaskPersistFailedHint(context,
+                                    provider: provider);
+                              }
+                              return;
+                            }
+                            if (!context.mounted) return;
                             showUndoSnackBar(
                               context,
                               content:
                                   undoContent('已恢复「${task.title}」的循环'),
-                              onUndo: () async => snapshot == null
-                                  ? false
-                                  : provider.restoreTaskSnapshot(snapshot),
+                              // P2-2②（v3.0.7 审计）：同暂停侧迁 taskUndoAction
+                              // 三分支（restoreTaskSnapshot → 落盘语义）。
+                              onUndo: snapshot == null
+                                  ? null
+                                  : taskUndoAction(
+                                      context, provider, [snapshot]),
                             );
                           },
                           icon: const Icon(Symbols.play_circle, size: 18),
@@ -568,10 +620,30 @@ class TaskDetailScreen extends StatelessWidget {
                             ),
                           );
                           if (action == 'keep') {
-                            provider.endRepeat(task.id);
+                            // P2-2（v3.0.7 审计）：endRepeat 透传落盘结果——
+                            // 失败弹提示（内存已结束、全量写自愈）后再 pop，
+                            // 不再 fire-and-forget（DB 异常时零反馈）。
+                            final ok = await provider.endRepeat(task.id);
+                            if (!ok && context.mounted) {
+                              if (provider.byId(task.id) == null) {
+                                showTaskMissingHint(context);
+                              } else {
+                                showTaskPersistFailedHint(context,
+                                    provider: provider);
+                              }
+                            }
                             if (context.mounted) Navigator.pop(context);
                           } else if (action == 'done') {
-                            provider.endRepeat(task.id, markDone: true);
+                            final ok =
+                                await provider.endRepeat(task.id, markDone: true);
+                            if (!ok && context.mounted) {
+                              if (provider.byId(task.id) == null) {
+                                showTaskMissingHint(context);
+                              } else {
+                                showTaskPersistFailedHint(context,
+                                    provider: provider);
+                              }
+                            }
                             if (context.mounted) Navigator.pop(context);
                           }
                         },
@@ -642,7 +714,10 @@ class TaskDetailScreen extends StatelessWidget {
                             final n0 = DateTime.now();
                             final origDay =
                                 DateTime(n0.year, n0.month, n0.day);
-                            final copy = provider.rescheduleOnceOccurrence(
+                            // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随
+                            // addTask 异步化——落盘失败时副本已被 provider 回滚
+                            // 内存（返回 null），横幅按「无副本」分支如实显示。
+                            final copy = await provider.rescheduleOnceOccurrence(
                               task.id,
                               picked,
                               origDay: origDay,
@@ -667,14 +742,35 @@ class TaskDetailScreen extends StatelessWidget {
                                   // 副本清理与「取消跳过」都无从谈起，如实返回失败
                                   // （复合撤销此前恒返回 true，UI 仍报成功）。
                                   // 新P3-12：撤销作用于**操作时刻固化**的原日。
+                                  // P2-2（v3.0.7 审计）：discardTask /
+                                  // unskipOccurrence 均已透传落盘结果——按
+                                  // occurrence 弹层同款口径拆 false 双义
+                                  // （实体已不在 = 幂等或未持久化；实体仍在 =
+                                  // 移除未生效）。
                                   if (provider.byId(task.id) == null) {
                                     return false;
                                   }
+                                  var persisted = true;
                                   if (copy != null) {
-                                    provider.discardTask(copy.id);
+                                    final ok =
+                                        await provider.discardTask(copy.id);
+                                    if (!ok &&
+                                        provider.byId(copy.id) != null) {
+                                      return false; // 副本仍在列表：真失效
+                                    }
+                                    if (!ok) persisted = false;
                                   }
-                                  provider.unskipOccurrence(task.id,
-                                      day: origDay);
+                                  final unskipOk = await provider
+                                      .unskipOccurrence(task.id, day: origDay);
+                                  if (!unskipOk &&
+                                      provider.byId(task.id) == null) {
+                                    return false; // 源任务已消失：真失效
+                                  }
+                                  if (!unskipOk) persisted = false;
+                                  if (!persisted && context.mounted) {
+                                    showTaskPersistFailedHint(context,
+                                        provider: provider);
+                                  }
                                   return true;
                                 },
                               );
@@ -727,7 +823,14 @@ class TaskDetailScreen extends StatelessWidget {
                   for (final s in task.subtasks)
                     _SubTile(
                       sub: s,
-                      onChanged: (_) => provider.toggleSubTask(task.id, s.id),
+                      // P2-2（v3.0.7 审计）：toggleSubTask 透传落盘结果——
+                      // 失败弹提示（内存勾选已生效、全量写自愈）。
+                      onChanged: (_) => consumeTaskWriteResult(
+                        context,
+                        provider,
+                        task.id,
+                        provider.toggleSubTask(task.id, s.id),
+                      ),
                     ),
                 ],
               ),
@@ -814,7 +917,17 @@ class TaskDetailScreen extends StatelessWidget {
                     ) ??
                     false;
                 if (!confirmed) return;
-                provider.deleteTask(task.id);
+                // P2-2（v3.0.7 审计）：消费删除结果——旧实现 fire-and-forget
+                // 后直接 pop：DB 异常时（provider 已回滚内存）任务其实还在列表，
+                // 用户却以为删掉了，重启「复活」且零反馈。失败停留本页并如实
+                // 提示（重试可达：删除按钮就在手边），成功才 pop。
+                final deleted = await provider.deleteTask(task.id);
+                if (deleted == null && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('删除未生效，请重试')),
+                  );
+                  return;
+                }
                 if (context.mounted) Navigator.pop(context);
               },
               icon: const Icon(Symbols.delete),
@@ -927,7 +1040,16 @@ Future<void> _convertToHabit(BuildContext context, Task task) async {
     ),
   );
   if (remove == true) {
-    context.read<TaskProvider>().deleteTask(task.id);
+    // P2-2（v3.0.7 审计）：消费删除结果——习惯已建成而任务删除失败（provider
+    // 已回滚内存）时如实提示，不静默（用户重启后会发现任务还在）。
+    final deleted =
+        await context.read<TaskProvider>().deleteTask(task.id);
+    if (deleted == null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('任务删除未生效，请重试')),
+      );
+      return;
+    }
   }
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(

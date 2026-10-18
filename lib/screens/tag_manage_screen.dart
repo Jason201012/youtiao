@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/quick_entry_sheet.dart';
 
@@ -340,10 +341,19 @@ class _TagManageScreenState extends State<TagManageScreen> {
                   isArchived ? '取消归档' : '归档',
                   null,
                   () {
+                    // P2-2（v3.0.7 审计）：透传落盘结果——失败如实提示。
                     if (isArchived) {
-                      provider.unarchiveTag(tag);
+                      provider.unarchiveTag(tag).then((ok) {
+                        if (!ok && context.mounted) {
+                          showTaskPersistFailedHint(context, provider: provider);
+                        }
+                      });
                     } else {
-                      provider.archiveTag(tag);
+                      provider.archiveTag(tag).then((ok) {
+                        if (!ok && context.mounted) {
+                          showTaskPersistFailedHint(context, provider: provider);
+                        }
+                      });
                     }
                   },
                 ),
@@ -376,8 +386,14 @@ class _TagManageScreenState extends State<TagManageScreen> {
           ),
           onSubmitted: (v) async {
             if (v.trim().isNotEmpty && v.trim() != oldName) {
-              await provider.renameTag(oldName, v.trim());
-              Navigator.pop(d);
+              // P2-2（v3.0.7 审计）：renameTag 透传落盘结果——失败如实提示
+              // （旧标签仍在），不静默 pop。
+              final ok = await provider.renameTag(oldName, v.trim());
+              if (!ok && context.mounted) {
+                showTaskPersistFailedHint(context, provider: provider);
+                return;
+              }
+              if (context.mounted) Navigator.pop(d);
             }
           },
         ),
@@ -390,8 +406,13 @@ class _TagManageScreenState extends State<TagManageScreen> {
             onPressed: () async {
               final v = controller.text.trim();
               if (v.isNotEmpty && v != oldName) {
-                await provider.renameTag(oldName, v);
-                Navigator.pop(d);
+                // P2-2（v3.0.7 审计）：同 onSubmitted——失败如实提示。
+                final ok = await provider.renameTag(oldName, v);
+                if (!ok && context.mounted) {
+                  showTaskPersistFailedHint(context, provider: provider);
+                  return;
+                }
+                if (context.mounted) Navigator.pop(d);
               }
             },
             child: const Text('确定'),
@@ -449,8 +470,14 @@ class _TagManageScreenState extends State<TagManageScreen> {
             TextButton(
               onPressed: target != null
                   ? () async {
-                      await provider.mergeTags(source, target!);
-                      Navigator.pop(d);
+                      // P2-2（v3.0.7 审计）：mergeTags 透传落盘结果——失败如实
+                      // 提示（合并未落库），不静默 pop。
+                      final ok = await provider.mergeTags(source, target!);
+                      if (!ok && context.mounted) {
+                        showTaskPersistFailedHint(context, provider: provider);
+                        return;
+                      }
+                      if (context.mounted) Navigator.pop(d);
                     }
                   : null,
               child: const Text('合并'),
@@ -479,8 +506,14 @@ class _TagManageScreenState extends State<TagManageScreen> {
           ),
           TextButton(
             onPressed: () async {
-              await provider.deleteTag(tag);
-              Navigator.pop(d);
+              // P2-2（v3.0.7 审计）：deleteTag 透传落盘结果——失败如实提示
+              // （标签仍在任务上），不静默 pop。
+              final ok = await provider.deleteTag(tag);
+              if (!ok && context.mounted) {
+                showTaskPersistFailedHint(context, provider: provider);
+                return;
+              }
+              if (context.mounted) Navigator.pop(d);
             },
             style: TextButton.styleFrom(
               foregroundColor: Theme.of(context).colorScheme.error,

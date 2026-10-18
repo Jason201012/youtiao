@@ -265,21 +265,22 @@ void main() {
     });
     test('deleteTask 移入回收站，undoDelete 原样恢复', () async {
       final p = await buildWith([mk('1'), mk('2')]);
-      final removed = p.deleteTask('1');
+      // P2-2（v3.0.7 审计）：deleteTask / undoDelete 异步化。
+      final removed = await p.deleteTask('1');
       expect(removed?.id, '1');
       expect(p.total, 1);
       expect(p.trashCount, 1);
-      p.undoDelete();
+      await p.undoDelete();
       expect(p.total, 2);
       expect(p.trashCount, 0);
       expect(p.tasks.any((t) => t.id == '1'), isTrue);
     });
     test('批量删除 + 整体撤销', () async {
       final p = await buildWith([mk('1'), mk('2'), mk('3')]);
-      p.deleteTasks(['1', '3']);
+      await p.deleteTasks(['1', '3']);
       expect(p.total, 1);
       expect(p.trashCount, 2);
-      p.undoDelete();
+      await p.undoDelete();
       expect(p.total, 3);
       expect(p.trashCount, 0);
     });
@@ -662,7 +663,8 @@ void main() {
   group('P1-6 批量完成的语义前提（快捷键依赖的行为契约）', () {
     test('batchUpdate 不能改完成态：返回条数照常，但 status 被静默丢弃', () async {
       final p = await buildWith([mk('a'), mk('b')]);
-      final n = p.batchUpdate(
+      // P2-2（v3.0.7 审计）：batchUpdate 异步化并透传落盘结果。
+      final n = await p.batchUpdate(
         ['a', 'b'],
         (t) => t.copyWith(status: TaskStatus.done),
       );

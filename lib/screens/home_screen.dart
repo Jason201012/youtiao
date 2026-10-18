@@ -190,13 +190,27 @@ class HomeScreenState extends State<HomeScreen> {
     // P3-5：改走 `widgets/undo_snack_bar.dart` 的唯一实现（统一时长 + 超时提示）。
     // U1-2：用 [TaskProvider.batchUpdateAs] 返回的 batchId 定向撤销。
     final provider = context.read<TaskProvider>();
+    // P2-2（v3.0.7 审计）：BatchEditResult 携带 saved——落盘失败先弹提示
+    // （内存编辑已生效、全量写自愈），撤销横幅照常给（撤销本身会重试落盘）。
+    if (!n.saved) {
+      showTaskPersistFailedHint(context, provider: provider);
+    }
     showUndoSnackBar(
       context,
       content: undoContent('已更新 $n.count 条任务'),
       expiredHint: '这 $n.count 条任务的撤销窗口已结束',
       // P2-2（v2.9.6 审计）：undoBatchEdit 返回是否真正生效，失效时由
       // showUndoSnackBar 统一提示「撤销已失效」。
-      onUndo: () async => provider.undoBatchEdit(n.batchId),
+      // P2-2（v3.0.7 审计）：返回 `(applied, saved)`——saved=false 时任务已
+      // 回到编辑前状态（内存撤销生效），弹「写入失败」并按成功返回。
+      onUndo: () async {
+        final r = await provider.undoBatchEdit(n.batchId);
+        if (!r.applied) return false;
+        if (!r.saved && context.mounted) {
+          showTaskPersistFailedHint(context, provider: provider);
+        }
+        return true;
+      },
     );
   }
 
@@ -233,7 +247,16 @@ class HomeScreenState extends State<HomeScreen> {
     if (confirmed != true || !mounted) return;
     // U1-2（v2.9.5 审计）：取定向 `batchId`——这条横幅的「撤销」只还原**本次**
     // 批量删除（10 秒内又删了别的也不会串）。
-    final r = provider.deleteTasksAs(ids);
+    // P2-2（v3.0.7 审计）：deleteTasksAs 异步化并回滚失败——batchId=0 表示
+    // 落盘失败（任务仍在列表），如实提示而非弹「已删除 N 个任务」横幅。
+    final r = await provider.deleteTasksAs(ids);
+    if (!mounted) return;
+    if (r.$1 == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('删除未生效，请重试')),
+      );
+      return;
+    }
     _exitSelect();
     _showBatchUndoSnackBar(context, provider, r.$1, r.$2.length);
   }
@@ -276,7 +299,14 @@ class HomeScreenState extends State<HomeScreen> {
     Future.wait(ids.map((id) => provider.toggleDone(id))).then((results) {
       if (!mounted) return;
       if (results.contains(false)) {
-        showTaskPersistFailedHint(context);
+        // P3-3（v3.0.7 审计）：批量路径按「任一任务已不存在」拆 false 双义——
+        // 混合批量里有任务刚被删除时，「写入失败」文案会误导用户重试。
+        final anyMissing = ids.any((id) => provider.byId(id) == null);
+        if (anyMissing) {
+          showTaskMissingHint(context);
+        } else {
+          showTaskPersistFailedHint(context, provider: provider);
+        }
       }
       if (ids.isNotEmpty) {
         showUndoSnackBar(
@@ -976,10 +1006,15 @@ class _PostponeButton extends StatelessWidget {
       if (!go || !context.mounted) return;
     }
     // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次顺延）。
-    final r = provider.postponeToAs(ids, day);
+    // P2-2（v3.0.7 审计）：postponeToAs 异步化并返回 `(batchId, 条数, saved)`——
+    // saved=false 时先弹写入失败提示（内存顺延已生效、全量写自愈），横幅照常。
+    final r = await provider.postponeToAs(ids, day);
     if (!context.mounted) return;
     final n = r.$2;
     if (n <= 0) return;
+    if (!r.$3) {
+      showTaskPersistFailedHint(context, provider: provider);
+    }
     final origText = originalDates.isEmpty
         ? ''
         : '原截止：${originalDates.take(3).join('、')}'
@@ -987,13 +1022,22 @@ class _PostponeButton extends StatelessWidget {
     // P3-4 / U3-1（v2.9.5 审计）：此前硬编码 `Duration(seconds: 4)`，与删除的
     // 10 秒不一致；且无「窗口结束」提示。改走唯一实现。
     // U1-2：撤销按 batchId 定向，不再依赖「最近一次批量编辑」。
+    // P2-2（v3.0.7 审计）：undoBatchEdit 返回 `(applied, saved)`——saved=false
+    // 时任务已回到顺延前状态（内存撤销生效），弹「写入失败」并按成功返回。
     showUndoSnackBar(
       context,
       content: undoContent('已顺延 $n 条任务到 '
           '${day.month}月${day.day}日'
           '${origText.isEmpty ? '' : ' · $origText'}'),
       expiredHint: '这 $n 条顺延的撤销窗口已结束',
-      onUndo: () async => provider.undoBatchEdit(r.$1),
+      onUndo: () async {
+        final u = await provider.undoBatchEdit(r.$1);
+        if (!u.applied) return false;
+        if (!u.saved && context.mounted) {
+          showTaskPersistFailedHint(context, provider: provider);
+        }
+        return true;
+      },
     );
   }
 
@@ -1233,9 +1277,22 @@ class _DismissibleTask extends StatelessWidget {
       onDismissed: (_) {
         // 只有右滑（startToEnd）会走到这里。
         // U1-2：取定向 batchId（点这条横幅的撤销只还原本次删除）。
-        final r = context.read<TaskProvider>().deleteTaskAs(task.id);
-        final removed = r.$2;
-        if (removed != null) onDeleted(r.$1, removed);
+        // P2-2（v3.0.7 审计）：deleteTaskAs 异步化——落盘失败已回滚内存
+        // （batchId=0、removed=null），此时不弹横幅（没有真删除，无可撤销
+        // 之物），由全局提示「删除未生效」；本回调为 void 契约（Dismissible
+        // onDismissed），反馈走 ScaffoldMessenger 单点。
+        context.read<TaskProvider>().deleteTaskAs(task.id).then((r) {
+          final removed = r.$2;
+          if (removed == null) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('删除未生效，请重试')),
+              );
+            }
+            return;
+          }
+          onDeleted(r.$1, removed);
+        });
       },
       child: row,
     );
@@ -1278,7 +1335,8 @@ class _DismissibleTask extends StatelessWidget {
 ///
 /// 单个删除后底部提示，支持撤销。
 ///
-/// [batchId] 来自 [TaskProvider.deleteTaskAs]，用于定向撤销。
+/// [batchId] 来自 [TaskProvider.deleteTaskAs]，用于定向撤销；[removed] 为被删
+/// 任务（撤销后凭 id 判断内存是否已恢复——P2-2，v3.0.7 审计）。
 void _showUndoSnackBar(
     BuildContext context, TaskProvider provider, int batchId, Task removed) {
   showUndoSnackBar(
@@ -1288,7 +1346,17 @@ void _showUndoSnackBar(
     // P2-2（v2.9.6 审计）：undoDelete 返回是否真正生效（缓冲被彻底删除 /
     // 清空回收站作废时为 false），由 showUndoSnackBar 统一提示「撤销已失效」，
     // 不再静默 no-op。
-    onUndo: () async => provider.undoDelete(batchId),
+    // P2-2（v3.0.7 审计）：undoDelete 返回 `(applied, saved)`——applied=true
+    // + saved=false 时任务已回到列表（内存撤销生效、仅未持久化），弹「写入
+    // 失败」并按成功返回（全量写自愈），不误报「撤销已失效」。
+    onUndo: () async {
+      final r = await provider.undoDelete(batchId);
+      if (!r.applied) return false;
+      if (!r.saved && context.mounted) {
+        showTaskPersistFailedHint(context, provider: provider);
+      }
+      return true;
+    },
   );
 }
 
@@ -1301,6 +1369,13 @@ void _showBatchUndoSnackBar(
     context,
     content: undoContent('已删除 $count 个任务'),
     expiredHint: '这 $count 个任务的撤销窗口已结束',
-    onUndo: () async => provider.undoDelete(batchId),
+    onUndo: () async {
+      final r = await provider.undoDelete(batchId);
+      if (!r.applied) return false;
+      if (!r.saved && context.mounted) {
+        showTaskPersistFailedHint(context, provider: provider);
+      }
+      return true;
+    },
   );
 }

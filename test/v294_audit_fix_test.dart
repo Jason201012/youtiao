@@ -313,7 +313,8 @@ void main() {
     test('applyTemplateItems 套用后任务带预估（不再退回 30 分钟兜底）', () async {
       _installMocks();
       final provider = await buildWith([]);
-      final created = applyTemplateItems(provider, [
+      // P2-2（v3.0.7 审计）：applyTemplateItems 随 addTask 异步化。
+      final created = await applyTemplateItems(provider, [
         TemplateItem('写周报', Category.work, Priority.high, 1,
             estimateMinutes: 25),
       ]);

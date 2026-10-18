@@ -13,6 +13,7 @@ import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 
@@ -872,7 +873,11 @@ class _TaskSheetState extends State<TaskSheet> {
     // repeatInterval / reminderOffsetMin / 月内规则会被清掉，避免污染备份导出与
     // 「未来 30 天预览」，也避免 TaskProvider 的 remindersChanged 判定被无害残留误触发重排。
     if (_isEdit) {
-      provider.updateTask(widget.task!.copyWith(
+      // P2-2（v3.0.7 审计）：消费编辑落盘结果——旧实现 fire-and-forget：DB 异常
+      // 时界面显示已保存、重启全部回退且零提示（updateTask 是详情页保存的唯一
+      // 出口，属最高频写入口）。失败停留本层并提示（provider 不内存回滚，
+      // 全量写自愈；重试可达——保存按钮就在手边）。
+      final ok = await provider.updateTask(widget.task!.copyWith(
         title: title,
         priority: _priority,
         category: _category,
@@ -897,8 +902,22 @@ class _TaskSheetState extends State<TaskSheet> {
         pinned: _pinned,
         attachments: List.from(_attachments),
       ).normalizedRepeatFields());
+      if (!ok) {
+        if (!mounted) return;
+        if (provider.byId(widget.task!.id) == null) {
+          showTaskMissingHint(context);
+        } else {
+          showTaskPersistFailedHint(context, provider: provider);
+        }
+        return;
+      }
     } else {
-      final created = provider.addTask(Task(
+      // P2-2（v3.0.7 审计）：消费新建落盘结果——null = 落盘失败且 provider 已
+      // 回滚内存（任务不会出现在列表）。旧实现拿到 Task 后无条件提升暂存附件、
+      // pop：列表立刻出现、重启即丢且零提示。失败停留本层提示，暂存附件不提升
+      // （由 dispose 清理），重试不会造出重复任务——与习惯侧 _AddHabitSheet
+      // 失败口径一致（v3.0.6 审计）。
+      final created = await provider.addTask(Task(
         id: '',
         title: title,
         priority: _priority,
@@ -923,6 +942,11 @@ class _TaskSheetState extends State<TaskSheet> {
         pinned: _pinned,
         attachments: List.from(_attachments),
       ).normalizedRepeatFields());
+      if (created == null) {
+        if (!mounted) return;
+        showTaskPersistFailedHint(context, provider: provider);
+        return;
+      }
       // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
       // P1-11：同时提升从快速录入层继承的分享附件暂存会话。
       await AttachmentService.promoteStaging(_attachmentSession, created.id);

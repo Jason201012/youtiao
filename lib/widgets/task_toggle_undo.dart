@@ -24,17 +24,87 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/undo_snack_bar.dart';
 
 /// U2-1（v3.0.6 审计）：任务侧 App 内写入口的落盘失败**统一提示**——与习惯侧
-/// `showCheckInPersistFailedHint`（habit_screen.dart）同文案同口径。provider 的
+/// `showCheckInPersistFailedHint`（habit_screen.dart）同口径。provider 的
 /// setStatus / toggleDone / markOccurrenceDone 自 P2-1（v3.0.5 审计）起透传
-/// `_persist` 结果，但 App 内 5 处调用点全部 fire-and-forget：DB 异常时横幅照弹
-/// 「已完成（10 秒内可撤销）」、列表照显完成，重启回退为未完成——与通知面刚修掉
-/// 的谎报完全同构，只是发生在 App 内。任务侧 provider **不做内存回滚**
-/// （与习惯侧 P3-2 的口径差异，v3.0.5 报告核查备注 A 已接受），故提示文案
-/// 为「数据未保存」而非「操作未生效」。
-void showTaskPersistFailedHint(BuildContext context) {
+/// `_persist` 结果，P2-2（v3.0.7 审计）起新建 / 编辑 / 删除 / 循环控制等全部
+/// 写入口统一返回 `Future<bool>`，App 内各调用点消费结果后弹本提示。任务侧
+/// provider **不做内存回滚**（与习惯侧 P3-2 的口径差异，v3.0.5 报告核查备注 A
+/// 已接受），故提示文案为「数据未保存」而非「操作未生效」。
+///
+/// P3-2（v3.0.7 审计）：区分 [TaskProvider.dbLoadFailed]（安全模式）——旧文案
+/// 对所有失败一律「请重试」，而安全模式下 `_persist()` **恒** false（设计行为：
+/// 保护坏库不被内存态覆盖），顶部横幅已如实告知「本次修改不会保存」：此时再弹
+/// 「写入失败：请重试」既与横幅重复、又是误导（重试必然再失败）。安全模式改为
+/// 指向根因的文案，真正的 DB 异常才说「自动一并保存」（全量 replaceTasks 写，
+/// 后续任意一次成功写入即自愈——U2-2，v3.0.7 审计：把「请重试」落到具体可执行
+/// 的动作上，撤销类一次性 action 场景没有重试载体，「继续操作即落库」是事实）。
+///
+/// [provider] 可空（测试 / 无 provider 上下文）：缺省时按「非安全模式」处理。
+void showTaskPersistFailedHint(BuildContext context, {TaskProvider? provider}) {
+  final safeMode = provider?.dbLoadFailed ?? false;
   ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text('写入失败：数据未保存，请重试')),
+    SnackBar(
+      content: Text(safeMode
+          ? '安全模式下更改不会保存：已阻止写入以保护数据库，请先修复或恢复后再试'
+          : '写入失败：数据未保存；继续其它操作会自动一并保存'),
+    ),
   );
+}
+
+/// P3-3（v3.0.7 审计）：`Future<bool>` 的 false 双义之二——「任务不存在」。
+/// setStatus / toggleDone / markOccurrenceDone / unmarkOccurrenceDone 对
+/// `i == -1` 一律返回 false，与「落盘失败」压进同一个值；四种失败的 UI 后果
+/// 完全不同（一个是重试也无济于事的实体消失，一个是可自愈的持久化问题）。
+/// 消费方在 false 时按 `provider.byId(id) == null` 拆开，走本提示而非
+/// [showTaskPersistFailedHint]——与 [taskUndoAction] / 通知侧
+/// main._doComplete / _doTaskUndo 既有的 byId 判空口径对齐（项目自己早已承认
+/// 这两义必须区分，只是 App 内 4 个消费点没跟上）。
+void showTaskMissingHint(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('任务已不存在：可能刚被删除，请刷新后查看')),
+  );
+}
+
+/// P3-3（v3.0.7 审计）：完成族 4 个写入口（setStatus / toggleDone /
+/// markOccurrenceDone / unmarkOccurrenceDone）的统一消费助手——[result] 为
+/// provider 返回值，[taskId] 为被操作任务。ok=true 静默；false 时按 byId
+/// 判空二选一（实体消失 → [showTaskMissingHint]；落盘失败 → 带安全模式分化的
+/// [showTaskPersistFailedHint]）。
+void consumeTaskWriteResult(
+  BuildContext context,
+  TaskProvider provider,
+  String taskId,
+  Future<bool> result,
+) {
+  result.then((ok) {
+    if (ok) return;
+    if (!context.mounted) return;
+    if (provider.byId(taskId) == null) {
+      showTaskMissingHint(context);
+    } else {
+      showTaskPersistFailedHint(context, provider: provider);
+    }
+  });
+}
+
+/// P2-2（v3.0.7 审计）：复合撤销闭包（「移到下一天」/「仅此一次改期」）里
+/// 消费「修改类」写入口（unskipOccurrence 等）的统一助手，拆开 false 双义：
+/// - ok=true → 成功；
+/// - false 且实体已不在列表 → 真失效（返回 false，由 showUndoSnackBar 统一提示）；
+/// - false 且实体仍在 → 内存写入已生效、仅未持久化（全量写自愈）：弹
+///   [showTaskPersistFailedHint] 并按成功返回 true（与 [taskUndoAction] 的
+///   notSaved 分支同口径，不把已生效的撤销误报为失效）。
+Future<bool> consumeUndoWrite(
+  BuildContext context,
+  TaskProvider provider,
+  String entityId,
+  Future<bool> result,
+) async {
+  final ok = await result;
+  if (ok) return true;
+  if (provider.byId(entityId) == null) return false;
+  if (context.mounted) showTaskPersistFailedHint(context, provider: provider);
+  return true;
 }
 
 /// U2-1（v3.0.6 审计）：任务侧撤销回调的统一包装（单条 / 批量共用），消费
@@ -64,7 +134,11 @@ UndoAction taskUndoAction(
         }
       }
     }
-    if (notSaved && context.mounted) showTaskPersistFailedHint(context);
+    // P3-2（v3.0.7 审计）：失败提示改走安全模式分化版（见
+    // [showTaskPersistFailedHint]）——安全模式下「请重试」是误导。
+    if (notSaved && context.mounted) {
+      showTaskPersistFailedHint(context, provider: provider);
+    }
     return ok;
   };
 }
@@ -75,11 +149,19 @@ UndoAction taskUndoAction(
 /// 撤销横幅（任务侧 provider 不内存回滚，UI 显示的完成态需要撤销入口；
 /// 撤销本身也会重试落盘）。旧实现 fire-and-forget 后无条件弹横幅，DB 异常时
 /// 用户看到「已完成（10 秒内可撤销）」却不知数据未保存。
+/// P3-3（v3.0.7 审计）：false 双义拆开——任务不存在走 [showTaskMissingHint]，
+/// 落盘失败走安全模式分化的 [showTaskPersistFailedHint]。
 Future<void> toggleDoneWithUndo(
     BuildContext context, TaskProvider provider, Task task) async {
   final ok = await provider.toggleDone(task.id);
   if (!context.mounted) return;
-  if (!ok) showTaskPersistFailedHint(context);
+  if (!ok) {
+    if (provider.byId(task.id) == null) {
+      showTaskMissingHint(context);
+    } else {
+      showTaskPersistFailedHint(context, provider: provider);
+    }
+  }
   final title = task.title.isEmpty ? '(无标题)' : task.title;
   showUndoSnackBar(
     context,

@@ -103,6 +103,12 @@ final List<String> _pendingUndoTaskIds = [];
 /// （撤销是破坏性回退，不跨锁执行——与任务侧同口径，见 [_flushPendingIntents]）。
 final List<String> _pendingHabitUndoIds = [];
 
+/// P3-1（v3.0.7 审计）：「完成未保存」回执「重试」action 的冷启动入队——
+/// 重试落盘不依赖内存快照（走 persistNow 整体写库），首帧后补执行完全可行；
+/// 锁定期间不消费（写库动作不跨锁执行，与「撤销」同口径，见
+/// [_flushPendingIntents]）。
+final List<String> _pendingRetrySaveTaskIds = [];
+
 /// 冷启动时由「分享」入口转发过来的文本 + 来源包名，先于导航器就绪到达，待首帧后弹出预填录入层。
 class _PendingShare {
   final String text;
@@ -491,6 +497,23 @@ void _handleNotificationAction(String? actionId, String? payload) {
     }
     return;
   }
+  if (actionId == NotificationService.taskRetrySaveActionId) {
+    // P3-1（v3.0.7 审计）：「完成未保存」回执的「重试」——显式把当前内存态
+    // 整体写库（persistNow）。三态处理同 taskUndoActionId（就绪 → 执行；
+    // 已锁定 → 提示；冷启动 → 入队，首帧后补执行——重试落盘不依赖快照，
+    // 补执行可成功）。
+    final taskId = NotificationService.parseTaskId(payload);
+    if (taskId == null) return;
+    final state = _navigatorKey.currentState;
+    if (state != null && !_isAppLocked) {
+      _doRetrySave(state, taskId);
+    } else if (state != null) {
+      NotificationService.instance.showLockedActionHint(taskUndo: true);
+    } else {
+      _enqueue(_pendingRetrySaveTaskIds, taskId);
+    }
+    return;
+  }
 }
 
 /// U2-4（v2.9.6 审计）：通知「撤销」action——把该习惯今天的打卡记录回退一步。
@@ -552,9 +575,18 @@ void _doHabitUndo(NavigatorState nav, String habitId, {String? confirmDate}) {
   // 按返回值分支（.catchError 保留兜底持久层之外的异常）。
   hp.adjustCheckInValue(habit, DateTime.now(), -1).then((ok) {
     if (!ok) {
-      // 写入失败：如实不报成功。id 用插值（AppLog.d release 为 no-op，
-      // 纯常量实参会被 AOT 整体消除；插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
-      AppLog.d('[通知] 撤销写入失败 id=${habit.id}，不回报「已撤销」');
+      // P3-1（v3.0.7 审计）：写入失败不再只记日志——覆盖式回执「撤销未保存」
+      // 并挂「重试」action（同款 habitUndo 路由；provider 失败已回滚内存，
+      // 重试 = 干净的再次 -1）。与打卡侧、任务撤销侧（showTaskUndoNotSaved）
+      // 口径对齐：通知 action 不可静默、不可谎报。
+      // id 用插值（AppLog.d release 为 no-op，纯常量实参会被 AOT 整体消除；
+      // 插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
+      AppLog.d('[通知] 撤销写入失败 id=${habit.id}，回报「撤销未保存」');
+      NotificationService.instance.showHabitUndoNotSaved(
+        habit,
+        value: hp.todayValue(habit),
+        target: habit.effectiveTarget,
+      );
       return;
     }
     // U2-1（v3.0.5 审计）：登记「9 号槽已有确认条」，供 App 内后续写入
@@ -668,9 +700,18 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
     // 因此不再生成确认条——U2-1）。
     hp.adjustCheckInValue(habit, now, 1).then((ok) {
       if (!ok) {
-        // 写入失败：不报成功（通知 action 不可弹错误提示）。id 用插值（同上：
-        // 纯常量实参被 AOT 消除，插值模板片段必进快照）。
-        AppLog.d('[通知] 打卡写入失败 id=${habit.id}，不回报「已记 x/y」');
+        // P3-1（v3.0.7 审计）：写入失败不再只记日志——与打卡确认、撤销回执
+        // 对齐「通知 action 不可静默」口径（v3.0.5 U3-1 确立；下方旧注释
+        // 「通知 action 不可弹错误提示」已被 v3.0.6 的 showTaskUndoNotSaved
+        // 自证过时）。覆盖式回执「打卡未保存」并挂习惯 action（provider 失败
+        // 已回滚内存，重试 = 干净的再次 +1）。
+        // id 用插值（同上：纯常量实参被 AOT 消除，插值模板片段必进快照）。
+        AppLog.d('[通知] 打卡写入失败 id=${habit.id}，回报「打卡未保存」');
+        NotificationService.instance.showHabitCheckInNotSaved(
+          habit,
+          value: hp.todayValue(habit),
+          target: habit.effectiveTarget,
+        );
         return;
       }
       // 按完成后的真实进度回报（+1 后通常未达标 → 如实显示「已记 x/y」）。
@@ -694,7 +735,10 @@ void _doHabitCheckIn(NavigatorState nav, String habitId) {
   // 不再被持久层吞掉），按返回值分支回报。
   hp.checkInOnDay(habit, now).then((ok) {
     if (!ok) {
-      AppLog.d('[通知] 打卡写入失败 id=${habit.id}，不回报「已打卡 ✓」');
+      // P3-1（v3.0.7 审计）：同量化分支——落盘失败覆盖式回执「打卡未保存」
+      // （挂习惯 action，重试 = 干净的再次打卡），不再只记日志。
+      AppLog.d('[通知] 打卡写入失败 id=${habit.id}，回报「打卡未保存」');
+      NotificationService.instance.showHabitCheckInNotSaved(habit);
       return;
     }
     // U2-1（v3.0.5 审计）：show 前登记确认条标记（同上）。
@@ -867,13 +911,39 @@ void _doComplete(NavigatorState nav, String? taskId) {
   // 快照保留——用户仍可走「撤销」路径回滚内存态。
   provider.setStatus(taskId, TaskStatus.done).then((ok) {
     if (!ok) {
+      // P3-1（v3.0.7 审计）：落盘失败不再只记日志——setStatus 在落盘前已撤掉
+      // 源提醒（_reconcileDeadlineOnCompletion → cancel），通知消失后用户零反馈、
+      // 只能进 App 自己核对；v3.0.5 U3-1 起确立「通知 action 不可静默」口径，
+      // v3.0.6 又已给撤销侧补了 showTaskUndoNotSaved，此处的静默成为同一文件内
+      // 的不对称。现覆盖式回执「完成未保存」并挂「重试」action（走
+      // persistNow 真正重试落盘；setStatus 幂等早退不会再写盘，不能直接重调）。
       // id 用插值（AppLog.d release 为 no-op，纯常量实参会被 AOT 整体消除；
       // 插值模板片段必进快照——v3.0.4 门禁哨兵依据）。
-      AppLog.d('[通知] 完成写入失败 id=$taskId，不回报「已完成 ✓」');
+      AppLog.d('[通知] 完成写入失败 id=$taskId，回报「完成未保存」');
+      NotificationService.instance.showCompleteNotSaved(taskId, task.title);
       return;
     }
     // 覆盖式确认通知：用任务通知 id，用户一眼可见「已完成」，且不会叠加新通知。
     NotificationService.instance.showCompletedConfirm(taskId, task.title);
+  });
+}
+
+/// P3-1（v3.0.7 审计）：「完成未保存」回执的「重试」action 消费端——显式把
+/// 当前内存态整体写库（[TaskProvider.persistNow]）。为什么不能直接重调
+/// `setStatus(taskId, done)`：任务在内存里已是完成态，setStatus 的幂等早退
+/// 分支（v3.0.5 固化口径：幂等早退 = true、无写入 ≠ 失败）会直接返回成功而
+/// 不落盘——用户将拿到第二个假确认。成功後补弹「已完成 ✓」确认；仍失败则
+/// 保留原回执（内容不变，用户可再点一次）。
+void _doRetrySave(NavigatorState nav, String taskId) {
+  final provider = Provider.of<TaskProvider>(nav.context, listen: false);
+  provider.persistNow().then((ok) {
+    if (!ok) {
+      AppLog.d('[通知] 重试保存仍失败 id=$taskId，保留「完成未保存」回执');
+      return;
+    }
+    final t = provider.byId(taskId);
+    NotificationService.instance
+        .showCompletedConfirm(taskId, t?.title ?? '无标题任务');
   });
 }
 
@@ -1380,6 +1450,12 @@ class _MainScaffoldState extends State<MainScaffold>
         NotificationService.habitEntityId(entity),
         confirmDate: NotificationService.habitEntityDate(entity),
       );
+    }
+    // P3-1（v3.0.7 审计）：「完成未保存」的「重试」补执行——persistNow 不依赖
+    // 快照，冷启动入队后直接写库即可；与「撤销」同位消费（无需确认框：
+    // 重试只是把用户已确认过的完成态持久化，不引入新写入意图）。
+    while (_pendingRetrySaveTaskIds.isNotEmpty) {
+      _doRetrySave(state, _pendingRetrySaveTaskIds.removeAt(0));
     }
   }
 

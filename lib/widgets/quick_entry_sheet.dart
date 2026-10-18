@@ -11,6 +11,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 
 /// 快速录入弹层：一行自然语言直接建任务。
 ///
@@ -104,14 +105,24 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   }
 
   /// 直接入库并关闭
-  void _submit() {
+  Future<void> _submit() async {
     if (!_parsed.isValid) return;
     final provider = context.read<TaskProvider>();
     // P1-11：分享接收的附件随任务一并保存，并把暂存目录提升为正式目录。
     final base = _parsed.toTask();
-    final created = provider.addTask(base.copyWith(
+    // P2-2（v3.0.7 审计）：消费新建落盘结果——null = 落盘失败且 provider 已
+    // 回滚内存。旧实现 fire-and-forget 后直接 pop：列表立刻出现、重启即丢且
+    // 零提示。失败停留本层提示（输入内容还在，重试不造重复任务），暂存附件
+    // 不提升（dispose 按未消费清理）。
+    final created = await provider.addTask(base.copyWith(
       attachments: _pendingAttachment != null ? [_pendingAttachment!] : const [],
     ));
+    if (created == null) {
+      if (context.mounted) {
+        showTaskPersistFailedHint(context, provider: provider);
+      }
+      return;
+    }
     if (_attachmentSession != null) {
       AttachmentService.promoteStaging(_attachmentSession!, created.id)
           .catchError((_) {});

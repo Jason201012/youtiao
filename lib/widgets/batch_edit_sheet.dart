@@ -37,13 +37,17 @@ class BatchEditSheet {
   }
 }
 
-/// 批量编辑的返回值（[TaskProvider.batchUpdateAs] 的 `(batchId, count)` 具名化）。
+/// 批量编辑的返回值（[TaskProvider.batchUpdateAs] 的 `(batchId, count, saved)`
+/// 具名化）。
 ///
-/// [batchId] 供 [TaskProvider.undoBatchEdit] 定向撤销；[count] 为实际更新条数。
+/// [batchId] 供 [TaskProvider.undoBatchEdit] 定向撤销；[count] 为实际更新条数；
+/// [saved] 为本次批量落盘是否成功（P2-2，v3.0.7 审计——旧实现丢弃 `_persist()`
+/// 结果，DB 异常时横幅照弹、重启回退且零反馈；无实际变更时恒 true）。
 class BatchEditResult {
   final int batchId;
   final int count;
-  const BatchEditResult(this.batchId, this.count);
+  final bool saved;
+  const BatchEditResult(this.batchId, this.count, {this.saved = true});
 }
 
 /// 截止日期改动模式。
@@ -185,8 +189,11 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     }
 
     // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次编辑）。
-    final r = provider.batchUpdateAs(widget.ids, transform);
-    Navigator.pop(context, BatchEditResult(r.$1, r.$2));
+    // P2-2（v3.0.7 审计）：batchUpdateAs 异步化并透传落盘结果（saved 随
+    // BatchEditResult 回传给调用方消费）。
+    final r = await provider.batchUpdateAs(widget.ids, transform);
+    if (!mounted) return;
+    Navigator.pop(context, BatchEditResult(r.$1, r.$2, saved: r.$3));
   }
 
   @override

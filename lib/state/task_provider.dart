@@ -551,17 +551,27 @@ class TaskProvider extends ChangeNotifier {
   Set<String> get archivedTags => Set.unmodifiable(_archivedTags);
 
   /// 归档标签：标记为不可见但保留数据。返回是否实际变更。
-  Future<void> archiveTag(String name) async {
-    if (!_archivedTags.add(name)) return;
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（`_persist()` 结果；集合未变 =
+  /// true 无操作）。归档态本身走 SharedPreferences（[_persistTagArchive]），
+  /// 任务表改动（rename/merge/delete 会触发）才走 `_persist()`。
+  Future<bool> archiveTag(String name) async {
+    if (!_archivedTags.add(name)) return true;
     notifyListeners();
+    final ok = await _persist();
     await _persistTagArchive();
+    return ok;
   }
 
   /// 取消归档：重新在首页筛选中可见。
-  Future<void> unarchiveTag(String name) async {
-    if (!_archivedTags.remove(name)) return;
+  ///
+  /// P2-2（v3.0.7 审计）：同 [archiveTag] 透传落盘结果。
+  Future<bool> unarchiveTag(String name) async {
+    if (!_archivedTags.remove(name)) return true;
     notifyListeners();
+    final ok = await _persist();
     await _persistTagArchive();
+    return ok;
   }
 
   /// 重命名标签：全库替换所有任务上的 [oldName] 为 [newName]，并持久化。
@@ -570,8 +580,10 @@ class TaskProvider extends ChangeNotifier {
   /// P2-23：原实现循环内逐条 `updateTask`，每条都会 notifyListeners + 全量落库，
   /// 500 条任务的标签重命名 = 501 次全量序列化。现改为循环内只改内存
   /// （[`_applyTaskUpdate`] 不 notify / 不落库），循环后统一 notify + 落库一次。
-  Future<void> renameTag(String oldName, String newName) async {
-    if (oldName == newName || newName.trim().isEmpty) return;
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（无实际变更 = true 无操作）。
+  Future<bool> renameTag(String oldName, String newName) async {
+    if (oldName == newName || newName.trim().isEmpty) return true;
     final trimmed = newName.trim();
     var changed = false;
     for (final t in _tasks) {
@@ -584,17 +596,21 @@ class TaskProvider extends ChangeNotifier {
     if (_archivedTags.remove(oldName)) {
       _archivedTags.add(trimmed);
     }
+    var ok = true;
     if (changed) {
       notifyListeners();
-      await _persist();
+      ok = await _persist();
     }
     await _persistTagArchive();
+    return ok;
   }
 
   /// 合并标签：把 [source] 标签的所有任务改为 [target] 标签，然后删除 [source]。
   /// P2-23：同样改为「逐条改内存 + 单次落库」，消除 N 倍写放大。
-  Future<void> mergeTags(String source, String target) async {
-    if (source == target) return;
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（无实际变更 = true 无操作）。
+  Future<bool> mergeTags(String source, String target) async {
+    if (source == target) return true;
     var changed = false;
     for (final t in _tasks) {
       if (t.tags.contains(source)) {
@@ -610,16 +626,20 @@ class TaskProvider extends ChangeNotifier {
       }
     }
     _archivedTags.remove(source);
+    var ok = true;
     if (changed) {
       notifyListeners();
-      await _persist();
+      ok = await _persist();
     }
     await _persistTagArchive();
+    return ok;
   }
 
   /// 删除标签：从所有任务中移除 [name]。
   /// P2-23：同样改为「逐条改内存 + 单次落库」。
-  Future<void> deleteTag(String name) async {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（无实际变更 = true 无操作）。
+  Future<bool> deleteTag(String name) async {
     var changed = false;
     for (final t in _tasks) {
       if (t.tags.contains(name)) {
@@ -628,11 +648,13 @@ class TaskProvider extends ChangeNotifier {
       }
     }
     _archivedTags.remove(name);
+    var ok = true;
     if (changed) {
       notifyListeners();
-      await _persist();
+      ok = await _persist();
     }
     await _persistTagArchive();
+    return ok;
   }
 
   /// 某标签下的任务数（含所有状态）。
@@ -1098,7 +1120,9 @@ class TaskProvider extends ChangeNotifier {
       for (final issue in report.issues) {
         if (issue.type != DataHealthIssueType.staleTrash) continue;
         if (_trash.indexWhere((x) => x.id == issue.taskId) < 0) continue;
-        permanentDelete(issue.taskId);
+        // P2-2（v3.0.7 审计）：permanentDelete 异步化（透传落盘结果），此处
+        // 需 await——修复流程末尾还有一次统一 _persist()，单个失败不阻断整体。
+        await permanentDelete(issue.taskId);
         permanent++;
       }
       notifyListeners();
@@ -1121,7 +1145,9 @@ class TaskProvider extends ChangeNotifier {
     for (final issue in report.issues) {
       if (issue.type != DataHealthIssueType.duplicateTask) continue;
       if (issue.relatedIds.isEmpty) continue;
-      deleteTasksAs(issue.relatedIds);
+      // P2-2（v3.0.7 审计）：deleteTasksAs 异步化，同 await（失败已回滚内存，
+      // 计数仍按报告条数计——修复结果对话框另有失败提示通道）。
+      await deleteTasksAs(issue.relatedIds);
       fixed += issue.relatedIds.length;
     }
 
@@ -2139,15 +2165,20 @@ class TaskProvider extends ChangeNotifier {
 
   /// 专注会话回填：把某次专注时长（秒）累加到关联任务的 [Task.focusSecTotal]，
   /// 并持久化。任务已删除（不在 _tasks）则忽略。回调自 FocusProvider.addSession。
-  void addFocusSec(String taskId, int sec) {
-    if (sec <= 0) return;
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（旧实现 fire-and-forget `_persist()`，
+  /// DB 异常时累计专注仅存内存、重启回退且零反馈）。专注回调（main 的
+  /// onFocusRecorded）仍是 void 契约，暂不消费返回值——失败由顶部横幅与后续
+  /// 任意成功写入的全量替换自愈，与任务侧「修改类写入口不内存回滚」口径一致。
+  Future<bool> addFocusSec(String taskId, int sec) async {
+    if (sec <= 0) return true;
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     _tasks[i] = _tasks[i].copyWith(
       focusSecTotal: _tasks[i].focusSecTotal + sec,
     );
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// P2-9（v2.9.6 审计）：与 [addFocusSec] **对称**的扣减——专注记录被删除时
@@ -2155,30 +2186,34 @@ class TaskProvider extends ChangeNotifier {
   /// `addSession` 又回填一次，任务的「已专注」凭空多出一段，直接污染详情页
   /// 「预估 vs 实际」偏差与排程建议等下游口径。结果夹到 0，防御重复扣减与脏
   /// 数据；任务已删除则忽略。回调自 FocusProvider.removeSession。
-  void removeFocusSec(String taskId, int sec) {
-    if (sec <= 0) return;
+  ///
+  /// P2-2（v3.0.7 审计）：同 [addFocusSec] 透传落盘结果。
+  Future<bool> removeFocusSec(String taskId, int sec) async {
+    if (sec <= 0) return true;
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     _tasks[i] = _tasks[i].copyWith(
       focusSecTotal: _tasks[i].focusSecTotal - sec > 0
           ? _tasks[i].focusSecTotal - sec
           : 0,
     );
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 拖拽重排某分区内的任务顺序：把分区当前显示列表的 [oldIndex] 移到 [newIndex]，
   /// 并把它及其后续任务的 [Task.order] 顺次写为 1,2,3…，使手动顺序持久化（order 优先于日期排序）。
-  void reorderTasks(String section, int oldIndex, int newIndex) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（下标守卫不命中 = 无操作 → true）。
+  Future<bool> reorderTasks(String section, int oldIndex, int newIndex) async {
     final list = homeTasks[section];
-    if (list == null || list.isEmpty) return;
-    if (oldIndex < 0 || oldIndex >= list.length) return;
-    if (newIndex < 0 || newIndex > list.length) return;
+    if (list == null || list.isEmpty) return true;
+    if (oldIndex < 0 || oldIndex >= list.length) return true;
+    if (newIndex < 0 || newIndex > list.length) return true;
     final reordered = List<Task>.from(list);
     // Flutter ReorderableListView 的 newIndex 系「移除后」下标，下移需 -1 对齐。
     final insertAt = oldIndex < newIndex ? newIndex - 1 : newIndex;
-    if (insertAt < 0 || insertAt >= reordered.length) return;
+    if (insertAt < 0 || insertAt >= reordered.length) return true;
     final moved = reordered.removeAt(oldIndex);
     reordered.insert(insertAt, moved);
     for (var i = 0; i < reordered.length; i++) {
@@ -2189,7 +2224,7 @@ class TaskProvider extends ChangeNotifier {
       }
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// F-12：对外暴露的「偏好已变更，请重建」入口。
@@ -2307,15 +2342,18 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 切换某任务的某个子任务勾选态，并持久化。
-  void toggleSubTask(String taskId, String subId) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false；旧实现
+  /// fire-and-forget，DB 异常时勾选仅存内存、重启回退且零反馈）。
+  Future<bool> toggleSubTask(String taskId, String subId) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final subs = _tasks[i].subtasks.map((s) {
       return s.id == subId ? s.copyWith(done: !s.done) : s;
     }).toList();
     _tasks[i] = _tasks[i].copyWith(subtasks: subs);
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// P2-1（v3.0.5 审计）：返回落盘是否成功（任务不存在 = false）。既有调用方
@@ -2350,12 +2388,16 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 切换任务置顶/星标状态：置顶任务在所属分区内固定排最前（优先于手动 order）。
-  void togglePinned(String id) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false）。当前无 App 内
+  /// 调用点（命令面板/行内菜单均未接线），签名随本轮 provider 统一约定迁移，
+  /// 保证后续入口开箱即是透传语义。
+  Future<bool> togglePinned(String id) async {
     final i = _tasks.indexWhere((t) => t.id == id);
-    if (i == -1) return;
+    if (i == -1) return false;
     _tasks[i] = _tasks[i].copyWith(pinned: !_tasks[i].pinned);
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 把 DateTime 格式化为 yyyy-MM-dd（date-only），与 [Task.skipDates] 的存储格式一致。
@@ -2481,15 +2523,19 @@ class TaskProvider extends ChangeNotifier {
   /// 本次跳过：把 [day]（默认今天）追加进任务的 [Task.skipDates]。
   /// 跳过 ≠ 完成——当天不出现、不打卡、不影响连续天数；次日恢复正常。
   /// 对 interval 重复任务额外重排提醒，避免「跳过当天仍弹提醒」。
-  void skipOccurrence(String taskId, {DateTime? day}) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false；已是跳过态 =
+  /// true 幂等早退）。旧实现 fire-and-forget，DB 异常时弹层照显「已跳过」、
+  /// 重启回退且零反馈。
+  Future<bool> skipOccurrence(String taskId, {DateTime? day}) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final d = day ?? DateTime.now();
     final now = DateTime.now();
     final isToday =
         d.year == now.year && d.month == now.month && d.day == now.day;
     final ymd = _ymd(DateTime(d.year, d.month, d.day));
-    if (_tasks[i].skipDates.contains(ymd)) return; // 已跳过，幂等
+    if (_tasks[i].skipDates.contains(ymd)) return true; // 已跳过，幂等
     // F-7：跳过日期在其 occurrence 过去后即无用途，统一走滚动保留窗口清掉。
     final skip2 = [..._tasks[i].skipDates, ymd];
     var updated = _tasks[i].copyWith(
@@ -2511,7 +2557,7 @@ class TaskProvider extends ChangeNotifier {
       _scheduleRemindersFor(updated);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// P2-1：撤销一次 [skipOccurrence]——把 [day]（默认今天）从 [Task.skipDates] 移除。
@@ -2519,15 +2565,17 @@ class TaskProvider extends ChangeNotifier {
   /// 与 skipOccurrence 严格互逆（幂等：不在列表里则什么都不做），供「移到下一天」的
   /// 撤销使用——原实现只删副本、不退 skipDates，撤销后原日仍显示「已跳过」，
   /// UI 对用户说谎。方法内部同样重排提醒，避免撤销后当天提醒仍被跳过。
-  void unskipOccurrence(String taskId, {DateTime? day}) {
+  ///
+  /// P2-2（v3.0.7 审计）：同 [skipOccurrence] 透传落盘结果。
+  Future<bool> unskipOccurrence(String taskId, {DateTime? day}) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final d = day ?? DateTime.now();
     final now = DateTime.now();
     final isToday =
         d.year == now.year && d.month == now.month && d.day == now.day;
     final ymd = _ymd(DateTime(d.year, d.month, d.day));
-    if (!_tasks[i].skipDates.contains(ymd)) return; // 未跳过，幂等
+    if (!_tasks[i].skipDates.contains(ymd)) return true; // 未跳过，幂等
     // F-7：顺带把已过期的跳过日期一并清掉（历史版本可能留下超期条目）。
     final remaining =
         _tasks[i].skipDates.where((s) => s != ymd).toList();
@@ -2541,7 +2589,7 @@ class TaskProvider extends ChangeNotifier {
       _scheduleRemindersFor(updated);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// T2-5（v2.9.2 功能增强）：把重复任务从今天（含）暂停到 [until]（含）。
@@ -2565,13 +2613,20 @@ class TaskProvider extends ChangeNotifier {
   /// - 写入前过 [Task.pruneHistory] 滚动窗口，与 [skipOccurrence] 同口径；
   /// - 写入后撤挂 + 重排提醒（首个落点顺延到暂停区间之后）。
   ///
-  /// 返回实际生效的暂停终点（date-only）；整体无操作时返回 null——调用方据此
-  /// 决定是否弹「已暂停至 M/d」提示（此前用用户选择的日期，可能与实际不符）。
-  DateTime? pauseRepeatsUntil(String taskId, DateTime until) {
+  /// 返回实际生效的暂停终点（date-only）与落盘结果；整体无操作时 [until] 为
+  /// null——调用方据此决定是否弹「已暂停至 M/d」提示（此前用用户选择的日期，
+  /// 可能与实际不符）。
+  ///
+  /// P2-2（v3.0.7 审计）：旧实现 fire-and-forget `_persist()`，DB 异常时
+  /// 「已暂停至 M/d」横幅照弹、重启回退且零反馈。现返回具名记录
+  /// `(until, saved)`：until 非空 + saved=false 时调用方先弹写入失败提示
+  /// （内存暂停已生效、全量写自愈，仍给横幅与撤销入口，与完成族同口径）。
+  Future<({DateTime? until, bool saved})> pauseRepeatsUntil(
+      String taskId, DateTime until) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return null;
+    if (i == -1) return (until: null, saved: false);
     final src = _tasks[i];
-    if (!src.isRepeating || src.repeatEnded) return null; // P3-4：已结束重复不空写
+    if (!src.isRepeating || src.repeatEnded) return (until: null, saved: true); // P3-4：已结束重复不空写
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     var untilD = DateTime(until.year, until.month, until.day);
@@ -2580,7 +2635,7 @@ class TaskProvider extends ChangeNotifier {
         ? null
         : _parseYmdSafe(src.repeatUntil!);
     if (u != null && u.isBefore(untilD)) untilD = u;
-    if (untilD.isBefore(today)) return null;
+    if (untilD.isBefore(today)) return (until: null, saved: true);
     final set = <String>{...src.skipDates};
     for (var d = today; !d.isAfter(untilD); d = DateTime(d.year, d.month, d.day + 1)) {
       // 用「忽略跳过」的纯日历判定：已被单独跳过的日子补写无害（集合去重）。
@@ -2596,8 +2651,8 @@ class TaskProvider extends ChangeNotifier {
       _scheduleRemindersFor(_tasks[i]);
     }
     notifyListeners();
-    _persist();
-    return untilD;
+    final saved = await _persist();
+    return (until: untilD, saved: saved);
   }
 
   /// T2-5 配套：恢复重复——清除暂停窗口内的跳过日（P2-5，v2.9.9 审计）。
@@ -2607,13 +2662,16 @@ class TaskProvider extends ChangeNotifier {
   /// `[今天, 暂停终点]` 窗口内的键（终点 = [Task.pausedUntilDate]，无窗口则幂等
   /// 无操作）；窗口外的孤立未来跳过与过去的历史跳过记录（统计口径）不受影响。
   /// 恢复同时清除 [Task.pausedUntil] 显式窗口字段。
-  void resumeRepeats(String taskId) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 / 非重复 = false；
+  /// 无生效暂停窗口 = true 幂等无操作）。
+  Future<bool> resumeRepeats(String taskId) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final src = _tasks[i];
-    if (!src.isRepeating) return;
+    if (!src.isRepeating) return true;
     final end = src.pausedUntilDate;
-    if (end == null) return; // 无生效暂停窗口，幂等
+    if (end == null) return true; // 无生效暂停窗口，幂等
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final endKey = _ymd(end);
@@ -2632,8 +2690,7 @@ class TaskProvider extends ChangeNotifier {
         _scheduleRemindersFor(_tasks[i]);
       }
       notifyListeners();
-      _persist();
-      return;
+      return _persist();
     }
     _tasks[i] = src.copyWith(
       skipDates: Task.pruneHistory(remaining, now) ?? remaining,
@@ -2644,7 +2701,7 @@ class TaskProvider extends ChangeNotifier {
       _scheduleRemindersFor(_tasks[i]);
     }
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 结束重复：把 [Task.repeatUntil] 设为昨天，从今天起不再循环（保留历史任务不删）。
@@ -2659,9 +2716,11 @@ class TaskProvider extends ChangeNotifier {
   /// 结束的同时把任务置为已完成并计入今天的完成历史——任务直接落「已完成」分区，
   /// 而不是因 dueDate 被清空而落进「今天」分区还要用户再手动完成一次。
   /// 默认 false（「结束并保留待办」：任务留在「今天」分区由用户处置）。
-  void endRepeat(String taskId, {bool markDone = false}) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false）。
+  Future<bool> endRepeat(String taskId, {bool markDone = false}) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
-    if (i == -1) return;
+    if (i == -1) return false;
     final yesterday = DateTime.now().subtract(const Duration(days: 1));
     final now = DateTime.now();
     _tasks[i] = _tasks[i].copyWith(
@@ -2677,13 +2736,18 @@ class TaskProvider extends ChangeNotifier {
     );
     _cancelRemindersFor(_tasks[i].id);
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 仅此一次改期：跳过 [origDay]（默认今天）这一次 occurrence，并创建一条一次性副本任务，
   /// 截止时间设为 [newDay]（其余字段沿用原任务）。实现上即现有 [addTask]，无需新概念。
   ///
   /// P2-1：返回**新建的一次性副本**；调用方凭返回值的 id 精确撤销。
+  ///
+  /// P2-2（v3.0.7 审计）：随 [addTask] 一并异步化——null 现覆盖四种「未建成」：
+  /// 源任务不存在 / 同日改期 / 目标日为循环日 / 落盘失败（addTask 已回滚内存）。
+  /// 前三种与旧语义一致，第四种旧实现会把副本留在内存里（重启即丢）且调用方
+  /// 无从察觉。
   ///
   /// P3-3（v2.9.1 审计）：[newDay] 与 [origDay] 为同一天（把今天改到今天）时整体
   /// **无操作**——不跳过、不建副本，直接返回 null（旧实现会同日产生两条任务）。
@@ -2693,11 +2757,11 @@ class TaskProvider extends ChangeNotifier {
   /// 返回 null。此前 daily 任务「移到下一天」会把副本落到明天，而明天同时是循环日：
   /// 目标日循环提醒 + 副本一次性提醒双响，且循环任务完成后副本仍以未完成姿态挂着
   /// （「改期」变「复制」）。目标日若已被用户显式跳过（在 skipDates 里），仍照常建副本。
-  Task? rescheduleOnceOccurrence(
+  Future<Task?> rescheduleOnceOccurrence(
     String taskId,
     DateTime newDay, {
     DateTime? origDay,
-  }) {
+  }) async {
     final src = byId(taskId);
     if (src == null) return null;
     final orig = origDay ?? DateTime.now();
@@ -2712,7 +2776,7 @@ class TaskProvider extends ChangeNotifier {
     // 1) 防撞（F-2）：目标日是循环日 → 仅 skip 本次，交由原循环覆盖。
     final coveredByLoop = src.repeatsOn(target);
     // 2) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
-    skipOccurrence(taskId, day: origDay0);
+    await skipOccurrence(taskId, day: origDay0);
     if (coveredByLoop) return null;
     // 3) 创建一次性副本（repeat=none），dueDate 指向改期后的日期，其余沿用。
     // F-4：副本的提醒时刻必须优先取「该重复原本的提醒时刻」[Task.repeatMinute]，
@@ -2772,7 +2836,14 @@ class TaskProvider extends ChangeNotifier {
   /// 新建任务：插入到列表头部，自动分配唯一 id；有截止时间或每日提醒则调度。
   /// 返回创建后的 [Task]（含已分配 id），便于调用方把暂存附件目录提升为正式目录
   /// （见 [new_task_sheet] 的附件保存流程）。
-  Task addTask(Task task) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回 `Future<Task?>`——null = 落盘失败且**已回滚内存**
+  /// （任务撤出列表、撤掉本次调度）。旧实现 fire-and-forget `_persist()` 后无条件
+  /// 返回 Task：DB 异常时列表立刻出现、重启即丢且零提示（新建是最高频写入口）。
+  /// 回滚口径与习惯侧 `addHabit` 失败一致（v3.0.6 审计）：调用方停留输入层并
+  /// 如实提示，暂存附件不提升、由弹层 dispose 清理，重试不会造出重复任务。
+  /// 注：自增序列号已被本次消费，不回退（id 只增不减，避免与已分配 id 碰撞）。
+  Future<Task?> addTask(Task task) async {
     // P0-3：若调用方传入了可安全复用的 id（如 iCal 导入的 youtiao UID），
     // 则保留该 id，使「从有条导出再导回」能稳定去重；否则用自增序列分配新 id。
     // 安全（P2-A）：见 [_canReuseExternalId]——不再无条件信任外部 id。
@@ -2793,9 +2864,23 @@ class TaskProvider extends ChangeNotifier {
     _tasks.insert(0, newTask);
     _scheduleRemindersFor(newTask);
     notifyListeners();
-    _persist();
+    final ok = await _persist();
+    if (!ok) {
+      // P2-2（v3.0.7 审计）：落盘失败回滚内存（见方法注释）——列表不出现
+      // 「重启即丢」的幽灵任务，调用方拿到 null 后停留输入层。
+      _tasks.removeWhere((t) => t.id == useId);
+      _cancelRemindersFor(useId);
+      notifyListeners();
+      return null;
+    }
     return newTask;
   }
+
+  /// P3-1（v3.0.7 审计）：把当前内存态整体写库一次（通知「完成未保存」回执的
+  /// 「重试」action 专用）。[_doComplete] 落盘失败时内存完成态已生效、仅缺持久化，
+  /// 而 `setStatus` 的幂等早退分支不会再写盘（v3.0.5 固化口径：幂等早退 = true、
+  /// 无写入 ≠ 失败），直接重调 setStatus 会拿到假成功，故暴露显式重试入口。
+  Future<bool> persistNow() => _persist();
 
   /// P0-3：iCal / CSV 导入幂等去重。
   /// [incoming] 为解析出的任务（其 id 已由解析层设为 youtiao UID 前缀，或无 UID 留空）；
@@ -3078,12 +3163,16 @@ class TaskProvider extends ChangeNotifier {
   /// 仅强制保留内部派生/不可编辑字段（id / status / completedAt / focusSecTotal / order）
   /// 自 [old] 取，避免丢失 tags / subtasks / reminderOffsetMin 等新字段
   /// （曾于 v1.9.4 / v2.3.3 / v2.3.4 / v2.5.0 多次踩坑）。
-  void updateTask(Task updated) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false）。旧实现
+  /// fire-and-forget：DB 异常时界面显示已生效、重启全部回退且零提示——
+  /// 编辑是任务详情页保存的唯一出口，属最高频写入口之一。按任务侧既定口径
+  /// 不做内存回滚（UI 显示即内存态，全量写自愈），由调用方弹写入失败提示。
+  Future<bool> updateTask(Task updated) async {
     final ok = _applyTaskUpdate(updated);
-    if (ok) {
-      notifyListeners();
-      _persist();
-    }
+    if (!ok) return false;
+    notifyListeners();
+    return _persist();
   }
 
   /// P2-4：把一次任务更新应用到内存列表（重算拼音 / 重排提醒），但**不** notify、
@@ -3195,15 +3284,17 @@ class TaskProvider extends ChangeNotifier {
   /// 「批量编辑 A → 10 秒内顺延 B → 点当前可见的那条横幅」会还原 B（缓冲里最后写入的），
   /// 而横幅文案说的是 A —— 用户看到「撤销」却撤销了别的操作。
   /// 改法：每次操作分配自增 [batchId]，快照进 `_editUndoLog`；撤销时按 id 取回对应快照。
-  int batchUpdate(List<String> ids, Task Function(Task) transform) =>
-      batchUpdateAs(ids, transform).$2;
+  Future<int> batchUpdate(List<String> ids, Task Function(Task) transform) async =>
+      (await batchUpdateAs(ids, transform)).$2;
 
   /// P0-1 / U1-2（v2.9.5 审计）：[batchUpdate] 的**定向**版本。
   ///
-  /// 返回 `(batchId, 实际更新条数)`。调用方应把 [batchId] 传给撤销横幅的
+  /// 返回 `(batchId, 实际更新条数, saved)`。调用方应把 [batchId] 传给撤销横幅的
   /// [undoBatchEdit]，而不是依赖「最近一次」——见 [batchUpdate] 的 U1-2 说明。
-  (int, int) batchUpdateAs(List<String> ids, Task Function(Task) transform) {
-    if (ids.isEmpty) return (0, 0);
+  /// P2-2（v3.0.7 审计）：[saved] = 本次批量落盘是否成功；无实际变更时恒 true。
+  Future<(int, int, bool)> batchUpdateAs(
+      List<String> ids, Task Function(Task) transform) async {
+    if (ids.isEmpty) return (0, 0, true);
     // 先快照再逐条更新：更新会改动 _tasks，边遍历边改不安全。
     final targets = ids.map(byId).whereType<Task>().toList();
     // F1：批量编辑一次性改写 N 条且无快照，历史上「+N 天数输错 / 分类选错」不可逆。
@@ -3216,14 +3307,17 @@ class TaskProvider extends ChangeNotifier {
       // P2-4：循环内只改内存（拼音/提醒重排照常逐条生效），循环后统一落库一次。
       if (_applyTaskUpdate(transform(t))) changed++;
     }
+    var saved = true;
     if (changed > 0) {
       // U1-2：只登记**确实改了内容**的那些（无变更则无可撤销之物）。
       _editUndoLog[batchId] = snapshot;
       _trimUndoLog(_editUndoLog);
       notifyListeners();
-      _persist();
+      // P2-2（v3.0.7 审计）：透传落盘结果——旧实现 fire-and-forget，
+      // DB 异常时「已更新 N 条任务」横幅照弹、重启回退且零反馈。
+      saved = await _persist();
     }
-    return (batchId, changed);
+    return (batchId, changed, saved);
   }
 
   // ===== 批量编辑（改前快照 + 撤销）=====
@@ -3275,16 +3369,21 @@ class TaskProvider extends ChangeNotifier {
   /// 就撤销那次操作，而不是「最近一次」。
   ///
   /// P2-2（v2.9.6 审计）：返回是否真正生效——缓冲被清（恢复备份 / 淘汰）或
-  /// 快照任务已全部不存在时返回 false，由 `showUndoSnackBar` 提示
+  /// 快照任务已全部不存在时 applied=false，由 `showUndoSnackBar` 提示
   /// 「撤销已失效」，不再静默 no-op（横幅承诺了「可撤销」，点了没反应比失败更糟）。
-  bool undoBatchEdit([int? batchId]) {
+  /// P2-2（v3.0.7 审计）：追加 [saved]（落盘结果）——旧实现丢弃 `_persist()`
+  /// 结果，落盘失败时内存撤销已生效、DB 未更新，调用方却只拿到 `true`
+  /// （与 restoreTaskSnapshot 的「存在语义」同款错位）。applied=true +
+  /// saved=false 时调用方应弹「写入失败」并仍按成功返回（全量写自愈），
+  /// 与 [taskUndoAction] 三分支口径对齐。
+  Future<({bool applied, bool saved})> undoBatchEdit([int? batchId]) async {
     final log = _editUndoLog;
-    if (log.isEmpty) return false;
+    if (log.isEmpty) return (applied: false, saved: false);
     final id = (batchId == null || batchId == 0)
         ? log.keys.reduce((a, b) => a > b ? a : b)
         : batchId;
     final batch = log.remove(id);
-    if (batch == null || batch.isEmpty) return false;
+    if (batch == null || batch.isEmpty) return (applied: false, saved: false);
     var changed = false;
     for (final orig in batch) {
       if (byId(orig.id) == null) continue; // 任务已不在列表（被删除），不允许复活
@@ -3292,22 +3391,27 @@ class TaskProvider extends ChangeNotifier {
       // （批量编辑本就不改这些字段），并复用提醒重排 / 拼音重算等既有逻辑。
       if (_applyTaskUpdate(orig)) changed = true;
     }
-    if (changed) {
-      notifyListeners();
-      _persist();
-    }
-    return changed;
+    if (!changed) return (applied: false, saved: false);
+    notifyListeners();
+    // P2-2（v3.0.7 审计）：透传落盘结果——applied=true + saved=false 时内存
+    // 撤销已生效（全量写自愈），调用方弹「写入失败」而非「撤销已失效」。
+    final saved = await _persist();
+    return (applied: true, saved: saved);
   }
 
   /// P0-2：把 [ids] 任务的截止日期整体改到 [targetDay]（date-only，保留原时刻）。
   /// 语义是「改期」而非「加天数」——过期多久都拉到同一天，重复任务的重锚点不受影响，
   /// 提醒由 [updateTask] 统一重排。无截止日期的任务原样保留。返回实际更新条数。
-  int postponeTo(List<String> ids, DateTime targetDay) =>
-      postponeToAs(ids, targetDay).$2;
+  ///
+  /// P2-2（v3.0.7 审计）：随 [batchUpdateAs] 异步化并透传落盘结果。
+  Future<int> postponeTo(List<String> ids, DateTime targetDay) async =>
+      (await postponeToAs(ids, targetDay)).$2;
 
-  /// P0-2 / U1-2（v2.9.5 审计）：[postponeTo] 的**定向**版本，返回 `(batchId, 条数)`。
+  /// P0-2 / U1-2（v2.9.5 审计）：[postponeTo] 的**定向**版本，返回
+  /// `(batchId, 条数, saved)`（末位为落盘结果，P2-2 v3.0.7 审计新增）。
   /// 顺延与批量编辑共用 [_editUndoLog]，故同样可被精确撤销。
-  (int, int) postponeToAs(List<String> ids, DateTime targetDay) =>
+  Future<(int, int, bool)> postponeToAs(
+          List<String> ids, DateTime targetDay) async =>
       batchUpdateAs(ids, (t) {
         final d = t.dueDate;
         if (d == null) return t;
@@ -3331,7 +3435,15 @@ class TaskProvider extends ChangeNotifier {
   ///
   /// U1-2（v2.9.5 审计）：原无返回值的 `_removeMany` 包装已无调用点，删除
   /// （analyze 曾报 unused_element）。
-  (int, List<Task>) _removeManyAs(List<String> ids) {
+  ///
+  /// P2-2（v3.0.7 审计）：异步化并透传落盘结果。落盘失败时**回滚内存**
+  /// （按原索引插回任务、撤掉回收站副本、重挂提醒、注销本次撤销缓冲）并返回
+  /// `(0, [])`——旧实现丢弃 `_persist()` 结果：列表已移除、DB 里还在，
+  /// 重启「复活」且零提示（task_detail 删除后直接 pop，连横幅都没有）。
+  /// 回滚口径与习惯侧 `deleteHabit` 失败分支一致（v3.0.6 审计 P3-2）：
+  /// 「界面所见 = 库内实际」，调用方据 null/0 提示「删除未生效，请重试」。
+  /// 注：自增 batchId 已被本次消费，不回退（只增不减）。
+  Future<(int, List<Task>)> _removeManyAs(List<String> ids) async {
     // 收集待删任务的原始索引与对象（升序）
     final toRemove = <int, Task>{};
     for (final id in ids) {
@@ -3374,7 +3486,22 @@ class TaskProvider extends ChangeNotifier {
     _deleteUndoLog[batchId] = _DeleteUndoEntry(batch, anchors);
     _trimUndoLog(_deleteUndoLog);
     notifyListeners();
-    _persist();
+    final ok = await _persist();
+    if (!ok) {
+      // P2-2（v3.0.7 审计）：落盘失败回滚内存（见方法注释）——按原索引升序
+      // 插回（此前按降序删除，升序插回可精确还原）；回收站副本撤掉；提醒
+      // 重挂；撤销缓冲注销（没有真删除，就无可撤销之物）。
+      for (final i in sortedIdx) {
+        _tasks.insert(i, toRemove[i]!);
+      }
+      _trash.removeWhere((t) => batch.any((b) => b.id == t.id));
+      for (final r in batch) {
+        _scheduleRemindersFor(r);
+      }
+      _deleteUndoLog.remove(batchId);
+      notifyListeners();
+      return (0, const <Task>[]);
+    }
     _syncTrashExpireNotice(); // P1-12：新入回收站后重排过期预告
     return (batchId, batch);
   }
@@ -3399,22 +3526,38 @@ class TaskProvider extends ChangeNotifier {
   /// 返回被删除的任务（用于撤销 / 提示）。
   ///
   /// U1-2：需要定向撤销时请改用 [deleteTaskAs]（拿到 `batchId`）。
-  Task? deleteTask(String id) => deleteTaskAs(id).$2;
+  ///
+  /// P2-2（v3.0.7 审计）：返回 `Future<Task?>`——null = 没删到（id 不存在）
+  /// **或**落盘失败（provider 已回滚内存，任务仍在列表）。旧实现
+  /// fire-and-forget 后直接 pop，删除失败零反馈。调用方（task_detail）据此
+  /// 停留并提示「删除未生效，请重试」，与习惯侧 `deleteHabit` 失败口径一致。
+  Future<Task?> deleteTask(String id) async {
+    final r = await deleteTaskAs(id);
+    return r.$2;
+  }
 
   /// [deleteTask] 的定向版本：返回 `(batchId, 被删任务)`。
-  /// `batchId == 0` 表示没删到任何东西（id 不存在），此时第二个元素为 null。
-  (int, Task?) deleteTaskAs(String id) {
-    final r = _removeManyAs([id]);
+  /// `batchId == 0` 表示没删到任何东西（id 不存在或落盘失败已回滚），
+  /// 此时第二个元素为 null。
+  Future<(int, Task?)> deleteTaskAs(String id) async {
+    final r = await _removeManyAs([id]);
     return (r.$1, r.$2.isEmpty ? null : r.$2.first);
   }
 
   /// 多选批量删除：一次删除多个任务（移入回收站，可整体撤销）。
   ///
   /// U1-2：需要定向撤销时请改用 [deleteTasksAs]。
-  void deleteTasks(List<String> ids) => deleteTasksAs(ids);
+  ///
+  /// P2-2（v3.0.7 审计）：返回是否删到且落盘成功（false 时已回滚内存）。
+  Future<bool> deleteTasks(List<String> ids) async {
+    final r = await deleteTasksAs(ids);
+    return r.$1 != 0;
+  }
 
   /// [deleteTasks] 的定向版本：返回 `(batchId, 被删任务列表)`。
-  (int, List<Task>) deleteTasksAs(List<String> ids) => _removeManyAs(ids);
+  /// 落盘失败（已回滚）时为 `(0, [])`。
+  Future<(int, List<Task>)> deleteTasksAs(List<String> ids) async =>
+      _removeManyAs(ids);
 
   /// 撤销一次删除（支持批量）：从回收站取回，按**邻居锚点**归位，恢复其本地提醒。
   ///
@@ -3432,14 +3575,19 @@ class TaskProvider extends ChangeNotifier {
   /// P2-2（v2.9.6 审计）：返回是否真正生效——缓冲为空 / 快照已被
   /// [_dropFromUndoBuffer] 作废（彻底删除、清空回收站）时返回 false，
   /// 由 `showUndoSnackBar` 提示「撤销已失效」，不再静默 no-op。
-  bool undoDelete([int? batchId]) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回具名记录 `(applied, saved)`（同 [undoBatchEdit]）——
+  /// 旧实现丢弃 `_persist()` 结果，落盘失败时任务已回到列表（内存撤销生效）、
+  /// DB 未更新，调用方却只拿到 `true`。applied=true + saved=false 时调用方
+  /// 弹「写入失败」并仍按成功返回（全量写自愈），不误报「撤销已失效」。
+  Future<({bool applied, bool saved})> undoDelete([int? batchId]) async {
     final log = _deleteUndoLog;
-    if (log.isEmpty) return false;
+    if (log.isEmpty) return (applied: false, saved: false);
     final id = (batchId == null || batchId == 0)
         ? log.keys.reduce((a, b) => a > b ? a : b)
         : batchId;
     final entry = log.remove(id);
-    if (entry == null || entry.tasks.isEmpty) return false;
+    if (entry == null || entry.tasks.isEmpty) return (applied: false, saved: false);
     final batch = entry.tasks;
     final anchors = entry.anchors;
     for (var k = 0; k < batch.length; k++) {
@@ -3454,9 +3602,9 @@ class TaskProvider extends ChangeNotifier {
       _renumberSection(_sectionNameOf(r));
     }
     notifyListeners();
-    _persist();
+    final saved = await _persist(); // P2-2（v3.0.7 审计）：透传落盘结果
     _syncTrashExpireNotice(); // P1-12：撤销删除后重排
-    return true;
+    return (applied: true, saved: saved);
   }
 
   /// F-05：按邻居锚点解析撤销插入位置（见 [undoDelete] 的三档兜底）。
@@ -3494,16 +3642,20 @@ class TaskProvider extends ChangeNotifier {
   }
 
   /// 从回收站恢复任务到任务列表（清除 deletedAt，放回顶部），并恢复其本地提醒。
-  void restoreFromTrash(String id) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（不在回收站 = false）。旧实现
+  /// fire-and-forget：DB 异常时列表已恢复、重启又回回收站且零反馈。
+  Future<bool> restoreFromTrash(String id) async {
     final i = _trash.indexWhere((t) => t.id == id);
-    if (i == -1) return;
+    if (i == -1) return false;
     final t = _trash.removeAt(i);
     final restored = t.copyWith(deletedAt: null);
     _tasks.insert(0, restored);
     _scheduleRemindersFor(restored);
     notifyListeners();
-    _persist();
+    final ok = await _persist();
     _syncTrashExpireNotice(); // P1-12：恢复后重排
+    return ok;
   }
 
   /// P2-1：把一条**活动列表**中的任务直接移除（不进回收站）。
@@ -3515,10 +3667,15 @@ class TaskProvider extends ChangeNotifier {
   /// 本方法用于清掉「系统自动生成、用户从未要求保留」的一次性副本——
   /// 放进回收站反而会让用户困惑。附件目录一并清理，避免孤立文件。
   /// 幂等：id 不存在时什么都不做。
-  void discardTask(String id) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（id 不存在 = true 幂等无操作）。
+  /// 不内存回滚（与删除族不同）：本方法的调用方是「移到下一天」等复合撤销
+  /// 闭包，按 `byId(copy.id) == null` 判内存移除是否生效（见
+  /// [consumeUndoWrite]），回滚反而会破坏该判据。
+  Future<bool> discardTask(String id) async {
     final before = _tasks.length;
     _tasks.removeWhere((t) => t.id == id);
-    if (_tasks.length == before) return; // 不存在，幂等
+    if (_tasks.length == before) return true; // 不存在，幂等
     _cancelRemindersFor(id);
     // P0-1 一致：彻底移除时一并清理附件目录，避免孤立文件长期占用空间。
     AttachmentService.removeDir(id);
@@ -3526,11 +3683,14 @@ class TaskProvider extends ChangeNotifier {
     // 再点删除撤销」把已清理附件的任务复活成「文件不存在」。
     _dropFromUndoBuffer(id);
     notifyListeners();
-    _persist();
+    return _persist();
   }
 
   /// 在回收站中彻底删除某任务（不可恢复），并取消其本地提醒。
-  void permanentDelete(String id) {
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（不在回收站 = false）。旧实现
+  /// fire-and-forget：DB 异常时回收站条目已消失、重启又回来且零反馈。
+  Future<bool> permanentDelete(String id) async {
     _trash.removeWhere((t) => t.id == id);
     _cancelRemindersFor(id);
     // P0-1：彻底删除时一并清理其附件目录，避免孤立文件长期占用空间。
@@ -3540,13 +3700,16 @@ class TaskProvider extends ChangeNotifier {
     // 任务复活但附件已删，详情页附件全部「文件不存在」。
     _dropFromUndoBuffer(id);
     notifyListeners();
-    _persist();
+    final ok = await _persist();
     _syncTrashExpireNotice(); // P1-12：彻底删除后重排
+    return ok;
   }
 
   /// 清空回收站（全部彻底删除），并取消其中所有任务的本地提醒。
-  void clearTrash() {
-    if (_trash.isEmpty) return;
+  ///
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（回收站已空 = true 幂等无操作）。
+  Future<bool> clearTrash() async {
+    if (_trash.isEmpty) return true;
     for (final t in _trash) {
       _cancelRemindersFor(t.id);
       // P0-1：清理附件目录。
@@ -3557,8 +3720,9 @@ class TaskProvider extends ChangeNotifier {
     // U1-2：改为清空整张定向缓冲（不再只是「最近一次」那一条）。
     if (_deleteUndoLog.isNotEmpty) _deleteUndoLog.clear();
     notifyListeners();
-    _persist();
+    final ok = await _persist();
     NotificationService.instance.cancelTrashExpireNotice(); // P1-12：清空回收站即取消预告
+    return ok;
   }
 
   /// 完整备份数据（任务 + 偏好 + 可选回收站），用于「备份与恢复」导出。

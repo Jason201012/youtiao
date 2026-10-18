@@ -139,7 +139,8 @@ void main() {
         'notifications_enabled': false,
       }));
       final before = p.tasks.length;
-      final copy = p.rescheduleOnceOccurrence(
+      // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 异步化（下同）。
+      final copy = await p.rescheduleOnceOccurrence(
         '301',
         today.add(const Duration(days: 1)),
         origDay: today,
@@ -173,7 +174,7 @@ void main() {
         'notifications_enabled': false,
       }));
       final before = p.tasks.length;
-      final copy = p.rescheduleOnceOccurrence('302', target, origDay: today);
+      final copy = await p.rescheduleOnceOccurrence('302', target, origDay: today);
       expect(copy, isNotNull, reason: '目标日不是循环日 → 副本仍需承载这一次');
       expect(p.tasks.length, before + 1);
       expect(copy!.repeat, RepeatType.none);
@@ -191,7 +192,7 @@ void main() {
         'notifications_enabled': false,
       }));
       final before = p.tasks.length;
-      final copy = p.rescheduleOnceOccurrence('303', today, origDay: today);
+      final copy = await p.rescheduleOnceOccurrence('303', today, origDay: today);
       // P3-3（v2.9.1 审计）：原实现会「skip 今天 + 新建一条 dueDate=今天的一次性副本」，
       // 于是同一天出现两条任务，且副本的提醒时刻（原 repeatMinute）多半已过、静默不响。
       // 现在目标日 == 原日属**整体无操作**：不跳过、不建副本、返回 null。

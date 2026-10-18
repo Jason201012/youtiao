@@ -158,8 +158,9 @@ void main() {
         [mk('999999', title: '外部任务')],
         ['999999@youtiao'],
       ));
-      final a = p.addTask(mk('', title: 'A'));
-      final b = p.addTask(mk('', title: 'B'));
+      // P2-2（v3.0.7 审计）：addTask 异步化（落盘失败返回 null 并回滚内存）。
+      final a = (await p.addTask(mk('', title: 'A')))!;
+      final b = (await p.addTask(mk('', title: 'B')))!;
       expect(a.id, isNot(b.id), reason: '新建任务 id 必须互不相同');
       expect(p.tasks.where((t) => t.id == a.id).length, 1);
       expect(p.tasks.where((t) => t.id == b.id).length, 1);
@@ -171,7 +172,8 @@ void main() {
         [mk('42', title: '外部'), mk('77', title: '外部2')],
         ['42@youtiao', '77@youtiao'],
       ));
-      final fresh = p.addTask(mk('', title: '新建'));
+      // P2-2（v3.0.7 审计）：addTask 异步化。
+      final fresh = (await p.addTask(mk('', title: '新建')))!;
       final ids = p.tasks.map((t) => t.id).toList();
       expect(ids.where((i) => i == fresh.id).length, 1);
       expect(fresh.id, isNot('42'));
@@ -188,26 +190,27 @@ void main() {
       final b = mk('2', title: 'B', due: DateTime(2026, 9, 2, 9));
       final p = await buildWith([a, b]);
 
-      final n = p.batchUpdate(['1', '2'], (t) => t.copyWith(pinned: true));
+      // P2-2（v3.0.7 审计）：batchUpdate 异步化并透传落盘结果。
+      final n = await p.batchUpdate(['1', '2'], (t) => t.copyWith(pinned: true));
       expect(n, 2);
       expect(p.byId('1')!.pinned, isTrue);
       expect(p.byId('2')!.pinned, isTrue);
 
       // 未命中的 id 静默跳过，不影响返回值
-      final m = p.batchUpdate(['1', '不存在的id'], (t) => t);
+      final m = await p.batchUpdate(['1', '不存在的id'], (t) => t);
       expect(m, 1);
     });
 
     test('batchUpdate 空列表安全返回 0', () async {
       final p = await buildWith([mk('1')]);
-      expect(p.batchUpdate([], (t) => t.copyWith(pinned: true)), 0);
+      expect(await p.batchUpdate([], (t) => t.copyWith(pinned: true)), 0);
     });
 
     test('postponeTo 平移截止日期并保留原时刻', () async {
       final old = mk('1', title: 'A', due: DateTime(2020, 1, 1, 14, 30));
       final p = await buildWith([old]);
       final target = DateTime(2026, 8, 30);
-      final n = p.postponeTo(['1'], target);
+      final n = await p.postponeTo(['1'], target);
       expect(n, 1);
       final d = p.byId('1')!.dueDate!;
       expect(d.year, 2026);
@@ -220,7 +223,8 @@ void main() {
     test('postponeTo 跳过无截止日期的任务（不凭空造截止日）', () async {
       final t = mk('1', title: '无截止');
       final p = await buildWith([t]);
-      expect(p.postponeTo(['1'], DateTime(2026, 8, 30)), 1); // 仍计入"已处理"
+      // P2-2（v3.0.7 审计）：postponeTo 异步化并透传落盘结果。
+      expect(await p.postponeTo(['1'], DateTime(2026, 8, 30)), 1); // 仍计入"已处理"
       expect(p.byId('1')!.dueDate, isNull, reason: '不应给无截止任务硬塞日期');
     });
 
@@ -228,7 +232,7 @@ void main() {
       final a = mk('1', title: 'A');
       final b = mk('2', title: 'B');
       final p = await buildWith([a, b]);
-      p.batchUpdate(['1', '2'], (t) => t.copyWith(
+      await p.batchUpdate(['1', '2'], (t) => t.copyWith(
             priority: Priority.high,
             category: Category.study,
             tags: {...t.tags, '工作'}.toList(),

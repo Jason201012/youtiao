@@ -9,6 +9,7 @@ import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 
 /// 人类可读体积（与 [AttachmentRef.sizeLabel] 同口径：B/KB/MB/GB）。
@@ -146,7 +147,12 @@ class _StorageScreenState extends State<StorageScreen> {
       if (task != null) {
         final newAtt =
             task.attachments.where((a) => a.fileName != f.fileName).toList();
-        provider.updateTask(task.copyWith(attachments: newAtt));
+        // P2-2（v3.0.7 审计）：updateTask 透传落盘结果——失败如实提示
+        // （任务的附件引用仍在，重启后条目回来）。
+        final ok = await provider.updateTask(task.copyWith(attachments: newAtt));
+        if (!ok && mounted) {
+          showTaskPersistFailedHint(context, provider: provider);
+        }
       }
       await AttachmentService.deleteAttachmentFile(f.taskId, f.fileName);
     }
@@ -191,7 +197,12 @@ class _StorageScreenState extends State<StorageScreen> {
         if (task != null) {
           final newAtt =
               task.attachments.where((a) => a.fileName != fileName).toList();
-          provider.updateTask(task.copyWith(attachments: newAtt));
+          // P2-2（v3.0.7 审计）：同单条删除——失败如实提示。
+          final ok =
+              await provider.updateTask(task.copyWith(attachments: newAtt));
+          if (!ok && mounted) {
+            showTaskPersistFailedHint(context, provider: provider);
+          }
         }
         await AttachmentService.deleteAttachmentFile(taskId, fileName);
       }

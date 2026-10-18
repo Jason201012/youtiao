@@ -5,6 +5,7 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
+import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 
 /// 回收站：展示已删除（可恢复）的任务，支持恢复、彻底删除、清空。
@@ -122,8 +123,15 @@ class TrashScreen extends StatelessWidget {
                         ),
                         const SizedBox(width: 8),
                         // 恢复
+                        // P2-2（v3.0.7 审计）：restoreFromTrash 透传落盘结果——
+                        // 失败弹提示（内存已恢复、全量写自愈），不再零反馈。
                         IconButton(
-                          onPressed: () => provider.restoreFromTrash(t.id),
+                          onPressed: () => consumeTaskWriteResult(
+                            context,
+                            provider,
+                            t.id,
+                            provider.restoreFromTrash(t.id),
+                          ),
                           icon: Icon(Symbols.restore_from_trash,
                               size: 22, color: primary),
                           tooltip: '恢复',
@@ -204,7 +212,13 @@ class TrashScreen extends StatelessWidget {
           FilledButton(
             onPressed: () {
               Navigator.pop(d);
-              provider.clearTrash();
+              // P2-2（v3.0.7 审计）：clearTrash 透传落盘结果——失败如实提示
+              // （条目仍在回收站），不再零反馈。
+              provider.clearTrash().then((ok) {
+                if (!ok && context.mounted) {
+                  showTaskPersistFailedHint(context, provider: provider);
+                }
+              });
             },
             child: const Text('清空'),
           ),
@@ -239,7 +253,13 @@ class TrashScreen extends StatelessWidget {
             ),
             onPressed: () {
               Navigator.pop(d);
-              provider.permanentDelete(t.id);
+              // P2-2（v3.0.7 审计）：permanentDelete 透传落盘结果——失败如实
+              // 提示（条目仍在回收站），不再零反馈（附件目录清理属幂等操作）。
+              provider.permanentDelete(t.id).then((ok) {
+                if (!ok && context.mounted) {
+                  showTaskPersistFailedHint(context, provider: provider);
+                }
+              });
             },
             child: const Text('彻底删除'),
           ),

@@ -1254,6 +1254,12 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   ];
 
   final _titleCtl = TextEditingController();
+  /// P3-4（v3.0.7 审计）：提交中守卫——「添加」异步化（await addHabit）后
+  /// 出现了以前不存在的异步窗口，双击会并发两次 addHabit（各自分配不同 id）
+  /// 生成两条重复习惯；且成功分支还会对已 pop 的 context 再调 Navigator.pop。
+  /// 与同文件 `_HabitEditSheet` 的 `_saving`（2743/2751 两处 onPressed 置灰）
+  /// 完全对齐。
+  bool _saving = false;
   String _emoji = _emojis.first;
   int _colorValue = _palette.first.value;
   final Set<int> _weekdays = {};
@@ -1539,30 +1545,45 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
             width: double.infinity,
             height: 48,
             child: FilledButton(
-              onPressed: () async {
-                final title = _titleCtl.text.trim();
-                if (title.isEmpty) return;
-                // U2-1（v3.0.6 审计）：消费落盘结果——失败停留编辑层并如实
-                // 提示（provider 已回滚内存，重试不会造出重复习惯）。旧实现
-                // fire-and-forget 后直接 pop：新建的习惯仅存内存，重启即丢，
-                // 用户却已看到它出现在列表里。
-                final hp = context.read<HabitProvider>();
-                final ok = await hp.addHabit(
-                  title: title,
-                  emoji: _emoji,
-                  colorValue: _colorValue,
-                  weekdays: _weekdays.toList(),
-                  reminderMinute: _reminderMinute,
-                  weeklyGoal: _weeklyGoal,
-                  dailyTarget: _dailyTarget,
-                  graceDays: _graceDays,
-                );
-                if (!ok) {
-                  if (context.mounted) showCheckInPersistFailedHint(context);
-                  return;
-                }
-                Navigator.pop(context);
-              },
+              // P3-4（v3.0.7 审计）：提交期间置灰，与 _HabitEditSheet 的 _saving 同口径。
+              onPressed: _saving
+                  ? null
+                  : () async {
+                      final title = _titleCtl.text.trim();
+                      if (title.isEmpty) return;
+                      // P3-4（v3.0.7 审计）：防重入——异步窗口期内按钮已置灰，
+                      // 这里是兜底（键盘 / 快捷键等非按钮路径）。
+                      if (_saving) return;
+                      setState(() => _saving = true);
+                      // U2-1（v3.0.6 审计）：消费落盘结果——失败停留编辑层并如实
+                      // 提示（provider 已回滚内存，重试不会造出重复习惯）。旧实现
+                      // fire-and-forget 后直接 pop：新建的习惯仅存内存，重启即丢，
+                      // 用户却已看到它出现在列表里。
+                      final hp = context.read<HabitProvider>();
+                      final ok = await hp.addHabit(
+                        title: title,
+                        emoji: _emoji,
+                        colorValue: _colorValue,
+                        weekdays: _weekdays.toList(),
+                        reminderMinute: _reminderMinute,
+                        weeklyGoal: _weeklyGoal,
+                        dailyTarget: _dailyTarget,
+                        graceDays: _graceDays,
+                      );
+                      if (!ok) {
+                        // P3-4（v3.0.7 审计）：失败分支解除守卫（按钮恢复可点），
+                        // 用户留在编辑层可直接重试。
+                        if (mounted) setState(() => _saving = false);
+                        if (context.mounted) showCheckInPersistFailedHint(context);
+                        return;
+                      }
+                      // P3-4（v3.0.7 审计）：成功分支补 mounted 守卫——旧实现
+                      // 直接 Navigator.pop(context)：若 await 期间 sheet 已被
+                      // 销毁（系统返回 / 父级路由弹出），对失效 context 调 pop
+                      // 会触发断言异常（失败分支早有该检查，成功分支没有）。
+                      if (!mounted) return;
+                      Navigator.pop(context);
+                    },
               child: const Text('添加'),
             ),
           ),
@@ -2471,12 +2492,59 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       // unnecessary_null_comparison 两条 warning，打破项目「0 warning」声明）。
       // 控制流已保证非空，直写。
       content: undoContent(snapshot.undoLabel),
-      onUndo: () async => (await hp.restoreHabit(snapshot)) != null,
-      // U2-1（v3.0.6 审计）：null 现覆盖两种「未生效」——同 id 已重建 /
-      // 落盘失败已回滚（restoreHabit 新增失败回滚）。旧默认文案
-      // 「撤销已失效：该操作已不可恢复」对落盘失败不实（重试即可），
-      // 改为对两者都准确的「撤销未生效：请重试」。
-      failureHint: '撤销未生效：请重试',
+      onUndo: () async {
+        final restored = await hp.restoreHabit(snapshot);
+        if (restored != null) return true;
+        // P2-1（v3.0.7 审计）：null 双义拆开——
+        // ① 同 id 已重建（restoreHabit 早退分支，快照**未**暂存）= 真失效：
+        //    自挂失效提示并返回 true——不走 failureHint（那条文案与「再试一次」
+        //    是给落盘失败的，此时重试只会二次骗人）；
+        // ② 落盘失败（restoreHabit 失败路径已把快照暂存进 provider）= 返回
+        //    false，让唯一实现弹 failureHint + failureAction，「再试一次」
+        //    有真实载体（见 _retryHabitRestore）。
+        if (hp.byId(snapshot.habit.id) != null) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('撤销已失效：已重新创建了同名习惯，请手动合并或删除'),
+              ),
+            );
+          }
+          return true;
+        }
+        return false;
+      },
+      // U2-1（v3.0.6 审计）：null 曾同时覆盖「同 id 已重建 / 落盘失败已回滚」，
+      // 文案改成对两者都准确的「撤销未生效：请重试」。
+      // P2-1（v3.0.7 审计）：该文案随后被证伪——撤销 action 点按后横幅即被
+      // 框架关闭，快照原本只活在该闭包里，而习惯已从内存与数据库**同时**移除
+      // （deleteHabit 早已成功落盘），「请重试」在物理上不存在入口，用户拿到
+      // 的是虚假承诺（对照：v3.0.6 之前的默认文案「撤销已失效：该操作已不可
+      // 恢复」对本分支反而准确）。现 restoreHabit 失败路径暂存快照，本提示挂
+      // 「再试一次」action 重新恢复——与通知侧 showTaskUndoNotSaved 的「重试」
+      // 载体对齐，两侧口径不再自相矛盾。
+      failureHint: '撤销未保存：习惯已从列表移除，点「再试一次」重新恢复',
+      failureAction: (
+        label: '再试一次',
+        onPressed: () => _retryHabitRestore(context, hp, snapshot),
+      ),
+    );
+  }
+
+  /// P2-1（v3.0.7 审计）：删除撤销失败提示的「再试一次」——从 provider 暂存区
+  /// （[HabitProvider.retryRestoreHabit]）重新恢复被删的习惯。快照不会因提示条
+  /// 超时消失而丢失（暂存在 provider，不在闭包里），仍失败时如实告知备份路径，
+  /// 不再让用户去找一个不存在的按钮。
+  Future<void> _retryHabitRestore(
+      BuildContext context, HabitProvider hp, DeletedHabit snapshot) async {
+    final restored = await hp.retryRestoreHabit();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(restored != null
+            ? '已恢复「${snapshot.habit.title}」'
+            : '恢复失败：请前往「设置 → 备份与恢复」从备份找回'),
+      ),
     );
   }
 

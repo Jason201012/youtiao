@@ -701,9 +701,14 @@ class _Column extends StatelessWidget {
               // （与通知面 P2-1，v3.0.5 审计同构）。失败提示先入队、横幅
               // 紧随（async 闭包使提示先于横幅可见）；撤销回调改走
               // taskUndoAction 的落盘语义（不再复用「撤销已失效」）。
+              // P3-3（v3.0.7 审计）：false 双义拆开（byId 判空给第二句文案）。
               final ok = await provider.setStatus(snapshot.id, dropStatus!);
               if (!ok && context.mounted) {
-                showTaskPersistFailedHint(context);
+                if (provider.byId(snapshot.id) == null) {
+                  showTaskMissingHint(context);
+                } else {
+                  showTaskPersistFailedHint(context, provider: provider);
+                }
               }
               if (context.mounted) {
                 _KanbanCard._showStatusUndo(context, provider, snapshot);
@@ -833,8 +838,15 @@ class _KanbanCard extends StatelessWidget {
     }
     final snapshot = task;
     final ok = await provider.setStatus(task.id, next);
+    // P3-3（v3.0.7 审计）：false 双义拆开——任务在操作瞬间已被删除时走
+    // 「任务已不存在」文案（重试必然再失败），落盘失败才走安全模式分化的
+    // 「写入失败」（与 taskUndoAction 的 byId 判空口径对齐）。
     if (!ok && context.mounted) {
-      showTaskPersistFailedHint(context);
+      if (provider.byId(task.id) == null) {
+        showTaskMissingHint(context);
+      } else {
+        showTaskPersistFailedHint(context, provider: provider);
+      }
     }
     if (context.mounted) {
       _showStatusUndo(context, provider, snapshot);

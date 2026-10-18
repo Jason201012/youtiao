@@ -192,8 +192,11 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                       title: Text(t.name),
                       subtitle: Text('${t.description} · ${t.items.length} 项'),
                       trailing: const Icon(Icons.chevron_right),
-                      onTap: () {
-                        final n = applyTemplate(provider, t);
+                      onTap: () async {
+                        // P2-2（v3.0.7 审计）：applyTemplate 异步化——等待真实
+                        // 落库数再提示（落盘失败的条目已被 provider 回滚，不计入）。
+                        final n = await applyTemplate(provider, t);
+                        if (!context.mounted) return;
                         Navigator.pop(context);
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
@@ -241,7 +244,10 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                         trailing: PopupMenuButton<String>(
                           onSelected: (v) async {
                             if (v == 'apply') {
-                              final n = applyUserTemplate(provider, t);
+                              // P2-2（v3.0.7 审计）：同内置模板——等待真实
+                              // 落库数再提示。
+                              final n = await applyUserTemplate(provider, t);
+                              if (!context.mounted) return;
                               Navigator.pop(context);
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(

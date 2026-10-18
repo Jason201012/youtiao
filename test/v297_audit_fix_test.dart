@@ -47,31 +47,37 @@ void main() {
   group('P2-2/P2-3 撤销缓冲返回生效结果 + 恢复备份清缓冲', () {
     test('undoDelete：成功 true；重复撤销（缓冲已消费）false', () async {
       final p = await buildWith([_task('1', title: '甲'), _task('2', title: '乙')]);
-      final r = p.deleteTaskAs('1');
+      // P2-2（v3.0.7 审计）：deleteTaskAs / undoDelete 异步化并改返回具名记录
+      // `(applied, saved)`——生效断言改为读 applied 字段（saved 语义见 v307 用例）。
+      final r = await p.deleteTaskAs('1');
       expect(r.$2, isNotNull);
-      expect(p.undoDelete(r.$1), isTrue, reason: '缓冲在、任务可恢复 → 生效');
-      expect(p.undoDelete(r.$1), isFalse, reason: '同一 batchId 已被消费');
+      expect((await p.undoDelete(r.$1)).applied, isTrue,
+          reason: '缓冲在、任务可恢复 → 生效');
+      expect((await p.undoDelete(r.$1)).applied, isFalse,
+          reason: '同一 batchId 已被消费');
       expect(p.tasks.any((t) => t.id == '1'), isTrue,
           reason: '撤销成功后任务回到列表');
     });
 
     test('undoBatchEdit：生效 true；空缓冲 / 未知 batchId false', () async {
       final p = await buildWith([_task('1', title: '甲')]);
-      final r = p.postponeToAs(['1'], DateTime(2026, 10, 1));
+      final r = await p.postponeToAs(['1'], DateTime(2026, 10, 1));
       expect(r.$2, 1);
-      expect(p.undoBatchEdit(r.$1), isTrue);
-      expect(p.undoBatchEdit(r.$1), isFalse, reason: '已消费');
-      expect(p.undoBatchEdit(99999), isFalse, reason: '未知 batchId');
+      expect((await p.undoBatchEdit(r.$1)).applied, isTrue);
+      expect((await p.undoBatchEdit(r.$1)).applied, isFalse, reason: '已消费');
+      expect((await p.undoBatchEdit(99999)).applied, isFalse,
+          reason: '未知 batchId');
     });
 
     test('P2-3：restoreFromJson 清空两套撤销缓冲，残留横幅不再复活任务',
         () async {
       final p = await buildWith([_task('1', title: '甲')]);
       // ① 删除（删除缓冲登记 batchId）
-      final del = p.deleteTaskAs('1');
+      // P2-2（v3.0.7 审计）：deleteTaskAs / postponeToAs 异步化。
+      final del = await p.deleteTaskAs('1');
       expect(p.tasks.any((t) => t.id == '1'), isFalse);
       // ② 编辑另一条（编辑缓冲登记另一个 batchId）
-      final edit = p.postponeToAs(['2'], DateTime(2026, 10, 2));
+      final edit = await p.postponeToAs(['2'], DateTime(2026, 10, 2));
       // 恢复备份（覆盖 _tasks/_trash）
       final backup = jsonEncode({
         'version': 3,
@@ -83,9 +89,9 @@ void main() {
       });
       await p.restoreFromJson(backup);
       // ③ 残留横幅的「撤销」：缓冲已清 → 返回 false 且**不得复活/回写**。
-      expect(p.undoDelete(del.$1), isFalse,
+      expect((await p.undoDelete(del.$1)).applied, isFalse,
           reason: 'P2-3：删除缓冲已被恢复清空——此前会把恢复前已删任务复活');
-      expect(p.undoBatchEdit(edit.$1), isFalse,
+      expect((await p.undoBatchEdit(edit.$1)).applied, isFalse,
           reason: 'P2-3：编辑缓冲已被恢复清空——此前会按 id 回写恢复前快照');
       expect(p.tasks.map((t) => t.id), ['9'],
           reason: '恢复结果不被残留撤销污染');

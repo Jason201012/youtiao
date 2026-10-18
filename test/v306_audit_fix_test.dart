@@ -320,7 +320,10 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
       await tester.pumpAndSettle();
-      expect(find.text('写入失败：数据未保存，请重试'), findsOneWidget,
+      // P3-2/U2-2（v3.0.7 审计）：失败文案改为「继续其它操作会自动一并保存」
+      // ——「请重试」在一次性 action 场景没有可点的重试载体（撤销横幅点按即关），
+      // 且全量 replaceTasks 写意味着后续任意成功写入即自愈；安全模式另有专属文案。
+      expect(find.textContaining('写入失败：数据未保存'), findsOneWidget,
           reason: '落盘失败如实提示——旧实现 fire-and-forget 后无条件弹'
               '「已完成（10 秒内可撤销）」，重启回退为未完成');
       // 撤销横幅仍在队列（任务侧 provider 不内存回滚，UI 的完成态需要撤销入口）。
