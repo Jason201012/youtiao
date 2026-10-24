@@ -884,8 +884,10 @@ String _dueLabel(DateTime? due) {
   final k = dueCompareKey(due);
   final d = DateTime(k.year, k.month, k.day);
   final diff = d.difference(today).inDays;
-  final time =
-      ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
+  // L22（v3.0.8 审计）：纯日期形态省略时刻（同 task_row 口径）。
+  final time = dueIsPureDateForm(due)
+      ? ''
+      : ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
   if (diff == 0) return '今天$time';
   if (diff == 1) return '明天$time';
   if (diff == -1) return '昨天$time';

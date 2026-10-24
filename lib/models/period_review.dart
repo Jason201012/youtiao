@@ -329,12 +329,20 @@ class PeriodReview {
     int habitExpected = 0;
     int habitDone = 0;
     final habits = <HabitPeriodStat>[];
-    for (final h in habit.activeHabits) {
+    // L7（v3.0.8 审计）：遍历源从 activeHabits 改为**全量含归档**——期内归档的
+    // 习惯此前从月报/年报整段消失，与成就侧「归档保留历史」口径不一致（归档
+    // 不清打卡记录 / 热力图 / streak）。归档习惯的应打卡日按归档日截断
+    // （archivedAt 缺省的老数据按「全程在期内」的尽力口径，不丢统计）。
+    for (final h in habit.habits) {
       // 习惯创建之前的日子不该计入「应打卡」，否则新习惯在年报里永远难看。
       final from = _laterOf(start, _dateOnly(h.createdAt));
+      // 归档日之后不再计入「应打卡」（归档 = 退场）；归档日当天仍算计划内。
+      final to = h.archivedAt != null
+          ? _earlierOf(end, _dateOnly(h.archivedAt!))
+          : end;
       int expected = 0;
-      if (!from.isAfter(end)) {
-        final days = end.difference(from).inDays + 1;
+      if (!from.isAfter(to)) {
+        final days = to.difference(from).inDays + 1;
         for (int i = 0; i < days; i++) {
           if (h.shouldCheckInOn(from.add(Duration(days: i)))) expected++;
         }
@@ -393,6 +401,9 @@ class PeriodReview {
 
   static DateTime _laterOf(DateTime a, DateTime b) =>
       a.isAfter(b) ? a : b;
+
+  static DateTime _earlierOf(DateTime a, DateTime b) =>
+      a.isBefore(b) ? a : b;
 
   static bool _inRange(DateTime d, DateTime start, DateTime end) =>
       !d.isBefore(start) && !d.isAfter(end);

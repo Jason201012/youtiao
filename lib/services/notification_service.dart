@@ -70,6 +70,12 @@ class NotificationService {
   /// 专注进行中常驻通知渠道（锁屏可见、无声、无角标）。
   static const String _chFocusProgress = 'focus_progress';
 
+  /// L14（v3.0.8 审计）：专注「被切出」挽留通知专用渠道（低优先级、无声、无
+  /// 角标）。该通知在用户**回到前台的瞬间**触发——用户已在看 App，高优带声的
+  /// heads-up 既突兀又无用；旧实现复用任务提醒渠道（高优 + 声音），用户想单独
+  /// 静音它只能连任务提醒一起关。低优先级无声渠道让它安静地躺在通知栏。
+  static const String _chFocusInterrupt = 'focus_interrupt';
+
   /// 专注（番茄钟）完成通知固定 id：schedule / cancel / show 必须共用同一 id，
   /// 这样「系统闹钟到点弹」与「应用内到点补弹」会互相覆盖而非重复成两条。
   static const int focusDoneNotifyId = 777777;
@@ -198,18 +204,28 @@ class NotificationService {
   /// 任务类提醒（截止 / 重复）统一的两个 action 按钮：稍后提醒 + 完成。
   /// 习惯提醒不显示「完成」（习惯是打卡语义，走各自 action），故单独维护。
   ///
-  /// U3-2（v3.0.3 审计）口径固化（防后续轮次按缺陷重复上报）：点「稍后提醒」
-  /// 后原通知**会**随 action 点击自动消散——flutter_local_notifications 17.2.4
-  /// 的 `AndroidNotificationAction.cancelNotification` **默认即 true**（Dart 侧
-  /// 经 method_channel_mappers 序列化进 action 参数 → 原生
-  /// ActionBroadcastReceiver.onReceive 按 CANCEL_NOTIFICATION extra 撤掉承载
-  /// 该 action 的通知；showsUserInterface 路径由
-  /// processForegroundNotificationAction 同样处理），无需显式设参。审计报告
-  /// 「均未设 cancelNotification: true → 原通知仍留在通知栏」的前提与插件实际
-  /// 默认不符，特此注释钉死。
+  /// H2（v3.0.8 审计）：全部 action 显式 `showsUserInterface: true`。此前这两组
+  /// （与 habitActionsFor、确认条「撤销」）都是默认 false，而本 App **从未**在
+  /// AndroidManifest 注册插件的 ActionBroadcastReceiver、initialize 也没有
+  /// `onDidReceiveBackgroundNotificationResponse` 后台回调：false 的 action 的
+  /// PendingIntent 是发往**未注册组件**的显式广播，点击后无处投递——连默认的
+  /// cancelNotification 都不执行（按钮毫无反应、通知原样留存），v2.5.9 起全部
+  /// 主 action 都是死键。现行口径与撤销族（:1778 / :1883 / :1927 / :2254 四处，
+  /// v3.0.0 起）对齐：点按先拉起 App 前台，再走 Flutter 侧
+  /// `onDidReceiveNotificationResponse` 既有回调（main._handleNotificationAction），
+  /// handler 全量复用；杀进程场景由冷启动 launch details（H3）补位。代价是点击
+  /// 会切到前台；「完整方案」（manifest 注册 receiver + `vm:entry-point` 后台
+  /// 回调）需把依赖 Provider/Navigator 的 handler 重写为无 UI 依赖，留待后续轮次。
+  ///
+  /// U3-2（v3.0.3 审计）注释**更正**：该轮注释声称「ActionBroadcastReceiver.
+  /// onReceive 会撤掉承载该 action 的通知」——其前提（manifest 注册该 receiver）
+  /// 在本 App 从未成立，那条注释钉死的是错误结论。现行事实：只有
+  /// showsUserInterface: true 的 action 才能可靠撤通知并触发 Flutter 回调。
   static List<AndroidNotificationAction> get _taskActions => [
-        AndroidNotificationAction(snoozeActionId, '稍后提醒'),
-        AndroidNotificationAction(completeActionId, '完成'),
+        AndroidNotificationAction(snoozeActionId, '稍后提醒',
+            showsUserInterface: true),
+        AndroidNotificationAction(completeActionId, '完成',
+            showsUserInterface: true),
       ];
 
   /// 习惯类提醒统一的两个 action 按钮：稍后提醒 + 打卡。
@@ -221,12 +237,14 @@ class NotificationService {
   /// **+1**（U2-6 之后恒 +1，不再一键顶满），原标签「打卡」让用户分不清是
   /// 「+1」还是「达标」。量化习惯改显「记 1 个」；布尔习惯维持「打卡」。
   ///
-  /// U3-2（v3.0.3 审计）：cancelNotification 口径同 [_taskActions] 注释
-  /// （插件 17.2.4 默认 true，action 点击即撤原通知，无需显式设参）。
+  /// H2（v3.0.8 审计）：`showsUserInterface: true`——同 [_taskActions]（未注册
+  /// ActionBroadcastReceiver + 无后台回调，false 的 action 是死键）。
   static List<AndroidNotificationAction> habitActionsFor(Habit habit) => [
-        AndroidNotificationAction(snoozeActionId, '稍后提醒'),
+        AndroidNotificationAction(snoozeActionId, '稍后提醒',
+            showsUserInterface: true),
         AndroidNotificationAction(
-            habitCheckInActionId, habit.isQuantified ? '记 1 个' : '打卡'),
+            habitCheckInActionId, habit.isQuantified ? '记 1 个' : '打卡',
+            showsUserInterface: true),
       ];
 
   /// 点击通知的回调（由 main.dart 注入，负责根据 payload 导航）。
@@ -408,6 +426,14 @@ class NotificationService {
     _initialized = true;
   }
 
+  /// H3（v3.0.8 审计）：冷启动 launch details 透出。插件只把「由通知拉起」的
+  /// payload / actionId 放在这里——`onDidReceiveNotificationResponse` 对启动
+  /// intent 不会回调（onAttachedToActivity 不转发、onNewIntent 只覆盖热态），
+  /// 本 App 此前全仓零调用，「点通知跳转」在进程已死的最常见路径下失效。
+  /// main() 在 init() 后调用一次，命中即送入与热态相同的入口。
+  Future<NotificationAppLaunchDetails?> getAppLaunchDetails() =>
+      _plugin.getNotificationAppLaunchDetails();
+
   /// P2-3（v2.8.6 审计）：提醒时区覆盖偏好（SharedPreferences 键）。
   /// '' = 跟随设备（默认）；非空 = IANA 时区名（如 'Asia/Shanghai'，设置页选择）。
   static const String _kTzOverridePref = 'reminder_timezone_override';
@@ -551,6 +577,15 @@ class NotificationService {
       '专注进行中',
       description: '专注计时常驻通知（锁屏显示剩余时间）',
       importance: Importance.defaultImportance,
+      playSound: false,
+      showBadge: false,
+    ));
+    // L14（v3.0.8 审计）：见 [_chFocusInterrupt] 注释。
+    await plugin.createNotificationChannel(const AndroidNotificationChannel(
+      _chFocusInterrupt,
+      '专注中断提示',
+      description: '专注期间切出 App 的次数提示（无声，不打扰）',
+      importance: Importance.low,
       playSound: false,
       showBadge: false,
     ));
@@ -1166,9 +1201,13 @@ class NotificationService {
         AppLog.d('[通知] 未调度习惯提醒 id=${habit.id}：近期无合法打卡日');
         return false;
       }
-      final signature = occurrences
+      // L1（v3.0.8 审计）：签名纳入**标题 / 表情**——旧签名只含落点时刻，
+      // 改名 / 换图标后签名不变、走上面的提前返回，未来最多 8 次提醒仍烘焙
+      // 旧标题（重启才自愈）。内容变化必须重挂（落点时刻不变也照挂）。
+      final signature = '${occurrences
           .map((e) => '${e.year}-${e.month}-${e.day}T${e.hour}:${e.minute}')
-          .join('|');
+          .join('|')}'
+          '#${habit.emoji}#${habit.title}';
       if (_armedSignatures['habit:${habit.id}'] == signature) return true;
 
       final mode = await _scheduleMode;
@@ -1934,7 +1973,7 @@ class NotificationService {
       await _plugin.show(
         _notifyIdOf(taskId),
         '完成未保存',
-        '${title.isNotEmpty ? title : '无标题任务'} · 已在应用内完成，但保存失败，请重试',
+        '${title.isNotEmpty ? title : '无标题任务'} · 已完成，但保存失败：请点「重试」',
         detail,
         payload: '$payloadTaskPrefix$taskId',
       );
@@ -1986,9 +2025,13 @@ class NotificationService {
         autoCancel: true,
         // U2-4（v2.9.6 审计）：补「撤销」action——通知打卡写入后此前只能进 App
         // 纠正。休息日分支没有写入任何记录，不挂撤销。
+        // H2（v3.0.8 审计）：撤销同样显式拉起前台（与撤销族四处同口径）。
         actions: restDay
             ? null
-            : [AndroidNotificationAction(habitUndoActionId, '撤销')],
+            : [
+                AndroidNotificationAction(habitUndoActionId, '撤销',
+                    showsUserInterface: true)
+              ],
         visibility: visibility,
       ),
     );
@@ -2260,7 +2303,7 @@ class NotificationService {
       await _plugin.show(
         habitConfirmNotifyIdOf(habit.id),
         '撤销未保存',
-        '${habit.emoji} ${habit.title} · 已回退但保存失败，请重试'
+        '${habit.emoji} ${habit.title} · 撤销未保存，请重试'
             '${value != null && target != null ? '（当前 $value/$target）' : ''}',
         detail,
         payload:
@@ -2326,7 +2369,11 @@ class NotificationService {
   ///
   /// P2-1（v3.0.1 审计）：文案按动作类型参数化——旧实现固定写「撤销打卡记录」，
   /// 任务「完成撤销」命中该提示时话术错位（用户被告知去撤销打卡记录）。
-  Future<void> showLockedActionHint({bool taskUndo = false}) async {
+  ///
+  /// U3-3（v3.0.8 审计）：补 [retrySave] 类型——「完成未保存」的「重试」此前
+  /// 复用 `taskUndo: true`，用户会以为自己在撤销完成。三类动作各表其事。
+  Future<void> showLockedActionHint(
+      {bool taskUndo = false, bool retrySave = false}) async {
     if (!enabled) return;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -2343,10 +2390,12 @@ class NotificationService {
     try {
       await _plugin.show(
         lockedActionNotifyId,
-        '已锁定，未执行撤销',
-        taskUndo
-            ? '应用处于锁定状态。请解锁后在 App 内撤销该任务的完成。'
-            : '应用处于锁定状态。请解锁后在 App 内撤销打卡记录。',
+        retrySave ? '已锁定，未执行重试' : '已锁定，未执行撤销',
+        retrySave
+            ? '应用处于锁定状态，「重试保存」未执行。请解锁后打开 App 查看该任务状态。'
+            : taskUndo
+                ? '应用处于锁定状态。请解锁后在 App 内撤销该任务的完成。'
+                : '应用处于锁定状态。请解锁后在 App 内撤销打卡记录。',
         detail,
       );
     } catch (e) {
@@ -2453,11 +2502,27 @@ class NotificationService {
   /// P0-4：专注「被切出」挽留通知——切回 App 时告知本次专注已中断过几次，
   /// 让「实际专注质量」可感知（L1 只做次数统计，不识别来源 App，无需任何权限）。
   /// 固定 id，多次打断互相覆盖，不会堆成一排。
+  ///
+  /// L14（v3.0.8 审计）：改用 [_chFocusInterrupt] 低优先级无声渠道——该通知在
+  /// 用户回到前台的瞬间触发（人已在 App 里），旧实现复用任务提醒渠道（高优 +
+  /// 声音）会弹突兀的 heads-up 与铃声，且无法在系统设置里单独静音。
   Future<void> showFocusInterruptNotice(int count) => _plugin.show(
         focusInterruptNotifyId,
         '专注被中断过',
         '本次专注已切出 $count 次，回来继续吧',
-        NotificationDetails(android: _focusDoneAndroid),
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            _chFocusInterrupt,
+            '专注中断提示',
+            channelDescription: '专注期间切出 App 的次数提示（无声，不打扰）',
+            importance: Importance.low,
+            priority: Priority.low,
+            playSound: false,
+            autoCancel: true,
+            channelShowBadge: false,
+            visibility: visibility,
+          ),
+        ),
       );
 
   /// 取消「专注被切出」挽留通知（专注停止 / 完成时清理）。

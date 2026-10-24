@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:todolist/models/checkin.dart';
+import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/task.dart';
 
 /// 路径段白名单（与 [AttachmentService._isSafeSegment] 口径一致）：仅允许
@@ -119,6 +121,48 @@ class BackupValidator {
       }
     }
 
+    // 5a) 习惯 / 打卡段体检（M8，v3.0.8 审计）：此前校验器只覆盖
+    // tasks/trash/attachments，habits/check_ins 完全未校验——脏备份（某条
+    // habit 缺 id、weekdays 含字符串、date 不可解析）会绕过校验，在
+    // habit_provider.restoreFromJson 的 `clear()..addAll()` 中途抛错，留下
+    // 半新半旧且未落盘的混合态。与恢复侧同口径逐条真实反序列化，失败即拒绝。
+    final habitsRaw = data['habits'];
+    if (habitsRaw != null) {
+      if (habitsRaw is! List) {
+        return const BackupValidationResult(false, '习惯字段形态非法（应为列表）');
+      }
+      for (var i = 0; i < (habitsRaw).length; i++) {
+        final e = (habitsRaw)[i];
+        if (e is! Map) {
+          return BackupValidationResult(false, '第 ${i + 1} 条习惯不是对象，备份可能已损坏');
+        }
+        try {
+          Habit.fromJson(Map<String, dynamic>.from(e));
+        } catch (err) {
+          return BackupValidationResult(false, '第 ${i + 1} 条习惯解析失败（字段非法）：$err');
+        }
+      }
+    }
+    final checkInsRaw = data['check_ins'];
+    if (checkInsRaw != null) {
+      if (checkInsRaw is! List) {
+        return const BackupValidationResult(false, '打卡记录字段形态非法（应为列表）');
+      }
+      for (var i = 0; i < (checkInsRaw).length; i++) {
+        final e = (checkInsRaw)[i];
+        if (e is! Map) {
+          return BackupValidationResult(
+              false, '第 ${i + 1} 条打卡记录不是对象，备份可能已损坏');
+        }
+        try {
+          CheckIn.fromJson(Map<String, dynamic>.from(e));
+        } catch (err) {
+          return BackupValidationResult(
+              false, '第 ${i + 1} 条打卡记录解析失败（字段非法）：$err');
+        }
+      }
+    }
+
     // 5b) 附件字段形态校验（P1-1 加固）：若存在 attachments，则必须是
     // Map<String, List>，且每个元素的 ref 为对象、data 为字符串；taskId / fileName
     // 不得含路径分隔符或父目录序列。结构非法则拒绝恢复，避免脏备份绕过还原层校验。
@@ -130,6 +174,10 @@ class BackupValidator {
       for (final entry in (attachRaw as Map).entries) {
         final tid = entry.key;
         final items = entry.value;
+        // H1（v3.0.8 审计）：`__skipped` 是 collectBlobs 无条件写入的统计段
+        // （值为 Map 而非 List），与 restoreBlobs 的豁免对齐，否则 App 自产的
+        // 每一份备份都会被 5b 形态校验拒绝，「备份→恢复」闭环断裂。
+        if (tid == '__skipped') continue;
         if (tid is! String || items is! List || !_isSafeSegment(tid)) {
           return const BackupValidationResult(
               false, '附件字段形态非法（taskId 越界或结构错误）');

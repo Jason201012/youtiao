@@ -123,8 +123,9 @@ void main() {
       final cancelsBefore = calls.where((c) => c.method == 'cancel').length;
 
       // 10 秒内点「撤销」：整体快照回滚到逾期状态。
-      final ok = p.restoreTaskSnapshot(overdue);
-      expect(ok, isTrue, reason: 'P2-2：restoreTaskSnapshot 返回是否生效');
+      // U3-4（v3.0.8 审计）：迁到 persisted 版（await 落盘结果）。
+      final ok = await p.restoreTaskSnapshotPersisted(overdue);
+      expect(ok, isTrue, reason: 'P2-2：restoreTaskSnapshotPersisted 返回是否落盘');
       final cancelsAfter = calls.where((c) => c.method == 'cancel').length;
       expect(cancelsAfter, greaterThan(cancelsBefore),
           reason: '改期挂上的「明天」闹钟必须在撤销时被 cancel——'
@@ -135,7 +136,7 @@ void main() {
 
     test('撤销到不存在的任务：返回 false（不抛错）', () async {
       final p = await buildWith([_task('1')]);
-      expect(p.restoreTaskSnapshot(_task('ghost')), isFalse);
+      expect(await p.restoreTaskSnapshotPersisted(_task('ghost')), isFalse);
     });
   });
 

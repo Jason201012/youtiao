@@ -117,6 +117,24 @@ String _wdLabel(int wd) => ['一', '二', '三', '四', '五', '六', '日'][wd 
 /// 今日页按钮（「今天不打卡」）四处四种写法。今日页经 `show` 子句引用本常量。
 const String kHabitRestDayLabel = '今天不打卡';
 
+/// L5（v3.0.8 审计）：习惯图标选项集——新建与编辑弹层共用。此前两份私有副本、
+/// 且编辑层没有入口：选错图标只能删除重建并丢失全部打卡历史。
+const List<String> kHabitEmojis = [
+  '💪', '📚', '🏃', '💧', '🧘', '😴',
+  '🥗', '✍️', '🎯', '💡', '🌟', '🚭',
+];
+
+/// L5（v3.0.8 审计）：习惯颜色选项集（同上，新建与编辑共用）。
+const List<Color> kHabitPalette = [
+  Color(0xFF0061A4),
+  Color(0xFF6750A4),
+  Color(0xFF00696E),
+  Color(0xFFB3261E),
+  Color(0xFF386A20),
+  Color(0xFF965400),
+  Color(0xFF8B4A82),
+];
+
 /// U2-2（v2.9.6 审计）：休息日点击写入口的统一反馈——此前习惯列表行的
 /// 圆圈 / ✎ / +1 在休息日 `onTap: null`，但 `HitTestBehavior.opaque` 仍吞掉
 /// 点击，完全无反应（说明只挂 Tooltip 需长按才弹），用户会误判「点坏了」。
@@ -158,9 +176,20 @@ String _fmtMinute(int minute) {
 /// P3-2（v3.0.5 审计）：App 内写入口的落盘失败如实反馈——provider 已回滚内存
 /// （UI 显示的即已落盘的），此处仅提示用户写入未保存、可重试（旧实现全部
 /// 忽略 provider 返回的 bool，落盘失败时 App 内照样乐观显示成功）。
-void showCheckInPersistFailedHint(BuildContext context) {
+///
+/// P3-1（v3.0.8 审计）：按安全模式分化（与任务侧 showTaskPersistFailedHint
+/// 同口径）——HabitProvider.load() 失败会置位 dbLoadFailed，此后 _persist
+/// 恒 false（设计行为：保护坏库不被内存态覆盖），顶部横幅已告知「本次修改
+/// 不会保存」：此时复读「请重试」既与横幅重复又误导（重试必然再失败）。
+/// [provider] 缺省（测试 / 无 provider 上下文）时按非安全模式处理。
+void showCheckInPersistFailedHint(BuildContext context, {HabitProvider? provider}) {
+  final safeMode = provider?.dbLoadFailed ?? false;
   ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text('写入失败：数据未保存，请重试')),
+    SnackBar(
+      content: Text(safeMode
+          ? '安全模式下更改不会保存：已阻止写入以保护数据，请先修复或恢复后再试'
+          : '写入失败：数据未保存，请重试'),
+    ),
   );
 }
 
@@ -176,7 +205,7 @@ Future<void> checkInWithCelebration(
   final ok = await hp.toggleCheckInToday(habit);
   if (!context.mounted) return;
   if (!ok) {
-    showCheckInPersistFailedHint(context);
+    showCheckInPersistFailedHint(context, provider: hp);
     return;
   }
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
@@ -193,7 +222,7 @@ Future<void> incrementWithCelebration(
   final ok = await hp.adjustCheckInValue(habit, DateTime.now(), 1);
   if (!context.mounted) return;
   if (!ok) {
-    showCheckInPersistFailedHint(context);
+    showCheckInPersistFailedHint(context, provider: hp);
     return;
   }
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
@@ -223,7 +252,7 @@ Future<void> completeTodayTargetWithCelebration(
   final ok = await hp.completeTodayTarget(habit);
   if (!context.mounted) return;
   if (!ok) {
-    showCheckInPersistFailedHint(context);
+    showCheckInPersistFailedHint(context, provider: hp);
     return;
   }
   await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
@@ -294,6 +323,10 @@ Future<void> showCheckInUndoSnackBar(
     failureHint: '撤销已失效：这条记录之后已被再次修改',
     onUndo: () async {
       // P3-2：只有「当前仍是操作后的状态（0）」才回写，不覆盖用户后续操作。
+      // L2（v3.0.8 审计）：习惯可能已在 10 秒窗口内被删除——旧闭包不校验，
+      // 撤销会写孤儿打卡记录并复活已删习惯的每日提醒（restoreHabit/落盘路径
+      // 都按 snapshot 放回）。先按 id 判在，不在即真失效。
+      if (hp.byId(habit.id) == null) return false;
       // P3-2（v3.0.5 审计）：回写结果透传——落盘失败按「撤销已失效」如实反馈。
       final cur = hp.checkInValueOn(habit, day);
       if (cur != 0) return false;
@@ -333,7 +366,7 @@ Future<void> toggleHabitWithUndo(
   final ok = await hp.toggleCheckInToday(habit);
   if (!context.mounted) return;
   if (!ok) {
-    showCheckInPersistFailedHint(context);
+    showCheckInPersistFailedHint(context, provider: hp);
     return;
   }
 
@@ -443,7 +476,7 @@ Future<void> promptHabitTodayQuantity(
   // P3-2（v3.0.5 审计）：「设置数量」对话框消费落盘结果，失败如实提示
   //（provider 已回滚内存，不再乐观显示成功）。
   final ok = await hp.setCheckInValue(habit, DateTime.now(), v);
-  if (!ok && context.mounted) showCheckInPersistFailedHint(context);
+  if (!ok && context.mounted) showCheckInPersistFailedHint(context, provider: hp);
 }
 
 /// 打开单习惯详情弹层（含该习惯自己的热力图、连续天数与分享入口）。
@@ -999,7 +1032,7 @@ class _ReminderChip extends StatelessWidget {
             final hp = context.read<HabitProvider>();
             final ok =
                 await hp.setReminder(habit, picked.hour * 60 + picked.minute);
-            if (!ok && context.mounted) showCheckInPersistFailedHint(context);
+            if (!ok && context.mounted) showCheckInPersistFailedHint(context, provider: hp);
           }
         },
         onLongPress: () async {
@@ -1031,7 +1064,7 @@ class _ReminderChip extends StatelessWidget {
           if (confirmed == true) {
             // U2-1（v3.0.6 审计）：同 onTap——消费落盘结果，失败如实提示。
             final ok = await hp.setReminder(habit, null);
-            if (!ok && context.mounted) showCheckInPersistFailedHint(context);
+            if (!ok && context.mounted) showCheckInPersistFailedHint(context, provider: hp);
           }
         },
         child: Container(
@@ -1239,19 +1272,9 @@ class _AddHabitSheet extends StatefulWidget {
 }
 
 class _AddHabitSheetState extends State<_AddHabitSheet> {
-  static const List<Color> _palette = [
-    Color(0xFF0061A4),
-    Color(0xFF6750A4),
-    Color(0xFF00696E),
-    Color(0xFFB3261E),
-    Color(0xFF386A20),
-    Color(0xFF965400),
-    Color(0xFF8B4A82),
-  ];
-  static const List<String> _emojis = [
-    '💪', '📚', '🏃', '💧', '🧘', '😴',
-    '🥗', '✍️', '🎯', '💡', '🌟', '🚭',
-  ];
+  // L5（v3.0.8 审计）：改为引用文件级共享集（与编辑弹层同源）。
+  static const List<Color> _palette = kHabitPalette;
+  static const List<String> _emojis = kHabitEmojis;
 
   final _titleCtl = TextEditingController();
   /// P3-4（v3.0.7 审计）：提交中守卫——「添加」异步化（await addHabit）后
@@ -1564,7 +1587,9 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                         title: title,
                         emoji: _emoji,
                         colorValue: _colorValue,
-                        weekdays: _weekdays.toList(),
+                        // L4（v3.0.8 审计）：与编辑层同款排序——Set 迭代顺序
+                        // 不保证，未排序时频率文案可能显示「每周 三 一」。
+                        weekdays: _weekdays.toList()..sort(),
                         reminderMinute: _reminderMinute,
                         weeklyGoal: _weeklyGoal,
                         dailyTarget: _dailyTarget,
@@ -1574,7 +1599,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                         // P3-4（v3.0.7 审计）：失败分支解除守卫（按钮恢复可点），
                         // 用户留在编辑层可直接重试。
                         if (mounted) setState(() => _saving = false);
-                        if (context.mounted) showCheckInPersistFailedHint(context);
+                        if (context.mounted) showCheckInPersistFailedHint(context, provider: hp);
                         return;
                       }
                       // P3-4（v3.0.7 审计）：成功分支补 mounted 守卫——旧实现
@@ -1601,9 +1626,17 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
 /// - 顶栏「编辑」（改名/改星期/改周目标/归档/删除，删除带二次确认）；
 /// - 「补卡」按钮（日期选择器选过去日期，调 [HabitProvider.checkInOnDay]）；
 /// - 已打卡时主按钮先弹确认再取消，避免误触清掉连续记录。
+///
+/// H4（v3.0.8 审计）：弹层改持 **habitId** 而非 Habit 对象——updateHabit 是
+/// 不可变替换（`_habits[idx] = updated`），旧实现一次性持有对象、永不按 id
+/// 回读：保存成功后弹层继续持旧对象，写按钮按旧状态全部可点（归档/休息日
+/// 守卫被旁路、已归档习惯的提醒被旧对象重挂回系统闹钟），且「编辑层从旧对象
+/// 初始化」会把首次编辑的标题/目标量按旧值整体覆盖回去。现在 build 时经
+/// `hp.byId` 取当前对象（provider 变更即随 watch 刷新）；取不到 = 习惯已
+/// 被删除，自动关层。
 class _HabitDetailSheet extends StatelessWidget {
-  final Habit habit;
-  const _HabitDetailSheet({required this.habit});
+  final String habitId;
+  const _HabitDetailSheet({required this.habitId});
 
   static void show(BuildContext context, Habit habit) {
     showModalBottomSheet(
@@ -1613,7 +1646,7 @@ class _HabitDetailSheet extends StatelessWidget {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => _HabitDetailSheet(habit: habit),
+      builder: (_) => _HabitDetailSheet(habitId: habit.id),
     );
   }
 
@@ -1625,18 +1658,38 @@ class _HabitDetailSheet extends StatelessWidget {
   /// 2. **改数量**：量化习惯（T1-2）补卡时可以填「那天到底做了多少」，而不是被
   ///    硬编码记成 1 个单位。
   Future<void> _backfillCheckIn(BuildContext context, HabitProvider hp) async {
+    // H4（v3.0.8 审计）：按 id 取当前对象（弹层不持有快照，见类注释）。
+    final habit = hp.byId(habitId);
+    if (habit == null) return;
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final first = DateTime(habit.createdAt.year, habit.createdAt.month,
         habit.createdAt.day);
+    // L8（v3.0.8 审计）：补卡日期夹取到 **createdAt**——旧实现在「习惯当天
+    // 创建」时回退到 30 天前，补卡日期可早于创建日，longestStreak 扫描起点被
+    // 拉到创建前（为一条「出生前」的记录延长连续天数）。创建日在未来（时钟
+    // 漂移）时收敛到今天，避免 firstDate > lastDate 触发选择器断言。
+    final firstDate = first.isAfter(today) ? today : first;
     final picked = await showDatePicker(
       context: context,
-      initialDate: today.subtract(const Duration(days: 1)),
-      firstDate: first.isBefore(today) ? first : today.subtract(const Duration(days: 30)),
+      // initialDate 必须同落在 [firstDate, lastDate] 内，否则断言崩溃。
+      initialDate: firstDate.isBefore(today)
+          ? today.subtract(const Duration(days: 1))
+          : today,
+      firstDate: firstDate,
       lastDate: today,
       helpText: '选择要补卡 / 撤卡的日期',
     );
     if (picked == null) return;
+    // H4（v3.0.8 审计）：补卡选到今天且今天是休息日时，provider 侧按无操作
+    // 处理（返回 true），此处提前给如实反馈，避免「已补 X月X日打卡」的假成功。
+    final isToday = picked.year == today.year &&
+        picked.month == today.month &&
+        picked.day == today.day;
+    if (isToday && !habit.shouldCheckInOn(picked)) {
+      showHabitRestDayHint(context);
+      return;
+    }
     final dayLabel = '${picked.month}月${picked.day}日';
     final existing = hp.checkInValueOn(habit, picked);
 
@@ -1681,13 +1734,15 @@ class _HabitDetailSheet extends StatelessWidget {
         // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不再谎报「已撤销」。
         final ok = await hp.setCheckInValue(habit, picked, 0);
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(ok
-                  ? '已撤销 $dayLabel 的打卡'
-                  : '写入失败：数据未保存，请重试'),
-            ),
-          );
+          if (ok) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('已撤销 $dayLabel 的打卡')),
+            );
+          } else {
+            // P3-1（v3.0.8 审计）：改走统一助手（安全模式分化），不再硬编码
+            // 「请重试」。
+            showCheckInPersistFailedHint(context, provider: hp);
+          }
         }
       } else if (action == 'edit') {
         if (!context.mounted) return;
@@ -1709,7 +1764,7 @@ class _HabitDetailSheet extends StatelessWidget {
         final ok = await hp.setCheckInValue(habit, picked, v);
         if (context.mounted) {
           if (!ok) {
-            showCheckInPersistFailedHint(context);
+            showCheckInPersistFailedHint(context, provider: hp);
             return;
           }
           await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
@@ -1747,7 +1802,7 @@ class _HabitDetailSheet extends StatelessWidget {
     final ok = await hp.checkInOnDay(habit, picked, value: value);
     if (context.mounted) {
       if (!ok) {
-        showCheckInPersistFailedHint(context);
+        showCheckInPersistFailedHint(context, provider: hp);
         return;
       }
       await _maybeCelebrate(context, hp, habit, wasMet, longestBefore);
@@ -1761,6 +1816,9 @@ class _HabitDetailSheet extends StatelessWidget {
   /// U15：已打卡状态下点主按钮 = 取消今日打卡，先确认再撤（防误触清连续记录）。
   Future<void> _confirmUncheckToday(
       BuildContext context, HabitProvider hp) async {
+    // H4（v3.0.8 审计）：按 id 取当前对象（见类注释）。
+    final habit = hp.byId(habitId);
+    if (habit == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
@@ -1788,7 +1846,7 @@ class _HabitDetailSheet extends StatelessWidget {
       // P3-2（v3.0.5 审计）：按落盘结果反馈，失败不再静默（provider 已回滚内存，
       // 打卡记录原样保留）。
       final ok = await hp.uncheckInOnDay(habit, DateTime.now());
-      if (!ok && context.mounted) showCheckInPersistFailedHint(context);
+      if (!ok && context.mounted) showCheckInPersistFailedHint(context, provider: hp);
     }
   }
 
@@ -1805,6 +1863,9 @@ class _HabitDetailSheet extends StatelessWidget {
   /// ModalBarrier 挡住点不到。现在统一委托 [showCheckInUndoSnackBar]，
   /// 并传 `closeSheet: true` 先关弹层再提示。
   Future<void> _clearTodayWithUndo(BuildContext context, HabitProvider hp) async {
+    // H4（v3.0.8 审计）：按 id 取当前对象（见类注释）。
+    final habit = hp.byId(habitId);
+    if (habit == null) return;
     // P3-1：操作发生时即固化 date-only。
     final day = _dateOnlyNow();
     final previous = hp.todayValue(habit);
@@ -1813,7 +1874,7 @@ class _HabitDetailSheet extends StatelessWidget {
     final ok = await hp.clearToday(habit);
     if (!context.mounted) return;
     if (!ok) {
-      showCheckInPersistFailedHint(context);
+      showCheckInPersistFailedHint(context, provider: hp);
       return;
     }
     await showCheckInUndoSnackBar(
@@ -1831,6 +1892,18 @@ class _HabitDetailSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hp = context.watch<HabitProvider>();
+    // H4（v3.0.8 审计）：按 id 回读**当前**对象（provider 变更随 watch 刷新）；
+    // 取不到 = 习惯已被删除（如备份恢复整体替换），安排退场后自动关层，
+    // 不再持旧对象继续渲染与放行写按钮。
+    final habit = hp.byId(habitId);
+    if (habit == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+      });
+      return const SizedBox.shrink();
+    }
     final ext = appColors(context);
     final onBg = Theme.of(context).colorScheme.onBackground;
     final primary = Theme.of(context).colorScheme.primary;
@@ -2347,6 +2420,10 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
   late int? _reminderMinute = widget.habit.reminderMinute;
   late int? _dailyTarget = widget.habit.dailyTarget;
   late int _graceDays = widget.habit.graceDays;
+  // L5（v3.0.8 审计）：编辑层补齐图标 / 颜色（provider 的 updateHabit 早已
+  // 支持这两个入参，UI 侧此前无入口——选错只能删除重建并丢失全部打卡历史）。
+  late String _emoji = widget.habit.emoji;
+  late int _colorValue = widget.habit.colorValue;
   bool _saving = false;
 
   @override
@@ -2403,6 +2480,8 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     final ok = await hp.updateHabit(
       widget.habit,
       title: title,
+      emoji: _emoji,
+      colorValue: _colorValue,
       weekdays: _weekdays.toList()..sort(),
       weeklyGoal: _weeklyGoal,
       archived: _archived,
@@ -2415,9 +2494,9 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     if (!mounted) return;
     if (!ok) {
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('保存失败：数据未落盘，请重试')),
-      );
+      // P3-1（v3.0.8 审计）：按安全模式分化（与打卡失败提示同口径），不再
+      // 无条件「请重试」——安全模式下重试必然再失败。
+      showCheckInPersistFailedHint(context, provider: hp);
       return;
     }
     Navigator.pop(context);
@@ -2476,6 +2555,12 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
     // 关闭编辑层 + 其下的详情弹层，回到习惯列表（删除后详情已无意义）。
     navigator.pop();
     navigator.pop();
+    // U3-1（v3.0.8 审计）：删除后编辑层 context 随即失效，而撤销横幅的
+    // onUndo / failureAction 回调都发生在弹层关闭**之后**——继续用本层
+    // context 调 ScaffoldMessenger.of 会静默失败（mounted=false），成功 /
+    // 失败反馈都看不到。横幅本身渲染在页面级 messenger 上，这里提前捕获
+    // messenger 状态供两个闭包使用。
+    final messenger = ScaffoldMessenger.of(context);
     // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`——`ScaffoldMessenger`
     // 自带队列，主动 hide 等于亲手丢掉前一条撤销机会（用户毫不知情）。
     //
@@ -2503,13 +2588,11 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
         //    false，让唯一实现弹 failureHint + failureAction，「再试一次」
         //    有真实载体（见 _retryHabitRestore）。
         if (hp.byId(snapshot.habit.id) != null) {
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('撤销已失效：已重新创建了同名习惯，请手动合并或删除'),
-              ),
-            );
-          }
+          messenger.showSnackBar(
+            const SnackBar(
+              content: Text('撤销已失效：已重新创建了同名习惯，请手动合并或删除'),
+            ),
+          );
           return true;
         }
         return false;
@@ -2526,7 +2609,7 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       failureHint: '撤销未保存：习惯已从列表移除，点「再试一次」重新恢复',
       failureAction: (
         label: '再试一次',
-        onPressed: () => _retryHabitRestore(context, hp, snapshot),
+        onPressed: () => _retryHabitRestore(messenger, hp, snapshot),
       ),
     );
   }
@@ -2535,11 +2618,14 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
   /// （[HabitProvider.retryRestoreHabit]）重新恢复被删的习惯。快照不会因提示条
   /// 超时消失而丢失（暂存在 provider，不在闭包里），仍失败时如实告知备份路径，
   /// 不再让用户去找一个不存在的按钮。
-  Future<void> _retryHabitRestore(
-      BuildContext context, HabitProvider hp, DeletedHabit snapshot) async {
-    final restored = await hp.retryRestoreHabit();
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+  ///
+  /// U3-1（v3.0.8 审计）：重试显式携带**当次快照**（provider 侧按 id 校验暂存
+  /// 区，两次删除撤销连续失败时不会恢复错对象）；反馈走页面级 messenger
+  /// （编辑层 context 在两次 pop 后已失效，见 _delete 内注释）。
+  Future<void> _retryHabitRestore(ScaffoldMessengerState messenger,
+      HabitProvider hp, DeletedHabit snapshot) async {
+    final restored = await hp.retryRestoreHabit(snapshot);
+    messenger.showSnackBar(
       SnackBar(
         content: Text(restored != null
             ? '已恢复「${snapshot.habit.title}」'
@@ -2593,6 +2679,56 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
                   borderSide: BorderSide.none,
                 ),
               ),
+            ),
+            const SizedBox(height: 16),
+            // L5（v3.0.8 审计）：图标 / 颜色编辑入口（与新建弹层同款选器）。
+            const Text('图标', style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: kHabitEmojis
+                  .map((e) => GestureDetector(
+                        onTap: () => setState(() => _emoji = e),
+                        child: Container(
+                          width: 40,
+                          height: 40,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: _emoji == e ? ext.chip : Colors.transparent,
+                            border: Border.all(
+                                color: _emoji == e
+                                    ? Theme.of(context).colorScheme.primary
+                                    : ext.navBorder),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(e, style: const TextStyle(fontSize: 20)),
+                        ),
+                      ))
+                  .toList(),
+            ),
+            const SizedBox(height: 16),
+            const Text('颜色', style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: kHabitPalette
+                  .map((c) => GestureDetector(
+                        onTap: () => setState(() => _colorValue = c.value),
+                        child: Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: c,
+                            shape: BoxShape.circle,
+                            border: _colorValue == c.value
+                                ? Border.all(color: Colors.white, width: 3)
+                                : null,
+                          ),
+                        ),
+                      ))
+                  .toList(),
             ),
             const SizedBox(height: 16),
             const Text('打卡日（不选 = 每天）',

@@ -662,9 +662,12 @@ class _Footer extends StatelessWidget {
 
 /// 任务行右侧时间文案：有截止时间显示 HH:mm；重复无截止显示重复摘要；否则「全天」。
 String _taskTime(Task t) {
-  if (t.dueDate != null) {
-    final h = t.dueDate!.hour.toString().padLeft(2, '0');
-    final m = t.dueDate!.minute.toString().padLeft(2, '0');
+  final due = t.dueDate;
+  if (due != null) {
+    // L22（v3.0.8 审计）：纯日期形态显示「全天」而非 "23:59"（同 today_screen）。
+    if (dueIsPureDateForm(due)) return '全天';
+    final h = due.hour.toString().padLeft(2, '0');
+    final m = due.minute.toString().padLeft(2, '0');
     return '$h:$m';
   }
   // P3-2（v2.9.1 审计）：已「结束重复」的任务（repeat 字段仍在、repeatUntil 已过）

@@ -66,6 +66,13 @@ class CsvImportResult {
   /// 不再被当普通任务导入为活动任务（反向复活）。调用方如实提示。
   final int skippedDeleted;
 
+  /// M5（v3.0.8 审计）：是否因超过单批解析上限（[parseTasksCsv] 的 [maxItems]）
+  /// 被截断。CSV 此前完全没有上限（对照 iCal 的 500 条保护）：2MB CSV 可载数万
+  /// 行，经 `_addTasksBulk` 一次性灌库并对每条调度提醒——UI 长时间冻结、调度
+  /// 积压，且 CSV 无稳定 ID，误导入只能逐条删除。现与 iCal 同口径截断 + 标记，
+  /// 由调用方提示分批。
+  final bool truncated;
+
   const CsvImportResult({
     required this.tasks,
     required this.errors,
@@ -73,6 +80,7 @@ class CsvImportResult {
     this.meta = const [],
     this.skippedSections = 0,
     this.skippedDeleted = 0,
+    this.truncated = false,
   });
   bool get hasErrors => errors.isNotEmpty;
 }
@@ -81,7 +89,10 @@ class CsvImportResult {
 ///
 /// 表头自动探测：首行任一格命中「标题」类别名即按表头解析，否则按固定列序。
 /// 所有草稿 `id` 为空串（交由 [TaskProvider.importDedup] / addTask 分配新 id）。
-CsvImportResult parseTasksCsv(String raw) {
+///
+/// M5（v3.0.8 审计）：[maxItems] 单批上限（默认 500，与 iCal 同口径）——见
+/// [CsvImportResult.truncated]。
+CsvImportResult parseTasksCsv(String raw, {int maxItems = 500}) {
   final rows = _parseCsvRows(raw);
   if (rows.isEmpty) {
     return const CsvImportResult(tasks: [], errors: [], totalRows: 0);
@@ -172,6 +183,8 @@ CsvImportResult parseTasksCsv(String raw) {
   // 内容丢弃，只有再次命中段表头时继续计数（三表拼接：任务段 + 专注段 + 习惯段，
   // 计数如实反映被忽略的段数），绝不把段内数据行当任务解析。
   var skipping = false;
+  // M5（v3.0.8 审计）：截断标记（见 [CsvImportResult.truncated]）。
+  var truncated = false;
 
   // P2-5（v3.0.0 审计）：段表头整行指纹——本 App 导出的非任务段表头（归一后）
   // 前缀。旧判据只看首格 ==「日期/习惯」，任务段中间某行标题恰为「日期/习惯」
@@ -209,6 +222,12 @@ CsvImportResult parseTasksCsv(String raw) {
         if (idx < cells.length && norm(cells[idx]) == name) headerHits++;
       });
       if (headerHits >= 2) continue;
+    }
+    // M5（v3.0.8 审计）：单批上限——到达即整体停止解析并标记截断（与 iCal 的
+    // maxItems 语义一致：提示用户分批，而不是把数万行一次性灌库）。
+    if (tasks.length >= maxItems) {
+      truncated = true;
+      break;
     }
     totalRows++;
 
@@ -288,7 +307,8 @@ CsvImportResult parseTasksCsv(String raw) {
       totalRows: totalRows,
       meta: meta,
       skippedSections: skippedSections,
-      skippedDeleted: skippedDeleted);
+      skippedDeleted: skippedDeleted,
+      truncated: truncated);
 }
 
 /// RFC 4180 子集 CSV 解析：引号包裹、双写转义、逗号 / CR / LF / CRLF、BOM 剥除。

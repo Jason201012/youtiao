@@ -196,7 +196,7 @@ void main() {
         _mk(id: '1', title: 'Buy milk', due: DateTime(2026, 10, 1)),
       ]);
       // 大小写 + 首尾空白 + 内部空格差异 → 归一后同指纹（P3-2）→ 跳过不重加。
-      final r1 = p.importDedup(
+      final r1 = await p.importDedup(
         [_mk(title: '  buy   MILK ', due: DateTime(2026, 10, 1))],
         const [null],
         fingerprint: true,
@@ -206,7 +206,7 @@ void main() {
       expect(p.tasks, hasLength(1));
 
       // 不同截止 → 指纹不同 → 新增。
-      final r2 = p.importDedup(
+      final r2 = await p.importDedup(
         [_mk(title: 'buy milk', due: DateTime(2026, 10, 2))],
         const [null],
         fingerprint: true,
@@ -232,7 +232,7 @@ void main() {
       ]);
       // 来源方（iCal 典型）只有标题 + 截止：note/tags/预计/提醒偏移/区间开始
       // 全部为空，repeat 未携带 → 逐一保留原值。
-      final r = p.importDedup(
+      final r = await p.importDedup(
         [_mk(id: '1', title: '写周报', due: day)],
         const ['1'],
         overwrite: true,

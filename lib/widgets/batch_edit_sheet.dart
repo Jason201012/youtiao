@@ -71,6 +71,12 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
   /// 置顶：null=不改，true=全部置顶，false=全部取消置顶
   bool? _pinned;
 
+  /// P2-1（v3.0.8 审计）：应用中守卫——v3.0.7 把 batchUpdateAs 异步化后出现
+  /// 窗口：确认弹窗关闭后、await 落库期间「应用」按钮仍可点，第二次确认会对
+  /// **已经平移过的**任务再平移一次（日期变成 +2N），并产生两条撤销记录与
+  /// 二次 pop 风险（该窗口在 batchUpdateAs 同步时基本不存在）。
+  bool _applying = false;
+
   @override
   void dispose() {
     _daysCtl.dispose();
@@ -88,6 +94,10 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
   }
 
   Future<void> _apply() async {
+    // P2-1（v3.0.8 审计）：防重入（见 [_applying]）——覆盖「确认对话框显示
+    // 期间 + await 落库期间」整个窗口。
+    if (_applying) return;
+    setState(() => _applying = true);
     final provider = context.read<TaskProvider>();
     // F1：二次确认 + 影响前瞻——批量编辑一次性改写 N 条且无快照，先让用户确认。
     final count = widget.ids.length;
@@ -112,7 +122,10 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true) {
+      if (mounted) setState(() => _applying = false);
+      return;
+    }
 
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -128,6 +141,7 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('请输入 0 - 3650 之间的天数')),
       );
+      if (mounted) setState(() => _applying = false);
       return;
     }
     // 追加标签：支持逗号 / 空格分隔，去重、去空，不覆盖已有标签。
@@ -185,7 +199,10 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
         detail: '$dead 项任务改期后的截止时刻已早于当前时刻，'
             '保存后这些任务的提醒将不会触发。\n\n仍要改期吗？',
       );
-      if (!go || !mounted) return;
+      if (!go || !mounted) {
+        if (mounted) setState(() => _applying = false);
+        return;
+      }
     }
 
     // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次编辑）。
@@ -310,7 +327,8 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
-                  onPressed: _apply,
+                  // P2-1（v3.0.8 审计）：应用窗口内置灰。
+                  onPressed: _applying ? null : _apply,
                   child: const Text('应用'),
                 ),
               ),

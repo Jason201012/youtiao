@@ -308,7 +308,7 @@ void main() {
     notifCalls.clear();
 
     // 导入覆盖：同 id + 同指纹（标题/截止一致），源显式 status=done。
-    final r = p.importDedup(
+    final r = await p.importDedup(
       [mk(id: '7001', due: due, title: '买菜').copyWith(status: TaskStatus.done)],
       ['7001@youtiao'],
       overwrite: true,
@@ -340,7 +340,7 @@ void main() {
     );
     notifCalls.clear();
 
-    final r = p.importDedup(
+    final r = await p.importDedup(
       [mk(id: '7002', due: due, title: '缴费')],
       ['7002@youtiao'],
       overwrite: true,
@@ -408,7 +408,7 @@ void main() {
     // restore 后 _lastResetDay 基线未知（null）→ checkDailyReset 按「已跨天」
     // 处理（宁可多排不可漏排）→ 必须清理。旧实现什么都不做：内存 _trash 不重载，
     // 此后任意编辑触发 _persist 的按 id 差量 upsert 会把原生已删行复活回 DB。
-    p.checkDailyReset();
+    await p.checkDailyReset();
     expect(p.trash, isEmpty,
         reason: '跨天分支必须与原生午夜清理同口径（旧实现窗口可持续数天，且'
             'trashRemainingDays 返回负数与「理论上已先于展示被清理」注释矛盾）');
@@ -503,7 +503,8 @@ void main() {
     final p = await buildWith([t], notificationsEnabled: true);
     notifCalls.clear();
 
-    p.restoreTaskSnapshot(t.copyWith(title: '改标题'));
+    // U3-4（v3.0.8 审计）：迁到 persisted 版。
+    await p.restoreTaskSnapshotPersisted(t.copyWith(title: '改标题'));
     await drainMicrotasks();
 
     final cancels =

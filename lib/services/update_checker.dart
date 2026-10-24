@@ -70,26 +70,39 @@ class UpdateChecker {
       // 代码托管域上，302 到其它主机即视为链路被劫持/重定向链被控。
       // （内容签名仍是最终兜底——本道校验的价值在于「早失败、少一次不可信抓取」。）
       final client = http.Client();
-      final http.Response resp;
+      // M10（v3.0.8 审计）：落地主机校验需要「最终落地 URL」。package:http 1.6.0
+      // 中 `client.get()` 返回的 `Response` **没有** `.url`（url 在
+      // `BaseResponseWithUrl` 上，1.x 只有 `StreamedResponse`/`IOStreamedResponse`
+      // 实现，v2 才并入 BaseResponse）；而旧代码 `resp.request?.url` 恒为清单源
+      // URL（原始请求），这道校验对所有 302 恒放行，属「假防御」。改走
+      // `client.send()`——其返回的 `StreamedResponse` 实现了
+      // `BaseResponseWithUrl`，`.url` 即 dart:io 透明跟随重定向后的**最终落地**。
+      // （内容签名仍是最终兜底——本道校验的价值在于「早失败、少一次不可信抓取」。）
+      final req = http.Request('GET', Uri.parse(_manifestUrl))
+        ..headers['User-Agent'] = 'youtiao-update-checker';
+      final http.StreamedResponse resp;
+      String body;
       try {
-        resp = await client
-            .get(
-              Uri.parse(_manifestUrl),
-              headers: {'User-Agent': 'youtiao-update-checker'},
-            )
-            .timeout(const Duration(seconds: 8));
+        resp = await client.send(req).timeout(const Duration(seconds: 8));
+        // 先读完响应体再关 client（send 返回时 body 尚未到达）。
+        body = await resp.stream.bytesToString().timeout(const Duration(seconds: 8));
       } finally {
         client.close();
       }
-      final landed = resp.request?.url;
-      if (landed != null && !UpdatePolicy.isAllowedHost(landed.host)) {
+      // BaseResponseWithUrl 是 1.x 的可选能力（v2 才并入 BaseResponse）：IO 实现带
+      // 最终落地 URL；其它实现缺失时回退为请求 URL（与旧行为一致，不误杀）。
+      final landed = switch (resp) {
+        http.BaseResponseWithUrl(:final url) => url,
+        _ => req.url,
+      };
+      if (!UpdatePolicy.isAllowedHost(landed.host)) {
         return const UpdateResult(
             hasUpdate: false, error: '更新清单被重定向到非白名单主机（已拒绝）');
       }
       if (resp.statusCode != 200) {
         return UpdateResult(hasUpdate: false, error: 'HTTP ${resp.statusCode}');
       }
-      final Map<String, dynamic> data = jsonDecode(resp.body);
+      final Map<String, dynamic> data = jsonDecode(body);
       // F12：从 v2.8.0 起，update.json 的 ECDSA 签名升级为强约束——
       // 只要**本机版本**或清单自报版本达到 2.8.0（不含预发布），`signature` 字段即
       // 必填且必须通过内置公钥校验；缺签名 / 验签失败一律拒绝，避免「沿用未签名旧清单

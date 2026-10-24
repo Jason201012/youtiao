@@ -147,7 +147,7 @@ void main() {
   test('P2-2：新建导入不再静默丢弃状态与完成时间（空库迁移场景）', () async {
     final p = await buildWith(const <Task>[]);
     final completedAt = DateTime(2026, 9, 30, 10, 30);
-    final r = p.importDedup(
+    final r = await p.importDedup(
       <Task>[
         mk(title: '已完成任务'),
         mk(title: '待办任务'),
@@ -181,7 +181,7 @@ void main() {
     ]);
     // 第三方 .ics 枚举出的小整数 id 撞上真实任务，但内容指纹不一致 →
     // 丢弃 id、按全新任务导入，且 meta 状态 / 完成时间一并应用。
-    final r = p.importDedup(
+    final r = await p.importDedup(
       <Task>[mk(id: '500', title: '外部任务', due: due2)],
       const [''],
       fingerprint: true,
@@ -221,7 +221,7 @@ void main() {
       repeatWeekdays: const [3],
       note: '来自外部来源',
     );
-    final r = p.importDedup(<Task>[draft], const [''],
+    final r = await p.importDedup(<Task>[draft], const [''],
         overwrite: true, fingerprint: true);
     expect(r.overwritten, 1);
     final after = p.byId('w')!;
@@ -238,7 +238,7 @@ void main() {
     ]);
     // 行 1 带备注、行 2 不带：旧行为下行 2 以「构建索引时的旧快照」为基准，
     // 空 note 视为「源为空保留原值」→ 保留旧快照的空串，吞掉行 1 的备注。
-    final r = p.importDedup(
+    final r = await p.importDedup(
       <Task>[
         mk(title: '重复条目', due: due, note: '重要备注'),
         mk(title: '重复条目', due: due),

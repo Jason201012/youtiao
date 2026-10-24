@@ -125,7 +125,7 @@ void main() {
 
       // 恶意 .ics：UID 恰好也是 9，但内容完全不同
       final evil = mk('9', title: '钓鱼内容', due: DateTime(2026, 12, 25, 9));
-      final res = await Future.value(p.importDedup([evil], ['9@youtiao'],
+      final res = await Future.value(await p.importDedup([evil], ['9@youtiao'],
           overwrite: true));
 
       expect(res.overwritten, 0, reason: '指纹不一致，不应覆盖真实任务');
@@ -144,7 +144,7 @@ void main() {
 
       final same = mk('9', title: '同一条', due: DateTime(2026, 9, 1, 9));
       final res = await Future.value(
-          p.importDedup([same], ['9@youtiao'], overwrite: true));
+          await p.importDedup([same], ['9@youtiao'], overwrite: true));
 
       expect(res.overwritten, 1);
       expect(res.added, 0);
@@ -154,7 +154,7 @@ void main() {
     test('超大外部 id 不会让后续新建任务 id 碰撞', () async {
       final p = await buildWith([mk('8', title: '存在的')]);
       // 外部 .ics 塞一个超大 id
-      await Future.value(p.importDedup(
+      await Future.value(await p.importDedup(
         [mk('999999', title: '外部任务')],
         ['999999@youtiao'],
       ));
@@ -168,7 +168,7 @@ void main() {
 
     test('导入后 _recomputeIdSeq 生效：新 id 不与任何现存 id 重复', () async {
       final p = await buildWith([mk('8', title: 'x')]);
-      await Future.value(p.importDedup(
+      await Future.value(await p.importDedup(
         [mk('42', title: '外部'), mk('77', title: '外部2')],
         ['42@youtiao', '77@youtiao'],
       ));

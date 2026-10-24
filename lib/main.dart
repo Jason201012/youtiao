@@ -498,17 +498,19 @@ void _handleNotificationAction(String? actionId, String? payload) {
     return;
   }
   if (actionId == NotificationService.taskRetrySaveActionId) {
-    // P3-1（v3.0.7 审计）：「完成未保存」回执的「重试」——显式把当前内存态
-    // 整体写库（persistNow）。三态处理同 taskUndoActionId（就绪 → 执行；
-    // 已锁定 → 提示；冷启动 → 入队，首帧后补执行——重试落盘不依赖快照，
-    // 补执行可成功）。
+    // P3-1（v3.0.7 审计）：「完成未保存」回执的「重试」——按完成意图真正写库
+    // （见 _doRetrySave：同进程 persistNow / 跨进程 setStatus force 重放）。
+    // 三态处理同 taskUndoActionId（就绪 → 执行；已锁定 → 提示；冷启动 → 入队，
+    // 首帧后补执行）。
+    // U3-3（v3.0.8 审计）：锁定提示改用的 retrySave 类型——旧实现复用
+    // taskUndo，用户会以为自己在「撤销完成」。
     final taskId = NotificationService.parseTaskId(payload);
     if (taskId == null) return;
     final state = _navigatorKey.currentState;
     if (state != null && !_isAppLocked) {
       _doRetrySave(state, taskId);
     } else if (state != null) {
-      NotificationService.instance.showLockedActionHint(taskUndo: true);
+      NotificationService.instance.showLockedActionHint(retrySave: true);
     } else {
       _enqueue(_pendingRetrySaveTaskIds, taskId);
     }
@@ -928,22 +930,44 @@ void _doComplete(NavigatorState nav, String? taskId) {
   });
 }
 
-/// P3-1（v3.0.7 审计）：「完成未保存」回执的「重试」action 消费端——显式把
-/// 当前内存态整体写库（[TaskProvider.persistNow]）。为什么不能直接重调
-/// `setStatus(taskId, done)`：任务在内存里已是完成态，setStatus 的幂等早退
-/// 分支（v3.0.5 固化口径：幂等早退 = true、无写入 ≠ 失败）会直接返回成功而
-/// 不落盘——用户将拿到第二个假确认。成功後补弹「已完成 ✓」确认；仍失败则
-/// 保留原回执（内容不变，用户可再点一次）。
+/// P3-1（v3.0.7 审计）：「完成未保存」回执的「重试」action 消费端——把完成意图
+/// 真正写库。为什么不能直接重调 `setStatus(taskId, done)`：同进程内任务在内存里
+/// 已是完成态，setStatus 的幂等早退分支（v3.0.5 固化口径：幂等早退 = true、
+/// 无写入 ≠ 失败）会直接返回成功而不落盘——用户将拿到第二个假确认。
+///
+/// P3-3（v3.0.8 审计）：**跨进程场景按完成意图重放，不再重写当前载入态**。旧实现
+/// 无条件 `persistNow()`（当前内存态整体写库）：杀进程后用户再点「重试」时，
+/// `load()` 早已把任务重载为**未完成**（上一次就没写进去），persistNow 成功写回
+/// 的是「未完成」，却仍弹「已完成 ✓」——任务实际仍未完成（任务已删时还会弹
+/// 「无标题任务」）。现在三态：任务不存在 → 如实回失效；内存已是完成态（同进程）
+/// → persistNow；内存是未完成（跨进程重放）→ `setStatus(..., force: true)` 绕开
+/// 幂等早退真正写一次。只有「重放后确为完成态」才弹确认——不谎报。
+/// 成功确认不复用带撤销按钮的路径（快照 `_notifyCompleteSnapshots` 随进程丢失，
+/// 冷启动场景点「撤销」必然回「已失效」）。
 void _doRetrySave(NavigatorState nav, String taskId) {
   final provider = Provider.of<TaskProvider>(nav.context, listen: false);
-  provider.persistNow().then((ok) {
+  final t = provider.byId(taskId);
+  if (t == null) {
+    // P3-3（v3.0.8 审计）：旧实现此时仍会弹「已完成 ✓ · 无标题任务」。
+    NotificationService.instance.showTaskUndoInvalid(taskId);
+    return;
+  }
+  final Future<bool> done;
+  if (t.done) {
+    done = provider.persistNow(); // 同进程：内存已是完成态，整体写库即可
+  } else {
+    // 跨进程：按完成意图重放（force 绕开幂等早退，见 setStatus 注释）。
+    done = provider.setStatus(taskId, TaskStatus.done, force: true);
+  }
+  done.then((ok) {
     if (!ok) {
       AppLog.d('[通知] 重试保存仍失败 id=$taskId，保留「完成未保存」回执');
       return;
     }
-    final t = provider.byId(taskId);
-    NotificationService.instance
-        .showCompletedConfirm(taskId, t?.title ?? '无标题任务');
+    final cur = provider.byId(taskId);
+    // 双保险：重放后仍非完成态（理论上不可达）时不弹完成确认。
+    if (cur == null || !cur.done) return;
+    NotificationService.instance.showCompletedConfirm(taskId, cur.title);
   });
 }
 
@@ -999,10 +1023,37 @@ void main() async {
   // debugPrint/print，这里把 debugPrint 整体置空，覆盖存量 70 余处调用；
   // 新增代码统一走 [AppLog]（内部以 kReleaseMode 守卫）。
   _silenceDebugPrintInRelease();
-  // 在 init() 前挂上点击回调（init 内部 initialize() 会在冷启动时直接触发）。
+  // 在 init() 前挂上点击回调（热态点击由 initialize 的 onDidReceiveNotificationResponse
+  // 直接触发；冷启动路径见下方 H3 的 getAppLaunchDetails——init 本身**不会**
+  // 对启动 intent 回调 Dart，旧注释「冷启动时由 initialize 直接触发」不成立）。
   NotificationService.onNotificationTap = _handleNotificationTap;
   NotificationService.onNotificationAction = _handleNotificationAction;
   await NotificationService.instance.init();
+
+  // H3（v3.0.8 审计）：冷启动由通知拉起时，插件只把 payload / actionId 放在
+  // getNotificationAppLaunchDetails() 里——onAttachedToActivity 不会对启动
+  // intent 自动回调 Dart，onNewIntent 只覆盖热态。本 App 此前全仓零调用该方法，
+  // 「点通知跳转」在最常见路径（提醒响后数小时才点、进程已被系统回收）下失效：
+  // App 正常拉起但停在首页。这里显式取一次，命中即送入与热态相同的入口——
+  // 此时导航器通常未就绪，两个 handler 内部都会暂存入队，待 MainScaffold 首帧 /
+  // 解锁后经 [_flushPendingIntents] 消费（与既有冷启动链路完全复用）。
+  try {
+    final launch = await NotificationService.instance.getAppLaunchDetails();
+    if (launch != null && launch.didNotificationLaunchApp) {
+      final response = launch.notificationResponse;
+      if (response != null) {
+        final actionId = response.actionId;
+        if (actionId != null && actionId.isNotEmpty) {
+          _handleNotificationAction(actionId, response.payload);
+        } else {
+          _handleNotificationTap(response.payload);
+        }
+      }
+    }
+  } catch (e) {
+    // 读取失败不阻断启动：冷启动点击跳转降级为停在首页（与修复前一致）。
+    AppLog.d('[通知] 冷启动 launch details 读取失败：$e');
+  }
 
   // 分享建任务：注册原生 → Dart 文本通道（与通知点击通道同理）。
   const MethodChannel('com.example.todolist/share_intent')
@@ -1127,6 +1178,13 @@ void main() async {
   TaskProvider.onGuardTick = () {
     if (!task.notificationsEnabled) return;
     unawaited(habit.scheduleAllReminders());
+  };
+  // L25（v3.0.8 审计）：通知总开关「关 → 开」时重排固定时刻提醒（简报 ×2 /
+  // 习惯挽留 / 回收站预告）——旧链路只重排任务提醒，常驻前台场景下当晚简报与
+  // 挽留静默丢失。rescheduleFixedTimeReminders 内部已按各开关分流（关闭即取消）。
+  TaskProvider.onFixedTimeRemindersReschedule = () {
+    if (!task.notificationsEnabled) return;
+    unawaited(rescheduleFixedTimeReminders(task, focus, habit));
   };
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。

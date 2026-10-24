@@ -332,6 +332,11 @@ class ExportSheet {
             title: const Text('选择导入方式'),
             content: Text(
               '共解析到 ${result.tasks.length} 条任务。'
+              // M4（v3.0.8 审计）：超 500 条被解析层截断（maxItems），两处文案
+              // （本确认框 + 结果 SnackBar）都必须消费 result.truncated——旧实现
+              // 都不消费，用户以为全量迁入，尾批任务凭空消失（解析层注释自述
+              // 「调用方应提示用户分批导入」从未被执行）。
+              '${result.truncated ? '文件超出单批 500 条上限，仅解析前 500 条，请拆分后分批导入。' : ''}'
               '${result.simplifiedRepeat > 0 ? '其中 ${result.simplifiedRepeat} 条复杂重复已简化为一次性。' : ''}'
               // P2-1（v2.9.0 审计）：提醒段的迁移结果必须如实告知——迁移不了的要
               // 明说「提醒不迁移」，不能让它静默消失（旧实现整段忽略 AALARM/VALARM）。
@@ -381,6 +386,10 @@ class ExportSheet {
   /// P2-2（v3.0.0 审计）：iCal 解析层提供「源是否显式提供」元信息
   /// （[IcsImportResult.meta]），透传给 [TaskProvider.importDedup]——覆盖更新
   /// 只改写源显式携带的字段，缺省（无 PRIORITY/CATEGORIES/STATUS 行）保留原值。
+  ///
+  /// M3 / P3-6（v3.0.8 审计）：await 落盘结果——旧实现不等 importDedup 的
+  /// `_persist()` 就报「导入完成」，DB 异常时重启后导入条目全部蒸发。saved=false
+  /// 时文案改为「生效但未保存，请重试」。
   static Future<void> _runImportDedup(
     TaskProvider provider,
     BuildContext context,
@@ -388,7 +397,7 @@ class ExportSheet {
     required bool overwrite,
     required bool fingerprint,
   }) async {
-    final stats = provider.importDedup(
+    final stats = await provider.importDedup(
       result.tasks,
       result.uids,
       overwrite: overwrite,
@@ -404,12 +413,21 @@ class ExportSheet {
     final extra = result.simplifiedRepeat > 0
         ? '（${result.simplifiedRepeat} 条复杂重复已简化为一次性）'
         : '';
+    // M4（v3.0.8 审计）：截断提示同步进结果 SnackBar（确认框之后用户可能已
+    // 忘记分批提醒，这里再如实给一次）。
+    final truncatedNote =
+        result.truncated ? '（超出单批 500 条上限，尾批未导入，请分批）' : '';
     // F-10（v2.8.5 审计）：已映射但细节部分丢失的规则单独提示，不再静默。
     final partial = result.partialRepeat > 0
         ? '（${result.partialRepeat} 条重复规则部分保留，间隔/次数细节未支持）'
         : '';
+    final notSaved = stats.saved
+        ? ''
+        : '；写入未保存（DB 异常），请重试或检查存储空间';
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('iCal 导入完成：${parts.join('，')}$extra$partial')),
+      SnackBar(
+          content: Text('iCal 导入完成：${parts.join('，')}'
+              '$extra$partial$truncatedNote$notSaved')),
     );
   }
 
@@ -462,12 +480,16 @@ class ExportSheet {
       final deletedNote = result.skippedDeleted > 0
           ? '；${result.skippedDeleted} 条回收站条目已跳过（不导入已删除内容）'
           : '';
+      // M5（v3.0.8 审计）：单批 500 条上限的截断提示（与 iCal 同口径）。
+      final truncatedNote = result.truncated
+          ? '；文件超出单批 500 条上限，仅解析前 500 条，请拆分后分批导入'
+          : '';
       if (result.tasks.isEmpty) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-                content:
-                    Text('未解析到可导入的任务$errHead$sectionNote$deletedNote')),
+                content: Text('未解析到可导入的任务'
+                    '$errHead$sectionNote$deletedNote$truncatedNote')),
           );
         }
         return;
@@ -484,7 +506,7 @@ class ExportSheet {
                 children: [
                   Text(
                     '共解析到 ${result.tasks.length} 条任务（数据行 ${result.totalRows} 行）'
-                    '$errHead$sectionNote$deletedNote。'
+                    '$errHead$sectionNote$deletedNote$truncatedNote。'
                     // P1-2（v2.9.9 审计）：CSV 没有稳定 ID（草稿 id 为空），重复判定
                     // 一律按「标题 + 截止日期」指纹——必须如实告知判定依据。
                     '\nCSV 无稳定 ID：重复按「标题 + 截止日期」判定。',
@@ -554,7 +576,7 @@ class ExportSheet {
     CsvImportResult result, {
     required bool overwrite,
   }) async {
-    final stats = provider.importDedup(
+    final stats = await provider.importDedup(
       result.tasks,
       List<String?>.filled(result.tasks.length, null),
       overwrite: overwrite,
@@ -571,10 +593,19 @@ class ExportSheet {
     final failed = result.errors.isEmpty
         ? ''
         : '（${result.errors.length} 行校验失败未导入）';
+    // M5（v3.0.8 审计）：截断提示同步进结果 SnackBar。
+    final csvTruncatedNote =
+        result.truncated ? '（超出单批 500 条上限，尾批未导入，请分批）' : '';
+    // M3 / P3-6（v3.0.8 审计）：消费落盘结果（同 iCal 入口）。
+    final notSaved = stats.saved
+        ? ''
+        : '；写入未保存（DB 异常），请重试或检查存储空间';
     // U2-5（v3.0.0 审计）：失败行不再只报条数——完整清单（行号 + 原因，
     // 可滚动）在结果对话框里给出，用户可按行号定位修正后定点重导。
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('CSV 导入完成：${parts.join('，')}$failed')),
+      SnackBar(
+          content: Text(
+              'CSV 导入完成：${parts.join('，')}$failed$csvTruncatedNote$notSaved')),
     );
     if (result.errors.isNotEmpty) {
       await showDialog<void>(

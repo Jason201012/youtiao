@@ -238,7 +238,7 @@ void main() {
     final src = repeating(id: '9101', repeatMinute: 480).copyWith(
       doneDates: [Task.ymdKey(today().subtract(const Duration(days: 1)))],
     );
-    final r = p.importDedup([src], [null], overwrite: true, statuses: [null]);
+    final r = await p.importDedup([src], [null], overwrite: true, statuses: [null]);
     expect(r.overwritten, 1, reason: '同 id 同指纹 → 覆盖分支命中');
     expect(p.byId('9101')!.doneDates, isNotEmpty,
         reason: '前提：_mergeOverwriteFields 以来源 doneDates 覆盖（报告前提复算）');

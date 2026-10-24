@@ -232,7 +232,17 @@ class _EditorBodyState extends State<_EditorBody> {
       iconName: _iconName,
       items: built,
     );
-    await UserTemplateStore.save(t);
+    // L11（v3.0.8 审计）：消费保存结果——失败停留编辑层并如实提示（旧实现
+    // 异常直接冒泡出 async 闭包：UI 零反馈，用户以为保存成功了）。
+    final ok = await UserTemplateStore.save(t);
+    if (!ok) {
+      if (ctx.mounted) {
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          const SnackBar(content: Text('模板保存失败：请检查存储空间后重试')),
+        );
+      }
+      return;
+    }
     if (ctx.mounted) Navigator.pop(ctx);
   }
 

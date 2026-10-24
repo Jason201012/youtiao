@@ -130,23 +130,37 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     if (defer) {
       // 「移到下一天」= 把当前 occurrence 跳过 + 在新日期另落一次性副本。
       // F-2（v2.8.5 审计）：若 newDay 本身就是循环日，provider 只会 skip 本次、
-      // **不建副本**（返回 null）——否则目标日循环提醒 + 副本一次性提醒双响，
+      // **不建副本**（coveredByLoop）——否则目标日循环提醒 + 副本一次性提醒双响，
       // 且循环完成后副本仍挂着。文案与撤销动作据此分支。
-      // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化——
-      // 落盘失败时副本已被 provider 回滚内存（返回 null），横幅按「无副本」
-      // 分支如实显示（跳过本身仍已生效，另有 skip 撤销可回）。
+      // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化。
+      // P3-2（v3.0.8 审计）：返回值改具名记录，五种结局各表其事——尤其
+      // copyFailed（副本落盘失败已回滚）不再被误显示成「循环日覆盖」：旧文案
+      // 让用户以为「任务已在新日期、只是无需副本」，实际原日被跳过、目标日
+      // 没有任何任务（失败被伪装成预期行为，用户不会去点撤销）。
       final newDay = d.add(const Duration(days: 1));
-      final copy = await widget.provider.rescheduleOnceOccurrence(
+      final r = await widget.provider.rescheduleOnceOccurrence(
         _task.id,
         newDay,
         origDay: d,
       );
+      final copy = r.copy;
       // P3-6：给被跳过的这一天留一个会话级痕迹（行内文案会显示跳过来源）。
-      _deferSkipped.add(Task.ymdKey(d));
+      // P3-2（v3.0.8 审计）：仅在跳过确已发生时标注——noop（同日）/ missing
+      // （源任务不存在）时什么也没发生，不能留「已跳过」痕迹。
+      if (!r.noop && !r.missing) _deferSkipped.add(Task.ymdKey(d));
       _refresh();
       if (context.mounted) {
         final dayLabel =
             '${newDay.month.toString().padLeft(2, '0')}-${newDay.day.toString().padLeft(2, '0')}';
+        final content = r.missing
+            ? '任务已不存在，改期未生效'
+            : r.noop
+                ? '无需改期（目标日就是原日）'
+                : r.copyFailed
+                    ? '已跳过 $dayLabel，但副本写入失败（目标日暂无该任务，请重试）'
+                    : r.coveredByLoop
+                        ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
+                        : '已移到 $dayLabel（已新建一次性副本）';
         // P3-2（v2.9.6 审计）：迁入 `widgets/undo_snack_bar.dart` 唯一实现——
         // 本分支此前是内联 SnackBar（`kUndoWindow` 时长但**无超时提示**、
         // 文案未插秒数），同族「撤销」第 3 套实现。注释曾称「复合撤销语义上
@@ -155,9 +169,7 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
         // P3-5（v2.9.5 审计）：本分支的撤销是**复合**的（删副本 + 取消跳过）。
         showUndoSnackBar(
           context,
-          content: undoContent(copy == null
-              ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
-              : '已移到 $dayLabel（已新建一次性副本）'),
+          content: undoContent(content),
           onUndo: () async {
             // P2-1（v2.8.8）：撤销必须**双向**还原——① 按 service 返回的副本 id
             // 精确移除那座一次性副本（原实现按「标题 + 日期」反查，同名任务

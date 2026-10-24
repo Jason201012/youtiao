@@ -225,8 +225,13 @@ class DataIo {
   /// 调用方（backup_sheet）会误报「附件因体积超限已剥离」，误导用户以为
   /// 附件被安全处理过。
   static (Map<String, dynamic>, bool) trimForExport(Map<String, dynamic> map) {
+    // L12（v3.0.8 审计）：预算打 9 折——估算与真实序列化误差 ≤5%（见
+    // [estimateJsonBytes]），32MB 边缘「估算 31.9MB、实际 33MB」时会写出一个
+    // 读入端（同为 32MB 上限）必然拒绝的备份：「写得出去、取不回来」。留 10%
+    // 余量把最坏情况压回限内（超限时走原有的附件剥离逻辑）。
+    final budget = (maxExportPayloadBytes * 9 ~/ 10);
     final est = estimateJsonBytes(map);
-    if (est <= maxExportPayloadBytes) return (map, false);
+    if (est <= budget) return (map, false);
     // 复制后剥离，避免污染调用方持有的原 map（多次调用安全）。
     final trimmed = Map<String, dynamic>.from(map);
     final stripped = trimmed.remove('attachments') != null;

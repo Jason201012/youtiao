@@ -415,8 +415,16 @@ class HomeScreenState extends State<HomeScreen> {
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
           buildDefaultDragHandles: false,
-          onReorder: (oldIndex, newIndex) =>
-              provider.reorderTasks(sectionKey, oldIndex, newIndex),
+          onReorder: (oldIndex, newIndex) {
+            // P3-6（v3.0.8 审计）：消费 reorderTasks 的落盘结果——旧实现丢弃
+            // Future<bool>：手动排序落盘失败完全静默（重启后顺序回退且零反馈）。
+            provider.reorderTasks(sectionKey, oldIndex, newIndex).then((ok) {
+              if (ok) return;
+              final ctx = context;
+              if (!ctx.mounted) return;
+              showTaskPersistFailedHint(ctx, provider: provider);
+            });
+          },
           children: tiles,
         ),
         const SizedBox(height: 8),
@@ -553,8 +561,25 @@ class HomeScreenState extends State<HomeScreen> {
             tasks.where((t) => Task.isOverdue(t, DateTime.now())).toList(),
           TaskFilter.all => const <Task>[],
         };
+        // H5（v3.0.8 审计）：visible 必须与**屏幕上可见**的任务一致。旧实现在
+        // TaskFilter.all 下直接拼接五个分区、不过 [_tagFilter]，而多选顶栏的
+        // 「全选」消费的正是这个 visible：点了标签芯片（列表只剩含该标签的
+        // 任务）后「全选」→ 选区包含全部不可见任务——确认框虽显示真实条数，
+        // 但用户按屏幕所见理解，批量删除 / 改期 / 改优先级会作用到大量没看到
+        // 的任务（_toggleSelectAll 的注释自述「全选当前可见任务」，实现与其
+        // 自身承诺相悖）。谓词与 _section 内的 shown 过滤保持同一条。
+        // （标签芯片仅在 all 视图渲染，_tagFilter 非空即 all 视图。）
+        final tagPredicate = _tagFilter == null
+            ? null
+            : (Task t) => t.tags.contains(_tagFilter);
         final visible = filter == TaskFilter.all
-            ? [...overdue, ...today, ...future, ...repeat, ...done]
+            ? [
+                ...overdue,
+                ...today,
+                ...future,
+                ...repeat,
+                ...done,
+              ].where((t) => tagPredicate == null || tagPredicate(t)).toList()
             : filtered;
 
         // 拖拽重排仅在默认全量视图、无标签筛选时启用（与 _section 的 reorderable 对齐）。
@@ -1065,8 +1090,11 @@ class _PostponeButton extends StatelessWidget {
       ),
     );
     ctl.dispose();
-    // U20：输入非数字 / ≤0 时旧实现静默 return（用户以为执行了）；改为显式提示。
-    if (days == null || days <= 0) {
+    // L17（v3.0.8 审计）：区分「取消」（null，静默即可）与「非法值」
+    // （≤0 / 非数字）——旧实现把两者混在一个条件里，点「取消」也弹
+    // 「请输入大于 0 的天数」，文案说谎。
+    if (days == null) return;
+    if (days <= 0) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('请输入大于 0 的天数')),

@@ -164,7 +164,7 @@ void main() {
             status: TaskStatus.done, completedAt: doneAt,
             priority: Priority.high, category: Category.work),
       ]);
-      final r = p.importDedup(
+      final r = await p.importDedup(
         [mk(id: '1', title: '写周报', due: day)],
         const ['1'],
         overwrite: true,
@@ -184,7 +184,7 @@ void main() {
         mk(id: '1', title: '写周报', due: day,
             status: TaskStatus.done, completedAt: day),
       ]);
-      final r = p.importDedup(
+      final r = await p.importDedup(
         [mk(id: '1', title: '写周报', due: day,
             priority: Priority.low, category: Category.study)],
         const ['1'],
@@ -209,7 +209,7 @@ void main() {
         mk(id: '1', title: '写周报', due: day,
             status: TaskStatus.done, completedAt: doneAt),
       ]);
-      p.importDedup(
+      await p.importDedup(
         [mk(id: '1', title: '写周报', due: day, status: TaskStatus.done)],
         const ['1'],
         overwrite: true,
@@ -328,7 +328,7 @@ void main() {
   group('P2-7 批量落库 order', () {
     test('同批同分区 order 唯一且递增（与旧逐条扫 max 等价）', () async {
       final p = await buildWith(const []);
-      final r = p.importDedup([
+      final r = await p.importDedup([
         mk(title: '甲'),
         mk(title: '乙'),
         mk(title: '丙'),
@@ -358,7 +358,7 @@ void main() {
         mk(id: '1', title: '月度', due: day,
             repeat: RepeatType.monthly, monthlyFromEnd: 1),
       ]);
-      p.importDedup(
+      await p.importDedup(
         [mk(id: '1', title: '月度', due: day)],
         const ['1'],
         overwrite: true,
@@ -377,7 +377,7 @@ void main() {
         mk(id: '1', title: '月度', due: day,
             repeat: RepeatType.monthly, monthlyDay: 1, monthlyFromEnd: 1),
       ]);
-      p.importDedup(
+      await p.importDedup(
         [mk(id: '1', title: '月度', due: day,
             repeat: RepeatType.monthly, monthlyDay: 15)],
         const ['1'],
@@ -527,7 +527,7 @@ void main() {
   group('U2-2 批内指纹判重', () {
     test('跳过挡：同一文件两行完全相同 → 只导 1 条、另 1 条计 skipped', () async {
       final p = await buildWith(const []);
-      final r = p.importDedup([
+      final r = await p.importDedup([
         mk(title: '买菜', due: DateTime(2026, 10, 15)),
         mk(title: '买菜', due: DateTime(2026, 10, 15)),
       ], const [null, null], fingerprint: true);
@@ -538,7 +538,7 @@ void main() {
 
     test('覆盖挡：批内重复行以后行为准（替换，不重复导入）', () async {
       final p = await buildWith(const []);
-      final r = p.importDedup([
+      final r = await p.importDedup([
         mk(title: '买菜', due: DateTime(2026, 10, 15), note: '第一版'),
         mk(title: '买菜', due: DateTime(2026, 10, 15), note: '第二版'),
       ], const [null, null], fingerprint: true, overwrite: true);

@@ -47,6 +47,11 @@ class _TemplateLibraryBody extends StatefulWidget {
 class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
   List<UserTemplate> _user = const [];
 
+  /// P2-1（v3.0.8 审计）：套用中守卫——applyTemplate 逐条 await addTask（一条
+  /// 模板通常 3-7 项，等待时间足以诱发双击），旧实现无 _applying：双击「套用」
+  /// 并发跑两遍 → 整份模板复制两份。
+  bool _applying = false;
+
   @override
   void initState() {
     super.initState();
@@ -90,7 +95,16 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
         }
         return;
       }
-      await UserTemplateStore.save(t);
+      // L11（v3.0.8 审计）：消费保存结果（原子写 + 失败如实提示）。
+      final ok = await UserTemplateStore.save(t);
+      if (!ok) {
+        if (ctx.mounted) {
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            const SnackBar(content: Text('模板保存失败：请检查存储空间后重试')),
+          );
+        }
+        return;
+      }
       await _reload();
       if (ctx.mounted) {
         ScaffoldMessenger.of(ctx)
@@ -193,15 +207,26 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                       subtitle: Text('${t.description} · ${t.items.length} 项'),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () async {
+                        // P2-1（v3.0.8 审计）：防重入（见 [_applying]）。
+                        if (_applying) return;
+                        setState(() => _applying = true);
                         // P2-2（v3.0.7 审计）：applyTemplate 异步化——等待真实
                         // 落库数再提示（落盘失败的条目已被 provider 回滚，不计入）。
-                        final n = await applyTemplate(provider, t);
+                        // U3-6（v3.0.8 审计）：整批一次落盘——失败已整体
+                        // 回滚（created=0），按失败分支如实提示，不再出现
+                        // 「新增 0 条」后被误读为空模板。
+                        final r = await applyTemplate(provider, t);
+                        if (!mounted) return;
+                        setState(() => _applying = false);
                         if (!context.mounted) return;
                         Navigator.pop(context);
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                                content: Text('已套用「${t.name}」，新增 $n 条任务')),
+                                content: Text(r.created == r.total
+                                    ? '已套用「${t.name}」，新增 ${r.created} 条任务'
+                                    : '套用失败：「${t.name}」未保存'
+                                        '（已整体回滚），请检查存储空间后重试')),
                           );
                         }
                       },
@@ -244,15 +269,25 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                         trailing: PopupMenuButton<String>(
                           onSelected: (v) async {
                             if (v == 'apply') {
+                              // P2-1（v3.0.8 审计）：同内置模板防重入。
+                              if (_applying) return;
+                              setState(() => _applying = true);
                               // P2-2（v3.0.7 审计）：同内置模板——等待真实
                               // 落库数再提示。
-                              final n = await applyUserTemplate(provider, t);
+                              // U3-6（v3.0.8 审计）：同内置模板——整批
+                              // 一次落盘，失败如实提示。
+                              final r = await applyUserTemplate(provider, t);
+                              if (!mounted) return;
+                              setState(() => _applying = false);
                               if (!context.mounted) return;
                               Navigator.pop(context);
                               if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(content:
-                                      Text('已套用「${t.name}」，新增 $n 条任务')),
+                                      Text(r.created == r.total
+                                          ? '已套用「${t.name}」，新增 ${r.created} 条任务'
+                                          : '套用失败：「${t.name}」未保存'
+                                              '（已整体回滚），请检查存储空间后重试')),
                                 );
                               }
                             } else if (v == 'edit') {

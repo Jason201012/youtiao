@@ -11,6 +11,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
+import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
 
 /// 快速录入弹层：一行自然语言直接建任务。
@@ -74,6 +75,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   String? _attachmentSession;
   /// 附件所有权是否已转移（直接保存或转入完整编辑）：转移后 dispose 不再清理暂存目录。
   bool _consumed = false;
+  /// P2-1（v3.0.8 审计）：提交中守卫——`_submit` 异步化（await addTask）后出现
+  /// 双击窗口：两次点按都会通过 `_parsed.isValid` 检查、各自分配不同自增 id →
+  /// 两条重复任务；且成功分支在弹层退场动画期间对已 pop 的 context 再调
+  /// Navigator.pop。与 habit_screen 的 _AddHabitSheet / new_task_sheet 的 _save
+  /// 同口径。
+  bool _saving = false;
 
   @override
   void initState() {
@@ -107,9 +114,34 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   /// 直接入库并关闭
   Future<void> _submit() async {
     if (!_parsed.isValid) return;
+    // P2-1（v3.0.8 审计）：防重入（见 [_saving] 注释；键盘 onSubmitted 也走本路）。
+    if (_saving) return;
+    setState(() => _saving = true);
     final provider = context.read<TaskProvider>();
     // P1-11：分享接收的附件随任务一并保存，并把暂存目录提升为正式目录。
     final base = _parsed.toTask();
+    // M17（v3.0.8 审计）：补 PastDueGuard——快速录入是「今天下午3点 开会」这类
+    // 自然语言的主入口，解析出今天过去时刻会直接建成功、无任何「提醒将不会
+    // 触发」提示（new_task_sheet / batch_edit / calendar / home / task_detail
+    // 五处早已接入，唯独这里没有——U12 定性的「信任级伤害」的最后幸存者）。
+    // 判定与弹窗统一走 [PastDueGuard]（重复任务天然豁免）。
+    final due = base.dueDate;
+    if (base.repeat == RepeatType.none &&
+        due != null &&
+        due.isBefore(DateTime.now())) {
+      final hh = due.hour.toString().padLeft(2, '0');
+      final mm = due.minute.toString().padLeft(2, '0');
+      final go = await PastDueGuard.confirm(
+        context,
+        count: 1,
+        detail: '解析出的截止时间（${due.month}/${due.day} $hh:$mm）'
+            '已早于当前时刻，保存后提醒将不会触发。\n\n仍要保存吗？',
+      );
+      if (!go) {
+        if (mounted) setState(() => _saving = false);
+        return;
+      }
+    }
     // P2-2（v3.0.7 审计）：消费新建落盘结果——null = 落盘失败且 provider 已
     // 回滚内存。旧实现 fire-and-forget 后直接 pop：列表立刻出现、重启即丢且
     // 零提示。失败停留本层提示（输入内容还在，重试不造重复任务），暂存附件
@@ -119,8 +151,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     ));
     if (created == null) {
       if (context.mounted) {
-        showTaskPersistFailedHint(context, provider: provider);
+        // P3-7（v3.0.8 审计）：同 new_task_sheet——新建失败已回滚内存，
+        // 「继续操作会自动一并保存」不成立，用「新建未生效，请重试」。
+        showTaskPersistFailedHint(context,
+            provider: provider, rolledBack: true);
       }
+      if (mounted) setState(() => _saving = false);
       return;
     }
     if (_attachmentSession != null) {
@@ -128,6 +164,9 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
           .catchError((_) {});
     }
     _consumed = true;
+    // P2-1（v3.0.8 审计）：成功分支补 mounted 守卫——await 期间弹层可能已被
+    // 销毁（系统返回 / 父级路由弹出），对失效 context 调 pop 会触发断言异常。
+    if (!mounted) return;
     Navigator.pop(context);
   }
 
@@ -297,7 +336,8 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
                     ),
                     const Spacer(),
                     FilledButton.icon(
-                      onPressed: _parsed.isValid ? _submit : null,
+                      // P2-1（v3.0.8 审计）：提交窗口内置灰。
+                      onPressed: _parsed.isValid && !_saving ? _submit : null,
                       icon: const Icon(Symbols.add, size: 20),
                       label: const Text('添加任务'),
                       style: FilledButton.styleFrom(

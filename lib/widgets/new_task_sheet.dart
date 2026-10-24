@@ -70,6 +70,19 @@ class _TaskSheetState extends State<TaskSheet> {
   List<SubTask> _subtasks = [];
   int? _editingIndex;
 
+  /// U3-2（v3.0.8 审计）：编辑保存落盘失败标记。任务侧 updateTask **不内存
+  /// 回滚**（全量写自愈口径），此时「放弃未保存的修改」对话框说「关闭将丢失
+  /// 这些改动」是空承诺——改动已在内存/列表里生效，下一次任意成功写入都会把
+  /// 它持久化。置位后关闭确认改文案，如实告知「关闭不会撤销」。
+  bool _editSaveFailed = false;
+
+  /// P2-1（v3.0.8 审计）：提交中守卫——v3.0.7 把 `_persist()` 纳入提交路径后
+  /// 出现了双击窗口：保存按钮仅以标题非空为可用条件，两次快速点按各自分配不同
+  /// 自增 id → 两条同名重复任务；且成功后续代码在弹层退场动画期间仍 mounted，
+  /// 第二次 Navigator.pop 可能把下层页面也弹掉。与习惯侧 _AddHabitSheet 的
+  /// _saving（v3.0.7 P3-4）同口径。
+  bool _saving = false;
+
   /// 标签列表（编辑模式从任务预填）。
   List<String> _tags = [];
   final _tagController = TextEditingController();
@@ -252,8 +265,21 @@ class _TaskSheetState extends State<TaskSheet> {
     for (var i = 0; i < _tags.length && i < _baseTags.length; i++) {
       if (_tags[i] != _baseTags[i]) return true;
     }
+    // M14（v3.0.8 审计）：子任务与附件不能只比**长度**——改子任务标题、
+    // 勾选/取消勾选、附件删一添一，旧判据下 _isDirty 恒 false，点 ✕ 直接
+    // 关闭零提示（改动静默丢失；附件置换场景新文件还被按孤儿清理）。
     if (_subtasks.length != _baseSubtasks.length) return true;
+    for (var i = 0; i < _subtasks.length && i < _baseSubtasks.length; i++) {
+      final a = _subtasks[i];
+      final b = _baseSubtasks[i];
+      if (a.title != b.title || a.done != b.done) return true;
+    }
     if (_attachments.length != _baseAttachments.length) return true;
+    for (var i = 0; i < _attachments.length && i < _baseAttachments.length; i++) {
+      final a = _attachments[i];
+      final b = _baseAttachments[i];
+      if (a.fileName != b.fileName || a.type != b.type) return true;
+    }
     // P2-1（v2.8.6 审计）：提醒类字段纳入脏判定。TimeOfDay / DateTime 已实现
     // 按值 ==；weekdays 用逐元素比较（与 TaskProvider._listEq 同口径）。
     if (_repeatTime != _baseRepeatTime) return true;
@@ -263,6 +289,9 @@ class _TaskSheetState extends State<TaskSheet> {
     // T1-1：预计时长纳入脏判定。
     if (_estimateMinutes != _baseEstimate) return true;
     if (!_intsEqual(_repeatWeekdays, _baseRepeatWeekdays)) return true;
+    // M13（v3.0.8 审计）：录音进行中纳入脏判定——旧实现录音不改任何被跟踪
+    // 字段，点 ✕ / 返回无确认直接关闭（麦克风继续占用、暂存文件继续写入）。
+    if (_isRecording) return true;
     return false;
   }
 
@@ -279,11 +308,18 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 返回 true 表示应真正关闭。对话框与场景解耦，供 PopScope / X 按钮共用。
   Future<bool> _confirmDiscardIfDirty() async {
     if (!_isDirty || _saved) return true;
+    // U3-2（v3.0.8 审计）：编辑落盘失败后文案分化——provider 不内存回滚，
+    // 「关闭将丢失这些改动」与事实相反（改动已在列表中生效，后续任意成功
+    // 写入都会持久化它）。如实说明，避免用户以为已还原而离开。
+    final liveInMemory = _editSaveFailed;
     final leave = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
-        title: const Text('放弃未保存的修改？'),
-        content: const Text('本次输入尚未保存，关闭将丢失这些改动。'),
+        title: Text(liveInMemory ? '关闭弹层？' : '放弃未保存的修改？'),
+        content: Text(liveInMemory
+            ? '本次修改已保存失败，但改动已在列表中生效，将在后续操作时自动保存；'
+                '关闭弹层不会撤销这些改动。'
+            : '本次输入尚未保存，关闭将丢失这些改动。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(d, false),
@@ -305,6 +341,15 @@ class _TaskSheetState extends State<TaskSheet> {
 
   @override
   void dispose() {
+    // M13（v3.0.8 审计）：录音中关闭弹层必须先停录再 dispose——旧实现两者都
+    // 不做了：麦克风在界面消失后继续录制（系统录音指示条常亮）、持续写入已被
+    // dispose 删除的暂存目录，且每次开关泄漏一个 AudioRecorder 平台资源。
+    // fire-and-forget：dispose 不能 await，异常静默（不影响退场）。
+    if (_isRecording) {
+      _recorder.stop().catchError((_) => null);
+      _isRecording = false;
+    }
+    _recorder.dispose().catchError((_) {});
     _titleController.dispose();
     _noteController.dispose();
     _subtaskController.dispose();
@@ -393,11 +438,16 @@ class _TaskSheetState extends State<TaskSheet> {
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
+    final first = now.subtract(const Duration(days: 365));
+    final last = now.add(const Duration(days: 365 * 5));
     final picked = await showDatePicker(
       context: context,
-      initialDate: _dueDate ?? now,
-      firstDate: now.subtract(const Duration(days: 365)),
-      lastDate: now.add(const Duration(days: 365 * 5)),
+      // M15（v3.0.8 审计）：initialDate 夹取到 [first, last]——久逾期任务的
+      // _dueDate 可能早于 firstDate 一年，旧实现直接传入会触发 showDatePicker
+      // 断言（debug 红屏崩溃）/ release 落错月份。
+      initialDate: _clampDate(_dueDate ?? now, first, last),
+      firstDate: first,
+      lastDate: last,
     );
     if (picked != null) {
       // F-4/F-5：重复任务不再把截止时间钉成所选日期 23:59。
@@ -423,11 +473,14 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 选择开始日期：默认今天；保留既有时间或默认 09:00。
   Future<void> _pickStartDate() async {
     final now = DateTime.now();
+    final first = now.subtract(const Duration(days: 365));
+    final last = now.add(const Duration(days: 365 * 5));
     final picked = await showDatePicker(
       context: context,
-      initialDate: _startDate ?? now,
-      firstDate: now.subtract(const Duration(days: 365)),
-      lastDate: now.add(const Duration(days: 365 * 5)),
+      // M15（v3.0.8 审计）：同 _pickDate 夹取。
+      initialDate: _clampDate(_startDate ?? now, first, last),
+      firstDate: first,
+      lastDate: last,
     );
     if (picked != null) {
       final int h = _startDate?.hour ?? 9;
@@ -535,15 +588,28 @@ class _TaskSheetState extends State<TaskSheet> {
   }
 
   Future<void> _pickRepeatUntil() async {
+    final now = DateTime.now();
+    final last = now.add(const Duration(days: 3650));
     final picked = await showDatePicker(
       context: context,
-      initialDate: _repeatUntilDate ??
-          DateTime.now().add(const Duration(days: 30)),
-      firstDate: DateTime.now(),
-      lastDate: DateTime.now().add(const Duration(days: 3650)),
+      // M15（v3.0.8 审计）：_repeatUntilDate 可能被 endRepeat 写成**昨天**
+      // （「结束并保留待办」的口径），旧实现直接传入必触发 firstDate 断言
+      // （debug 崩溃）；release 下也会落到错误月份。统一夹取。
+      initialDate: _clampDate(
+          _repeatUntilDate ?? now.add(const Duration(days: 30)), now, last),
+      firstDate: now,
+      lastDate: last,
       helpText: '选择重复结束日期（含当日仍循环，之后停止）',
     );
     if (picked != null) setState(() => _repeatUntilDate = picked);
+  }
+
+  /// M15（v3.0.8 审计）：把日期夹取到 [lo, hi] 闭区间（showDatePicker 要求
+  /// initialDate ∈ [firstDate, lastDate]，否则断言崩溃）。
+  static DateTime _clampDate(DateTime d, DateTime lo, DateTime hi) {
+    if (d.isBefore(lo)) return lo;
+    if (d.isAfter(hi)) return hi;
+    return d;
   }
 
   /// yyyy-MM-dd（date-only），与 [Task.repeatUntil] 存储格式一致。
@@ -823,6 +889,10 @@ class _TaskSheetState extends State<TaskSheet> {
   Future<void> _save() async {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
+    // P2-1（v3.0.8 审计）：防重入（见 [_saving] 注释）。 PastDueGuard 确认框
+    // 也在窗口内，按钮置灰 + 此处兜底（键盘 / 快捷键等非按钮路径）。
+    if (_saving) return;
+    setState(() => _saving = true);
     // U12：可设过去时间但无任何提示 = 提醒静默失效（15:00 建「今天 09:00」，
     // 保存成功却永不响铃——对提醒类 App 是信任级伤害）。一次性任务且截止时刻已过
     // 时，先提示「提醒不会触发」，由用户决定是否仍要保存（补录历史仍可能有意）。
@@ -837,7 +907,10 @@ class _TaskSheetState extends State<TaskSheet> {
         detail: '所选截止时间（${_formatDate(_dueDate!)} ${_formatTime(_dueDate!)}）'
             '已早于当前时刻，保存后提醒将不会触发。\n\n仍要保存吗？',
       );
-      if (!continueAnyway) return;
+      if (!continueAnyway) {
+        if (mounted) setState(() => _saving = false);
+        return;
+      }
     }
     final provider = Provider.of<TaskProvider>(context, listen: false);
     final repeatMinute =
@@ -909,6 +982,10 @@ class _TaskSheetState extends State<TaskSheet> {
         } else {
           showTaskPersistFailedHint(context, provider: provider);
         }
+        // U3-2（v3.0.8 审计）：编辑路径不内存回滚——置位后关闭确认弹层用
+        // 「关闭不会撤销」的如实文案（见 [_editSaveFailed]）。
+        _editSaveFailed = true;
+        if (mounted) setState(() => _saving = false);
         return;
       }
     } else {
@@ -944,7 +1021,10 @@ class _TaskSheetState extends State<TaskSheet> {
       ).normalizedRepeatFields());
       if (created == null) {
         if (!mounted) return;
-        showTaskPersistFailedHint(context, provider: provider);
+        // P3-7（v3.0.8 审计）：新建失败已回滚内存（任务不存在），通用文案
+        // 「继续其它操作会自动一并保存」不成立——传 rolledBack 用「新建未生效」。
+        showTaskPersistFailedHint(context, provider: provider, rolledBack: true);
+        if (mounted) setState(() => _saving = false);
         return;
       }
       // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
@@ -1776,7 +1856,8 @@ class _TaskSheetState extends State<TaskSheet> {
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              onPressed: canSave
+              // P2-1（v3.0.8 审计）：提交窗口内置灰（与入口兜底双保险）。
+              onPressed: canSave && !_saving
                   ? () async {
                       await _save();
                     }

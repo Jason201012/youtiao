@@ -979,7 +979,12 @@ class _KanbanCard extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w500,
-                      color: overdue ? AppColors.lightHigh : ext.meta,
+                      // L20（v3.0.8 审计）：逾期字色按明暗分化——旧实现硬编码
+                      // 浅色系红（AppColors.lightHigh），深色模式下对比度不足
+                      // （同文件 :895 的优先级色早已按 isDark 分支，此处漏了）。
+                      color: overdue
+                          ? (isDark ? AppColors.darkHigh : AppColors.lightHigh)
+                          : ext.meta,
                     ),
                   ),
                 // P3-19（v2.9.9 审计）：暂停中的待办卡此前没有任何暂停标识

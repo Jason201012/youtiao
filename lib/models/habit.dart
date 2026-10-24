@@ -21,6 +21,11 @@ class Habit {
   final int? reminderMinute;
   final DateTime createdAt;
   final bool archived;
+  /// 归档时间戳（L7，v3.0.8 审计）：归档发生时记录，供周期报告把「期内归档」
+  /// 习惯的应打卡日截断到归档日——否则归档习惯从月报/年报整段消失，与成就侧
+  /// 「归档保留历史」口径不一致。取消归档时清空；旧数据缺省 null（零迁移，
+  /// 缺省时周期报告按「全程在期内」的尽力口径统计）。
+  final DateTime? archivedAt;
   /// 每周目标打卡次数（0 = 不启用，1..14）。新增字段，旧数据缺省 0（零迁移）。
   final int weeklyGoal;
 
@@ -49,6 +54,7 @@ class Habit {
     this.reminderMinute,
     required this.createdAt,
     this.archived = false,
+    this.archivedAt,
     this.weeklyGoal = 0,
     this.dailyTarget,
     this.graceDays = 0,
@@ -121,6 +127,7 @@ class Habit {
         'reminderMinute': reminderMinute,
         'createdAt': createdAt.toIso8601String(),
         'archived': archived,
+        'archivedAt': archivedAt?.toIso8601String(),
         'weeklyGoal': weeklyGoal,
         'dailyTarget': dailyTarget,
         'graceDays': graceDays,
@@ -148,6 +155,9 @@ class Habit {
           ? DateTime.parse(j['createdAt'] as String)
           : DateTime.now(),
       archived: j['archived'] as bool? ?? false,
+      // L7（v3.0.8 审计）：备份是不可信输入，解析失败按「无时间戳」兜底
+      // （周期报告侧对 null 有尽力口径），不让脏数据炸掉整份恢复。
+      archivedAt: _tryParseDate(j['archivedAt']),
       weeklyGoal: (j['weeklyGoal'] as num?)?.toInt() ?? 0,
       // T1-2 / T1-4：备份是显式不可信输入，越界值一律回落默认——
       // 目标量 <=0 / 非整数 → 视为布尔习惯；宽限日夹到 [0,3]。
@@ -156,8 +166,18 @@ class Habit {
     );
   }
 
-  /// 解析每日目标量。
-  ///
+  /// 解析可选时间戳（L7，v3.0.8 审计：`archivedAt`）。脏数据 / 非字符串一律
+  /// 返回 null，与「字段缺省」同义——恢复路径绝不因单个坏字段整体失败。
+  static DateTime? _tryParseDate(dynamic v) {
+    if (v is! String) return null;
+    try {
+      return DateTime.parse(v);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 解析每日目标量。  ///
   /// P3-4（v2.9.4 审计）：此前「超出上界」与「<=0」同归 `null`，于是
   /// 手工改过的备份里 `dailyTarget: 20000` 会被**静默降级成布尔习惯**——
   /// 用户的量化语义被整体改掉（进度条消失、目标变1），且没有任何提示。
@@ -186,6 +206,8 @@ class Habit {
     int? reminderMinute,
     bool clearReminder = false,
     bool? archived,
+    DateTime? archivedAt,
+    bool clearArchivedAt = false,
     int? weeklyGoal,
     int? dailyTarget,
     bool clearDailyTarget = false,
@@ -201,6 +223,8 @@ class Habit {
             clearReminder ? null : (reminderMinute ?? this.reminderMinute),
         createdAt: createdAt,
         archived: archived ?? this.archived,
+        archivedAt:
+            clearArchivedAt ? null : (archivedAt ?? this.archivedAt),
         weeklyGoal: weeklyGoal ?? this.weeklyGoal,
         dailyTarget: clearDailyTarget ? null : (dailyTarget ?? this.dailyTarget),
         graceDays: graceDays ?? this.graceDays,

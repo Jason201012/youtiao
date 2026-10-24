@@ -152,8 +152,10 @@ void main() {
         target = target.add(const Duration(days: 1));
       }
       // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化。
-      final copy =
+      // P3-2（v3.0.8 审计）：返回值改具名记录，消费点取 .copy。
+      final r =
           await p.rescheduleOnceOccurrence('31', target, origDay: today);
+      final copy = r.copy;
       expect(copy, isNotNull);
       expect(copy!.doneDates, isEmpty,
           reason: '副本不得沿用原任务 doneDates，否则同一完成记录统计双算');

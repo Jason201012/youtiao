@@ -370,10 +370,11 @@ class _TagManageScreenState extends State<TagManageScreen> {
   }
 
   /// 重命名对话框
-  void _showRenameDialog(
-      BuildContext context, TaskProvider provider, String oldName) {
+  // L23（v3.0.8 审计）：改 async + 关闭后 dispose 控制器（旧实现创建后从不释放）。
+  Future<void> _showRenameDialog(
+      BuildContext context, TaskProvider provider, String oldName) async {
     final controller = TextEditingController(text: oldName);
-    showDialog(
+    await showDialog(
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('重命名标签'),
@@ -420,6 +421,8 @@ class _TagManageScreenState extends State<TagManageScreen> {
         ],
       ),
     );
+    // L23（v3.0.8 审计）：对话框关闭后释放控制器。
+    controller.dispose();
   }
 
   /// 合并对话框
@@ -532,9 +535,11 @@ class _TagManageScreenState extends State<TagManageScreen> {
   /// 损害对其它成功提示的信任。现改为真实链路：确认后唤起快速录入层，预填
   /// `#标签名` 语法，用户补一句标题即可建出一条带该标签的任务（标签随之诞生、
   /// 在本页可见可管理）。预填文本里不含日期/优先级，避免被解析器吃掉标签前缀。
-  void _showAddTagDialog(BuildContext context, TaskProvider provider) {
+  // L23（v3.0.8 审计）：改 async + 关闭后 dispose 控制器。
+  Future<void> _showAddTagDialog(
+      BuildContext context, TaskProvider provider) async {
     final controller = TextEditingController();
-    showDialog(
+    await showDialog(
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('新增标签'),
@@ -581,6 +586,8 @@ class _TagManageScreenState extends State<TagManageScreen> {
         ],
       ),
     );
+    // L23（v3.0.8 审计）：对话框关闭后释放控制器。
+    controller.dispose();
   }
 
   /// U1：带标签名唤起快速录入。名字含空白/`#`/`!` 时会被解析器截断，先提示防错位。

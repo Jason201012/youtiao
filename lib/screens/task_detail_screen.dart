@@ -41,7 +41,7 @@ import 'package:todolist/services/task_parser.dart';
 /// 2. **默认不外跳**：本 App 定位为「除检查更新外不联网」，点击链接会离开本地
 ///    并由浏览器发起网络请求。默认行为改为**只复制链接并提示**；用户在设置里
 ///    显式打开「允许打开备注中的链接」后才真正唤起外部浏览器。
-class _NoteText extends StatelessWidget {
+class _NoteText extends StatefulWidget {
   final String text;
   final Color color;
 
@@ -52,6 +52,36 @@ class _NoteText extends StatelessWidget {
     required this.color,
     required this.allowExternal,
   });
+
+  @override
+  State<_NoteText> createState() => _NoteTextState();
+}
+
+class _NoteTextState extends State<_NoteText> {
+  /// L18（v3.0.8 审计）：recognizer 按 URL 缓存复用 + dispose 统一释放。
+  /// 旧实现是 StatelessWidget：每次 build 新建 TapGestureRecognizer 且**从不
+  /// dispose**——详情页每次重建（打卡 / 编辑 / 进度通知刷新）都泄漏一个
+  /// recognizer。State 的 context 跨 rebuild 稳定，闭包捕获安全；URL 集合
+  /// 不变时复用同一实例，rebuild 零新增。
+  final Map<String, TapGestureRecognizer> _recognizers = {};
+
+  TapGestureRecognizer _recognizerFor(String url) {
+    final existing = _recognizers[url];
+    if (existing != null) return existing;
+    final r = TapGestureRecognizer()
+      ..onTap = () => _onTapLink(context, url);
+    _recognizers[url] = r;
+    return r;
+  }
+
+  @override
+  void dispose() {
+    for (final r in _recognizers.values) {
+      r.dispose();
+    }
+    _recognizers.clear();
+    super.dispose();
+  }
 
   /// 收紧后的 URL 正则：
   /// - `https?://` 开头，不接受其它 scheme（file / javascript / data 等一律不入链）；
@@ -74,6 +104,8 @@ class _NoteText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final text = widget.text;
+    final color = widget.color;
     final matches = _urlRe.allMatches(text).toList();
     if (matches.isEmpty) {
       return Text(text, style: TextStyle(fontSize: 14, color: color));
@@ -92,8 +124,8 @@ class _NoteText extends StatelessWidget {
       spans.add(TextSpan(
         text: url,
         style: TextStyle(fontSize: 14, color: linkColor, decoration: TextDecoration.underline),
-        recognizer: TapGestureRecognizer()
-          ..onTap = () => _onTapLink(context, url),
+        // L18（v3.0.8 审计）：走缓存 recognizer（见 [_recognizers]）。
+        recognizer: _recognizerFor(url),
       ));
       cursor = m.end;
     }
@@ -116,7 +148,7 @@ class _NoteText extends StatelessWidget {
       _tip(context, '链接无法识别');
       return;
     }
-    if (!allowExternal) {
+    if (!widget.allowExternal) {
       await Clipboard.setData(ClipboardData(text: url));
       if (context.mounted) {
         _tip(context, '已复制链接（可在设置中允许打开外链）');
@@ -411,7 +443,7 @@ class TaskDetailScreen extends StatelessWidget {
                         // skipDates 塞了一个当天无意义的日期，属假成功；而日后把规则改到
                         // 覆盖该日时，会被这条陈旧记录永久静默跳过。
                         onPressed: canSkipToday
-                            ? () {
+                            ? () async {
                                 // P2-2（v2.8.8 审计）：本次跳过此前点击即关页、无确认亦无撤销，
                                 // 误触后当天该次循环彻底消失（列表不出现、提醒不响）且当天
                                 // 无法恢复，只能等 occurrence 滚动过期被清掉——对纯本地无云端的
@@ -430,18 +462,22 @@ class TaskDetailScreen extends StatelessWidget {
                                 // P2-2（v3.0.7 审计）：消费落盘结果——失败弹提示
                                 // （内存跳过已生效、全量写自愈），横幅照常给。
                                 // P3-3（v3.0.7 审计）：false 双义拆开。
-                                provider
-                                    .skipOccurrence(task.id, day: opDay)
-                                    .then((ok) {
-                                  if (!ok && context.mounted) {
-                                    if (provider.byId(task.id) == null) {
-                                      showTaskMissingHint(context);
-                                    } else {
-                                      showTaskPersistFailedHint(context,
-                                          provider: provider);
-                                    }
+                                // L21（v3.0.8 审计）：改 **await 后按结果提示再 pop**——
+                                // 旧实现 fire-and-forget 后立即 Navigator.pop，失败提示
+                                // 所用的 context 已随弹层销毁：P2-2 为该入口承诺的失败
+                                // 反馈结构性不可达（撤销横幅却照常出现，用户以为成功了）。
+                                final ok = await provider.skipOccurrence(
+                                    task.id,
+                                    day: opDay);
+                                if (!context.mounted) return;
+                                if (!ok) {
+                                  if (provider.byId(task.id) == null) {
+                                    showTaskMissingHint(context);
+                                  } else {
+                                    showTaskPersistFailedHint(context,
+                                        provider: provider);
                                   }
-                                });
+                                }
                                 Navigator.pop(context);
                                 // U2-4（v2.9.4 审计）：不再 `hideCurrentSnackBar()`
                                 // ——`ScaffoldMessenger` 自带队列（后一条排在前一条
@@ -715,13 +751,16 @@ class TaskDetailScreen extends StatelessWidget {
                             final origDay =
                                 DateTime(n0.year, n0.month, n0.day);
                             // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随
-                            // addTask 异步化——落盘失败时副本已被 provider 回滚
-                            // 内存（返回 null），横幅按「无副本」分支如实显示。
-                            final copy = await provider.rescheduleOnceOccurrence(
+                            // addTask 异步化。P3-2（v3.0.8 审计）：返回值改具名
+                            // 记录，copyFailed（副本落盘失败已回滚）单独成义——
+                            // 旧实现把这种 null 显示成「$dayLabel 本身是循环日」，
+                            // 失败被伪装成预期行为（原日已跳过、目标日无任务）。
+                            final r = await provider.rescheduleOnceOccurrence(
                               task.id,
                               picked,
                               origDay: origDay,
                             );
+                            final copy = r.copy;
                             if (context.mounted) navigator.pop();
                             // U3-2（v2.9.5 审计）：去掉 `..hideCurrentSnackBar()`
                             // （同上文口径：不清场，靠队列）。
@@ -732,11 +771,18 @@ class TaskDetailScreen extends StatelessWidget {
                             // 弹层「移到下一天」同构：删副本（discardTask，含附件
                             // 清理与撤销缓冲作废）+ 取消原日跳过（unskipOccurrence）。
                             if (context.mounted) {
+                              final content = r.missing
+                                  ? '任务已不存在，改期未生效'
+                                  : r.noop
+                                      ? '无需改期（目标日就是原日）'
+                                      : r.copyFailed
+                                          ? '已跳过今天这一次，但副本写入失败（目标日暂无该任务，请重试）'
+                                          : r.coveredByLoop
+                                              ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
+                                              : '已改期至 $dayLabel（已新建一次性副本）';
                               showUndoSnackBar(
                                 context,
-                                content: undoContent(copy == null
-                                    ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
-                                    : '已改期至 $dayLabel（已新建一次性副本）'),
+                                content: undoContent(content),
                                 onUndo: () async {
                                   // 新P3-8（v2.9.7 审计）：源任务在窗口内被删时
                                   // 副本清理与「取消跳过」都无从谈起，如实返回失败
@@ -1194,8 +1240,10 @@ String _dueLabel(DateTime? due) {
   final key = dueCompareKey(due);
   final d = DateTime(key.year, key.month, key.day);
   final diff = d.difference(today).inDays;
-  final time =
-      ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
+  // L22（v3.0.8 审计）：纯日期形态省略时刻（同 task_row 口径）。
+  final time = dueIsPureDateForm(due)
+      ? ''
+      : ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
   if (diff == 0) return '今天$time';
   if (diff == 1) return '明天$time';
   if (diff == -1) return '昨天$time';
@@ -1247,7 +1295,19 @@ class _AttachmentTileState extends State<_AttachmentTile> {
 
   Future<void> _onTap() async {
     final ref = widget.ref;
-    final file = await _fileFuture;
+    File file;
+    try {
+      file = await _fileFuture;
+    } catch (e) {
+      // M1（v3.0.8 审计）：v3.0.8 之前导入的附件可能带未净化的扩展名
+      // （fileFor 抛 ArgumentError），原来此处无兜底，点按毫无反应。
+      // 现在给用户明确反馈，并在提示中带原因。
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('附件无法打开：$e')));
+      }
+      return;
+    }
     if (!await file.exists()) {
       if (mounted) {
         ScaffoldMessenger.of(context)

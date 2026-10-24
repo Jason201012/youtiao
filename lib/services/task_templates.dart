@@ -21,6 +21,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/app_log.dart'; // L11（v3.0.8 审计）：保存失败日志
 import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
 import 'package:todolist/state/task_provider.dart';
 
@@ -547,11 +548,25 @@ class UserTemplateStore {
 
   /// 保存（新增或覆盖，按 [UserTemplate.id] 同名文件）。
   /// 安全（P1-A）：id 先经 [sanitizeTemplateId] 净化，路径再经 [_safeFileFor] 断言。
-  static Future<void> save(UserTemplate t) async {
-    final d = await _dir();
-    final id = sanitizeTemplateId(t.id);
-    final file = _safeFileFor(d, '$id.json');
-    await file.writeAsString(jsonEncode(t.toJson()..['id'] = id));
+  ///
+  /// L11（v3.0.8 审计）：改**原子写**（先 `.tmp` 再 rename，与
+  /// [AttachmentService.importFile] / DataIo 同口径）并返回落盘结果——旧实现直接
+  /// `writeAsString`：写入中途打断（低电量 / 存储满 / 进程被杀）会留下半截 JSON，
+  /// 模板库下次读取即坏一个文件；且异常直接冒泡到调用方，编辑器零反馈
+  /// （用户以为保存成功了）。返回 false 时调用方停留编辑层如实提示。
+  static Future<bool> save(UserTemplate t) async {
+    try {
+      final d = await _dir();
+      final id = sanitizeTemplateId(t.id);
+      final file = _safeFileFor(d, '$id.json');
+      final tmp = File('${file.path}.tmp');
+      await tmp.writeAsString(jsonEncode(t.toJson()..['id'] = id));
+      await tmp.rename(file.path); // 同文件系统内原子替换
+      return true;
+    } catch (e) {
+      AppLog.d('[UserTemplateStore] 保存模板失败 id=${t.id}：$e');
+      return false;
+    }
   }
 
   /// 删除指定 id 的模板文件。安全（P1-A）：与 [save] 同款净化 + 路径断言，
@@ -564,42 +579,81 @@ class UserTemplateStore {
   }
 
   /// 导出为可分享的 JSON 文件（App 私有文档目录），返回文件句柄供 [DataIo.shareFile]。
+  ///
+  /// L11（v3.0.8 审计）：同样改原子写（半截文件分享出去 = 对方导入即坏）。
   static Future<File> exportTemplate(UserTemplate t) async {
     final base = await getApplicationDocumentsDirectory();
     final safe = t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
     final name = '有条-模板-$safe-${_ts()}.json';
     final file = File('${base.path}/$name');
-    await file.writeAsString(jsonEncode(t.toJson()));
+    final tmp = File('${file.path}.tmp');
+    await tmp.writeAsString(jsonEncode(t.toJson()));
+    await tmp.rename(file.path);
     return file;
+  }
+
+  /// M2（v3.0.8 审计）：序列化全部用户模板为 JSON 列表（备份 / 自动快照装配用）。
+  ///
+  /// 背景：模板是**文件存储**（App 文档目录 `<id>.json`），此前完全不在
+  /// `backupData()` / `_writeAutoBackup()` 覆盖范围内——备份恢复 / 换机后
+  /// 用户自建模板全部凭空消失（内置模板不受影响，用户难以察觉数据边界）。
+  /// 现以 `user_templates` 段纳入备份；读取失败（目录不存在等）按空列表，
+  /// 不阻断备份主流程。
+  static Future<List<dynamic>> exportAllForBackup() async {
+    try {
+      return [for (final t in await loadAll()) t.toJson()];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// M2（v3.0.8 审计）：从备份的 `user_templates` 段恢复模板（覆盖同 id 文件，
+  /// 与备份「以备份为准」的恢复语义一致）。逐条 try/catch：单条损坏跳过不
+  /// 阻断其余。返回成功写入条数（调用方并入 failures 提示）。
+  static Future<int> restoreAllFromBackup(List<dynamic> rawList) async {
+    var restored = 0;
+    for (final e in rawList) {
+      if (e is! Map) continue;
+      try {
+        final t = UserTemplate.fromJson(Map<String, dynamic>.from(e));
+        if (await save(t)) restored++;
+      } catch (_) {
+        // 单条损坏（缺字段 / 非法 id）跳过，不阻断其余模板恢复。
+      }
+    }
+    return restored;
   }
 }
 
 /// 把 [template] 套用为真实任务并加入 [provider]。每项按相对天数计算截止时间
 /// （date-only，落在 09:00）；重复项按规则生成重复任务，interval 以今天为锚点避免首日逾期。
-/// 返回实际创建的任务数量。
 ///
-/// P2-2（v3.0.7 审计）：随 [TaskProvider.addTask] 异步化——[TaskProvider.addTask]
-/// 落盘失败会回滚内存并返回 null（不计入创建数）。返回值改为 `Future<int>`，
-/// 调用方据此如实反馈「已创建 N 项」。
-Future<int> applyTemplate(
+/// U3-6（v3.0.8 审计）：返回 `(created: 实际落库数, total: 模板条目数)`——
+/// 批量套用已改为「一次性插入 + 单次落盘 + 失败整批回滚」，created < total
+/// 仅可能出现在整批失败（created = 0）时，调用方按失败分支提示。
+Future<({int created, int total})> applyTemplate(
         TaskProvider provider, BuiltInTemplate template) async =>
     applyTemplateItems(provider, template.items);
 
 /// 把用户模板 [t] 套用为真实任务并加入 [provider]。
 ///
-/// P2-2（v3.0.7 审计）：同 [applyTemplate] 异步化。
-Future<int> applyUserTemplate(TaskProvider provider, UserTemplate t) async =>
+/// U3-6（v3.0.8 审计）：同 [applyTemplate] 返回 `(created, total)`。
+Future<({int created, int total})> applyUserTemplate(
+        TaskProvider provider, UserTemplate t) async =>
     applyTemplateItems(provider, t.items);
 
 /// 套用一组 [TemplateItem] 为真实任务（内置 / 用户模板共用）。
 ///
-/// P2-2（v3.0.7 审计）：随 addTask 异步化——落盘失败的任务已被 provider 回滚
-/// 内存（addTask 返回 null），不计入创建数，调用方拿到的数字即真实落库数。
-Future<int> applyTemplateItems(
+/// U3-6（v3.0.8 审计）：改走 [TaskProvider.addTasksForTemplateApply] ——
+/// 旧实现逐条 `await provider.addTask`，每条内部都是一次全量 `replaceTasks`
+/// 落库（模板 7 项 = 7 次串行全表写，大库点套用明显卡顿，还放大 P2-1 的
+/// 双击窗口），且部分条目失败只体现为计数偏少、UI 无从提示。现在先构造
+/// 全部草稿，再一次性插入 + 单次落盘；落盘失败整批回滚（created = 0）。
+Future<({int created, int total})> applyTemplateItems(
     TaskProvider provider, List<TemplateItem> items) async {
   final today = DateTime.now();
   final base = DateTime(today.year, today.month, today.day);
-  var created = 0;
+  final drafts = <Task>[];
   for (final item in items) {
     final due = _firstDueDate(base, item);
     // 重复任务需有提醒时刻；未指定时默认 09:00。
@@ -608,7 +662,7 @@ Future<int> applyTemplateItems(
     // interval 锚点设为今天（date-only），保证「从今天起每 N 天」循环、首日不逾期。
     final anchor =
         item.repeat == RepeatType.interval ? base : null;
-    final t = await provider.addTask(Task(
+    drafts.add(Task(
       id: '',
       title: item.title,
       category: item.category,
@@ -638,10 +692,10 @@ Future<int> applyTemplateItems(
       reminderOffsetMin: due == null ? 0 : item.reminderOffsetMin,
       tags: List.from(item.tags),
     ));
-    // P2-2（v3.0.7 审计）：null = 该条落盘失败已被回滚，不计入创建数。
-    if (t != null) created++;
   }
-  return created;
+  // U3-6（v3.0.8 审计）：整批一次落盘；失败 = 0 条落库（已回滚）。
+  final ok = await provider.addTasksForTemplateApply(drafts);
+  return (created: ok ? drafts.length : 0, total: drafts.length);
 }
 
 /// 计算套用后的首个截止时间：有相对天数 → 今天 + N 天（00:00）；无相对天数但为重复任务

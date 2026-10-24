@@ -136,9 +136,17 @@ class AttachmentService {
     int? durationMs,
   }) async {
     final original = src.path.split(Platform.pathSeparator).last;
-    final ext = original.contains('.')
+    // M1（v3.0.8 审计）：扩展名取自源文件名最后一个点之后，未过白名单——
+    // 「报告.pdf（扫描版）」会产出 `.pdf（扫描版）`，下游 fileFor / collectBlobs /
+    // restoreBlobs 全部拒绝该名字，文件已落盘却永久不可用（详情页点按抛
+    /// ArgumentError 且无兜底）。此处与 [_isSafeSegment] 同口径净化，非法扩展名
+    /// 回退到 mime 推断或留空。
+    var ext = original.contains('.')
         ? '.${original.split('.').last}'
         : (mimeType != null ? _extFromMime(mimeType) : '');
+    if (ext.length > 1 && !_isSafeSegment(ext.substring(1))) {
+      ext = mimeType != null ? _extFromMime(mimeType) : '';
+    }
     final stamp =
         '${DateTime.now().millisecondsSinceEpoch}_${_randomInt(1000, 9999)}';
     final name = '$stamp$ext';
@@ -669,6 +677,11 @@ class RestoreBlobsStats {
   int oversize = 0;
   int skipped = 0;
   bool truncated = false;
+  /// P3-6（v3.0.8 审计）：任务侧备份恢复的整体落盘结果——`restoreFromJson`
+  /// 此前 `await _persist()` 但丢弃结果，UI 只消费附件统计，「已恢复」可能在
+  /// 任务未落库时上报（重启后恢复条目全部蒸发）。由 TaskProvider.restoreFromJson
+  /// 写入，backup_sheet 并入恢复结果的 failures 通道。
+  bool persisted = true;
   int get total => oversize + skipped;
   bool get hasSkipped => total > 0 || truncated;
 

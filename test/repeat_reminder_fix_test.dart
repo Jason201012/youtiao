@@ -365,8 +365,9 @@ void main() {
         ),
       ]);
       // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化。
+      // P3-2（v3.0.8 审计）：返回值改具名记录，消费点取 .copy。
       final copy =
-          (await p.rescheduleOnceOccurrence('1', DateTime(2026, 9, 13)))!;
+          (await p.rescheduleOnceOccurrence('1', DateTime(2026, 9, 13))).copy!;
       expect(copy.dueDate, DateTime(2026, 9, 13, 7, 0));
       expect(copy.repeat, RepeatType.none);
       expect(copy.isRepeating, isFalse);

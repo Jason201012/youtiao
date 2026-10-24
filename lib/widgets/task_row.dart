@@ -236,7 +236,12 @@ String _dueLabel(DateTime? due) {
   final key = dueCompareKey(due);
   final d = DateTime(key.year, key.month, key.day);
   final diff = d.difference(today).inDays;
-  final time = ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
+  // L22（v3.0.8 审计）：纯日期形态（23:59 = 当天截止，[dueIsPureDateForm]）
+  // 省略时刻——同一事实日历早已不显示时刻，任务行 / 详情 / 今日 / 分享四处却仍
+  // 显示 "23:59"，两套呈现让用户以为设过具体时刻。
+  final time = dueIsPureDateForm(due)
+      ? ''
+      : ' ${due.hour.toString().padLeft(2, '0')}:${due.minute.toString().padLeft(2, '0')}';
   if (diff == 0) return '今天$time';
   if (diff == 1) return '明天$time';
   if (diff == -1) return '昨天$time';

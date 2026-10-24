@@ -205,7 +205,8 @@ void main() {
         monthlyDay: 0, // 模拟编程构造 / 未来新增写入点的旁路（编辑器保存侧已夹）
       );
       // P2-2（v3.0.7 审计）：applyTemplateItems 随 addTask 异步化。
-      final created = await applyTemplateItems(p, [item]);
+      // U3-6（v3.0.8 审计）：返回值改具名记录，消费点取 .created。
+      final created = (await applyTemplateItems(p, [item])).created;
       expect(created, 1);
       expect(p.tasks.single.monthlyDay, 1,
           reason: '构造器不夹取（Task.fromJson 之外的路径防不住），套用侧兜底');

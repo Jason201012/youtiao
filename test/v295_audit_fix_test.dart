@@ -472,7 +472,9 @@ void main() {
           reason: '完成与跳过互斥：setStatus 会清**当日**跳过');
 
       // 撤销：不是「反向再切一次」，而是整体回滚。
-      p.restoreTaskSnapshot(snapshot);
+      // U3-4（v3.0.8 审计）：restoreTaskSnapshot（存在语义死 API）已删除，
+      // 测试统一走 persisted 版（await 落盘结果）。
+      await p.restoreTaskSnapshotPersisted(snapshot);
       final back = p.byId('1')!;
       expect(back.done, isFalse);
       expect(back.completedAt, isNull,
@@ -502,7 +504,7 @@ void main() {
       expect(p.byId('2')!.doneDates.length, 2,
           reason: 'setStatus 会追加今天');
 
-      p.restoreTaskSnapshot(snapshot);
+      await p.restoreTaskSnapshotPersisted(snapshot);
       expect(p.byId('2')!.doneDates, const ['2026-03-09'],
           reason: '追加的今天必须被撤销掉');
     });
@@ -510,7 +512,8 @@ void main() {
     test('任务已被删除时静默返回，不抛错', () async {
       final p = await buildWith(<Task>[_task('3', title: '存在')]);
       final ghost = _task('gone', title: '不存在');
-      expect(() => p.restoreTaskSnapshot(ghost), returnsNormally);
+      // U3-4（v3.0.8 审计）：迁到 persisted 版；「不抛错」改为 await 后判 false。
+      expect(await p.restoreTaskSnapshotPersisted(ghost), isFalse);
     });
   });
 

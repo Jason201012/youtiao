@@ -14,6 +14,7 @@ import 'package:todolist/services/backup_crypto.dart';
 import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/prefs_backup.dart';
+import 'package:todolist/services/task_templates.dart'; // M2（v3.0.8 审计）：备份/恢复纳入用户模板
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -214,6 +215,9 @@ class BackupSheet {
       // P2-9：附件统计提示——若 collectBlobs 因超体积 / 缺失跳过了附件，
       // 在 snackbar 文案中告知用户，避免「我存的附件怎么没在备份里」的迷惑。
       final collectStats = readCollectStats(map['attachments'] as Map<String, dynamic>);
+      // M2（v3.0.8 审计）：用户自定义模板纳入备份——模板是文件存储，此前
+      // 完全不在备份覆盖范围内，恢复 / 换机即全部丢失。恢复见 _doRestore。
+      map['user_templates'] = await UserTemplateStore.exportAllForBackup();
       // F13：导出前做大小预检。附件内联后整包若超过 32 MB，分享面板单文件大小
       // 敏感、还原端也会按 [DataIo.maxImportTextBytes] 拒绝读取——「写得出去、
       // 取不回来」。这里自动剥离 attachments 段，保住任务/习惯/偏好主体，
@@ -457,6 +461,12 @@ class BackupSheet {
       final blobStats = await provider.restoreFromJson(plaintext,
           includeTrash: includeTrash,
           rescheduleReminders: data['prefs'] is! Map);
+      // P3-6（v3.0.8 审计）：消费任务落盘结果并入 failures——旧实现丢弃，
+      // 「已恢复」可能在任务未写库时上报（重启后恢复条目全部蒸发；习惯侧已于
+      // v3.0.6 消费 bool，任务侧这里是不对称的漏网口）。
+      if (!blobStats.persisted) {
+        failures.add('任务（写入未保存，重启可能丢失）');
+      }
       // P3-10（v2.9.4 审计）：附件还原的「部分失败」（超单文件上限 / 非法文件名 /
       // 体积截断）此前被 restoreFromJson 直接丢弃，用户只看到「已从备份恢复」，
       // 却在附件列表里发现附件不见了。这里把统计并入既有 failures 机制，
@@ -482,6 +492,16 @@ class BackupSheet {
           if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
         } catch (e) {
           failures.add('习惯/打卡（$e）');
+        }
+      }
+      // M2（v3.0.8 审计）：恢复用户模板（覆盖同 id）。单条损坏跳过；
+      // 失败数并入 failures（≥1 条失败时提示，不打断主流程）。
+      if (data['user_templates'] is List) {
+        final restored = await UserTemplateStore.restoreAllFromBackup(
+            data['user_templates'] as List);
+        final total = (data['user_templates'] as List).length;
+        if (restored < total) {
+          failures.add('用户模板（恢复 $restored/$total 条，其余已跳过）');
         }
       }
       // P2-19：恢复偏好（仅当备份含 prefs 字段；老备份无则保持现有偏好不动）。
@@ -758,6 +778,10 @@ class BackupSheet {
       final blobStats = await provider.restoreFromJson(plaintext,
           includeTrash: includeTrash,
           rescheduleReminders: data['prefs'] is! Map);
+      // P3-6（v3.0.8 审计）：同 _doRestore，消费任务落盘结果并入 failures。
+      if (!blobStats.persisted) {
+        failures.add('任务（写入未保存，重启可能丢失）');
+      }
       final blobNote = blobStats.summary();
       if (blobNote != null) failures.add(blobNote);
       final focusList = data['focus_sessions'];
@@ -775,6 +799,15 @@ class BackupSheet {
           if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
         } catch (e) {
           failures.add('习惯/打卡（$e）');
+        }
+      }
+      // M2（v3.0.8 审计）：自动快照还原路径同样恢复用户模板（与 _doRestore 同口径）。
+      if (data['user_templates'] is List) {
+        final restored = await UserTemplateStore.restoreAllFromBackup(
+            data['user_templates'] as List);
+        final total = (data['user_templates'] as List).length;
+        if (restored < total) {
+          failures.add('用户模板（恢复 $restored/$total 条，其余已跳过）');
         }
       }
       // 还原 App 级偏好（外观/锁/专注/免打扰/通用开关）。

@@ -29,6 +29,14 @@ class HabitProvider extends ChangeNotifier {
   /// 自然失效。
   final Map<String, String> _confirmShownMarks = <String, String>{};
 
+  /// P3-1（v3.0.8 审计）：习惯侧安全模式标志——与 [TaskProvider.dbLoadFailed]
+  /// 同口径。此前 `load()` 失败只清空内存并写日志，UI 无从感知「现在处于
+  /// 写盘恒失败的安全模式」，打卡失败提示一律复读「请重试」（重试必然再失败），
+  /// 与顶部「本次修改不会保存」横幅自相矛盾。置位后由 habit_screen 的
+  /// `showCheckInPersistFailedHint` 分化为根因文案。
+  bool _dbLoadFailed = false;
+  bool get dbLoadFailed => _dbLoadFailed;
+
   /// U2-1（v3.0.5 审计）：通知 action 路径 show 确认条后登记（见
   /// [_confirmShownMarks]）。仅供 main 的通知 action 回调调用。
   void markConfirmShown(String habitId) =>
@@ -90,6 +98,10 @@ class HabitProvider extends ChangeNotifier {
 
   Future<void> load() async {
     _instance = this; // 注册单例，供自动备份等场景安全取用
+    // U3-1（v3.0.8 审计）：load 会整体替换数据集，删除撤销的失败暂存
+    // （[_pendingRestore]）随之作废——否则备份恢复后点旧横幅会把备份外 /
+    // 已不存在的习惯塞回当前数据集。
+    _pendingRestore = null;
     try {
       final db = LocalDatabase.instance;
       // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。
@@ -102,11 +114,19 @@ class HabitProvider extends ChangeNotifier {
       _checkIns
         ..clear()
         ..addAll(await db.loadCheckIns());
+      _dbLoadFailed = false; // 加载成功即脱离安全模式
     } catch (e, stack) {
       AppLog.d('HabitProvider 加载失败（习惯/打卡暂不可用）：$e\n$stack');
       _habits.clear();
       _checkIns.clear();
+      // P3-1（v3.0.8 审计）：置位安全模式标志（见字段注释）。
+      _dbLoadFailed = true;
     }
+    // L3（v3.0.8 审计）：数据集已整体替换，9 号槽确认条的会话内存标记全部
+    // 作废——否则备份恢复后「已有确认条」的近似命中，会让 App 内打卡
+    // 「无中生有」覆盖刷新一条本会话并未展示过的确认条（v3.0.4 U2-1 不变量的
+    // 恢复路径缺口）。
+    _confirmShownMarks.clear();
     notifyListeners();
   }
 
@@ -314,6 +334,10 @@ class HabitProvider extends ChangeNotifier {
       return null;
     }
     await NotificationService.instance.cancelHabitReminder(id);
+    // L3（v3.0.8 审计）：删除成功即作废该习惯的 9 号槽确认条会话标记——
+    // 否则（备份恢复 / 同 id 重建等路径）会让后续 App 内打卡「无中生有」地
+    // 覆盖刷新一条本会话并未展示过的确认条，违背 v3.0.4 U2-1 不变量。
+    _confirmShownMarks.remove(id);
     notifyListeners();
     _notifyHabitsChanged();
     return snapshot;
@@ -393,13 +417,19 @@ class HabitProvider extends ChangeNotifier {
   DeletedHabit? get pendingRestore => _pendingRestore;
 
   /// P2-1（v3.0.7 审计）：重试恢复——从 [_pendingRestore] 重新走一遍
-  /// [restoreHabit]。返回恢复后的习惯；仍失败（含暂存已空）时返回 null，
-  /// 快照继续暂存（restoreHabit 失败路径会重新写入），用户可再次重试。
-  /// 与通知侧 `showTaskUndoNotSaved` 的「重试」action 同口径：给「请重试」
-  /// 一个真实可点的载体，而不是让用户去找一个不存在的按钮。
-  Future<Habit?> retryRestoreHabit() async {
+  /// [restoreHabit]。返回恢复后的习惯；仍失败（含暂存已空 / 与入参不是同一
+  /// 快照）时返回 null，快照继续暂存（restoreHabit 失败路径会重新写入），
+  /// 用户可再次重试。与通知侧 `showTaskUndoNotSaved` 的「重试」action 同口径：
+  /// 给「请重试」一个真实可点的载体，而不是让用户去找一个不存在的按钮。
+  ///
+  /// U3-1（v3.0.8 审计）：入参从无参改为**显式快照**并按 id 校验——暂存区是
+  /// 单槽位，两次删除撤销连续失败时会被后一次覆盖：旧无参版让第一张横幅的
+  /// 「再试一次」恢复**第二个**习惯，却用第一个习惯的标题提示「已恢复『A』」
+  /// （恢复错对象 + 报错标题）。闭包捕获的快照与暂存区不一致时按失效处理。
+  Future<Habit?> retryRestoreHabit(DeletedHabit snapshot) async {
     final snap = _pendingRestore;
     if (snap == null) return null;
+    if (snap.habit.id != snapshot.habit.id) return null;
     return restoreHabit(snap);
   }
 
@@ -553,7 +583,11 @@ class HabitProvider extends ChangeNotifier {
     int run = 0;
     final today = DateTime.now();
     final metDays = _metDaysOf(habit);
-    for (int w = 0; w < weeks; w++) {
+    // L6（v3.0.8 审计）：从**上一个完整周**起算——旧实现把进行中的本周也当
+    // 链条一环，「连续 4 周」成就实际只能在每周后半段解锁（本周只打了 1 天卡
+    // 也计入链条）。w=1 即上一个已结束的自然周；本周达成由 goalMetThisWeek
+    // 单独表达，不混入「连续」语义。
+    for (int w = 1; w <= weeks; w++) {
       final monday = _mondayOf(DateTime(today.year, today.month, today.day)
           .subtract(Duration(days: 7 * w)));
       final sunday = monday.add(const Duration(days: 6));
@@ -606,11 +640,24 @@ class HabitProvider extends ChangeNotifier {
   /// 通知 action 回调（main._doHabitCheckIn / _doHabitUndo）按本结果回报，
   /// DB 异常不再被吞成「成功」。
   Future<bool> setCheckInValue(Habit habit, DateTime day, int value) async {
-    if (habit.archived) return true;
+    // H4（v3.0.8 审计）：归档 / 休息日守卫改判 **provider 当前对象**，不信任
+    // 调用方实参——详情/编辑弹层此前一次性持有 Habit 对象、永不按 id 回读，
+    // 保存成功后继续持旧对象：归档习惯的写按钮照常可点并真实落盘，还会用旧
+    // 对象把已归档习惯的提醒重挂回系统闹钟（habit_provider.dart 旧 :644）。
+    // 当前对象存在则以其为准；不存在（独立 Habit 对象的直接写入，如统计/
+    // 分享等历史用法）回落实参，保持既有调用契约不破。
+    final live = byId(habit.id) ?? habit;
+    if (live.archived) return true;
+    // 休息日守卫同样按当前 weekdays 判定（改星期后旧弹层仍按旧 weekdays 放行
+    // 的旁路）。仅限「写今天」——补卡（过去日期）按产品语义不限计划日，
+    // UI（详情弹层「补卡」）对该路径有独立说明，不受此限。
+    if (_sameDayKey(day, DateTime.now()) && !live.shouldCheckInOn(day)) {
+      return true;
+    }
     final v = value.clamp(0, Habit.maxDailyTarget);
     final k = CheckIn.dateKey(day);
     final idx = _checkIns
-        .indexWhere((c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
+        .indexWhere((c) => c.habitId == live.id && CheckIn.dateKey(c.date) == k);
     // P3-2（v3.0.5 审计）：写前留存旧记录与写入形态，落盘失败时回滚内存——
     // 旧实现先改内存再落盘、失败不回滚，App 内 UI 乐观显示成功、重启静默回退。
     final CheckIn? previous = idx == -1 ? null : _checkIns[idx];
@@ -619,7 +666,7 @@ class HabitProvider extends ChangeNotifier {
       if (idx == -1) return true; // 本就无记录 → 无操作，不触发无谓的落盘与重排
       _checkIns.removeAt(idx);
     } else if (added) {
-      _checkIns.add(CheckIn.forDay(habit.id, day, value: v));
+      _checkIns.add(CheckIn.forDay(live.id, day, value: v));
     } else {
       if (_checkIns[idx].value == v) return true; // 值未变 → 无操作
       _checkIns[idx] = _checkIns[idx].withValue(v);
@@ -630,18 +677,18 @@ class HabitProvider extends ChangeNotifier {
       // 按 habitId + dateKey 定位（await 期间下标可能漂移），回滚后不发
       // _notifyHabitsChanged（状态已还原，挽留等派生调度无需重排）。
       final cur = _checkIns.indexWhere(
-          (c) => c.habitId == habit.id && CheckIn.dateKey(c.date) == k);
+          (c) => c.habitId == live.id && CheckIn.dateKey(c.date) == k);
       if (added) {
         if (cur != -1) _checkIns.removeAt(cur);
       } else if (previous != null && cur != -1) {
         _checkIns[cur] = previous;
       }
-      _confirmShownMarks.remove(habit.id);
+      _confirmShownMarks.remove(live.id);
       notifyListeners();
       return false;
     }
     notifyListeners();
-    _rescheduleReminder(habit);
+    _rescheduleReminder(live);
     // P2-7（v2.9.5 审计）：**达标后撤掉挂起的「稍后提醒」**。
     //
     // 旧行为：21:00 弹提醒 → 点「稍后提醒」(+10min) → 21:05 在 App 里记满 8/8
@@ -656,8 +703,8 @@ class HabitProvider extends ChangeNotifier {
     // 在途提醒静默撤掉（当天实际 0/8，提醒再也不响），与 P2-7 的修复目的正好
     // 相反。`_sameDayKey` 保证跨午夜补卡（凌晨补昨天的卡）也不会误判。
     // 未达标时不清——用户可能只是先记了 1/8，稍后提醒仍该响。
-    if (_sameDayKey(day, DateTime.now()) && isTargetMetOn(habit, day)) {
-      NotificationService.instance.cancelHabitSnooze(habit.id);
+    if (_sameDayKey(day, DateTime.now()) && isTargetMetOn(live, day)) {
+      NotificationService.instance.cancelHabitSnooze(live.id);
     }
     // P3-3（v3.0.2 审计）：**今天的打卡被撤到 0 时，一并撤掉 9 号槽确认通知**。
     // 通知打卡产生的「已打卡 ✓ / 撤销」确认条（[showHabitCheckedConfirm] /
@@ -679,13 +726,13 @@ class HabitProvider extends ChangeNotifier {
     // 的消除；归零仍走 cancel（失真清理，P3-3 v3.0.2 口径保留）。
     if (_sameDayKey(day, DateTime.now())) {
       if (v <= 0) {
-        _confirmShownMarks.remove(habit.id);
-        NotificationService.instance.cancelHabitConfirm(habit.id);
-      } else if (_confirmShownToday(habit.id)) {
+        _confirmShownMarks.remove(live.id);
+        NotificationService.instance.cancelHabitConfirm(live.id);
+      } else if (_confirmShownToday(live.id)) {
         NotificationService.instance.showHabitCheckedConfirm(
-          habit,
+          live,
           value: v,
-          target: habit.effectiveTarget,
+          target: live.effectiveTarget,
         );
       }
     }
@@ -763,12 +810,19 @@ class HabitProvider extends ChangeNotifier {
     final idx = _habits.indexWhere((h) => h.id == habit.id);
     if (idx == -1) return false; // P3-2（v3.0.5 审计）：目标不存在 = 未生效
     final old = _habits[idx];
+    // H4（v3.0.8 审计）：copyWith 的基准改为**当前对象**（old）而非调用方实参
+    // ——实参可能是弹层持有的过期快照（弹层不按 id 回读），旧实现 `habit.copyWith`
+    // 会把首次编辑已落盘的标题/目标量/宽限日按旧值整体覆盖回去（「二次编辑
+    // 回滚首次编辑」）。各入参均为「null = 保持」，换基准后语义不变且消除回滚。
+    // L7（v3.0.8 审计）：归档 / 取消归档时维护 [archivedAt] 时间戳（周期报告
+    // 据此把归档习惯的应打卡日截断到归档日，见 period_review）。
+    final stampArchive = archived == true && !old.archived;
     // P3-10（v2.9.4 审计）：weeklyGoal 上界与「**更新后**的计划天数」联动。
     // 必须在 copyWith 之前算出生效 weekdays——用户在同一次编辑里把「每天」改成
     // 「每周一三五」时，若按旧值（7 天）算上界，就能把目标设成 7 次而计划只有
     // 3 天，又造出一个不可达目标。
     final effWeekdays = weekdays ?? old.weekdays;
-    final updated = habit.copyWith(
+    final updated = old.copyWith(
       title: (title != null && title.trim().isNotEmpty) ? title.trim() : null,
       emoji: emoji,
       colorValue: colorValue,
@@ -779,6 +833,9 @@ class HabitProvider extends ChangeNotifier {
       weeklyGoal:
           Habit.clampWeeklyGoalTo(weeklyGoal ?? old.weeklyGoal, effWeekdays),
       archived: archived,
+      // L7（v3.0.8 审计）：见上方 stampArchive 注释。
+      archivedAt: stampArchive ? DateTime.now() : null,
+      clearArchivedAt: archived == false,
       reminderMinute: reminderMinute,
       clearReminder: clearReminder,
       // 0 / 负数视为「取消量化」，与 AddHabitSheet 的「关闭」语义一致；
@@ -804,12 +861,17 @@ class HabitProvider extends ChangeNotifier {
     final reminderChanged = old.reminderMinute != updated.reminderMinute ||
         old.archived != updated.archived ||
         old.dailyTarget != updated.dailyTarget ||
-        !_weekdaysEqual(old.weekdays, updated.weekdays);
+        !_weekdaysEqual(old.weekdays, updated.weekdays) ||
+        // L1（v3.0.8 审计）：标题 / 表情也纳入重挂判据——提醒正文由两者拼成，
+        // 旧判据不含它们，改名后已挂的未来 8 次提醒仍烘焙旧标题（重启才自愈）。
+        // 调度侧签名（scheduleHabitReminder 的 _armedSignatures）已同步纳入内容。
+        old.title != updated.title ||
+        old.emoji != updated.emoji;
     if (updated.archived) {
       await NotificationService.instance.cancelHabitReminder(updated.id);
     } else if (reminderChanged) {
-      // 先取消旧提醒再重挂：仅当提醒时刻 / 星期 / 归档 / 目标量真的变了才动系统闹钟，
-      // 避免「只改了个名字」也把提醒取消重挂一遍（无谓的调度抖动）。
+      // 先取消旧提醒再重挂：提醒时刻 / 星期 / 归档 / 目标量 / 标题 / 表情任一
+      // 变化才动系统闹钟（无谓的调度抖动已由「真的变了」判据挡掉）。
       await NotificationService.instance.cancelHabitReminder(updated.id);
       if (updated.reminderMinute != null) {
         await NotificationService.instance.scheduleHabitReminder(
@@ -1160,9 +1222,45 @@ class HabitProvider extends ChangeNotifier {
   /// 通知已按恢复集重排（DB 异常属极端场景，优先保证「用户所见 = 内存态」
   /// 与失败如实告知，由调用方把失败并入恢复结果对话框）。
   Future<bool> restoreFromJson(Map<String, dynamic> data) async {
+    // U3-1（v3.0.8 审计）：整体替换数据集，删除撤销的失败暂存随之作废
+    // （与 [load] 同口径，见该处注释）。
+    _pendingRestore = null;
+    // M8（v3.0.8 审计）：先在**局部变量**里完整反序列化（任一条失败即整体放弃
+    // 本次恢复），全部通过后才触碰内存与通知。旧实现把 fromJson 内联进
+    // `_habits.clear()..addAll(...)`：中途抛错（某条 habit 缺 id、weekdays 含
+    // 字符串等）会留下半新半旧的混合态且**未落盘**——此后任意一次成功落盘就把
+    // 混合态永久写库；且重排循环在抛错点之后永不执行，而全部旧提醒已被撤掉
+    // （「全部习惯提醒被撤、不重挂」）。校验层（BackupValidator）已同步补
+    // habits/check_ins 逐条体检（M8①），这里是二道防线；抛出的
+    // FormatException 由 backup_sheet 两个恢复入口的 try/catch 如实呈现。
+    List<Habit>? newHabits;
+    List<CheckIn>? newCheckIns;
     if (data['habits'] is List) {
       final habitsList = data['habits'] as List;
+      final parsedHabits = <Habit>[];
+      for (var i = 0; i < habitsList.length; i++) {
+        final e = habitsList[i];
+        if (e is! Map) {
+          throw FormatException('第 ${i + 1} 条习惯不是对象，备份可能已损坏');
+        }
+        parsedHabits.add(Habit.fromJson(Map<String, dynamic>.from(e)));
+      }
+      newHabits = parsedHabits;
+    }
+    if (data['check_ins'] is List) {
+      final checkList = data['check_ins'] as List;
+      final parsedCheckIns = <CheckIn>[];
+      for (var i = 0; i < checkList.length; i++) {
+        final e = checkList[i];
+        if (e is! Map) {
+          throw FormatException('第 ${i + 1} 条打卡记录不是对象，备份可能已损坏');
+        }
+        parsedCheckIns.add(CheckIn.fromJson(Map<String, dynamic>.from(e)));
+      }
+      newCheckIns = parsedCheckIns;
+    }
 
+    if (newHabits != null) {
       // 🔴 修复 Bug1（僵尸习惯提醒）：覆盖 _habits 之前，先取消**本机现有全部习惯**
       // 的每日打卡提醒。否则若本机有 H1、备份里只有 H2，恢复后 H1 从列表消失，
       // 但它在系统 AlarmManager 里已排的提醒不会被取消，之后到点仍会弹一个
@@ -1178,8 +1276,18 @@ class HabitProvider extends ChangeNotifier {
 
       _habits
         ..clear()
-        ..addAll(
-            habitsList.map((e) => Habit.fromJson(e as Map<String, dynamic>)));
+        ..addAll(newHabits);
+    }
+    // M7（v3.0.8 审计）：check_ins 的替换必须**早于**下面的重排循环——旧实现
+    // 先按恢复前的打卡数据算 checkedToday 再挂提醒：换机恢复 / 回滚到较早备份后
+    // 方向一「今晚该响的提醒不响」、方向二「已达标却仍弹该打卡啦」（正是 v2.9.3
+    // 修掉的「达标仍提醒」在恢复路径复发），持续到下次打卡写入或重启。
+    if (newCheckIns != null) {
+      _checkIns
+        ..clear()
+        ..addAll(newCheckIns);
+    }
+    if (newHabits != null) {
       // 取消旧提醒并按恢复的 habits 重新调度（仅习惯提醒，不动任务通知）。
       // 注：上面的 oldIds 取消已覆盖「本机多余习惯」，这里再对恢复的列表逐个
       // 重挂（含 archived/无提醒的跳过），保证最终状态与备份一致。
@@ -1193,13 +1301,6 @@ class HabitProvider extends ChangeNotifier {
           );
         }
       }
-    }
-    if (data['check_ins'] is List) {
-      final checkList = data['check_ins'] as List;
-      _checkIns
-        ..clear()
-        ..addAll(
-            checkList.map((e) => CheckIn.fromJson(e as Map<String, dynamic>)));
     }
     final okHabits = await _persistHabits();
     final okCheckIns = await _persistCheckIns();

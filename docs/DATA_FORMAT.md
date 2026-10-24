@@ -1,7 +1,8 @@
 # 有条（Youtiao）数据格式白皮书
 
-> 版本：v2.7.0（versionCode 91）
-> 最后核对：2026-08-28（随 P1-9「每月倒数第 N 天」同步更新）
+> 版本：v3.0.9（versionCode 130）
+> 最后核对：2026-10-24（随 v3.0.8 审计轮同步：`__skipped` 校验契约、
+> `user_templates` 段、附件引用字段表订正）
 > 适用范围：备份 JSON、加密信封、iCal UID 映射、附件目录结构
 
 本文目的是把「有条」落在本机磁盘上的数据格式**完整写清**，供三类读者使用：
@@ -31,7 +32,9 @@
 
 ### 1.1 顶层结构
 
-由 `TaskProvider.backupData()` 生成，当前 `version = 3`：
+由 `TaskProvider.backupData()` 生成，当前 `version = 3`（手动导出与
+自动快照同构；P2-19 起手动备份同样携带 prefs / habits / check_ins /
+attachments，v3.0.8 审计轮起再纳入 `user_templates`）：
 
 ```json
 {
@@ -40,7 +43,12 @@
   "tasks": [ /* Task 对象数组 */ ],
   "trash":  [ /* 回收站任务，结构与 tasks 一致 */ ],
   "notifications_enabled": true,
-  "sound_enabled": true
+  "sound_enabled": true,
+  "focus_sessions": [],      // 专注记录（手动备份同样携带）
+  "habits": [], "check_ins": [],
+  "prefs": {},               // App 级偏好（白名单净化，见 prefs_backup.dart）
+  "attachments": {},         // 附件二进制 base64 内联（含 __skipped 统计段，见 §4.1）
+  "user_templates": []       // 用户自定义模板（UserTemplate.toJson 数组，v3.0.9 起）
 }
 ```
 
@@ -81,7 +89,7 @@
 | `pinned` | bool | `false` | 是否置顶 |
 | `pinyinInitials` | String | `''` | 拼音首字母，恢复后统一重算（旧备份多为空串） |
 | `updatedAt` | ISO-8601? | `null` | 最后更新时间 |
-| `attachments` | Array | `[]` | 附件引用，元素为 `{fileName, type, size, addedAt}` |
+| `attachments` | Array | `[]` | 附件引用，元素为 `{id, type, fileName, sizeBytes, mimeType?, durationMs?, createdAt}`（`type` ∈ `image` / `audio` / `file`，见 `AttachmentRef.toJson`；旧文档 `{fileName, type, size, addedAt}` 已过时） |
 
 > **每月重复的三种语义互斥**：`monthlyFromEnd > 0` 时优先；否则若 `monthlyWeekday` 与
 > `monthlyWeekIndex` 均非 null 则按「第 N 个周几」；最后才回落到 `monthlyDay`。
@@ -97,7 +105,8 @@ App 每日自动写入 `<应用文档目录>/backup/auto/yyyy-MM-dd.json`，在 
   "focus_sessions": [],                 // 专注记录（FocusProvider.sessionsJson）
   "habits": [], "check_ins": [],        // 习惯与打卡（HabitProvider.backupData）
   "prefs": {},                          // App 级偏好（排除生物特征/更新检查/运行中的计时器）
-  "attachments": {}                     // 附件二进制，base64 内联
+  "attachments": {},                    // 附件二进制，base64 内联（含 __skipped 统计段）
+  "user_templates": []                  // 用户自定义模板（v3.0.9 起，M2）
 }
 ```
 
@@ -187,6 +196,23 @@ attachments/
 - 任务被删除时，其附件由 `AttachmentService` 的孤儿回收流程清理；回收前会把**所有**任务引用的
   文件名按 id 合并后再比对，避免 id 碰撞导致误删（v2.7.0 修复）。
 
+### 4.1 备份内 `attachments` 段与 `__skipped` 统计键
+
+`collectBlobs` 产出的 Map 以 taskId 为键、附件条目数组为值，并附加一个**独立统计键**：
+
+```json
+{
+  "<taskId>": [ { "name": "...", "b64": "..." } ],
+  "__skipped": { "oversize": 0, "missingOrInvalid": 0 }
+}
+```
+
+> **显式契约（H1，v3.0.9 起固化）**：`__skipped` 是 App 自己产出的合法统计段，
+> **任何校验层（`BackupValidator`）与恢复路径都必须豁免它**——不得把「键不是
+> 合法 taskId」当作结构错误拒绝整份备份。v2.8.1 起校验器曾因未豁免该键而
+> 拒绝 App 自己产出的每一份备份，该契约已随 H1 修复写成显式测试
+> （`test/v309_audit_fix_test.dart`），后续改动若破坏此豁免，测试即红。
+
 ---
 
 ## 5. 其它本地文件
@@ -209,6 +235,8 @@ attachments/
 3. **未知枚举值拒绝而非猜测**——恢复流程会「干跑解析」全部任务，任一条非法即在
    覆盖内存态之前抛错，保证失败时用户数据完好。
 4. **外来数据一律净化**——iCal UID、模板 id、附件文件名三者都是不可信输入，均有独立白名单。
+5. **`__skipped` 豁免是校验层契约**（见 §4.1）——校验器新增/收紧规则时，必须保持对
+   App 自产统计键的豁免，否则再次出现「校验器拒绝自己产出的备份」的闭环断裂。
 
 ---
 

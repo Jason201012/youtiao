@@ -380,20 +380,24 @@ class LocalDatabase {
 
   // ===== 旧版 SharedPreferences → SQLite 迁移 =====
 
+  /// L9（v3.0.8 审计）：解析失败**抛错**，不再 catch 成空表——旧实现把「JSON
+  /// 解析失败 / 字段损坏」与「key 不存在（raw == null，合法空数据）」混为一谈，
+  /// 调用方随即 replaceTasks([]) 并 remove(key)：旧 SP 里那份**唯一副本**被当成
+  /// 空数据覆盖写进 SQLite 后连锚点一起删除，与类头「绝不丢数据」的契约直接矛盾。
+  /// 现在 key 不存在 → 空表（正常首迁）；内容损坏 → 抛 [FormatException]，
+  /// 迁移在 replaceTasks 之前中止，旧 key 原样保留（下次启动重试 / 用户处置）。
   static List<Task> _parseTasks(String? raw) {
     if (raw == null) return [];
-    try {
-      final list = jsonDecode(raw) as List;
-      return list
-          .map((e) => Task.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return [];
-    }
+    final list = jsonDecode(raw) as List; // 损坏 → FormatException 上抛
+    return list
+        .map((e) => Task.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   /// 把旧版 SP 中的 tasks / trash JSON 迁移进数据库，成功后清除对应旧 key。
   /// 若写入过程中抛错，旧 key 不会被删除，下次启动可安全重试。
+  /// L9（v3.0.8 审计）：解析损坏同样抛错（见 [_parseTasks]）——调用方
+  /// （TaskProvider.load）已包 try/catch：保留 key、记日志、按空库继续启动。
   Future<void> migrateTasksFromPrefs(SharedPreferences prefs) async {
     final tasks = _parseTasks(prefs.getString(kPrefTasks));
     final trash = _parseTasks(prefs.getString(kPrefTrash));
@@ -409,15 +413,12 @@ class LocalDatabase {
     await prefs.remove(kPrefFocus);
   }
 
+  /// L9（v3.0.8 审计）：同 [_parseTasks]——解析失败抛错、保留旧 key。
   static List<FocusSession> _parseFocus(String? raw) {
     if (raw == null) return [];
-    try {
-      final list = jsonDecode(raw) as List;
-      return list
-          .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return [];
-    }
+    final list = jsonDecode(raw) as List; // 损坏 → FormatException 上抛
+    return list
+        .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 }

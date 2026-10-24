@@ -175,7 +175,9 @@ void main() {
               '据此挂「再试一次」action（与通知侧 showTaskUndoNotSaved 对齐）');
 
       // 重试：正常库 → 恢复成功（习惯 + 打卡 + 原列表位置）。
-      final h = await hp.retryRestoreHabit();
+      // U3-1（v3.0.8 审计）：retryRestoreHabit 改按快照校验（单槽位暂存会被
+      // 后一次失败覆盖，无参版会恢复错对象）——调用方显式携带当次快照。
+      final h = await hp.retryRestoreHabit(snap);
       expect(h, isNotNull, reason: '重试载体必须真实可执行——旧实现此路不存在');
       expect(h!.id, habit.id);
       expect(hp.byId(habit.id), isNotNull);
@@ -200,10 +202,38 @@ void main() {
       expect(hp.habits, hasLength(1), reason: '不产生重复习惯');
     });
 
-    test('retryRestoreHabit 无暂存 → null（幂等安全）', () async {
+    test('retryRestoreHabit 无暂存 / 快照不匹配 → null（U3-1 对象校验）', () async {
       final hp = HabitProvider();
       await hp.load();
-      expect(await hp.retryRestoreHabit(), isNull);
+      // 另一套 provider + 习惯（内存库共享单例：先重置再建，避免 .single 撞车）。
+      LocalDatabase.resetMemoryForTest();
+      LocalDatabase.testUseMemory = true;
+      SharedPreferencesStorePlatform.instance =
+          InMemorySharedPreferencesStore.empty();
+      final (hp2, habit2) = await habitWith();
+      final snap2 = (await hp2.deleteHabit(habit2.id))!;
+      expect(await hp.retryRestoreHabit(snap2), isNull,
+          reason: 'U3-1：暂存区为空 → 无从恢复（无参旧版同样 null，但无法'
+              '区分「空」与「错对象」）');
+      // 第三套：先成功删除，再让 restoreHabit 落盘失败 → 暂存 habit3 快照。
+      LocalDatabase.resetMemoryForTest();
+      LocalDatabase.testUseMemory = true;
+      SharedPreferencesStorePlatform.instance =
+          InMemorySharedPreferencesStore.empty();
+      final (hp3, habit3) = await habitWith();
+      final snap3 = (await hp3.deleteHabit(habit3.id))!;
+      LocalDatabase.testUseMemory = false;
+      final r3 = await hp3.restoreHabit(snap3); // 落盘失败 → 暂存
+      LocalDatabase.testUseMemory = true;
+      expect(r3, isNull);
+      expect(hp3.pendingRestore, isNotNull, reason: '暂存区现有 habit3 的快照');
+      expect(await hp3.retryRestoreHabit(snap2), isNull,
+          reason: 'U3-1：入参快照与暂存区不是同一个 → 按失效处理，'
+              '禁止「第一次的横幅恢复第二个习惯」');
+      expect(hp3.byId(habit3.id), isNull, reason: '未被误恢复');
+      expect(await hp3.retryRestoreHabit(snap3), isNotNull,
+          reason: '同一快照才真正恢复');
+      expect(hp3.byId(habit3.id), isNotNull);
     });
   });
 
@@ -396,7 +426,14 @@ void main() {
           '非「撤销已失效」（与 taskUndoAction 三分支口径对齐）');
     });
 
-    test('标签族透传落盘结果：archiveTag / renameTag 失败 false', () async {
+    // P3-4（v3.0.8 审计）：断言口径修正。旧断言「archiveTag 失败 false」把
+    // 「任务表写失败」当成归档失败——归档只写 SharedPreferences、不碰任务表，
+    // 旧实现的无条件 _persist() 既写放大又制造反向误导（安全模式下误报
+    // 「不会保存」，而归档其实已存 prefs）。现拆为两个语义分别钉死：
+    // ① archiveTag：DB 异常下仍返回 true（prefs 写入成功即归档成功）；
+    // ② renameTag：真改任务表，DB 异常下 saved=false 照旧透传。
+    test('标签族落盘结果透传：archiveTag 只写 prefs（DB 异常不影响）；'
+        'renameTag 失败 false', () async {
       final p = await buildWith([mk(id: '7411').copyWith(tags: ['工作'])]);
       // 前提：先把「工作」成功归档（幂等分支的对照——已归档再归档 = true 无操作）。
       // 旧写法 archiveTag('不存在') 会把「不存在」加进集合（add 非幂等命中），
@@ -412,8 +449,10 @@ void main() {
       } finally {
         LocalDatabase.testUseMemory = true;
       }
-      expect(okArchive, isFalse, reason: '旧实现 Future<void>：归档失败零反馈');
-      expect(okRename, isFalse);
+      expect(okArchive, isTrue,
+          reason: 'P3-4：归档只写 prefs，任务表写失败不该连坐——旧实现此时误报'
+              '「安全模式下更改不会保存」，而重启后标签仍是归档的（提示与事实相反）');
+      expect(okRename, isFalse, reason: 'renameTag 真改任务表，DB 异常如实上报');
       expect(p.archivedTags, contains('新标签'),
           reason: '内存已生效（归档集合不回滚——与任务侧修改类口径一致）');
       expect(p.byId('7411')!.tags, contains('主业'),
@@ -494,7 +533,9 @@ void main() {
       final args = Map<String, dynamic>.from(
           notifCalls.where((c) => c.method == 'show').single.arguments as Map);
       expect(args['title'], '撤销未保存');
-      expect(args['body'], contains('保存失败'));
+      // U3-3（v3.0.8 审计）：正文改「撤销未保存，请重试」——旧文案「已回退但
+      // 保存失败」与事实相反（setCheckInValue 失败会回滚内存，实际**没有回退**）。
+      expect(args['body'], contains('撤销未保存，请重试'));
       expect(args['payload'],
           '${NotificationService.payloadHabitPrefix}${NotificationService.habitEntityWithDate(habit.id, NotificationService.habitConfirmDateKey(DateTime.now()))}',
           reason: '与确认条撤销同路由（带展示日校验）：重试 = 干净的再次 -1');

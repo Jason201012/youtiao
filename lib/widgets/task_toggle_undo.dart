@@ -40,13 +40,22 @@ import 'package:todolist/widgets/undo_snack_bar.dart';
 /// 的动作上，撤销类一次性 action 场景没有重试载体，「继续操作即落库」是事实）。
 ///
 /// [provider] 可空（测试 / 无 provider 上下文）：缺省时按「非安全模式」处理。
-void showTaskPersistFailedHint(BuildContext context, {TaskProvider? provider}) {
+///
+/// P3-7（v3.0.8 审计）：[rolledBack] 参数——addTask / addTasksBulk 等**新建**入口
+/// 落盘失败时会回滚内存（任务已不存在，「继续其它操作会自动一并保存」对它不成立：
+/// 没有任何后续写入会把不存在的任务带回来）。这些入口传 rolledBack: true，文案改为
+/// 「新建未生效，请重试」——旧实现让新建侧也用通用文案，用户可能因此不再点保存，
+/// 以为「等等就会自己存上」。
+void showTaskPersistFailedHint(BuildContext context,
+    {TaskProvider? provider, bool rolledBack = false}) {
   final safeMode = provider?.dbLoadFailed ?? false;
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(safeMode
           ? '安全模式下更改不会保存：已阻止写入以保护数据库，请先修复或恢复后再试'
-          : '写入失败：数据未保存；继续其它操作会自动一并保存'),
+          : rolledBack
+              ? '新建未生效，请重试'
+              : '写入失败：数据未保存；继续其它操作会自动一并保存'),
     ),
   );
 }

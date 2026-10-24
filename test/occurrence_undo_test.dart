@@ -62,7 +62,7 @@ void main() {
       TaskProvider.onDayChanged = () => fired++;
       addTearDown(() => TaskProvider.onDayChanged = null);
 
-      p.checkDailyReset();
+      await p.checkDailyReset();
       expect(fired, 1, reason: '日边界判定必须与列表内容无关');
     });
 
@@ -72,9 +72,9 @@ void main() {
       TaskProvider.onDayChanged = () => fired++;
       addTearDown(() => TaskProvider.onDayChanged = null);
 
-      p.checkDailyReset(); // 确立当天基线
-      p.checkDailyReset();
-      p.checkDailyReset();
+      await p.checkDailyReset(); // 确立当天基线
+      await p.checkDailyReset();
+      await p.checkDailyReset();
       expect(fired, 1);
     });
   });
@@ -112,8 +112,9 @@ void main() {
       final newDay = origDay.add(const Duration(days: 1)); // 周六，非循环日
 
       // P2-2（v3.0.7 审计）：rescheduleOnceOccurrence 随 addTask 异步化。
-      final copy =
-          await p.rescheduleOnceOccurrence('1', newDay, origDay: origDay);
+      // P3-2（v3.0.8 审计）：返回值改具名记录，消费点取 .copy。
+      final r = await p.rescheduleOnceOccurrence('1', newDay, origDay: origDay);
+      final copy = r.copy;
       expect(copy, isNotNull);
       expect(copy!.id, isNot('1'));
       expect(p.byId('1')!.skipDates, contains('2026-09-11'));
@@ -129,12 +130,18 @@ void main() {
       expect(p.byId('1')!.skipDates, isEmpty, reason: '原日必须从 skipDates 归还');
     });
 
-    test('任务不存在时 rescheduleOnceOccurrence 安全返回 null', () async {
+    // P3-2（v3.0.8 审计）：null 四义拆开后，「源任务不存在」是显式的 missing
+    // 分支——旧测试只断言 isNull，五义里任何一义都满足，钉不住具体语义。
+    test('源任务不存在时 rescheduleOnceOccurrence 报 missing（copy 为 null）',
+        () async {
       final p = await buildWith([mk('1', repeat: RepeatType.daily)]);
-      expect(
-          await p.rescheduleOnceOccurrence(
-              'nope', origDay.add(const Duration(days: 1))),
-          isNull);
+      final r = await p.rescheduleOnceOccurrence(
+          'nope', origDay.add(const Duration(days: 1)));
+      expect(r.missing, isTrue, reason: '源任务不存在 = missing');
+      expect(r.copy, isNull);
+      expect(r.coveredByLoop, isFalse);
+      expect(r.copyFailed, isFalse);
+      expect(r.noop, isFalse);
     });
 
     test('discardTask 幂等，且只作用于活动列表（不进回收站）', () async {

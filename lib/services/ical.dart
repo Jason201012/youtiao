@@ -353,9 +353,15 @@ String? _toRrule(Task t) {
       return null;
   }
   if (t.repeatUntil != null) {
-    // UNTIL 用 yyyyMMdd（date-only），与 repeatUntil 的 yyyy-MM-dd 互换。
+    // L10（v3.0.8 审计）：UNTIL 与 DUE 同写 DATE-TIME 值类型——旧实现写
+    // date-only（yyyyMMdd），而本文件导出的 DUE 恒为 DATE-TIME（见 :179
+    // `DUE:${_toIcsLocalTime(due)}`）：RFC 5545 要求同一 RRULE 内 UNTIL 与
+    // DTSTART 值类型一致（DTSTART 若为 DATE-TIME，UNTIL 也必须是 DATE-TIME），
+    // 严格解析器（Google / Apple 日历）会把截止日当天最后一次 occurrence
+    // 排除（少一天）。改为「当天 23:59:59」的本地时刻，与「含当日仍循环」
+    // 的产品语义一致。
     final u = t.repeatUntil!.replaceAll('-', '');
-    base += ';UNTIL=$u';
+    base += ';UNTIL=${u}T235959';
   }
   return 'RRULE:$base';
 }

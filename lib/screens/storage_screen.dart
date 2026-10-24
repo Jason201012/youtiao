@@ -150,8 +150,13 @@ class _StorageScreenState extends State<StorageScreen> {
         // P2-2（v3.0.7 审计）：updateTask 透传落盘结果——失败如实提示
         // （任务的附件引用仍在，重启后条目回来）。
         final ok = await provider.updateTask(task.copyWith(attachments: newAtt));
-        if (!ok && mounted) {
-          showTaskPersistFailedHint(context, provider: provider);
+        if (!ok) {
+          // P3-5（v3.0.8 审计）：落盘失败**不再继续删文件**——旧实现提示后照删，
+          // 任务的附件引用还在库里、文件已没，重启后引用悬空（详情页「文件不存在」）。
+          if (mounted) {
+            showTaskPersistFailedHint(context, provider: provider);
+          }
+          return;
         }
       }
       await AttachmentService.deleteAttachmentFile(f.taskId, f.fileName);
@@ -198,10 +203,14 @@ class _StorageScreenState extends State<StorageScreen> {
           final newAtt =
               task.attachments.where((a) => a.fileName != fileName).toList();
           // P2-2（v3.0.7 审计）：同单条删除——失败如实提示。
+          // P3-5（v3.0.8 审计）：落盘失败即中止该条的文件删除（见 _deleteEntry）。
           final ok =
               await provider.updateTask(task.copyWith(attachments: newAtt));
-          if (!ok && mounted) {
-            showTaskPersistFailedHint(context, provider: provider);
+          if (!ok) {
+            if (mounted) {
+              showTaskPersistFailedHint(context, provider: provider);
+            }
+            continue;
           }
         }
         await AttachmentService.deleteAttachmentFile(taskId, fileName);
@@ -217,6 +226,10 @@ class _StorageScreenState extends State<StorageScreen> {
     // 传入全部仍保有元数据的任务（含回收站），避免误删回收站任务的附件。
     final all = [...provider.tasks, ...provider.trash];
     final bytes = await AttachmentService.previewOrphansBytes(all);
+    // L19（v3.0.8 审计）：await 后补 mounted 检查——旧实现此处直接用 context
+    // （同文件后半段 :241 有守卫，前后不一致）：预览期间页面被销毁时
+    // ScaffoldMessenger.of 触发 deactivated widget 异常。
+    if (!mounted) return;
     if (bytes <= 0) {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('未发现无主文件')));
@@ -236,7 +249,7 @@ class _StorageScreenState extends State<StorageScreen> {
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true || !mounted) return;
     final freed = await AttachmentService.deleteOrphans(all);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(

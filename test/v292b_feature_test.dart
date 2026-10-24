@@ -185,7 +185,8 @@ void main() {
       expect(done.completedAt, isNotNull);
 
       // 撤销入口的底层动作：整体快照回滚（T3-2 接线统一走这里）。
-      expect(p.restoreTaskSnapshot(before), isTrue);
+      // U3-4（v3.0.8 审计）：迁到 persisted 版（落盘语义）。
+      expect(await p.restoreTaskSnapshotPersisted(before), isTrue);
       final restored = p.tasks.single;
       expect(restored.done, isFalse);
       expect(restored.completedAt, isNull,

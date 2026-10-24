@@ -314,10 +314,13 @@ void main() {
       _installMocks();
       final provider = await buildWith([]);
       // P2-2（v3.0.7 审计）：applyTemplateItems 随 addTask 异步化。
-      final created = await applyTemplateItems(provider, [
+      // U3-6（v3.0.8 审计）：返回值改具名记录（created/total）。
+      final created =
+          (await applyTemplateItems(provider, [
         TemplateItem('写周报', Category.work, Priority.high, 1,
             estimateMinutes: 25),
-      ]);
+      ]))
+              .created;
       expect(created, 1);
       final t = provider.tasks.firstWhere((t) => t.title == '写周报');
       expect(t.estimateMinutes, 25);

@@ -85,7 +85,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     // 选「从零开始」则清空首启示例任务。
     if (!_keepSample) {
       try {
-        await task.clearSampleTasks();
+        // M18 / P3-6（v3.0.8 审计）：clearSampleTasks 现返回落盘结果——旧实现
+        // 忽略：DB 失败时重启后 7 条示例又回来，而用户已按「从零开始」理解了空库。
+        final ok = await task.clearSampleTasks();
+        if (!ok && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('示例任务清空未保存，重启后可能再次出现')),
+          );
+        }
       } catch (_) {
         // 清空失败不应阻塞进入主页。
       }

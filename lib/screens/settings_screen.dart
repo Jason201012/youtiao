@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.0.8');
+      if (mounted) setState(() => _version = '3.0.9');
     }
   }
 
@@ -85,17 +85,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
         nudgeMinute: p.habitNudgeMinute,
       );
 
+  /// L24（v3.0.8 审计）：检查更新忙态——网络慢时用户易重复点击（每次点击
+  /// 都发起一次 UpdateChecker.check），行内给加载反馈并禁用重复触发。
+  bool _checkingUpdate = false;
+
   /// 手动检查更新：有新版弹窗，无新版提示「已是最新」。
-  Future<void> _checkUpdateManually(BuildContext context) async {    final res = await UpdateChecker.check();
-    if (!mounted) return;
+  Future<void> _checkUpdateManually(BuildContext context) async {
+    // L24：忙态门控（SettingsRow 的 onTap 也据此禁用）。
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    try {
+      final res = await UpdateChecker.check();
+      if (!mounted) return;
     if (res.hasUpdate && res.info != null) {
       await UpdateDialog.show(context, res.info!);
-    } else {
-      final msg = res.error != null
-          ? '检查更新失败：${res.error}'
-          : '已是最新版本 ${_version.isEmpty ? '' : _version}';
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(msg)));
+      } else {
+        final msg = res.error != null
+            ? '检查更新失败：${res.error}'
+            : '已是最新版本 ${_version.isEmpty ? '' : _version}';
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(msg)));
+      }
+    } finally {
+      // L24：无论成败都复位忙态（失败也要让用户能重试）。
+      if (mounted) setState(() => _checkingUpdate = false);
     }
   }
 
@@ -107,6 +120,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<(String, String)?> _requestAutoBackupPassphrase(BuildContext ctx) async {
     final controller = TextEditingController();
     final hintCtrl = TextEditingController();
+    // L23（v3.0.8 审计）：对话框关闭后 dispose——旧实现创建后从不释放
+    // （本方法 + _changeAutoBackupPassphrase 共 5 个控制器同病）。
     String? errorText;
     final result = await showDialog<(String, String)>(
       context: ctx,
@@ -172,6 +187,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+    controller.dispose();
+    hintCtrl.dispose();
     return result;
   }
 
@@ -186,7 +203,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (hasOld) {
       final ctl = TextEditingController();
       String? err;
-      final ok = await showDialog<bool>(
+      // M16（v3.0.8 审计）：返回值从 bool 改为可区分的三态字符串——
+      // 旧实现「下一步」（旧口令校验通过）与「忘了旧密码」都 pop true，
+      // 后续 `if (ok == true) oldPass = null` 把「验证通过」与「强制重设」
+      // 合流：记得口令的用户被推进「旧加密快照永久无法解开」的恐吓式确认，
+      // 而 `ok == false`（取消）反而走进验证修改分支——唯一能走非强设路径的
+      // 操作是「输对口令后点取消」，语义荒谬。
+      // 三态：null = 取消 / 'forgot' = 忘旧口令（强制重设）/ 'verified' = 校验通过。
+      final ok = await showDialog<String>(
         context: ctx,
         builder: (dctx) => StatefulBuilder(
           builder: (dctx, setLocal) => AlertDialog(
@@ -207,11 +231,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(dctx).pop(false),
+                onPressed: () => Navigator.of(dctx).pop(),
                 child: const Text('取消'),
               ),
               TextButton(
-                onPressed: () => Navigator.of(dctx).pop(true),
+                onPressed: () => Navigator.of(dctx).pop('forgot'),
                 child: const Text('忘了旧密码'),
               ),
               FilledButton(
@@ -220,7 +244,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     setLocal(() => err = '当前口令不正确');
                     return;
                   }
-                  Navigator.of(dctx).pop(true);
+                  Navigator.of(dctx).pop('verified');
                 },
                 child: const Text('下一步'),
               ),
@@ -228,11 +252,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       );
+      ctl.dispose();
       if (ok == null) return;
       // 走「忘了旧密码」分支：弹强提示确认强制重设。
-      if (ok == true) {
+      if (ok == 'forgot') {
         oldPass = null;
       } else {
+        // 'verified'：校验已通过，按常规修改路径续走（不再误入强制重设）。
         oldPass = ctl.text;
         if (!provider.verifyAutoBackupPassphrase(oldPass)) return;
       }
@@ -317,6 +343,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+    // L23（v3.0.8 审计）：关闭后统一释放三个控制器。
+    ctlNew.dispose();
+    ctlConfirm.dispose();
+    ctlHint.dispose();
     if (newPass == null || newPass.isEmpty) return;
     // P2-4：返回 -1 = 失败；否则为被标记失效的旧口令快照数。
     final changed = await provider.changeAutoBackupPassphrase(
@@ -521,8 +551,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!ctx.mounted) return;
     if (chosen == 'fix') {
       // P2-1（v3.0.0 审计）：返回值分列——可逆路径只产生 reversibleFixed。
-      final fixed =
-          await provider.fixDataHealthIssues(report).then((r) => r.reversibleFixed);
+      // P3-6（v3.0.8 审计）：消费 saved——旧实现 fire-and-forget，「已修复 N 项」
+      // 在 DB 异常下不实（重启全部回退）。
+      final r = await provider.fixDataHealthIssues(report);
+      final fixed = r.reversibleFixed;
       if (!ctx.mounted) return;
       // P1-5：结果提示按类型如实说明去向——可逆的指明「可在回收站找回」，
       // 不再笼统提示（对永久删除的条目该提示是误导）。
@@ -534,6 +566,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final cleaned =
           fixed - dupMoved; // 空白子项 / 失效附件引用的剔除次数
       if (cleaned > 0) parts.add('子任务 / 附件引用已清理 $cleaned 处');
+      if (!r.saved) parts.add('写入未保存（存储异常），请重试');
       ScaffoldMessenger.of(ctx).showSnackBar(
         SnackBar(content: Text('已修复 ${parts.join('；')}')),
       );
@@ -598,10 +631,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final r = await provider.fixDataHealthIssues(report,
             includeStaleTrash: true);
         if (!ctx.mounted) return;
+        // P3-6（v3.0.8 审计）：saved=false 时如实追一句（旧实现 purge 分支
+        // 的 _persist() 也不看结果，「已彻底删除 N 条」可能重启后全部复活）。
+        final notSaved = r.saved ? '' : '；但写入未保存（存储异常），请重试';
         ScaffoldMessenger.of(ctx).showSnackBar(
           SnackBar(
             content: Text('已彻底删除 ${r.permanentDeleted} 条（含附件，不可恢复；'
-                '删除前已自动备份一次，必要时可从备份找回）'),
+                '删除前已自动备份一次，必要时可从备份找回）$notSaved'),
           ),
         );
       } catch (e) {
@@ -1611,7 +1647,11 @@ String _formatIdle(int seconds) {
                     SettingsRow(
                       icon: Symbols.system_update_alt,
                       label: '检查更新',
-                      onTap: () => _checkUpdateManually(context),
+                      // L24（v3.0.8 审计）：忙态行内反馈 + 禁用重复触发。
+                      value: _checkingUpdate ? '检查中…' : null,
+                      onTap: _checkingUpdate
+                          ? null
+                          : () => _checkUpdateManually(context),
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(

@@ -142,7 +142,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
     // P2-2（v3.0.7 审计）：updateTask 透传落盘结果——失败弹提示（内存改期
     // 已生效、全量写自愈），撤销横幅照常给。
     final ok = await provider.updateTask(updated);
-    if (!ok && mounted) {
+    // U3-5 / L16（v3.0.8 审计）：await 后统一先判 mounted 再做后续——旧实现
+    // 仅在失败分支检查，成功路径紧接着对（可能已销毁的）context 调
+    // showUndoSnackBar → ScaffoldMessenger.of 触发
+    // 「Looking up a deactivated widget's ancestor is unsafe」。
+    if (!mounted) return;
+    if (!ok) {
       if (provider.byId(task.id) == null) {
         showTaskMissingHint(context);
       } else {

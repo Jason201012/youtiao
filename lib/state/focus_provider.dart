@@ -4,8 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/services/local_database.dart';
+import 'package:todolist/services/app_log.dart'; // L9（v3.0.8 审计）：迁移失败日志
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/calendar_exporter.dart';
+// M6（v3.0.8 审计）：CSV 公式注入防护收口到 csv_safe 单一真源。
+import 'package:todolist/services/csv_safe.dart';
 
 /// 专注会话的持久化与统计。独立于 TaskProvider，避免相互耦合；
 /// 仅依赖 shared_preferences，key 为 [ _kFocus ]。
@@ -170,8 +173,14 @@ class FocusProvider extends ChangeNotifier {
     if (!LocalDatabase.testUseMemory) {
       await db.db;
     }
+    // L9（v3.0.8 审计）：同 TaskProvider.load——损坏旧 JSON 抛错时保留 key、
+    // 按空库继续（migrate 在 replaceFocus 之前中止，不覆盖写）。
     if (await db.focusEmpty && prefs.getString(_kFocus) != null) {
-      await db.migrateFocusFromPrefs(prefs);
+      try {
+        await db.migrateFocusFromPrefs(prefs);
+      } catch (e, s) {
+        AppLog.d('[FocusProvider] 旧版 SP 数据迁移失败（已保留旧 key）：$e\n$s');
+      }
     }
     _sessions
       ..clear()
@@ -587,15 +596,19 @@ class FocusProvider extends ChangeNotifier {
     final start = activeSegmentStartEpochMs != null
         ? DateTime.fromMillisecondsSinceEpoch(activeSegmentStartEpochMs!)
         : DateTime.now().subtract(Duration(seconds: total));
-    // 🟡 修复 Bug4：补录场景下，endedAt 不允许早于/晚于真实完成时刻。
+    // 🟡 修复 Bug4：补录场景下，endedAt 不允许落在未来。
     // 原写法 `ended = start + total` 在「本阶段曾暂停过」时会把 paused 之前的累计秒
     // 也加进去（start 已是最后一段起点，total 却含已累计的暂停前时间），导致 endedAt
     // 晚于当前时刻（落在未来）。按 endedAt 归日的统计（今日专注、日历视图）会算错天。
-    // 补录（_completeSilently / _completeNaturally）发生在阶段真正跑满之时，
-    // 用「现在」作为结束时刻最贴合真实完成点；对于无 segment 起点（理论上不会发生）
-    // 的兜底仍退回 start+total。
+    //
+    // M11（v3.0.8 审计）：endedAt 改取 `min(now, start + total)`——旧实现取 now
+    // （重开时刻）修 Bug4 的同时引入反向错误：杀后台跨天后补录会把昨日跑满的阶段
+    // 记到**今天**（昨日漏记、今日虚增，日历事件跨度从昨晚拉到今晨）。阶段真正
+    // 跑满的时刻就是 `start + total`（无暂停时精确；暂停时它偏未来，由 min 夹到
+    // now，Bug4 的防护不变）。
     final now = DateTime.now();
-    final ended = start.isAfter(now) ? start.add(Duration(seconds: total)) : now;
+    final cap = start.add(Duration(seconds: total));
+    final ended = cap.isAfter(now) ? now : cap;
     final s = FocusSession(
       id: _nextSessionId(),
       taskId: activeTaskId,
@@ -639,6 +652,18 @@ class FocusProvider extends ChangeNotifier {
         await NotificationService.instance.showFocusDoneNow(body: body);
       }
       // 自动进入下一阶段（接管计时、系统闹钟与进度通知）。
+      // M11（v3.0.8 审计）：**杀后台期间跑满的补录不自动续跑**——旧实现补录后
+      // 立即 _beginPhase(next)：设置运行态、弹常驻进度通知、挂系统闹钟，数日后
+      // 打开 App 会凭空替用户「开新番茄」。补录只把已完成的阶段记账，运行态收敛
+      // 到「待开始」（与用户主动停止同口径），想继续由用户自己点开始。
+      // 应用内自然跑满（silent=false）保持自动循环行为不变。
+      if (silent) {
+        _resetActive();
+        await _cancelCompletion();
+        await NotificationService.instance.cancelFocusProgress();
+        notifyListeners();
+        return;
+      }
       await _beginPhase(next, taskId: activeTaskId, taskTitle: activeTaskTitle);
       return;
     }
@@ -969,15 +994,12 @@ class FocusProvider extends ChangeNotifier {
   static String _fmtDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-  static String _esc(String s) {
-    final v = s.replaceAll('"', '""');
-    // S11 修复：CSV 公式注入防护。以 = + - @ 开头的单元格在 Excel/WPS 中会被当作公式执行。
-    // 前置单引号强制按文本处理（OWASP CSV Injection 惯例）。
-    if (v.isNotEmpty && const ['=', '+', '-', '@'].contains(v[0])) {
-      return "'$v";
-    }
-    return v;
-  }
+  /// M6（v3.0.8 审计）：直接委托 [csvCell]（csv_safe 单一真源）——旧实现是
+  /// 弱化版（只查首字符）：`"  =HYPERLINK(...)"`、`"\uFEFF=cmd|..."` 这类
+  /// 「前导空白 / BOM + 公式引导符」可绕过，恶意导入的标题带进专注记录后，导出
+  /// CSV 在 Excel/WPS 打开即公式注入复活。任务表 /  habit 表早在用 csvCell，
+  /// 专注表是最后一处漏网。
+  static String _esc(String s) => csvCell(s);
 }
 
 /// 单个任务的专注聚合统计。
