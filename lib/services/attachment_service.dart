@@ -147,6 +147,13 @@ class AttachmentService {
     if (ext.length > 1 && !_isSafeSegment(ext.substring(1))) {
       ext = mimeType != null ? _extFromMime(mimeType) : '';
     }
+    // N1（v3.0.9 审计）：上面的 mime 兜底产出**未复检**——`image/svg+xml`
+    // 推出 `.svg+xml`（`+` 不在 _isSafeSegment 白名单），文件按该名落盘后
+    // fileFor / collectBlobs / restoreBlobs 全部拒绝，与 M1 同型复发；
+    // 另：以 `.` 结尾的源文件名 ext=`.`（长度 1 不被首轮净化覆盖），尾点
+    // 文件名在 Windows 上语义脆弱。兜底赋值后统一复检，不安全置空串。
+    if (ext.length > 1 && !_isSafeSegment(ext.substring(1))) ext = '';
+    if (ext == '.') ext = '';
     final stamp =
         '${DateTime.now().millisecondsSinceEpoch}_${_randomInt(1000, 9999)}';
     final name = '$stamp$ext';
@@ -647,8 +654,17 @@ static Future<Map<String, List<AttachmentFileEntry>>> scanAll() async {
   }
 
   /// 按 MIME 推导一个兜底扩展名（仅当源文件无扩展名时使用）。
+  ///
+  /// N1（v3.0.9 审计）：image/* 分支的返回值同样过 [_isSafeSegment]——mime
+  /// 子类型可含 `+`（Android content resolver 对 .svg 常返回
+  /// `image/svg+xml` → `.svg+xml`），不在白名单，落盘即永久不可用附件
+  /// （与 M1 同型）。此处保证返回值恒合法：非法返回空串（调用方留无名
+  /// 文件，也好过产出拒绝名）。
   static String _extFromMime(String mime) {
-    if (mime.startsWith('image/')) return '.${mime.split('/').last}';
+    if (mime.startsWith('image/')) {
+      final ext = '.${mime.split('/').last}';
+      return _isSafeSegment(ext.substring(1)) ? ext : '';
+    }
     if (mime.startsWith('audio/')) return '.m4a';
     if (mime.startsWith('video/')) return '.mp4';
     return '';
@@ -681,7 +697,20 @@ class RestoreBlobsStats {
   /// 此前 `await _persist()` 但丢弃结果，UI 只消费附件统计，「已恢复」可能在
   /// 任务未落库时上报（重启后恢复条目全部蒸发）。由 TaskProvider.restoreFromJson
   /// 写入，backup_sheet 并入恢复结果的 failures 通道。
+  ///
+  /// N17（v3.0.9 审计）：本字段语义错位——寄宿在附件统计类上、实际承载
+  /// **任务表**写盘结果（历史成因：P3-6 轮不想改 restoreFromJson 返回类型）。
+  /// 改名 / 拆类会波及全部调用方与测试，本轮以文档钉死语义；后续若重构
+  /// 恢复返回值（如拆出独立 RestoreOutcome），连同下方 templates* 一并迁出。
   bool persisted = true;
+
+  /// N7（v3.0.9 审计）：`user_templates` 段恢复统计（恢复入口下沉进
+  /// [TaskProvider.restoreFromJson] 后透出）。`templatesTotal == 0` 表示
+  /// 备份无该段（老备份），调用方不提示；失败条数 = total − restored
+  /// （单条损坏 / 写盘失败，合并语义见 [UserTemplateStore.restoreAllFromBackup]）。
+  int templatesRestored = 0;
+  int templatesTotal = 0;
+  int get templatesFailed => templatesTotal - templatesRestored;
   int get total => oversize + skipped;
   bool get hasSkipped => total > 0 || truncated;
 

@@ -191,7 +191,8 @@ class NotificationService {
   /// P3-22（v2.9.9 审计）：任务「完成」确认通知上的「撤销」action——通知完成
   /// 此前只能写入不能回退（_doComplete 直接 setStatus(done)），与 App 内
   /// 「完成即撤销」承诺不统一。点击后由 main._doTaskUndo 用完成前快照整体回滚
-  /// （restoreTaskSnapshot）。仅任务类确认通知（task: 前缀 payload）携带。
+  /// （restoreTaskSnapshotPersisted；原注释写的 restoreTaskSnapshot 已删除）。
+  /// 仅任务类确认通知（task: 前缀 payload）携带。
   static const String taskUndoActionId = 'task_undo';
 
   /// P3-1（v3.0.7 审计）：「完成未保存」回执上的「重试」action——`_doComplete`

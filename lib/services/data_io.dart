@@ -163,15 +163,22 @@ class DataIo {
   /// 估算一个 JSON 友好的 Map 序列化为字符串后的字节数（UTF-8）。
   ///
   /// 不做真正的 JsonEncoder（昂贵），改为统计 key 串字节 + 数字.toString 字节 +
-  /// 字符串 UTF-8 字节 + 结构标点（`,`/`: `/`/`{`/`}`/`[`/`]`），并对未知
+  /// 字符串 JSON 转义后字节 + 结构标点（`,`/`: `/`/`{`/`}`/`[`/`]`），并对未知
   /// 类型用 `value.toString().length` 兜底。结果与真实 JsonEncoder 输出
   /// 误差在 5% 以内，足以用于「超额剥离附件」这类二元判断。
+  ///
+  /// N8（v3.0.9 审计）：字符串改按 **JSON 转义后** 的字节数计（见
+  /// [_escapedStringBytes]）——旧实现按原始 UTF-8 字节 + 2 引号计，而
+  /// jsonEncode 会把 `"`/`\` 展开成 2 字节、控制字符展开成 6 字节
+  /// （`\uXXXX`）：转义密集内容（大量引号 / 反斜杠 / 控制字符）可低估
+  /// 数倍，击穿 L12 的 10% 余量 →「估算 ≤ 预算但实际 > 32MB，写得出去
+  /// 取不回来」。常规中文 / ASCII 内容不受影响（无转义字符时两法相等）。
   static int estimateJsonBytes(Map<String, dynamic> map) {
     var total = 2; // { }
     final keys = map.keys.toList();
     for (var i = 0; i < keys.length; i++) {
       if (i > 0) total += 1; // ,
-      total += _utf8Bytes(keys[i]) + 2; // "key":
+      total += _escapedStringBytes(keys[i]) + 1; // "key":（含冒号）
       total += _estimateValueBytes(map[keys[i]]);
     }
     return total;
@@ -181,7 +188,7 @@ class DataIo {
     if (v == null) return 4; // null
     if (v is bool) return v ? 4 : 5; // true / false
     if (v is num) return v.toString().length;
-    if (v is String) return _utf8Bytes(v) + 2; // "..."
+    if (v is String) return _escapedStringBytes(v); // "..."
     if (v is List) {
       var n = 2; // [ ]
       for (var i = 0; i < v.length; i++) {
@@ -195,22 +202,53 @@ class DataIo {
       final ks = v.keys.toList();
       for (var i = 0; i < ks.length; i++) {
         if (i > 0) n += 1;
-        n += _utf8Bytes(ks[i].toString()) + 2 + _estimateValueBytes(v[ks[i]]);
+        n += _escapedStringBytes(ks[i].toString()) + 1 + _estimateValueBytes(v[ks[i]]);
       }
       return n;
     }
     return (v.toString().length);
   }
 
-  static int _utf8Bytes(String s) {
-    var n = 0;
+  /// N8（v3.0.9 审计）：按 **JSON 转义后** 的 UTF-8 字节数估算字符串
+  /// （含首尾引号）。Dart `jsonEncode` 的转义规则（dart:convert）：
+  /// `"` → `\"`、`\` → `\\`、\b \f \n \r \t → 两字符转义、其余 < 0x20 →
+  /// `\uXXXX`（6 字符）；≥ 0x20 的字符按 UTF-8 原长计（代理对各计 3
+  /// 字节，合起来正是非 BMP 字符 4 字节 UTF-8 的长度）。
+  ///
+  /// 旧实现的 `_utf8Bytes(s) + 2`（原始 UTF-8 + 引号）在含转义字符的
+  /// 内容上系统性低估——例如 1 MB 纯 `"` 的备注，真实序列化 2 MB，旧法
+  /// 估 1 MB：叠加 L12 的 9 折预算仍可越过 32MB 上限，写出还原端必拒的
+  /// 备份（F13「写得出去、取不回来」）。本函数封死该缺口；无转义字符时
+  /// 与旧法逐位相等（既有常规内容零影响）。
+  ///
+  /// 同轮顺带修正：key 与冒号此前也只按 `utf8 + 2` 计（注释却写
+  /// `"key":`）——每键漏 1 字节，N8 用例的精确对账暴露了它，现补上
+  /// （估算与真实序列化在无转义内容上逐位相等）。
+  static int _escapedStringBytes(String s) {
+    var n = 2; // 前后引号
     for (final cu in s.codeUnits) {
-      if (cu < 0x80) {
-        n += 1;
-      } else if (cu < 0x800) {
-        n += 2;
-      } else {
-        n += 3;
+      switch (cu) {
+        case 0x22: // "
+        case 0x5C: // \
+          n += 2;
+          break;
+        case 0x08: // \b
+        case 0x0C: // \f
+        case 0x0A: // \n
+        case 0x0D: // \r
+        case 0x09: // \t
+          n += 2;
+          break;
+        default:
+          if (cu < 0x20) {
+            n += 6; // \uXXXX
+          } else if (cu < 0x80) {
+            n += 1;
+          } else if (cu < 0x800) {
+            n += 2;
+          } else {
+            n += 3;
+          }
       }
     }
     return n;

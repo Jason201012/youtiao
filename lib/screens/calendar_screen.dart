@@ -134,9 +134,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     // 「已改期至 X」，与逾期顺延 / 批量顺延的 10 秒撤销口径不对等——拖错一次
     // 只能自己再拖回去，而拖拽的落点精度又远不如点选。
     //
-    // 撤销走 [TaskProvider.restoreTaskSnapshot]（整体替换快照）而非反向
-    // `updateTask(copyWith(dueDate: old))`：前者连带把 dueDate 变化应触发的
-    // 提醒重排一并交回 provider，调用方不必自己记得重排（漏一次就是静默丢提醒）。
+    // N18（v3.0.9 审计）：撤销改走 [taskUndoAction]（widgets/task_toggle_undo.dart）
+    // ——原注释称走 [TaskProvider.restoreTaskSnapshot]，该 API 已删除。
+    // taskUndoAction 内部按完成前快照整体回滚（restoreTaskSnapshotPersisted：
+    // 先撤在途提醒再按快照重排），dueDate 变化应触发的提醒重排由 provider
+    // 写路径负责，调用方不必自己记得重排（漏一次就是静默丢提醒）。
     final provider = Provider.of<TaskProvider>(context, listen: false);
     final updated = task.copyWith(dueDate: newDue);
     // P2-2（v3.0.7 审计）：updateTask 透传落盘结果——失败弹提示（内存改期
@@ -157,11 +159,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     showUndoSnackBar(
       context,
       content: undoContent('已改期至 ${DateFormat('M月d日').format(newDue)}'),
-      // P2-2（v2.9.6 审计）：restoreTaskSnapshot 返回是否生效（任务已删除时
+      // P2-2（v2.9.6 审计）：撤销返回值曾表示「是否生效」（任务已删除时
       // false），由唯一实现统一提示「撤销已失效」。
-      // P2-2②（v3.0.7 审计）：撤销改走 taskUndoAction 三分支（落盘语义，
-      // 落盘失败不再误报「撤销已失效」；restoreTaskSnapshot 的「存在语义」
-      // 恒返 true 会把失败当成功）。
+      // P2-2②（v3.0.7 审计）：撤销走 taskUndoAction 三分支（落盘语义，
+      // 落盘失败不再误报「撤销已失效」；已删除的快照 API「存在语义」恒返
+      // true 会把失败当成功——该 API 已于 U3-4（v3.0.8）删除）。
       onUndo: taskUndoAction(context, provider, [task]),
     );
   }

@@ -164,6 +164,17 @@ String exportIcs(List<Task> tasks, {List<Task>? extra}) {
     // - 纯日期形态（00:00/23:59，与 dueIsPureDateForm 同判）写
     //   `VALUE=DATE`；带时刻的时段开始写 DATE-TIME 全格式——旧实现一律
     //   VALUE=DATE，时段任务的开始时分静默丢失。
+    //
+    // N16（v3.0.9 审计·已知偏差，本轮不改行为）：DUE 恒写 DATE-TIME
+    // （见下方 `DUE:${_toIcsLocalTime(due)}`），于是「纯日期开始 + 任一
+    // DUE」时同一 VTODO 内 DTSTART(VALUE=DATE) 与 DUE(DATE-TIME) 值类型
+    // 不一致——RFC 5545 要求 VTODO 内两者同类型，严格解析器可能告警。
+    // 保留现状的理由：① 改为恒 DATE-TIME 会让「全天型开始」丢失日期形态
+    //   语义（第三方按 00:00 时刻展示），且要同步改 v2.9.9 / v3.0.0 两轮
+    //   钉死的导出断言；② 本 App 导入侧两种值类型都能解析（_parseIcs
+    //    DateTime），往返幂等不受影响；③ 报告口径为「存量问题，本轮未涉」。
+    // 后续若要做 RFC 完全合规，方向是「DTSTART 跟随 DUE 的值类型」并同步
+    // 更新既有断言，届时应作为独立变更评估第三方日历的展示回归。
     if (t.startDate != null && due != null) {
       final s = t.startDate!;
       if (dueIsPureDateForm(s)) {

@@ -346,10 +346,19 @@ class _TaskSheetState extends State<TaskSheet> {
     // dispose 删除的暂存目录，且每次开关泄漏一个 AudioRecorder 平台资源。
     // fire-and-forget：dispose 不能 await，异常静默（不影响退场）。
     if (_isRecording) {
-      _recorder.stop().catchError((_) => null);
+      // N13（v3.0.9 审计）：stop 与 dispose 改 whenComplete 串接——旧实现
+      // `stop()` 未 await 即 `dispose()`（fire-and-forget）：方法通道按序
+      // 执行通常无害，但部分平台 dispose-while-recording 抛错会导致 stop
+      // 永不完成、录音平台资源晚释放（系统录音指示条常亮）。stop 落定后
+      // 再 dispose；异常依旧静默（不影响退场）。
+      _recorder
+          .stop()
+          .catchError((_) => null)
+          .whenComplete(() => _recorder.dispose().catchError((_) {}));
       _isRecording = false;
+    } else {
+      _recorder.dispose().catchError((_) {});
     }
-    _recorder.dispose().catchError((_) {});
     _titleController.dispose();
     _noteController.dispose();
     _subtaskController.dispose();

@@ -605,8 +605,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # S5 修复：此脚本已废弃，统一改用根目录的 _publish_v266.py 作为唯一发版入口。
-    # 旧脚本生成的 update.json 缺少 apkSha256 且指向旧仓库 youtiao-releases，
-    # 误用会削弱自更新防线（见审计报告 S5）。
-    print("⛔ _build2.py 已废弃：请改用 _publish_v266.py（唯一发版入口）。", file=sys.stderr)
+    # L15（v3.0.9 审计）：本脚本已废弃。原指引称「统一改用根目录的
+    # _publish_v266.py」——该文件早已不存在（死指引，连续两轮审计悬空）。
+    # 现行发版编排为仓库外脚本根目录下按版本生成的 7 件套（均在
+    # E:\TRAE SOLO\14\，不在本仓库内）：
+    #   _make_vXXX.py（字节级改号）→ _build_vXXX.py → _gate_vXXX.py
+    #   （MUST 哨兵 + libapp.so grep + AAPT2 badging + apksigner 三重校验）
+    #   → _finalize_vXXX.py（签 update.json）→ 双端验签（verify_sig_v280.py
+    #   + test/c2_verify_sign.dart）→ _push / _publish / _attach_apk_8567 /
+    #   create_8567_release_vXXX.py → _verify_vXXX_release.py（四项核对）。
+    # 本脚本生成的 update.json 缺少 apkSha256 且指向旧仓库 youtiao-releases，
+    # 误用会削弱自更新防线（见审计报告 S5）。「签名后匿名拉取验签 + sha256
+    # 复核」由 _verify_vXXX_release.py 与 _gate_vXXX.py 承担。
+    print("⛔ _build2.py 已废弃：请改用按版本生成的发版脚本件套"
+          "（_make/_build/_gate/_finalize/_push/_publish/_attach_apk_8567/"
+          "create_8567_release/_verify_vXXX.py），勿用 v2.5.x 时代旧脚本。",
+          file=sys.stderr)
     sys.exit(1)

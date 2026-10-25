@@ -982,7 +982,7 @@ void _doRetrySave(NavigatorState nav, String taskId) {
 /// 那些改动一起还原——与撤销语义「回到完成前状态」一致，属预期行为。
 ///
 /// P2-1（v3.0.5 审计）：改用 [TaskProvider.restoreTaskSnapshotPersisted]——
-/// 旧 restoreTaskSnapshot 返回的 bool 语义是「任务是否存在」而非「是否落盘」，
+/// 已删除的旧快照 API 返回的 bool 语义是「任务是否存在」而非「是否落盘」，
 /// 落盘失败照样弹「已撤销完成」（重启后完成态复活）。现三分支：落盘成功 →
 /// 确认；任务已删 → 「已失效」；落盘失败 → 只记日志不弹确认（内存撤销已生效，
 /// 既不谎报持久化、也不误报「已失效」，与习惯侧同口径）。

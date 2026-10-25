@@ -345,13 +345,24 @@ class _TagManageScreenState extends State<TagManageScreen> {
                     if (isArchived) {
                       provider.unarchiveTag(tag).then((ok) {
                         if (!ok && context.mounted) {
-                          showTaskPersistFailedHint(context, provider: provider);
+                          // N9（v3.0.9 审计）：归档态是**纯 prefs 操作**，
+                          // 通用提示「继续其它操作会自动一并保存」对它不成立
+                          // （归档集合不经过任务表 _persist，没有任何后续
+                          // 写入会把它带回来）——且 provider 已回滚内存，
+                          // 界面即事实。如实说明需手动重试。
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('取消归档保存失败，请重试')),
+                          );
                         }
                       });
                     } else {
                       provider.archiveTag(tag).then((ok) {
                         if (!ok && context.mounted) {
-                          showTaskPersistFailedHint(context, provider: provider);
+                          // N9（v3.0.9 审计）：同上——纯 prefs 失败，
+                          // 不用任务表通用文案。
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('归档保存失败，请重试')),
+                          );
                         }
                       });
                     }

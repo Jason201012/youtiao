@@ -34,7 +34,7 @@
 
 由 `TaskProvider.backupData()` 生成，当前 `version = 3`（手动导出与
 自动快照同构；P2-19 起手动备份同样携带 prefs / habits / check_ins /
-attachments，v3.0.8 审计轮起再纳入 `user_templates`）：
+attachments，v3.0.9 起再纳入 `user_templates`（M2））：
 
 ```json
 {

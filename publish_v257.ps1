@@ -1,4 +1,16 @@
 <#
+⚠️ 已废弃（L15，v3.0.9 审计）——v2.5.x 时代产物，请勿使用：
+  - 目标 Gitee 仓库 jason1012/youtiao-releases-2 已退役（现为 youtiao-releases-4，
+    APK only），Forgejo 侧也只保留 rootnas/youtiao 一仓；第三发布站为 NAS GitLab 8567
+    （update.json 接入，apkSha256 pinning）。
+  - 本脚本只 patch update.json 的 apkSha256 一行，无 C-2 ECDSA 签名、无门禁哨兵、
+    无 8567 attach——跑它只会产出「旧仓库上的旧格式资产」，与现行发版防线
+    （_gate / _finalize / 双端验签 / _verify_vXXX_release）完全脱节。
+  - 现行发版编排：仓库外脚本根目录（E:\TRAE SOLO\14\）按版本生成的 7 件套
+    （_make/_build/_gate/_finalize/_push/_publish/_attach_apk_8567/
+    create_8567_release/_verify_vXXX.py），见 _build2.py 废弃说明。
+  保留本文件仅作历史存档，切勿对新版本执行。
+
 .SYNOPSIS
   youtiao v2.5.7 dual-repo release: compute SHA256 -> patch update.json -> upload to Gitee+Forgejo -> verify apkUrl.
 .DESCRIPTION

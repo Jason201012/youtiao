@@ -225,10 +225,9 @@ CsvImportResult parseTasksCsv(String raw, {int maxItems = 500}) {
     }
     // M5（v3.0.8 审计）：单批上限——到达即整体停止解析并标记截断（与 iCal 的
     // maxItems 语义一致：提示用户分批，而不是把数万行一次性灌库）。
-    if (tasks.length >= maxItems) {
-      truncated = true;
-      break;
-    }
+    // N3（v3.0.9 审计）：判定点从循环顶部下移到「即将产出任务」之前
+    // （见下方 meta.add 前的复刻）——顶部统一判上限会把「恰 500 条有效
+    // 任务 + 其后全是回收站行 / 空标题行」误报成「尾批未导入」（失实）。
     totalRows++;
 
     String cell(int? idx) =>
@@ -279,6 +278,14 @@ CsvImportResult parseTasksCsv(String raw, {int maxItems = 500}) {
     DateTime? completedAt;
     if (completedRaw.isNotEmpty) {
       completedAt = _parseDateTime(completedRaw);
+    }
+    // N3（v3.0.9 审计）：截断判定落在「即将产出任务」之前——回收站行 /
+    // 空标题行 / 解析失败行本就不产出任务，旧实现在循环顶部统一判上限，
+    // 恰 500 条有效任务后紧跟这些行时仍报「尾批未导入」（失实提示）。
+    // 放此处同时保证 meta 与 tasks 逐行对齐（不会留下无任务的 meta 条目）。
+    if (tasks.length >= maxItems) {
+      truncated = true;
+      break;
     }
     meta.add(CsvImportRowMeta(
       priority: prioRaw.isEmpty ? null : _parsePriority(prioRaw),

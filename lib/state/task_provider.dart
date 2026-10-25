@@ -562,17 +562,33 @@ class TaskProvider extends ChangeNotifier {
   /// 正常模式下任务表写入失败也会把「已保存」报成失败。现只写 prefs，prefs 失败
   /// 才如实返回 false。测试 `v307_audit_fix_test.dart` 的「archiveTag 失败 false」
   /// 断言同步改口径（见该测试注释）。
+  ///
+  /// N9（v3.0.9 审计）：prefs 写失败时**回滚内存**——旧实现 notifyListeners 已把
+  /// 「已归档」显示出来，写盘失败却不回滚：界面显示已归档、重启回退；且失败走
+  /// 通用提示「继续其它操作会自动一并保存」，对纯 prefs 态不成立（归档集合不
+  /// 经过任务表 `_persist()`，没有任何后续写入会把它带回来）。
   Future<bool> archiveTag(String name) async {
     if (!_archivedTags.add(name)) return true;
-    notifyListeners();
-    return _persistTagArchive();
+    notifyListeners(); // 乐观刷新：归档筛选即时生效
+    final ok = await _persistTagArchive();
+    if (!ok) {
+      _archivedTags.remove(name);
+      notifyListeners();
+    }
+    return ok;
   }
 
-  /// 取消归档：重新在首页筛选中可见。同 [archiveTag] 口径（只写 prefs）。
+  /// 取消归档：重新在首页筛选中可见。同 [archiveTag] 口径（只写 prefs，
+  /// 失败回滚内存——N9，v3.0.9 审计）。
   Future<bool> unarchiveTag(String name) async {
     if (!_archivedTags.remove(name)) return true;
-    notifyListeners();
-    return _persistTagArchive();
+    notifyListeners(); // 乐观刷新：取消归档筛选即时生效
+    final ok = await _persistTagArchive();
+    if (!ok) {
+      _archivedTags.add(name);
+      notifyListeners();
+    }
+    return ok;
   }
 
   /// 重命名标签：全库替换所有任务上的 [oldName] 为 [newName]，并持久化。
@@ -767,6 +783,12 @@ class TaskProvider extends ChangeNotifier {
   Future<String?> _writeAutoBackup(DateTime now) async {
     final focus = FocusProvider.instanceOrNull;
     final habit = HabitProvider.instanceOrNull;
+    // N5（v3.0.9 审计）：消费模板收集失败信号——旧实现 exportAllForBackup
+    // 吞错返回空列表：快照里 user_templates 恒空且用户不知情（换机后才发觉
+    // 模板没进备份）。失败记入设置页可见的错误栏（warning 性质：任务/习惯/
+    // 专注数据完整，仅模板缺失）。
+    final tplExport = await UserTemplateStore.exportAllForBackup();
+    final tplCollectFailed = tplExport.failed;
     final payload = <String, dynamic>{
       'version': 3,
       'app': '有条',
@@ -782,7 +804,7 @@ class TaskProvider extends ChangeNotifier {
       'attachments': await collectAttachmentBlobs(true),
       // M2（v3.0.8 审计）：用户自定义模板纳入自动快照（换机 / 卸载重装后
       // 随「从自动备份恢复」一并回来；文件存储此前完全不在覆盖范围）。
-      'user_templates': await UserTemplateStore.exportAllForBackup(),
+      'user_templates': tplExport.templates,
     };
     // 新P2-1：与手动备份（backup_sheet._doBackup）同口径的大小预检。
     final (trimmedPayload, attachmentsStripped) = DataIo.trimForExport(payload);
@@ -811,6 +833,14 @@ class TaskProvider extends ChangeNotifier {
       // 新P2-1：剥离事实不静默——记入设置页可见的错误栏（warning 性质：
       // 任务/习惯/专注数据完整，仅附件被剥离）。
       _lastAutoBackupError = '自动备份已剥离附件（数据体积超限），任务/习惯/专注数据完整';
+      AppLog.d(_lastAutoBackupError!);
+      notifyListeners();
+      return _lastAutoBackupError;
+    }
+    // N5（v3.0.9 审计）：模板收集失败同样不静默（优先级低于附件剥离，
+    // 故放在其后独立分支）——快照本身有效，仅缺用户模板段。
+    if (tplCollectFailed) {
+      _lastAutoBackupError = '自动备份未包含用户模板（模板目录读取失败）';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
       return _lastAutoBackupError;
@@ -978,21 +1008,30 @@ class TaskProvider extends ChangeNotifier {
     // P2-13：回收站到期自动清理此前只 removeWhere，不删附件目录
     // （对比 permanentDelete / clearTrash 都有 AttachmentService.removeDir），
     // 导致 attachments/<taskId>/ 成孤儿目录持续占空间，也与「到期即销毁」的隐私预期不符。
-    final expired = _trash.where(expiredEntry).map((t) => t.id).toList();
+    final expired = _trash.where(expiredEntry).toList();
     _trash.removeWhere(expiredEntry);
     // 通知撤销不设落盘门控（撤通知无害，且过期条目本就不该再响）。
-    for (final id in expired) {
-      NotificationService.instance.cancel(id);
-      NotificationService.instance.cancelRepeatReminder(id);
+    for (final t in expired) {
+      NotificationService.instance.cancel(t.id);
+      NotificationService.instance.cancelRepeatReminder(t.id);
     }
     final removed = _trash.length != before;
     if (removed && persist) {
       final ok = await _persist();
       // P3-5（v3.0.8 审计）：文件删除移到落盘成功之后（见方法注释）。
       if (ok) {
-        for (final id in expired) {
-          AttachmentService.removeDir(id);
+        for (final t in expired) {
+          AttachmentService.removeDir(t.id);
         }
+      } else {
+        // N10（v3.0.9 审计）：落盘失败**回滚内存**——旧实现 removeWhere 已
+        // 生效、通知已撤、文件保留，但条目重启复活且全程无提示（与同文件
+        // _removeManyAs / addTasksForTemplateApply 的失败回滚纪律不一致）。
+        // 回滚到清理前状态并刷新；撤销的通知无需补排——任务提醒唯一重排
+        // _rescheduleAllActive 只覆盖 _tasks（回收站条目不挂提醒，撤销本是
+        // 安全空操作），下次到期清理 / 午夜路径会重试。
+        _trash.addAll(expired);
+        notifyListeners();
       }
     }
     return removed;
@@ -1751,6 +1790,12 @@ class TaskProvider extends ChangeNotifier {
     }
     _tasks.clear();
     _trash.clear();
+    // N12（v3.0.9 审计）：一并清空撤销缓冲——旧实现只清任务表：引导前 10 秒
+    // 内删过示例任务（_deleteUndoLog 残留）→「从零开始」→点残留横幅撤销 →
+    // 示例任务复活进「空库」且提醒已撤（幽灵行）。与 restoreFromJson 的
+    // P2-3「整体重载前清撤销缓冲」同口径。
+    _editUndoLog.clear();
+    _deleteUndoLog.clear();
     NotificationService.instance.cancelTrashExpireNotice(); // P1-12：首启清空时取消预告
     _recomputeIdSeq(); // 重置自增 id 起点（空库 → 8 起）
     notifyListeners();
@@ -2385,9 +2430,13 @@ class TaskProvider extends ChangeNotifier {
 
   /// P2-1（v3.0.5 审计）：通知「撤销完成」action 专用——应用快照并**等待落盘
   /// 结果**。返回值语义：false = 任务不存在（快照失效）**或**落盘失败；
-  /// true = 快照已应用且落盘成功。App 内撤销横幅继续用 [restoreTaskSnapshot]
-  /// （bool = 是否存在，内存撤销已生效即可撤销，持久化失败走日志口径不弹窗），
-  /// 通知场景按本结果决定是否弹「已撤销完成」——DB 异常不再谎报成功。
+  /// true = 快照已应用且落盘成功。App 内撤销横幅走 [taskUndoAction]
+  /// （widgets/task_toggle_undo.dart，消费本方法的落盘语义三分支），本方法
+  /// 另供通知场景按结果决定是否弹「已撤销完成」——DB 异常不再谎报成功。
+  ///
+  /// N18（v3.0.9 审计）：上文原称「App 内撤销横幅继续用 restoreTaskSnapshot」，
+  /// 该 API 已于 U3-4（v3.0.8）删除，注释与现状相反——改写为如实记载，
+  /// 防止后来者按死 API 名找实现。
   ///
   /// P3-1（v3.0.6 审计）：identical 早退分支改为**真正重试落盘**——旧实现
   /// 「已安装过即 return true」假设「装了就是落了」，而 DB 异常路径下首次
@@ -3992,6 +4041,20 @@ class TaskProvider extends ChangeNotifier {
         ..clear()
         ..addAll(trashParsed);
     }
+    // N7（v3.0.9 审计）：user_templates 段恢复**下沉进本体**——此前仅
+    // backup_sheet 两个 UI 入口消费：恢复路径与生产者（_writeAutoBackup /
+    // _doBackup）接线不对称，未来新增恢复入口（脚本 / 新 UI）会静默丢模板
+    // （与 H1 同型的「生产者→消费者」缺口）。合并语义（只覆盖同 id）见
+    // [UserTemplateStore.restoreAllFromBackup]；统计先落局部，返回前并入
+    // [RestoreBlobsStats]，由调用方并入 failures 提示。
+    final tplRaw = data['user_templates'];
+    var tplRestored = 0;
+    var tplTotal = 0;
+    if (tplRaw is List) {
+      final tpl = await UserTemplateStore.restoreAllFromBackup(tplRaw);
+      tplRestored = tpl.restored;
+      tplTotal = tpl.total;
+    }
     if (data['notifications_enabled'] is bool) {
       _notificationsEnabled = data['notifications_enabled'];
     }
@@ -4024,6 +4087,10 @@ class TaskProvider extends ChangeNotifier {
     final blobStats =
         await AttachmentService.restoreBlobs(data['attachments'] as Map<String, dynamic>?);
     blobStats.persisted = ok; // P3-6（v3.0.8 审计）：透出任务落盘结果
+    // N7（v3.0.9 审计）：透出 user_templates 段恢复统计（total==0 = 备份
+    // 无该段 / 老备份，调用方不提示）。
+    blobStats.templatesRestored = tplRestored;
+    blobStats.templatesTotal = tplTotal;
     // F-11：覆盖恢复后回收本机旧附件。
     // 备份只带回「备份内存在的」附件字节，本机原有、备份中并不存在的任务附件目录
     // 会就此变成孤儿并持续占用私有空间（换机 / 用旧备份覆盖时尤其明显）。
@@ -4317,8 +4384,9 @@ class TaskProvider extends ChangeNotifier {
     NotificationService.instance.cancelRepeatReminder(id);
   }
 
-  /// 重复任务完成态变更后（setStatus / toggleDone / restoreTaskSnapshot /
-  /// markOccurrenceDone / unmarkOccurrenceDone 五入口共用）重排其重复提醒。
+  /// 重复任务完成态变更后（setStatus / toggleDone /
+  /// restoreTaskSnapshotPersisted / markOccurrenceDone / unmarkOccurrenceDone
+  /// 五入口共用）重排其重复提醒。
   ///
   /// [cancelCurrent]（P2-2，v3.0.4 审计）：是否先撤该任务**当前**的全部调度。
   /// 「整体完成态切换」（setStatus / toggleDone——今日 occurrence 必受影响）

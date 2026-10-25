@@ -200,6 +200,29 @@ class BackupValidator {
       }
     }
 
+    // 5c) 用户模板段体检（N4，v3.0.9 审计）：M2 把 user_templates 纳入备份时
+    //     未给校验器补规则——两条恢复路径都先过校验器，却对该段完全不查，
+    //     与 M8「脏条目在校验层拦截」口径不一致。此处补**形态级**校验
+    //     （列表 + 逐条对象）；字段级净化由恢复侧分层负责：
+    //     UserTemplate.fromJson 判型回退 + save 的 id 白名单 / 路径断言
+    //     （与 attachments 的分层一致）。不在校验器引入 task_templates 的
+    //     fromJson——那会拖入 flutter / path_provider / task_provider 依赖，
+    //     破坏本文件「纯 Dart、可直接单测」的性质（且 fromJson 本身对元数据
+    //     非字符串是回退而非抛错，真实反序列化在这里没有增量拦截力）。
+    final templatesRaw = data['user_templates'];
+    if (templatesRaw != null) {
+      if (templatesRaw is! List) {
+        return const BackupValidationResult(false, '用户模板字段形态非法（应为列表）');
+      }
+      for (var i = 0; i < templatesRaw.length; i++) {
+        final e = templatesRaw[i];
+        if (e is! Map) {
+          return BackupValidationResult(
+              false, '第 ${i + 1} 个用户模板不是对象，备份可能已损坏');
+        }
+      }
+    }
+
     // 全部通过。
     final count = list.length;
     final hasTrash = trashRaw is List && (trashRaw).isNotEmpty;

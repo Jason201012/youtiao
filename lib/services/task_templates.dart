@@ -511,8 +511,11 @@ class UserTemplateStore {
       (await loadAllWithBroken()).templates;
 
   /// [loadAll] 的完整版：附带损坏（JSON 解析失败 / 字段异常）被跳过的文件数。
-  /// 全目录枚举失败（目录不存在等）返回空列表 + 0（不视为损坏）。
-  static Future<({List<UserTemplate> templates, int broken})>
+  /// 全目录枚举失败（目录不存在等）返回空列表 + 0 + **failed=true**（N5，
+  /// v3.0.9 审计：旧实现把枚举失败与「真的没有模板」压成同一个返回值，
+  /// 备份收集无法区分——换机后才发觉模板没进备份。现透出失败信号，
+  /// 由 exportAllForBackup 转成备份侧的「收集失败」提示）。
+  static Future<({List<UserTemplate> templates, int broken, bool failed})>
       loadAllWithBroken() async {
     try {
       final d = await _dir();
@@ -538,11 +541,11 @@ class UserTemplateStore {
         }
       }
       out.sort((a, b) => a.name.compareTo(b.name));
-      return (templates: out, broken: broken);
+      return (templates: out, broken: broken, failed: false);
     } catch (_) {
       // 显式类型实参：裸 `const []` 在 record 字面量字段位会推断为 List<dynamic>，
       // 与声明返回类型 List<UserTemplate> 不符（编译错误）。
-      return (templates: const <UserTemplate>[], broken: 0);
+      return (templates: const <UserTemplate>[], broken: 0, failed: true);
     }
   }
 
@@ -599,18 +602,40 @@ class UserTemplateStore {
   /// 用户自建模板全部凭空消失（内置模板不受影响，用户难以察觉数据边界）。
   /// 现以 `user_templates` 段纳入备份；读取失败（目录不存在等）按空列表，
   /// 不阻断备份主流程。
-  static Future<List<dynamic>> exportAllForBackup() async {
-    try {
-      return [for (final t in await loadAll()) t.toJson()];
-    } catch (_) {
-      return [];
-    }
+  ///
+  /// N5（v3.0.9 审计）：返回 `(templates, failed)`——旧实现目录枚举失败时
+  /// 静默吞错返回空列表：备份里 user_templates 恒空且用户不知情（换机后才
+  /// 发觉模板没进备份）。对照 collectBlobs 的 `__skipped` 统计段，补一个
+  /// 「收集失败」信号，由调用方（手动备份 snackbar / 自动快照错误栏）如实
+  /// 提示，不阻断备份主流程。`failed == false` 且列表为空 = 真的没有模板
+  /// （与失败可区分）。失败信号来自 [loadAllWithBroken] 的 `failed`
+  /// （目录枚举异常），本方法自身不再需要 try/catch——loadAllWithBroken
+  /// 已保证不抛。
+  static Future<({List<dynamic> templates, bool failed})>
+      exportAllForBackup() async {
+    final loaded = await loadAllWithBroken();
+    return (
+      templates: [for (final t in loaded.templates) t.toJson()],
+      failed: loaded.failed,
+    );
   }
 
-  /// M2（v3.0.8 审计）：从备份的 `user_templates` 段恢复模板（覆盖同 id 文件，
-  /// 与备份「以备份为准」的恢复语义一致）。逐条 try/catch：单条损坏跳过不
-  /// 阻断其余。返回成功写入条数（调用方并入 failures 提示）。
-  static Future<int> restoreAllFromBackup(List<dynamic> rawList) async {
+  /// M2（v3.0.8 审计）：从备份的 `user_templates` 段恢复模板。
+  ///
+  /// N6（v3.0.9 审计）：注释与行为对齐——本方法是**合并语义**（只覆盖同 id
+  /// 文件、本地多出的模板保留），与 tasks/trash 的整表覆盖不同，旧注释称
+  /// 「与备份以备份为准的恢复语义一致」与事实不符。这是有意的安全取舍：
+  /// 恢复旧备份不应把用户此后新建的模板删掉（那才是真正的数据丢失），
+  /// 「同 id 覆盖」已保证备份内的修改生效。已知边界：多次恢复不同备份会
+  /// 累积模板，用户可在模板库手动删除。
+  ///
+  /// N7（v3.0.9 审计）：返回值从「成功条数」改为 `(restored, total)`——
+  /// 恢复入口已下沉进 [TaskProvider.restoreFromJson]（此前后仅 backup_sheet
+  /// 两个 UI 入口消费，新增恢复入口会静默丢模板），由本体消费并经
+  /// [RestoreBlobsStats] 透出统计，`total` 供「恢复 x/y 条」文案。
+  /// 逐条 try/catch：单条损坏跳过不阻断其余。
+  static Future<({int restored, int total})> restoreAllFromBackup(
+      List<dynamic> rawList) async {
     var restored = 0;
     for (final e in rawList) {
       if (e is! Map) continue;
@@ -621,7 +646,7 @@ class UserTemplateStore {
         // 单条损坏（缺字段 / 非法 id）跳过，不阻断其余模板恢复。
       }
     }
-    return restored;
+    return (restored: restored, total: rawList.length);
   }
 }
 

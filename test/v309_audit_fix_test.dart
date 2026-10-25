@@ -409,7 +409,9 @@ void main() {
     test('exportAllForBackup 收集已保存模板；save 覆盖写同 id', () async {
       await UserTemplateStore
           .save(UserTemplate(id: 'tpl1', name: '晨间例行'));
-      var all = await UserTemplateStore.exportAllForBackup();
+      // N5（v3.0.9 审计）：返回改为 (templates, failed) 记录型——失败信号
+      // 供调用方提示「本次备份未包含自定义模板」。此处正常路径 failed=false。
+      var all = (await UserTemplateStore.exportAllForBackup()).templates;
       expect(all.length, 1);
       expect((all.first as Map)['id'], 'tpl1');
       expect((all.first as Map)['name'], '晨间例行');
@@ -417,7 +419,7 @@ void main() {
       // 同 id 再保存 = 覆盖（备份语义：导出的是当前最新态）。
       await UserTemplateStore
           .save(UserTemplate(id: 'tpl1', name: '晨间例行v2'));
-      all = await UserTemplateStore.exportAllForBackup();
+      all = (await UserTemplateStore.exportAllForBackup()).templates;
       expect(all.length, 1, reason: '同 id 覆盖，不产生双份');
       expect((all.first as Map)['name'], '晨间例行v2');
     });
@@ -425,7 +427,9 @@ void main() {
     test('restoreAllFromBackup 覆盖恢复 + 单条损坏跳过', () async {
       await UserTemplateStore
           .save(UserTemplate(id: 'tpl1', name: '旧名'));
-      final restored = await UserTemplateStore.restoreAllFromBackup([
+      // N7（v3.0.9 审计）：返回改为 (restored, total)——恢复入口下沉进
+      // provider.restoreFromJson 后由本体消费并透出统计。
+      final r = await UserTemplateStore.restoreAllFromBackup([
         {
           'id': 'tpl1',
           'name': '备份名',
@@ -434,7 +438,8 @@ void main() {
         'not-a-map', // 坏条目（非对象）：跳过不阻断
         {1: 'x'}, // 非字符串键 → Map<String,dynamic>.from 抛错 → 跳过
       ]);
-      expect(restored, 1, reason: '只有 1 条合法条目被恢复');
+      expect(r.restored, 1, reason: '只有 1 条合法条目被恢复');
+      expect(r.total, 3, reason: 'total 含坏条目（供「恢复 x/y 条」文案）');
       final all = await UserTemplateStore.loadAll();
       expect(all.single.name, '备份名', reason: 'M2：以备份为准覆盖同 id');
     });

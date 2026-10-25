@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.0.9');
+      if (mounted) setState(() => _version = '3.1.0');
     }
   }
 
@@ -252,6 +252,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       );
+      // N2（v3.0.9 审计）：dispose 前先把口令存入局部变量——旧实现
+      // `ctl.dispose()` 先于 `ctl.text` 读取执行：当前 Flutter 的
+      // ChangeNotifier.value getter 无 disposed 断言故行为正确，但属依赖
+      // 未定义行为（Flutter 一旦收紧断言即 debug 崩溃，与仓库「debug
+      // 崩溃零容忍」口径冲突）。同时删掉旧实现的冗余重放——弹框「下一步」
+      // 已校验通过，无需再验一次。
+      final enteredPass = ctl.text;
       ctl.dispose();
       if (ok == null) return;
       // 走「忘了旧密码」分支：弹强提示确认强制重设。
@@ -259,8 +266,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         oldPass = null;
       } else {
         // 'verified'：校验已通过，按常规修改路径续走（不再误入强制重设）。
-        oldPass = ctl.text;
-        if (!provider.verifyAutoBackupPassphrase(oldPass)) return;
+        oldPass = enteredPass;
       }
       if (oldPass == null) {
         final forced = await _confirmForceReset(ctx);

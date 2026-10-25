@@ -119,7 +119,10 @@ class BackupSheet {
                   title: const Text('备份到文件'),
                   subtitle: Text(encrypt
                       ? '加密导出完整数据（凭口令恢复）'
-                      : '导出完整数据（任务、习惯、专注记录与设置），可分享保存'),
+                      // N14（v3.0.9 审计）：枚举补齐——附件与用户模板实际
+                      // 已进备份（P0-1 / M2），文案却停留在「任务、习惯、
+                      // 专注记录与设置」，「完整数据」名不副实。
+                      : '导出完整数据（任务、习惯、专注记录、附件、用户模板与设置），可分享保存'),
                   onTap: () {
                     // P0-1 修复：口令必须在「清空输入框之前」取成局部变量并传出。
                     // 原实现先 clear() 再读 passCtrl.text，读到空串导致勾选加密仍写明文。
@@ -216,8 +219,14 @@ class BackupSheet {
       // 在 snackbar 文案中告知用户，避免「我存的附件怎么没在备份里」的迷惑。
       final collectStats = readCollectStats(map['attachments'] as Map<String, dynamic>);
       // M2（v3.0.8 审计）：用户自定义模板纳入备份——模板是文件存储，此前
-      // 完全不在备份覆盖范围内，恢复 / 换机即全部丢失。恢复见 _doRestore。
-      map['user_templates'] = await UserTemplateStore.exportAllForBackup();
+      // 完全不在备份覆盖范围内，恢复 / 换机即全部丢失。恢复见 restoreFromJson
+      // （N7 起下沉进本体）。
+      // N5（v3.0.9 审计）：消费收集失败信号——模板目录读取失败时备份里
+      // user_templates 恒空，旧实现用户毫不知情（换机后才发觉）。失败在
+      // 结果 snackbar 里如实告知（不阻断备份主流程）。
+      final tplExport = await UserTemplateStore.exportAllForBackup();
+      map['user_templates'] = tplExport.templates;
+      final tplCollectFailed = tplExport.failed;
       // F13：导出前做大小预检。附件内联后整包若超过 32 MB，分享面板单文件大小
       // 敏感、还原端也会按 [DataIo.maxImportTextBytes] 拒绝读取——「写得出去、
       // 取不回来」。这里自动剥离 attachments 段，保住任务/习惯/偏好主体，
@@ -294,7 +303,11 @@ class BackupSheet {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(msg),
+            // N5（v3.0.9 审计）：模板收集失败追加在文案尾部——放在最终
+            // snackbar 一处拼接，避免被下方「下载目录写入失败」分支覆盖。
+            content: Text(tplCollectFailed
+                ? '$msg（用户模板读取失败，未包含在备份中）'
+                : msg),
             action: SnackBarAction(
               label: '分享',
               onPressed: () => DataIo.shareFile(file),
@@ -496,13 +509,12 @@ class BackupSheet {
       }
       // M2（v3.0.8 审计）：恢复用户模板（覆盖同 id）。单条损坏跳过；
       // 失败数并入 failures（≥1 条失败时提示，不打断主流程）。
-      if (data['user_templates'] is List) {
-        final restored = await UserTemplateStore.restoreAllFromBackup(
-            data['user_templates'] as List);
-        final total = (data['user_templates'] as List).length;
-        if (restored < total) {
-          failures.add('用户模板（恢复 $restored/$total 条，其余已跳过）');
-        }
+      // N7（v3.0.9 审计）：恢复已下沉进 provider.restoreFromJson（见其
+      // user_templates 段处理与 RestoreBlobsStats.templates*）——此处不再
+      // 重复恢复（避免双恢复 / 失败数双计），仅按透出统计如实提示。
+      if (blobStats.templatesTotal > 0 && blobStats.templatesFailed > 0) {
+        failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
+            '${blobStats.templatesTotal} 条，其余已跳过）');
       }
       // P2-19：恢复偏好（仅当备份含 prefs 字段；老备份无则保持现有偏好不动）。
       // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences。
@@ -801,14 +813,12 @@ class BackupSheet {
           failures.add('习惯/打卡（$e）');
         }
       }
-      // M2（v3.0.8 审计）：自动快照还原路径同样恢复用户模板（与 _doRestore 同口径）。
-      if (data['user_templates'] is List) {
-        final restored = await UserTemplateStore.restoreAllFromBackup(
-            data['user_templates'] as List);
-        final total = (data['user_templates'] as List).length;
-        if (restored < total) {
-          failures.add('用户模板（恢复 $restored/$total 条，其余已跳过）');
-        }
+      // M2（v3.0.8 审计）：自动快照还原路径同样恢复用户模板。
+      // N7（v3.0.9 审计）：同 _doRestore——恢复已下沉进
+      // provider.restoreFromJson，此处仅按透出统计提示，不重复恢复。
+      if (blobStats.templatesTotal > 0 && blobStats.templatesFailed > 0) {
+        failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
+            '${blobStats.templatesTotal} 条，其余已跳过）');
       }
       // 还原 App 级偏好（外观/锁/专注/免打扰/通用开关）。
       // 写回 SharedPreferences 后，触发各 Provider 重新读取使内存态即时生效。

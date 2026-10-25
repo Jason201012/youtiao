@@ -219,14 +219,26 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                         if (!mounted) return;
                         setState(() => _applying = false);
                         if (!context.mounted) return;
-                        Navigator.pop(context);
-                        if (context.mounted) {
+                        // N11（v3.0.9 审计）：失败**停留本层**——旧实现失败
+                        // 也 Navigator.pop：用户需重开模板库才能重试，与新建
+                        // 「失败停留本层」口径不对齐。另：0 项模板时
+                        // created==total（0==0）旧显示「新增 0 条」，
+                        // 按空模板如实提示。
+                        if (r.created == r.total) {
+                          Navigator.pop(context);
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                  content: Text(r.total == 0
+                                      ? '「${t.name}」是空模板，没有可套用的条目'
+                                      : '已套用「${t.name}」，新增 ${r.created} 条任务')),
+                            );
+                          }
+                        } else if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                                content: Text(r.created == r.total
-                                    ? '已套用「${t.name}」，新增 ${r.created} 条任务'
-                                    : '套用失败：「${t.name}」未保存'
-                                        '（已整体回滚），请检查存储空间后重试')),
+                                content: Text('套用失败：「${t.name}」未保存'
+                                    '（已整体回滚），请检查存储空间后重试')),
                           );
                         }
                       },
@@ -280,14 +292,23 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                               if (!mounted) return;
                               setState(() => _applying = false);
                               if (!context.mounted) return;
-                              Navigator.pop(context);
-                              if (context.mounted) {
+                              // N11（v3.0.9 审计）：同内置模板——失败停留
+                              // 本层可重试；0 项模板按空模板如实提示。
+                              if (r.created == r.total) {
+                                Navigator.pop(context);
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                        content: Text(r.total == 0
+                                            ? '「${t.name}」是空模板，没有可套用的条目'
+                                            : '已套用「${t.name}」，新增 ${r.created} 条任务')),
+                                  );
+                                }
+                              } else if (context.mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content:
-                                      Text(r.created == r.total
-                                          ? '已套用「${t.name}」，新增 ${r.created} 条任务'
-                                          : '套用失败：「${t.name}」未保存'
-                                              '（已整体回滚），请检查存储空间后重试')),
+                                  SnackBar(
+                                      content: Text('套用失败：「${t.name}」未保存'
+                                          '（已整体回滚），请检查存储空间后重试')),
                                 );
                               }
                             } else if (v == 'edit') {
