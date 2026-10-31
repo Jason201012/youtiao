@@ -177,31 +177,6 @@
   .priv h3{font-size:16px;margin-bottom:6px}
   .priv p{font-size:13.5px;color:var(--text-2);max-width:30ch;margin:0 auto}
 
-  /* changelog */
-  .log-card{
-    background:var(--card);border:1px solid var(--border);border-radius:18px;
-    padding:34px 38px;box-shadow:var(--shadow);max-width:820px;margin:0 auto;
-  }
-  @media (max-width:600px){ .log-card{padding:26px 22px} }
-  .log-ver{display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap}
-  .log-ver h3{font-size:21px;font-weight:800}
-  .badge{font-size:12px;font-weight:600;color:var(--brand);background:var(--brand-soft);
-    border:1px solid var(--brand-ring);border-radius:99px;padding:2px 11px}
-  .log-date{font-size:13px;color:var(--text-3)}
-  .log-card ul{list-style:none;margin-top:16px}
-  .log-card li{
-    position:relative;padding:7px 0 7px 24px;font-size:14.5px;color:var(--text-2);
-    border-bottom:1px dashed var(--border);
-  }
-  .log-card li:last-child{border-bottom:none}
-  .log-card li::before{
-    content:"";position:absolute;left:4px;top:16px;width:6px;height:6px;border-radius:50%;
-    background:var(--brand);opacity:.65;
-  }
-  .log-card li b{color:var(--text);font-weight:600}
-  .log-more{text-align:center;margin-top:24px;font-size:14px}
-  .log-more a{margin:0 10px}
-
   /* download */
   .dl-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:820px;margin:0 auto}
   @media (max-width:680px){ .dl-grid{grid-template-columns:1fr} }
@@ -249,7 +224,6 @@
     <nav class="nav-links">
       <a href="#features">功能</a>
       <a href="#privacy">隐私</a>
-      <a href="#changelog">更新日志</a>
       <a href="#download">下载</a>
       <a href="https://github.com/Jason201012/youtiao" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -404,37 +378,6 @@
   </div>
 </section>
 
-<!-- ============ CHANGELOG ============ -->
-<section id="changelog">
-  <div class="wrap">
-    <div class="sec-head reveal">
-      <div class="kicker">CHANGELOG</div>
-      <h2>持续维护，小步快跑</h2>
-      <p>每一轮修复都经过全量自动化测试与独立安全审计。</p>
-    </div>
-    <div class="log-card reveal">
-      <div class="log-ver">
-        <h3>v3.1.1</h3>
-        <span class="badge">数据安全修复</span>
-        <span class="log-date">2026-10-31</span>
-      </div>
-      <ul>
-        <li><b>数据安全</b>：修复数据库加载失败后首次写入可能覆盖全部习惯 / 专注记录的高危问题——现拒绝写入并如实提示，顶部安全模式横幅覆盖任务、习惯、专注三侧。</li>
-        <li><b>统计口径</b>：完成统计统一按「完成事件日」计数，重复任务每天完成正确计入周报 / 月报 / 成就，不再被午夜重置清零。</li>
-        <li><b>番茄循环</b>：休息段不再计入任务专注时长，任务详情、周报、成就多端对齐。</li>
-        <li><b>备份</b>：修复 8 项设置（早晚简报 / 习惯挽留）使用错误键名导致恢复后静默回默认的问题。</li>
-        <li><b>应用锁</b>：修复恢复备份后可能锁死设备的问题，解锁页新增「无法验证？关闭应用锁」出口。</li>
-        <li><b>其他</b>：通知权限被拒常驻提示；标签合并前确认且可撤销；多项写盘失败不再虚报成功。全量 1024 项自动化测试通过。</li>
-      </ul>
-    </div>
-    <div class="log-more reveal">
-      <a href="https://github.com/Jason201012/youtiao/releases" target="_blank" rel="noopener">GitHub 全部发行版 →</a>
-      <a href="https://gitee.com/jason1012/youtiao-releases-4/releases" target="_blank" rel="noopener">Gitee 全部发行版 →</a>
-      <a href="https://github.com/Jason201012/youtiao/blob/master/CHANGELOG.md" target="_blank" rel="noopener">完整 CHANGELOG →</a>
-    </div>
-  </div>
-</section>
-
 <!-- ============ DOWNLOAD ============ -->
 <section id="download">
   <div class="wrap">
@@ -478,7 +421,6 @@
     <div class="links">
       <a href="https://github.com/Jason201012/youtiao" target="_blank" rel="noopener">源码（GitHub）</a>
       <a href="https://gitee.com/jason1012/youtiao" target="_blank" rel="noopener">源码（Gitee）</a>
-      <a href="https://github.com/Jason201012/youtiao/blob/master/CHANGELOG.md" target="_blank" rel="noopener">更新日志</a>
     </div>
   </div>
 </footer>
