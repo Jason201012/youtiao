@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:lpinyin/lpinyin.dart';
+// lpinyin 的直接依赖已下沉到 PinyinIndex（A4 单一真源），此处不再直接引用。
+import 'package:todolist/services/pinyin_index.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/models/attachment.dart';
 
@@ -327,11 +328,21 @@ class Task {
   /// 用于把高频/重要任务常驻列表顶部。序列化为 `pinned`，缺省 false（向后兼容，零迁移）。
   final bool pinned;
 
-  /// 标题拼音首字母串（如「整理周会纪要」→ "zhenglizhouhuijiyao"），用于「拼音首字母搜索」。
+  /// 标题拼音首字母串（如「整理周会纪要」→ "zlzhjy"），用于「拼音首字母搜索」。
   /// 由 [computePinyinInitials] 在新建/编辑任务时计算并落库，旧数据缺省为空串（向后兼容，零迁移）。
   /// 搜索时与标题一起做包含匹配（见 [GlobalSearch._matchesTask]）。
   /// 注意：此为派生字段，[copyWith] 默认保留旧值，调用方无需每次重算。
   final String pinyinInitials;
+
+  /// A4（v3.1.1 功能增强）：标题拼音**全拼**串（小写、无分隔，如「周报」→
+  /// "zhoubao"），用于「全拼搜索」——中文用户敲「zhoulibao」能直接命中
+  /// 「周立波」类标题，不再只能敲首字母「zlb」。
+  ///
+  /// 与 [pinyinInitials] 同为派生字段：由 [computePinyinFull] 在新建 / 编辑时
+  /// 计算落库，[copyWith] 默认保留旧值；旧数据缺省空串（向后兼容，零迁移），
+  /// 恢复路径统一按标题重算补齐。搜索时**空串跳过**（避免空串恒真），
+  /// 与首字母路径并行匹配、互不替代。
+  final String pinyinFull;
 
   /// 本地最后更新时间（UTC）。用于本地增量持久化/备份的排序与去重依据，
   /// 不参与联网（纯离线）。序列化为 `updatedAt`，旧数据缺省为 null（向后兼容）。
@@ -374,6 +385,7 @@ class Task {
     this.estimateMinutes,
     this.pinned = false,
     this.pinyinInitials = '',
+    this.pinyinFull = '',
     this.updatedAt,
     this.attachments = const [],
   });
@@ -422,6 +434,7 @@ class Task {
     Object? estimateMinutes = _kKeep,
     bool? pinned,
     String? pinyinInitials,
+    String? pinyinFull,
     Object? updatedAt = _kKeep,
     List<AttachmentRef>? attachments,
   }) =>
@@ -469,6 +482,7 @@ class Task {
             : estimateMinutes as int?,
         pinned: pinned ?? this.pinned,
         pinyinInitials: pinyinInitials ?? this.pinyinInitials,
+        pinyinFull: pinyinFull ?? this.pinyinFull,
         updatedAt: updatedAt == _kKeep ? this.updatedAt : updatedAt as DateTime?,
         attachments: attachments ?? this.attachments,
       );
@@ -507,6 +521,7 @@ class Task {
         'estimateMinutes': estimateMinutes,
         'pinned': pinned,
         'pinyinInitials': pinyinInitials,
+        'pinyinFull': pinyinFull,
         'updatedAt': updatedAt?.toIso8601String(),
         'attachments': attachments.map((a) => a.toJson()).toList(),
       };
@@ -600,6 +615,8 @@ class Task {
       estimateMinutes: _clampIntOrNull(j['estimateMinutes'], 1, 30 * 24 * 60),
       pinned: j['pinned'] as bool? ?? false,
       pinyinInitials: j['pinyinInitials'] as String? ?? '',
+      // A4（v3.1.1 功能增强）：旧数据缺省空串（零迁移）；恢复路径会按标题重算补齐。
+      pinyinFull: j['pinyinFull'] as String? ?? '',
       updatedAt: j['updatedAt'] == null
           ? null
           : DateTime.parse(j['updatedAt'] as String),
@@ -1146,28 +1163,19 @@ class Task {
   }
 
   /// 计算标题的拼音首字母串（小写，不含空格）。如「整理」→ "zl"、「整理周会纪要」→ "zlzhjy"。
-  /// 依赖 [PinyinHelper]（lpinyin），纯 Dart、无平台调用；非汉字字符（数字/英文/标点）跳过，
+  /// 依赖 lpinyin，纯 Dart、无平台调用；非汉字字符（数字/英文/标点）跳过，
   /// 仅取每个汉字的拼音首字母拼接。空标题返回空串。
   /// 用于「拼音首字母搜索」（A1）：搜 "zl" 可命中「整理」，搜 "zz" 可命中「整理周…」。
-  static String computePinyinInitials(String title) {
-    if (title.isEmpty) return '';
-    final buf = StringBuffer();
-    for (final rune in title.runes) {
-      final ch = String.fromCharCode(rune);
-      // 仅对 CJK 统一汉字区（含扩展 A）取拼音首字母；其余（字母/数字/符号）忽略，
-      // 避免英文/数字干扰首字母匹配（搜 "abc" 不应被中文标题里的字母串命中）。
-      if (_isCjk(rune)) {
-        // lpinyin 2.x：getShortPinyin 对单字返回其拼音首字母（小写，如「整」→ "z"）；
-        // 注意 getFirstWordPinyin 返回的是完整拼音（「整」→ "zheng"），不能用于首字母搜索。
-        final py = PinyinHelper.getShortPinyin(ch);
-        if (py.isNotEmpty) buf.write(py.toLowerCase());
-      }
-    }
-    return buf.toString();
-  }
+  ///
+  /// A4（v3.1.1 功能增强）：实现委托给 [PinyinIndex.initials] 单一真源
+  /// （Habit 侧拼音索引同源共用，CJK 过滤与多音字口径不再两处维护）；
+  /// 本方法保留为任务模型侧的稳定 API（既有调用点与测试引用）。
+  static String computePinyinInitials(String title) => PinyinIndex.initials(title);
 
-  /// 判断码点是否落在常用汉字区（CJK Unified Ideographs + 扩展 A）。
-  static bool _isCjk(int rune) =>
-      (rune >= 0x4E00 && rune <= 0x9FFF) || // 基本汉字
-      (rune >= 0x3400 && rune <= 0x4DBF); // 扩展 A
+  /// A4（v3.1.1 功能增强）：计算标题的拼音**全拼**串（小写、无分隔）。
+  /// 如「整理周会纪要」→ "zhenglizhouhuijiyao"（与 [computePinyinInitials]
+  /// 的首字母口径互为对照）。委托 [PinyinIndex.full] 单一真源：
+  /// 逐 CJK 汉字取 `getPinyinE`（缺字以空串兜底、不抛异常——lpinyin 的
+  /// `getPinyin` 遇生僻字会抛异常，绝不能用在新建 / 编辑 / 恢复主路径）。
+  static String computePinyinFull(String title) => PinyinIndex.full(title);
 }

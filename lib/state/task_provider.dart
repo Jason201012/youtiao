@@ -146,6 +146,200 @@ class TaskProvider extends ChangeNotifier {
     return hour >= _dndStartHour || hour < _dndEndHour;
   }
 
+  // ===== 全局提醒临时静音（A2，v3.1.1 功能增强）=====
+  /// 静音窗口终点（ISO 时间戳存 prefs；null = 未静音）。
+  /// 调度侧的消费点在 [NotificationService.isReminderMuted]（六个调度入口
+  /// 统一判定，落点在窗口内不排、错过不补发）；本类负责状态、持久化与
+  /// 「静音开始撤已排提醒 / 静音结束全量重排」的编排。
+  static const String _kRemindersMutedUntil = 'reminders_muted_until';
+  DateTime? _remindersMutedUntil;
+
+  /// 静音窗口终点；null = 未静音。**可能已过期**（尚未被守护轮次清理），
+  /// UI 展示请用 [remindersMuted]。
+  DateTime? get remindersMutedUntil => _remindersMutedUntil;
+
+  /// 当前是否处于静音中（终点严格晚于现在）。过期的窗口不算静音。
+  bool get remindersMuted {
+    final u = _remindersMutedUntil;
+    return u != null && u.isAfter(DateTime.now());
+  }
+
+  /// 设置/解除临时静音。
+  ///
+  /// - 开始静音：先**撤销已排**的任务一次性 / 重复 / 习惯 / 简报 / 挽留 / 回收站
+  ///   提醒，再全量重排——重排时调度入口会把窗口内落点跳过，窗口外落点原样
+  ///   重挂（「窗口外未来提醒仍在」）。专注进行中的常驻进度 / 完成通知与打卡 /
+  ///   完成确认条不是「提醒」，不在撤销范围。
+  /// - 解除静音（含到期自愈）：全量重排补挂未来的落点；窗口内错过的提醒不补发。
+  /// - 过期时间戳一律归一为 null（不保留已失效的静音态）。
+  Future<void> setRemindersMutedUntil(DateTime? until) async {
+    final now = DateTime.now();
+    if (until != null && !until.isAfter(now)) until = null;
+    _remindersMutedUntil = until;
+    NotificationService.remindersMutedUntil = until;
+    notifyListeners();
+    await _persistSettings();
+    if (!_notificationsEnabled) return;
+    if (until != null) {
+      await _cancelScheduledReminderNotifications();
+      _rescheduleAllActive();
+      onGuardTick?.call(); // 习惯打卡提醒重挂（窗口内落点被调度入口跳过）
+      onFixedTimeRemindersReschedule?.call(); // 简报 ×2 / 挽留 / 回收站预告
+    } else {
+      // 解除：与「勿扰/声音变更」同口径全量重排。
+      NotificationService.instance.clearOccurrenceMemo();
+      rescheduleAllNotifications();
+      onFixedTimeRemindersReschedule?.call();
+    }
+  }
+
+  /// A2：撤销全部「提醒类」已排通知（静音开始时调用）。
+  /// 逐类显式取消而非 cancelAll——后者会连专注进行中常驻通知与确认条一并清掉，
+  /// 违背 A2「不取消非提醒类通知」的边界。
+  Future<void> _cancelScheduledReminderNotifications() async {
+    final n = NotificationService.instance;
+    for (final t in _tasks) {
+      try {
+        await n.cancel(t.id); // 一次性截止提醒 + snooze（同 id 段撤销）
+        await n.cancelRepeatReminder(t.id);
+      } catch (_) {}
+    }
+    final habit = HabitProvider.instanceOrNull;
+    if (habit != null) {
+      for (final h in habit.habits) {
+        try {
+          await n.cancelHabitReminder(h.id);
+        } catch (_) {}
+      }
+    }
+    try {
+      await n.cancelBriefing(true);
+      await n.cancelBriefing(false);
+      await n.cancelHabitNudge();
+      await n.cancelTrashExpireNotice();
+    } catch (_) {}
+  }
+
+  /// A2：静音到期自愈——上一轮守护时仍在静音、现已过期 → 清键并全量重排
+  /// （补挂未来的落点）。挂在 15 分钟守护 / 回前台的 [checkDailyReset] 上，
+  /// 无需额外定时器；最长 15 分钟的恢复延迟可接受（期间仅横幅滞后）。
+  Future<void> _autoRestoreIfMuteExpired() async {
+    final u = _remindersMutedUntil;
+    if (u == null || u.isAfter(DateTime.now())) return;
+    await setRemindersMutedUntil(null);
+  }
+
+  // ===== 今日三件 / MIT（A5，v3.1.1 功能增强）=====
+  /// 「今天最重要的一件事 ×3」的承诺机制：prefs `daily_mit` 存
+  /// `YYYY-MM-DD → [taskId,…]` 的 JSON map（最多 [kDailyMitMax] 个），
+  /// 日切后旧键自动清理（纯偏好存储，不写任务字段、不参与统计口径）。
+  static const String _kDailyMit = 'daily_mit';
+  /// 今日三件的数量上限（读写两侧共用）。
+  static const int kDailyMitMax = 3;
+  Map<String, List<String>> _dailyMit = {};
+
+  /// 今日三件的任务 id（按用户排列序）。**惰性过滤**：已删除（含入回收站）
+  /// 的 id 不再出现——删除任务后卡片不出现悬空 id；已完成任务**保留**在列表里
+  /// （行内以完成态呈现，兑现「完成时行内反映」；日切后整卡清空）。
+  List<String> get todayMit {
+    final key = _ymd(DateTime.now());
+    final ids = _dailyMit[key] ?? const <String>[];
+    return ids.where((id) => _tasks.any((t) => t.id == id)).toList();
+  }
+
+  /// 某任务是否已被选为今日三件。
+  bool isTodayMit(String id) => todayMit.contains(id);
+
+  /// 空态建议：逾期 → 今天到期 → 高优先级（复用 [homeTasks] 的同口径分区，
+  /// 已选中的不再出现），最多 [kDailyMitMax] 条。
+  List<Task> suggestMitCandidates() {
+    final home = homeTasks;
+    final chosen = todayMit.toSet();
+    final out = <Task>[];
+    void takeFrom(Iterable<Task> pool) {
+      for (final t in pool) {
+        if (out.length >= kDailyMitMax) return;
+        if (t.status != TaskStatus.todo) continue;
+        if (chosen.contains(t.id)) continue;
+        if (out.any((x) => x.id == t.id)) continue;
+        out.add(t);
+      }
+    }
+
+    takeFrom(home['overdue'] ?? const <Task>[]);
+    takeFrom(home['today'] ?? const <Task>[]);
+    if (out.length < kDailyMitMax) {
+      takeFrom(_tasks.where((t) => t.priority == Priority.high));
+    }
+    return out;
+  }
+
+  /// 覆写今日三件（去重、截断到 [kDailyMitMax]、过滤已不存在的 id）并落盘。
+  /// 返回落盘是否成功。
+  Future<bool> setTodayMit(List<String> ids) async {
+    final key = _ymd(DateTime.now());
+    final valid = ids
+        .toSet()
+        .take(kDailyMitMax)
+        .where((id) => _tasks.any((t) => t.id == id))
+        .toList();
+    _dailyMit[key] = valid;
+    _pruneOldMit(keepKey: key);
+    notifyListeners();
+    return _persistDailyMit();
+  }
+
+  /// 把某任务加入 / 移出今日三件。已满（[kDailyMitMax]）时返回 false
+  /// （UI 据此提示「最多 3 件」），落盘失败也返回 false。
+  Future<bool> toggleTodayMit(String id) async {
+    final key = _ymd(DateTime.now());
+    final list = [..._dailyMit[key] ?? const <String>[]];
+    if (list.contains(id)) {
+      list.remove(id);
+    } else {
+      if (list.length >= kDailyMitMax) return false;
+      list.add(id);
+    }
+    return setTodayMit(list);
+  }
+
+  /// 清理其它日期的 MIT 键（日切 / 覆写时调用）——报告要求「旧日期自动清理」，
+  /// 避免无限增长。仅内存；下次任意 MIT 写入顺带落盘。
+  void _pruneOldMit({required String keepKey}) {
+    _dailyMit.removeWhere((k, _) => k != keepKey);
+  }
+
+  Future<bool> _persistDailyMit() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kDailyMit, jsonEncode(_dailyMit));
+      return true;
+    } catch (e) {
+      AppLog.d('[TaskProvider] 今日三件落盘失败：$e');
+      return false;
+    }
+  }
+
+  /// 从 prefs 载入今日三件（[load] 调用）。脏 JSON / 非法形态一律按空处理
+  /// （备份是不可信输入，恢复路径同样经此收敛）；只保留今天与未来的键没有
+  /// 意义——仅保留今天，其余清理。
+  Future<void> _loadDailyMit(SharedPreferences prefs) async {
+    _dailyMit = {};
+    final raw = prefs.getString(_kDailyMit);
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      decoded.forEach((k, v) {
+        if (k is! String || v is! List) return;
+        _dailyMit[k] = v.whereType<String>().toList();
+      });
+    } catch (e) {
+      AppLog.d('[TaskProvider] 今日三件数据损坏（已按空处理）：$e');
+    }
+    _pruneOldMit(keepKey: _ymd(DateTime.now()));
+  }
+
   // ===== 每日专注目标（分钟）=====
   /// 用户自定的「每日专注目标」分钟数；0 表示不启用目标（今日卡不展示进度环）。
   /// 默认 120（与历史硬编码值一致）。在设置页可调，持久化到 SharedPreferences。
@@ -858,7 +1052,12 @@ class TaskProvider extends ChangeNotifier {
   /// 1.33× 膨胀，明文预算 = 上限 × 3/4 再减 1MB；附件剥离后仍超预算的极端
   /// 场景（元数据本身超大）直接跳过本日快照并如实记录，绝不写「取不回来」
   /// 的废快照。
-  Future<String?> _writeAutoBackup(DateTime now) async {
+  /// A1（v3.1.1 功能增强）：组装全量快照 payload——自动备份与「恢复前快照」
+  /// **共用**（此前组装逻辑内联在 [_writeAutoBackup]，恢复前快照要么复制一份
+  /// 要么漏段；抽成单一真源后两路逐字段一致，含 trimForExport 的附件剥离）。
+  /// 返回 (裁剪后的 payload, 附件是否被剥离, 模板收集是否失败)。
+  Future<(Map<String, dynamic>, bool, bool)> _buildSnapshotPayload(
+      DateTime now) async {
     final focus = FocusProvider.instanceOrNull;
     final habit = HabitProvider.instanceOrNull;
     // N5（v3.0.9 审计）：消费模板收集失败信号——旧实现 exportAllForBackup
@@ -886,6 +1085,12 @@ class TaskProvider extends ChangeNotifier {
     };
     // 新P2-1：与手动备份（backup_sheet._doBackup）同口径的大小预检。
     final (trimmedPayload, attachmentsStripped) = DataIo.trimForExport(payload);
+    return (trimmedPayload, attachmentsStripped, tplCollectFailed);
+  }
+
+  Future<String?> _writeAutoBackup(DateTime now) async {
+    final (trimmedPayload, attachmentsStripped, tplCollectFailed) =
+        await _buildSnapshotPayload(now);
     // 新P3-3：加密路径的明文预算（3/4 上限 − 1MB 信封与估算余量）。
     final budget = _autoBackupEncrypt
         ? (DataIo.maxExportPayloadBytes * 3 ~/ 4) - (1 << 20)
@@ -924,6 +1129,69 @@ class TaskProvider extends ChangeNotifier {
       return _lastAutoBackupError;
     }
     return null;
+  }
+
+  /// A1（v3.1.1 功能增强）：恢复前自动快照——真正覆盖前把当前全量状态写入
+  /// `backup/pre-restore/pre-restore-YYYYMMDD-HHMMSS.json(.enc.json)`，
+  /// 与自动快照**同构**（同一 payload 组装 + 可加密），滚动保留 3 份。
+  ///
+  /// - 失败**不阻断恢复**（返回 false，调用方在结果里如实提示「本次恢复
+  ///   不可回滚」），但绝不静默：日志留痕。
+  /// - 与自动快照同口径的尺寸预检：写出去取不回来的废快照绝不落盘。
+  /// - 「恢复成功后保留 7 天」由保留 3 份的滚动策略自然覆盖（每次恢复前
+  ///   都会生成新快照，3 份内必然含最近一次的回滚点）。
+  Future<bool> writePreRestoreSnapshot() async {
+    try {
+      final now = DateTime.now();
+      final (payload, _, _) = await _buildSnapshotPayload(now);
+      final budget = _autoBackupEncrypt
+          ? (DataIo.maxExportPayloadBytes * 3 ~/ 4) - (1 << 20)
+          : DataIo.maxExportPayloadBytes;
+      if (DataIo.estimateJsonBytes(payload) > budget) {
+        AppLog.d('[TaskProvider] 恢复前快照跳过：数据体积超过还原上限');
+        return false;
+      }
+      final plain = const JsonEncoder.withIndent('  ').convert(payload);
+      final body = buildBackupPayload(
+          plain, encryptOn: _autoBackupEncrypt, pass: _autoBackupPass);
+      final suffix = _autoBackupEncrypt ? '.enc.json' : '.json';
+      final p = (int n) => n.toString().padLeft(2, '0');
+      final name = 'pre-restore-'
+          '${now.year}${p(now.month)}${p(now.day)}-'
+          '${p(now.hour)}${p(now.minute)}${p(now.second)}$suffix';
+      await DataIo.saveToAppDocs('backup/pre-restore/$name', body);
+      await _rotatePreRestoreSnapshots();
+      return true;
+    } catch (e) {
+      AppLog.d('[TaskProvider] 恢复前快照失败（继续恢复，本次不可回滚）：$e');
+      return false;
+    }
+  }
+
+  /// A1：恢复前快照滚动保留 3 份（backup/pre-restore/），只认 .json，
+  /// 按文件名（含时间戳）字典序 = 时间序。失败静默，不阻断恢复主流程。
+  Future<void> _rotatePreRestoreSnapshots() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final base = Directory('${dir.path}/backup/pre-restore');
+      if (!await base.exists()) return;
+      final files = base
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.json'))
+          .toList();
+      files.sort((a, b) => _autoBackupName(a).compareTo(_autoBackupName(b)));
+      final excess = files.length - 3;
+      for (var i = 0; i < excess; i++) {
+        try {
+          await files[i].delete();
+        } catch (_) {
+          // 单文件删除失败不影响其余
+        }
+      }
+    } catch (e) {
+      AppLog.d('恢复前快照清理失败（忽略）：$e');
+    }
   }
 
   /// 滚动保留：仅保留最近 7 份当日快照（backup/auto/ 目录），删除更早的。
@@ -971,43 +1239,93 @@ class TaskProvider extends ChangeNotifier {
 
   /// 列出本地自动备份快照（新→旧），供「备份与恢复」面板还原。
   /// 每项含 date(DateTime)、file(File) 与 encrypted 标记（L-08）。
+  ///
+  /// A1（v3.1.1 功能增强）：一并列出「恢复前快照」（backup/pre-restore/，
+  /// 文件名 pre-restore-YYYYMMDD-HHMMSS[.enc].json），面板内以「恢复前」
+  /// 标签展示、可一键还原（走与自动快照同一套解析 / 校验 / 恢复流程）。
   Future<List<AutoBackupEntry>> listAutoBackups() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final base = Directory('${dir.path}/backup/auto');
-      if (!await base.exists()) return const [];
-      final files = base
-          .listSync()
-          .whereType<File>()
-          // P2-4：`*.stale.enc.json` 是换口令后已不可解的旧口令快照标记，
-          // 不再出现在恢复面板（滚动保留会按日期自然淘汰）。
-          .where((f) =>
-              f.path.endsWith('.json') &&
-              !_autoBackupName(f).contains('.stale.'))
-          .toList();
-      files.sort((a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
       final out = <AutoBackupEntry>[];
-      for (final f in files) {
-        final name = _autoBackupName(f);
-        // 文件名形如 YYYY-MM-DD.json 或 YYYY-MM-DD.enc.json（加密快照）
-        final encrypted = name.endsWith('.enc.json');
-        final key = encrypted
-            ? name.substring(0, name.length - '.enc.json'.length)
-            : name.substring(0, name.length - '.json'.length);
-        final parts = key.split('-');
-        if (parts.length == 3) {
-          final y = int.tryParse(parts[0]);
-          final m = int.tryParse(parts[1]);
-          final d = int.tryParse(parts[2]);
-          if (y != null && m != null && d != null) {
-            out.add(AutoBackupEntry(
-              date: DateTime(y, m, d),
-              file: f,
-              encrypted: encrypted,
-            ));
+      // —— 自动快照（backup/auto/）——
+      final base = Directory('${dir.path}/backup/auto');
+      if (await base.exists()) {
+        final files = base
+            .listSync()
+            .whereType<File>()
+            // P2-4：`*.stale.enc.json` 是换口令后已不可解的旧口令快照标记，
+            // 不再出现在恢复面板（滚动保留会按日期自然淘汰）。
+            .where((f) =>
+                f.path.endsWith('.json') &&
+                !_autoBackupName(f).contains('.stale.'))
+            .toList();
+        files.sort((a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
+        for (final f in files) {
+          final name = _autoBackupName(f);
+          // 文件名形如 YYYY-MM-DD.json 或 YYYY-MM-DD.enc.json（加密快照）
+          final encrypted = name.endsWith('.enc.json');
+          final key = encrypted
+              ? name.substring(0, name.length - '.enc.json'.length)
+              : name.substring(0, name.length - '.json'.length);
+          final parts = key.split('-');
+          if (parts.length == 3) {
+            final y = int.tryParse(parts[0]);
+            final m = int.tryParse(parts[1]);
+            final d = int.tryParse(parts[2]);
+            if (y != null && m != null && d != null) {
+              out.add(AutoBackupEntry(
+                date: DateTime(y, m, d),
+                file: f,
+                encrypted: encrypted,
+              ));
+            }
           }
         }
       }
+      // —— 恢复前快照（backup/pre-restore/）——
+      final preDir = Directory('${dir.path}/backup/pre-restore');
+      if (await preDir.exists()) {
+        final preFiles = preDir
+            .listSync()
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.json'))
+            .toList();
+        preFiles.sort(
+            (a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
+        for (final f in preFiles) {
+          final name = _autoBackupName(f);
+          final encrypted = name.endsWith('.enc.json');
+          final stem = encrypted
+              ? name.substring(
+                  0, name.length - '.enc.json'.length)
+              : name.substring(0, name.length - '.json'.length);
+          // pre-restore-YYYYMMDD-HHMMSS
+          final m = RegExp(r'^pre-restore-(\d{8})-(\d{6})$').firstMatch(stem);
+          if (m == null) continue;
+          final y = int.tryParse(m.group(1)!.substring(0, 4));
+          final mo = int.tryParse(m.group(1)!.substring(4, 6));
+          final d = int.tryParse(m.group(1)!.substring(6, 8));
+          final hh = int.tryParse(m.group(2)!.substring(0, 2));
+          final mi = int.tryParse(m.group(2)!.substring(2, 4));
+          final ss = int.tryParse(m.group(2)!.substring(4, 6));
+          if (y == null ||
+              mo == null ||
+              d == null ||
+              hh == null ||
+              mi == null ||
+              ss == null) {
+            continue;
+          }
+          out.add(AutoBackupEntry(
+            date: DateTime(y, mo, d, hh, mi, ss),
+            file: f,
+            encrypted: encrypted,
+            preRestore: true,
+          ));
+        }
+      }
+      // 混排后仍按时间新→旧（两类文件名前缀不同，不能直接按文件名互比）。
+      out.sort((a, b) => b.date.compareTo(a.date));
       return out;
     } catch (e) {
       AppLog.d('列出自动备份失败：$e');
@@ -1565,6 +1883,21 @@ class TaskProvider extends ChangeNotifier {
     _briefingMorningMinute = prefs.getInt(_kBriefMorningM) ?? 30;
     _habitNudgeEnabled = prefs.getBool(_kHabitNudgeOn) ?? true;
     _habitNudgeMinute = prefs.getInt(_kHabitNudgeMin) ?? 23 * 60;
+    // A2（v3.1.1 功能增强）：临时静音窗口——旧数据无键 = 未静音（零迁移）；
+    // 冷启动发现已过期的时间戳按「未静音」兜底并顺手清键（重启仍保持静音，
+    // 过期则自动恢复，无需等守护轮次）。
+    final mutedRaw = prefs.getString(_kRemindersMutedUntil);
+    if (mutedRaw != null) {
+      final parsed = DateTime.tryParse(mutedRaw);
+      if (parsed != null && parsed.isAfter(DateTime.now())) {
+        _remindersMutedUntil = parsed;
+      } else {
+        await prefs.remove(_kRemindersMutedUntil);
+      }
+    }
+    NotificationService.remindersMutedUntil = _remindersMutedUntil;
+    // A5（v3.1.1 功能增强）：今日三件——旧数据无键 = 未选择（零迁移）。
+    await _loadDailyMit(prefs);
     NotificationService.instance.enabled = _notificationsEnabled;
     // P2-6（v2.9.4 审计）：把**有原生副作用**的两个开关纳入 load() 的应用范围。
     //
@@ -1672,6 +2005,9 @@ class TaskProvider extends ChangeNotifier {
     final today = _ymd(DateTime.now());
     final dayChanged = _lastResetDay != today;
     _lastResetDay = today;
+    // A2（v3.1.1 功能增强）：静音到期自愈——已过期则清键并全量重排补挂落点。
+    // 挂在守护 / 回前台的公共入口上，无需额外定时器。
+    await _autoRestoreIfMuteExpired();
     // P3-3（v3.0.4 审计）：跨天分支补一次回收站清理（与原生午夜清理同口径）。
     // 旧行为：进程存活跨 00:00 时，原生 MidnightResetReceiver.cleanupTrashSqlite
     // 已删除过期 trash 行 + 附件目录，但本 Provider 的内存 _trash 不重载
@@ -1683,6 +2019,8 @@ class TaskProvider extends ChangeNotifier {
     if (dayChanged) {
       await _cleanupTrashIfNeeded(persist: true);
       _syncTrashExpireNotice();
+      // A5：日切后清理昨日（及更早）的今日三件键——「日切自动清空」承诺。
+      _pruneOldMit(keepKey: today);
     }
     final changed = await _resetDailyIfNeeded(); // P3-8：await 落盘结果
     if (_notificationsEnabled) _rescheduleOneShotReminders();
@@ -1794,6 +2132,13 @@ class TaskProvider extends ChangeNotifier {
     await prefs.setInt(_kBriefMorningM, _briefingMorningMinute);
     await prefs.setBool(_kHabitNudgeOn, _habitNudgeEnabled);
     await prefs.setInt(_kHabitNudgeMin, _habitNudgeMinute);
+    // A2（v3.1.1 功能增强）：临时静音窗口（null = 未静音，清键）。
+    if (_remindersMutedUntil != null) {
+      await prefs.setString(
+          _kRemindersMutedUntil, _remindersMutedUntil!.toIso8601String());
+    } else {
+      await prefs.remove(_kRemindersMutedUntil);
+    }
   }
 
   /// 完整持久化：偏好写 SharedPreferences，任务 / 回收站写 SQLite。
@@ -3107,7 +3452,9 @@ class TaskProvider extends ChangeNotifier {
     var newTask = task.copyWith(
       id: useId,
       // A1：落库时统一计算拼音首字母，保证所有新建入口（NL 快速录入等）都自动覆盖。
+      // A4（v3.1.1 功能增强）：全拼同点位落库（全拼搜索的数据源）。
       pinyinInitials: Task.computePinyinInitials(task.title),
+      pinyinFull: Task.computePinyinFull(task.title),
     );
     // 落点到对应分区的末尾：取该分区现有最大 order + 1，避免新建任务跳到手动排序的区顶。
     final section = _sectionNameOf(newTask);
@@ -3326,9 +3673,11 @@ class TaskProvider extends ChangeNotifier {
       final useId =
           _canReuseExternalId(t.id) ? t.id : (_idSeq++).toString();
       // A1：落库时统一计算拼音首字母，保证所有新建入口都自动覆盖。
+      // A4（v3.1.1 功能增强）：全拼同点位落库。
       var nt = t.copyWith(
         id: useId,
         pinyinInitials: Task.computePinyinInitials(t.title),
+        pinyinFull: Task.computePinyinFull(t.title),
       );
       // 落点到对应分区的末尾：取该分区现有最大 order + 1（含本批已排好的行）。
       final section = _sectionNameOf(nt);
@@ -3476,9 +3825,15 @@ class TaskProvider extends ChangeNotifier {
     if (i == -1) return false;
     final old = _tasks[i];
     // A1：标题变化时重算拼音首字母（标题不变则沿用旧值）。
-    final pin = updated.title == old.title
-        ? old.pinyinInitials
-        : Task.computePinyinInitials(updated.title);
+    // A4（v3.1.1 功能增强）：全拼同口径——两串是同一标题的两个派生视图，
+    // 必须同算同存，否则「改名后全拼还是旧标题」会造成搜索错位。
+    final titleChanged = updated.title != old.title;
+    final pin = titleChanged
+        ? Task.computePinyinInitials(updated.title)
+        : old.pinyinInitials;
+    final pyf = titleChanged
+        ? Task.computePinyinFull(updated.title)
+        : old.pinyinFull;
     // F2 兜底：切换到「每隔 N 天」却没带锚点时补为今天。
     // 编辑弹层里把「每天/每周/工作日」改成「每隔 N 天」时，原任务没有 repeatAnchor，
     // 而 Task.copyWith 对 repeatAnchor 用 _kKeep 哨兵，显式传 null 是**真写入 null**；
@@ -3506,6 +3861,7 @@ class TaskProvider extends ChangeNotifier {
       focusSecTotal: old.focusSecTotal,
       order: old.order,
       pinyinInitials: pin,
+      pinyinFull: pyf,
     );
     // 截止时间或重复设置发生变化时，先取消旧调度再统一重排，避免状态不一致。
     // P1-1：判定必须覆盖「一切会影响提醒触发时刻/是否触发」的字段——
@@ -4136,11 +4492,15 @@ class TaskProvider extends ChangeNotifier {
     _mergeUndoLog.clear(); // P3-6（v3.1.0 审计）：合并撤销同上作废
     // P1-2：恢复后统一按标题重算拼音首字母（旧版备份 pinyinInitials 多为空串，
     // 直接采用会导致恢复后拼音搜索静默失效），保证搜索始终可用。
+    // A4（v3.1.1 功能增强）：全拼同口径重算——旧备份无 pinyinFull 时一并补齐，
+    // 「首次恢复即完成回填」，之后编辑无需再判空补算。
     _tasks
       ..clear()
       ..addAll(parsed
-          .map((t) =>
-              t.copyWith(pinyinInitials: Task.computePinyinInitials(t.title)))
+          .map((t) => t.copyWith(
+                pinyinInitials: Task.computePinyinInitials(t.title),
+                pinyinFull: Task.computePinyinFull(t.title),
+              ))
           .toList());
     // F-8（v2.8.5 审计）：覆盖恢复同样自愈 interval 缺锚点（下方 _persist 落库，
     // 与 load() 的自愈口径一致）。
@@ -4631,14 +4991,24 @@ class AutoBackupEntry {
   final File file; // 快照文件（App 私有文档目录 backup/auto/ 下）
   /// L-08：该快照是否为加密信封（.enc.json）。还原时需先解密。
   final bool encrypted;
+  /// A1（v3.1.1 功能增强）：是否为「恢复前快照」（backup/pre-restore/ 下、
+  /// 时间戳文件名）。面板以此区分标签；还原流程与普通快照完全一致。
+  final bool preRestore;
   const AutoBackupEntry({
     required this.date,
     required this.file,
     this.encrypted = false,
+    this.preRestore = false,
   });
 
-  /// 友好展示：M月D日。
-  String get label => '${date.month}月${date.day}日';
+  /// 友好展示：M月D日（恢复前快照附 HH:mm，便于区分同日多次恢复的回滚点）。
+  String get label {
+    final base = '${date.month}月${date.day}日';
+    return preRestore
+        ? '$base ${date.hour.toString().padLeft(2, '0')}:'
+            '${date.minute.toString().padLeft(2, '0')} 恢复前'
+        : base;
+  }
 
   /// 副标题：明确标注加密状态（L-08 的知情权部分）。
   String get statusLabel => encrypted ? '已加密' : '明文';

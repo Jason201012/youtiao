@@ -909,6 +909,26 @@ class TaskDetailScreen extends StatelessWidget {
 
           const SizedBox(height: 24),
 
+          // A5（v3.1.1 功能增强）：置顶 / 取消置顶——此前模型与批量编辑都支持
+          // pinned，但任务建好后没有任何单条切换入口（togglePinned 全库零调用）。
+          // 消费落盘结果：失败如实提示（内存已翻转，重启回退）。
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                final ok = await provider.togglePinned(task.id);
+                if (!ok && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('置顶未保存，请重试')),
+                  );
+                }
+              },
+              icon: const Icon(Symbols.push_pin),
+              label: Text(task.pinned ? '取消置顶' : '置顶'),
+            ),
+          ),
+          const SizedBox(height: 12),
+
           // 开始专注
           SizedBox(
             width: double.infinity,

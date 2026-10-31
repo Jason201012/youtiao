@@ -158,7 +158,7 @@ class _CommandPaletteState extends State<CommandPalette> {
                 ? (actionAvailable
                     ? '执行：${c.label}'
                     : '当前不可用')
-                : '可用：/done /new /trash /tags /export /backup /today /board /calendar /focus /habit /settings /home'));
+                : '可用：/done /pin /new /trash /tags /export /backup /today /board /calendar /focus /habit /settings /home'));
     return ListTile(
       leading: Icon(icon,
           color: known ? scheme.primary : ext.meta, size: 22),

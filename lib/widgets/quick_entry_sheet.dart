@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard;
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/attachment.dart';
@@ -109,6 +110,30 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
 
   void _onChanged(String v) {
     setState(() => _parsed = TaskParser.parse(v));
+  }
+
+  /// A4（v3.1.1 功能增强）：从剪贴板粘贴建任务——**只有用户点按本按钮才读取**
+  /// 剪贴板（不自动读、不后台轮询、不进任何存储）；读取后 trim、截断 500 字，
+  /// 填入输入框并交给现有解析器实时预览（识别 chip 同步回显）。
+  /// 剪贴板无文本时轻提示，不打断录入。
+  Future<void> _pasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = (data?.text ?? '').trim();
+    if (text.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('剪贴板没有文本内容'),
+          duration: Duration(milliseconds: 900),
+        ));
+      }
+      return;
+    }
+    final clipped = text.length > 500 ? text.substring(0, 500) : text;
+    _controller.value = TextEditingValue(
+      text: clipped,
+      selection: TextSelection.collapsed(offset: clipped.length),
+    );
+    _onChanged(clipped);
   }
 
   /// 直接入库并关闭
@@ -329,6 +354,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
                 // 操作区
                 Row(
                   children: [
+                    // A4（v3.1.1 功能增强）：从剪贴板粘贴（仅点按触发读取）。
+                    TextButton.icon(
+                      onPressed: _pasteFromClipboard,
+                      icon: const Icon(Symbols.content_paste, size: 18),
+                      label: const Text('粘贴'),
+                    ),
                     TextButton.icon(
                       onPressed: _controller.text.trim().isEmpty ? null : _openFullEditor,
                       icon: const Icon(Symbols.tune, size: 18),

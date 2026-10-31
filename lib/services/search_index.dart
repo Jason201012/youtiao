@@ -1,5 +1,6 @@
 import 'package:todolist/models/task.dart';
 import 'package:todolist/models/habit.dart';
+import 'package:todolist/services/pinyin_index.dart';
 
 /// 全局搜索结果：任务与习惯分别成组，便于 UI 按类型分区展示。
 class GlobalSearchResult {
@@ -36,7 +37,8 @@ class GlobalSearch {
   }
 
   /// 任务命中规则：标题 / 分类（中文 label + 英文 name）/ 优先级（中文 + 英文）/
-  /// 备注 / 重复规则（label + 摘要）/ 标签 / 子任务标题（S2）/ 拼音首字母（A1）。
+  /// 备注 / 重复规则（label + 摘要）/ 标签 / 子任务标题（S2）/ 拼音首字母（A1）/
+  /// 拼音全拼（A4）。
   static bool _matchesTask(Task t, String q) {
     if (t.title.toLowerCase().contains(q)) return true;
     if (t.category.label.toLowerCase().contains(q)) return true;
@@ -51,12 +53,31 @@ class GlobalSearch {
     if (t.subtasks.any((s) => s.title.toLowerCase().contains(q))) return true;
     // A1：拼音首字母匹配（搜 "zl" 命中「整理」），仅当首字母串非空时尝试，避免空串恒真。
     if (t.pinyinInitials.isNotEmpty && t.pinyinInitials.contains(q)) return true;
+    // A4（v3.1.1 功能增强）：全拼匹配（搜 "zhoulibao" 命中「周立波」）。
+    // 仅对「纯字母 ≥2 位」的查询启用——长度阈值挡住单字母的过匹配，
+    // 空串（旧数据）跳过避免恒真；首字母路径保持原状不受影响。
+    if (q.length >= 2 &&
+        PinyinIndex.isAlphaQuery(q) &&
+        t.pinyinFull.isNotEmpty &&
+        t.pinyinFull.contains(q)) {
+      return true;
+    }
     return false;
   }
 
-  /// 习惯命中规则：标题 / 频率文案（每天 / 每周 X）/ 提醒时间（HH:mm + 小时数字）。
+  /// 习惯命中规则：标题 / 频率文案（每天 / 每周 X）/ 提醒时间（HH:mm + 小时数字）/
+  /// 拼音首字母 + 全拼（A4，与任务侧同口径）。
   static bool _matchesHabit(Habit h, String q) {
     if (h.title.toLowerCase().contains(q)) return true;
+    // A4（v3.1.1 功能增强）：拼音匹配——此前习惯搜索只命中中文标题 / 频率 /
+    // 提醒时间，敲拼音搜不到习惯；现与任务侧同一套阈值与空串守卫。
+    if (h.pinyinInitials.isNotEmpty && h.pinyinInitials.contains(q)) return true;
+    if (q.length >= 2 &&
+        PinyinIndex.isAlphaQuery(q) &&
+        h.pinyinFull.isNotEmpty &&
+        h.pinyinFull.contains(q)) {
+      return true;
+    }
     // 频率文案同时提供「紧凑」(每周一三五) 与「带空格」(每周 一 三 五) 两种写法，
     // 这样搜「周一」既能命中紧凑串里的「周一」子串，也兼容带空格的展示文案。
     final labels = h.weekdays.map(_wdLabel).join();

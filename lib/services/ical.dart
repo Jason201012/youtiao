@@ -957,7 +957,9 @@ Task? _blockToTask(Map<String, String> b) {
     //   2) 标准 `DURATION`（第三方日历的写法，含本 App 无 DUE 时的自身产物）。
     estimateMinutes: _parseEstimateProperty(b[_kEstimateProp]) ??
         _parseDurationMinutes(b['DURATION']),
+    // A4（v3.1.1 功能增强）：全拼与首字母同点位落库（导入路径同样可全拼搜索）。
     pinyinInitials: Task.computePinyinInitials(title),
+    pinyinFull: Task.computePinyinFull(title),
   );
 }
 

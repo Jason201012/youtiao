@@ -71,6 +71,13 @@ const List<String> _backedUpPrefKeys = <String>[
   // 恢复侧配套：applyAppPrefs 写回后必须调 NotificationService.reloadTimezoneOverride()
   // 重解析内存时区并全量重排（见 backup_sheet 恢复流程），否则仅落盘、本轮不生效。
   'reminder_timezone_override',
+  // A2（v3.1.1 功能增强）：全局提醒临时静音窗口（ISO 时间戳；null = 未静音）。
+  // 静音是用户显式设置的短期状态，换机 / 恢复后保持，避免「刚恢复完又被旧静音噤声」
+  // 的反向困惑；过期的窗口由 TaskProvider.load() 按未静音兜底。
+  'reminders_muted_until',
+  // A5（v3.1.1 功能增强）：今日三件（MIT）选中的任务 id（JSON map，按日期键）。
+  // 纯偏好存储、零迁移；旧备份无此键时保持现有选择（不覆盖）。
+  'daily_mit',
 ];
 
 /// P2-2（v3.1.0 审计）：刻意**不**进白名单的键及策略说明。

@@ -8,6 +8,7 @@ import 'package:todolist/models/today.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
+import 'package:todolist/services/search_history.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 // U3-5：撤销窗口时长的单一真源（任务 / 批量删除 / 跳过循环日共用）。
@@ -95,6 +96,10 @@ class HomeScreenState extends State<HomeScreen> {
   /// 搜索关键字输入框
   final TextEditingController _searchCtl = TextEditingController();
 
+  /// A4（v3.1.1 功能增强）：搜索历史（新→旧，最多 10 条）。
+  /// 进入搜索态时载入；提交查询时记录；结果区在查询为空时渲染。
+  List<String> _searchHistory = const <String>[];
+
   /// 搜索输入框焦点：P1-9 供桌面端 Ctrl/Cmd+F 快捷键从外部聚焦。
   final FocusNode _searchFocus = FocusNode();
 
@@ -130,6 +135,32 @@ class HomeScreenState extends State<HomeScreen> {
   void _enterSearch() {
     setState(() => _searching = true);
     widget.onSearchingChanged?.call(true);
+    // A4（v3.1.1 功能增强）：进入搜索态即载入历史（异步回来后刷新一次；
+    // 结果区在「查询为空」时渲染历史 chips）。
+    SearchHistory.load().then((list) {
+      if (mounted && _searching) setState(() => _searchHistory = list);
+    });
+  }
+
+  /// A4：把历史词条回填到搜索框（程序赋值不触发 onChanged，手动刷新结果）。
+  void _applyHistoryQuery(String q) {
+    _searchCtl.value = TextEditingValue(
+      text: q,
+      selection: TextSelection.collapsed(offset: q.length),
+    );
+    setState(() {});
+  }
+
+  /// A4：清空搜索历史。
+  Future<void> _clearSearchHistory() async {
+    await SearchHistory.clear();
+    if (mounted) setState(() => _searchHistory = const <String>[]);
+  }
+
+  /// A4：记录一次提交过的查询并刷新历史（回车提交时调用）。
+  Future<void> _recordSearchHistory(String q) async {
+    final list = await SearchHistory.add(q);
+    if (mounted && _searching) setState(() => _searchHistory = list);
   }
 
   /// 退出搜索模式并清空关键字
@@ -319,6 +350,26 @@ class HomeScreenState extends State<HomeScreen> {
     return ids.length;
   }
 
+  /// A5（v3.1.1 功能增强）：供命令面板 `/pin` 调用——把当前选中项全部置顶。
+  /// 已置顶的项会被跳过（语义是「置顶」而非「反选」，与 [completeSelected]
+  /// 一致；取消置顶走批量编辑）。返回实际置顶条数；落盘失败的条目由
+  /// [consumeTaskWriteResult] 如实提示（内存已翻转，重启回退）。
+  int pinSelected() {
+    if (_selected.isEmpty) return 0;
+    final provider = context.read<TaskProvider>();
+    final targets = <Task>[];
+    for (final id in _selected) {
+      final t = provider.byId(id);
+      if (t != null && !t.pinned) targets.add(t);
+    }
+    if (targets.isEmpty) return 0;
+    _exitSelect();
+    for (final t in targets) {
+      consumeTaskWriteResult(context, provider, t.id, provider.togglePinned(t.id));
+    }
+    return targets.length;
+  }
+
   /// 单个任务行（含滑动/多选/编辑），两个分区与筛选列表共用。
   /// [dragIndex] 非 null 时在左侧显示一个拖拽手柄（仅首页默认视图、无标签筛选时启用），
   /// 用于手动重排；其余场景走普通 Padding。
@@ -442,6 +493,46 @@ class HomeScreenState extends State<HomeScreen> {
     final ext = appColors(context);
     final query = _searchCtl.text.trim();
     if (query.isEmpty) {
+      // A4（v3.1.1 功能增强）：搜索历史——查询为空时展示最近 10 条，
+      // 点击即回填；无历史时维持原「输入关键字」提示。
+      if (_searchHistory.isNotEmpty) {
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(
+            AppColors.pagePadX,
+            8,
+            AppColors.pagePadX,
+            20,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text('最近搜索',
+                      style: TextStyle(color: ext.meta, fontSize: 13)),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: _clearSearchHistory,
+                    child: const Text('清空'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final h in _searchHistory)
+                    ActionChip(
+                      label: Text(h),
+                      onPressed: () => _applyHistoryQuery(h),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        );
+      }
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -602,13 +693,15 @@ class HomeScreenState extends State<HomeScreen> {
                         constraints: const BoxConstraints(),
                       ),
                       const SizedBox(width: 4),
-                      Expanded(
-                        child: TextField(
-                          controller: _searchCtl,
-                          focusNode: _searchFocus,
-                          autofocus: true,
-                          onChanged: (_) => setState(() {}),
-                          style: TextStyle(fontSize: 16, color: onBg),
+                        Expanded(
+                          child: TextField(
+                            controller: _searchCtl,
+                            focusNode: _searchFocus,
+                            autofocus: true,
+                            onChanged: (_) => setState(() {}),
+                            // A4（v3.1.1 功能增强）：提交（回车）即记录历史。
+                            onSubmitted: _recordSearchHistory,
+                            style: TextStyle(fontSize: 16, color: onBg),
                           decoration: InputDecoration(
                             hintText: '搜索任务 / 习惯',
                             hintStyle: TextStyle(fontSize: 16, color: ext.meta),
@@ -730,6 +823,13 @@ class HomeScreenState extends State<HomeScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // A2（v3.1.1 功能增强）：临时静音期细横幅——让静音
+                          // 状态可见 + 一键恢复，避免「忘了关、提醒静悄悄失效」。
+                          if (provider.remindersMuted &&
+                              provider.remindersMutedUntil != null) ...[
+                            _MuteBanner(until: provider.remindersMutedUntil!),
+                            const SizedBox(height: 12),
+                          ],
                           // 筛选芯片：默认「全部」；看板统计卡点击会套用对应筛选
                           _FilterChips(provider: provider),
                           const SizedBox(height: 12),
@@ -744,6 +844,13 @@ class HomeScreenState extends State<HomeScreen> {
                                 _tagFilter = _tagFilter == tag ? null : tag;
                               }),
                             ),
+                            const SizedBox(height: 12),
+                          ],
+                          // A5（v3.1.1 功能增强）：今日三件（MIT）卡——「今天最
+                          // 重要的一件事」的承诺机制，空态按逾期→今天→高优先级
+                          // 给建议；可折叠、日切自动清空、不写任务字段。
+                          if (filter == TaskFilter.all && !_searching) ...[
+                            const _TodayMitCard(),
                             const SizedBox(height: 12),
                           ],
                           // 今日摘要卡：仅默认全量视图、非搜索态显示，点击进入今日聚合页。
@@ -829,6 +936,229 @@ class HomeScreenState extends State<HomeScreen> {
 }
 
 /// 首页标签筛选芯片行：列出所有已用标签，点击切换筛选（再次点击同一标签取消）。
+/// A2（v3.1.1 功能增强）：临时静音期细横幅——展示静音截止时刻，提供一键恢复。
+/// 仅在静音窗口内渲染（调用方已判 [TaskProvider.remindersMuted]）。
+class _MuteBanner extends StatelessWidget {
+  final DateTime until;
+  const _MuteBanner({required this.until});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    final p = context.read<TaskProvider>();
+    final hh = until.hour.toString().padLeft(2, '0');
+    final mm = until.minute.toString().padLeft(2, '0');
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
+      decoration: BoxDecoration(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Row(
+        children: [
+          Icon(Symbols.notifications_paused, size: 18, color: ext.meta),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text('提醒已静音至 $hh:$mm',
+                style: TextStyle(fontSize: 13, color: ext.meta)),
+          ),
+          TextButton(
+            onPressed: () => p.setRemindersMutedUntil(null),
+            child: const Text('恢复'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A5（v3.1.1 功能增强）：今日三件（MIT）卡——「今天最重要的一件事 ×3」的
+/// 承诺机制。数据存 prefs `daily_mit`（经 [TaskProvider] 读写，不写任务字段）：
+/// - 已选行实时反映完成 / 删除（完成保留展示划线态，删除即消失）；
+/// - 空态按「逾期 → 今天到期 → 高优先级」给最多 3 条建议，一键采纳；
+/// - 可折叠；日切后由 provider 清理旧键（自动清空）；
+/// - 纯偏好存储，不参与统计口径、不遮挡首页主列表。
+class _TodayMitCard extends StatefulWidget {
+  const _TodayMitCard();
+
+  @override
+  State<_TodayMitCard> createState() => _TodayMitCardState();
+}
+
+class _TodayMitCardState extends State<_TodayMitCard> {
+  bool _collapsed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<TaskProvider>();
+    final ext = appColors(context);
+    final scheme = Theme.of(context).colorScheme;
+    final ids = provider.todayMit;
+    // 空态才给建议（已选后建议即收起，避免两列表互相干扰）。
+    final suggestions =
+        ids.isEmpty ? provider.suggestMitCandidates() : const <Task>[];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 12),
+      decoration: BoxDecoration(
+        color: ext.chip,
+        borderRadius: BorderRadius.circular(AppColors.cardRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(width: 8),
+              Icon(Symbols.flag, size: 18, color: scheme.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('今日三件',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: scheme.onSurface)),
+              ),
+              Text('${ids.length}/${TaskProvider.kDailyMitMax}',
+                  style: TextStyle(fontSize: 12, color: ext.meta)),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  _collapsed ? Symbols.expand_more : Symbols.expand_less,
+                  size: 20,
+                  color: ext.meta,
+                ),
+                onPressed: () => setState(() => _collapsed = !_collapsed),
+                tooltip: _collapsed ? '展开' : '收起',
+              ),
+            ],
+          ),
+          if (!_collapsed) ...[
+            if (ids.isNotEmpty)
+              ...ids.map((id) {
+                final t = provider.byId(id);
+                // 惰性过滤已兜住悬空 id，这里只为类型收窄兜底。
+                if (t == null) return const SizedBox.shrink();
+                return _mitRow(context, provider, t);
+              })
+            else if (suggestions.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Text('从建议中挑选今天最重要的几件事：',
+                    style: TextStyle(fontSize: 12, color: ext.meta)),
+              ),
+              const SizedBox(height: 4),
+              ...suggestions.map((t) => _suggestRow(context, provider, t)),
+            ] else
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Text('今天暂无到期任务——先在首页添加几条待办吧',
+                    style: TextStyle(fontSize: 12, color: ext.meta)),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 已选行：圆圈（完成，带撤销）+ 标题（进详情）+ 移出。
+  Widget _mitRow(BuildContext context, TaskProvider provider, Task t) {
+    final ext = appColors(context);
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        children: [
+          InkWell(
+            customBorder: const CircleBorder(),
+            onTap: () => toggleDoneWithUndo(context, provider, t),
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Icon(
+                t.done ? Icons.check_circle : Icons.radio_button_unchecked,
+                size: 20,
+                color: t.done ? scheme.primary : ext.meta,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => TaskDetailScreen(taskId: t.id))),
+              child: Text(
+                t.title.isEmpty ? '(无标题)' : t.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: t.done ? ext.meta : scheme.onSurface,
+                  decoration:
+                      t.done ? TextDecoration.lineThrough : TextDecoration.none,
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: '移出今日三件',
+            icon: Icon(Symbols.close, size: 16, color: ext.meta),
+            onPressed: () => consumeTaskWriteResult(
+              context,
+              provider,
+              t.id,
+              provider.toggleTodayMit(t.id),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 建议行：「+」采纳 + 标题。点击即加入今日三件（可再次点移出）。
+  Widget _suggestRow(BuildContext context, TaskProvider provider, Task t) {
+    final ext = appColors(context);
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        children: [
+          InkWell(
+            customBorder: const CircleBorder(),
+            onTap: () => consumeTaskWriteResult(
+              context,
+              provider,
+              t.id,
+              provider.toggleTodayMit(t.id),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Icon(Icons.add_circle_outline, size: 20, color: ext.meta),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => TaskDetailScreen(taskId: t.id))),
+              child: Text(
+                t.title.isEmpty ? '(无标题)' : t.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 14, color: scheme.onSurface),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _TagFilterChips extends StatelessWidget {
   final List<String> allTags;
   final String? active;

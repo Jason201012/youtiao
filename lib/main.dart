@@ -1706,6 +1706,27 @@ class _MainScaffoldState extends State<MainScaffold>
     return n;
   }
 
+  /// A5（v3.1.1 功能增强）：命令面板 `/pin` 的落地逻辑——把首页选中项置顶。
+  /// 兜底与 `/done` 同型：非首页提示「请先回到首页」；无选中 / 全部已置顶
+  /// 返回 0 并提示，避免「命令执行了却什么都没发生」。
+  int _pinSelectedAndNotify(BuildContext context) {
+    if (_index != 0) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先回到首页勾选任务')),
+        );
+      }
+      return 0;
+    }
+    final n = _homeKey.currentState?.pinSelected() ?? 0;
+    if (n == 0 && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('没有可置顶的选中任务（已置顶的会跳过）')),
+      );
+    }
+    return n;
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
@@ -1821,6 +1842,8 @@ class _MainScaffoldState extends State<MainScaffold>
                       actions: {
                         // /new：唤起快速录入（与 FAB 同源，符合报告「唤起快速录入」语义）。
                         'new': () => QuickEntrySheet.show(context),
+                        // A5（v3.1.1 功能增强）：/pin 置顶首页选中项。
+                        'pin': () => _pinSelectedAndNotify(context),
                         // /trash：跳转回收站。
                         'trash': () => Navigator.push(
                               context,

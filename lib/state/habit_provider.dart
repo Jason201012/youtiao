@@ -5,6 +5,7 @@ import 'package:todolist/models/checkin.dart';
 import 'package:todolist/services/habit_migration.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/pinyin_index.dart';
 import 'package:todolist/services/csv_safe.dart';
 
 /// 习惯 / 打卡的状态层：管理习惯列表、每日打卡记录、连续天数统计与持久化。
@@ -73,8 +74,24 @@ class HabitProvider extends ChangeNotifier {
   List<CheckIn> get checkIns => List.unmodifiable(_checkIns);
 
   /// 未归档的习惯（首页/今日列表展示用）。
-  List<Habit> get activeHabits =>
-      _habits.where((h) => !h.archived).toList();
+  ///
+  /// A3（v3.1.1 功能增强）：按 [Habit.order] 升序展示（拖拽排序的读点）；
+  /// 同 order 值按创建时间兜底——旧数据全 0 时展示顺序与升级前逐位一致
+  /// （零迁移）。归档习惯不参与排序（[archivedHabits] 单独成区）。
+  List<Habit> get activeHabits {
+    final list = _habits.where((h) => !h.archived).toList()
+      ..sort((a, b) {
+        final c = a.order.compareTo(b.order);
+        if (c != 0) return c;
+        final c2 = a.createdAt.compareTo(b.createdAt);
+        if (c2 != 0) return c2;
+        // 终极并列（同毫秒创建）：按 id 兜底——id 形如「微秒时间戳.序号」，
+        // 字典序 ≈ 创建序，保证排序**全序确定**（List.sort 非稳定排序，
+        // 无兜底时同键元素顺序随输入抖动，会打乱依赖顺序的用例与 UI）。
+        return a.id.compareTo(b.id);
+      });
+    return list;
+  }
 
   /// 新P2-2（v2.9.7 审计）：已归档的习惯。
   ///
@@ -116,6 +133,19 @@ class HabitProvider extends ChangeNotifier {
       _habits
         ..clear()
         ..addAll(await db.loadHabits());
+      // A4（v3.1.1 功能增强）：旧数据拼音索引回填——两串皆空且标题非空时按
+      // 标题补算（仅内存，随后任意持久化顺带落库；标题无汉字者计算结果本就
+      // 为空串，每轮重复计算的开销可忽略）。旧习惯无需恢复备份即可全拼搜索。
+      for (var i = 0; i < _habits.length; i++) {
+        final h = _habits[i];
+        if (h.title.isEmpty) continue;
+        if (h.pinyinInitials.isEmpty && h.pinyinFull.isEmpty) {
+          _habits[i] = h.copyWith(
+            pinyinInitials: PinyinIndex.initials(h.title),
+            pinyinFull: PinyinIndex.full(h.title),
+          );
+        }
+      }
       _checkIns
         ..clear()
         ..addAll(await db.loadCheckIns());
@@ -157,6 +187,8 @@ class HabitProvider extends ChangeNotifier {
     int? dailyTarget,
     /// T1-4：宽限日（每周允许缺卡 N 天不断签，0..3）。
     int graceDays = 0,
+    /// A3（v3.1.1 功能增强）：量化单位（空/缺省 = 无单位；超界截断）。
+    String? unit,
   }) async {
     final h = Habit(
       id: _nextHabitId(),
@@ -174,6 +206,13 @@ class HabitProvider extends ChangeNotifier {
           ? dailyTarget.clamp(1, Habit.maxDailyTarget).toInt()
           : null,
       graceDays: graceDays.clamp(0, 3),
+      // A3：单位写入侧夹取与反序列化侧同真源（Habit.clampUnit）。
+      unit: unit == null ? '' : Habit.clampUnit(unit),
+      // A3：新建习惯追加到排序末尾（order = 当前最大 + 1，_gap 兜底）。
+      order: _nextHabitOrder(),
+      // A4（v3.1.1 功能增强）：拼音索引随新建落库（全拼搜索的数据源）。
+      pinyinInitials: PinyinIndex.initials(title),
+      pinyinFull: PinyinIndex.full(title),
       createdAt: DateTime.now(),
     );
     _habits.add(h);
@@ -200,6 +239,59 @@ class HabitProvider extends ChangeNotifier {
   /// 生成全局唯一习惯 id（时间戳 + 进程内自增序号，避免同毫秒撞 id）。
   String _nextHabitId() =>
       '${DateTime.now().microsecondsSinceEpoch}.${_habitSeq++}';
+
+  /// A3（v3.1.1 功能增强）：新建习惯的排序权重——追加到当前末尾之后
+  /// （活动习惯的最大 order + 1；无活动习惯时从 0 起）。归档习惯不参与。
+  double _nextHabitOrder() {
+    var max = -1.0;
+    for (final h in _habits) {
+      if (h.archived) continue;
+      if (h.order > max) max = h.order;
+    }
+    return max + 1;
+  }
+
+  /// A3（v3.1.1 功能增强）：习惯列表拖拽排序——把活动习惯从 [oldIndex] 移到
+  /// [newIndex]（ReorderableListView 回调语义：newIndex 为目标插入位，含移除
+  /// 前的偏移，这里按惯例先做 -1 归一），随后**全量重排** 0..n-1 并落盘。
+  ///
+  /// - 只重排活动习惯；归档习惯的 order 原样保留（不参与排序）。
+  /// - 返回落盘是否成功；失败回滚全部 order（与 [updateHabit] 同口径：
+  ///   不留「内存已重排、库未落盘」的分歧）。
+  /// - 顺序只影响展示，不影响打卡 / 统计 / 连续天数。
+  Future<bool> reorderHabits(int oldIndex, int newIndex) async {
+    final actives = activeHabits;
+    if (oldIndex < 0 || oldIndex >= actives.length) return false;
+    var target = newIndex > oldIndex ? newIndex - 1 : newIndex;
+    if (target < 0) target = 0;
+    if (target > actives.length - 1) target = actives.length - 1;
+    final moved = actives[oldIndex];
+    if (moved.id == actives[target].id) return true; // 原位：无操作
+    final reordered = [...actives]..removeAt(oldIndex);
+    reordered.insert(target, moved);
+    final orderById = <String, double>{
+      for (var i = 0; i < reordered.length; i++) reordered[i].id: i.toDouble(),
+    };
+    final snapshot = List<Habit>.of(_habits);
+    var dirty = false;
+    for (var i = 0; i < _habits.length; i++) {
+      final n = orderById[_habits[i].id];
+      if (n == null || _habits[i].order == n) continue;
+      _habits[i] = _habits[i].copyWith(order: n);
+      dirty = true;
+    }
+    if (!dirty) return true;
+    notifyListeners();
+    final ok = await _persistHabits();
+    if (!ok) {
+      _habits
+        ..clear()
+        ..addAll(snapshot);
+      notifyListeners();
+      return false;
+    }
+    return true;
+  }
 
   /// T1-3：按「任务 → 习惯」映射草稿新建习惯，返回创建出的 [Habit]。
   ///
@@ -232,6 +324,11 @@ class HabitProvider extends ChangeNotifier {
           ? dailyTarget.clamp(1, Habit.maxDailyTarget).toInt()
           : null,
       graceDays: graceDays.clamp(0, 3),
+      // A3：与 [addHabit] 同口径——转习惯的新条目同样追加到排序末尾。
+      order: _nextHabitOrder(),
+      // A4（v3.1.1 功能增强）：拼音索引随新建落库。
+      pinyinInitials: PinyinIndex.initials(draft.title),
+      pinyinFull: PinyinIndex.full(draft.title),
       createdAt: DateTime.now(),
     );
     _habits.add(h);
@@ -799,6 +896,7 @@ class HabitProvider extends ChangeNotifier {
   ///   于是「建习惯时忘了设提醒」= 永远没有入口补设（提醒 chip 不存在）。
   /// - **每日目标量**（[dailyTarget] / [clearDailyTarget]，T1-2）。
   /// - **宽限日**（[graceDays]）。
+  /// - **单位**（[unit]，A3；null = 不修改，空串 = 清除单位）。
   ///
   /// P3-2（v3.0.5 审计）：返回落盘是否成功——落盘失败回滚内存（`_habits[idx]`
   /// 还原为 [old]），提醒调度在失败分支不触碰（UI 显示的即已落盘的）。习惯
@@ -817,6 +915,7 @@ class HabitProvider extends ChangeNotifier {
     int? dailyTarget,
     bool clearDailyTarget = false,
     int? graceDays,
+    String? unit,
   }) async {
     final idx = _habits.indexWhere((h) => h.id == habit.id);
     if (idx == -1) return false; // P3-2（v3.0.5 审计）：目标不存在 = 未生效
@@ -833,6 +932,11 @@ class HabitProvider extends ChangeNotifier {
     // 「每周一三五」时，若按旧值（7 天）算上界，就能把目标设成 7 次而计划只有
     // 3 天，又造出一个不可达目标。
     final effWeekdays = weekdays ?? old.weekdays;
+    // A4（v3.1.1 功能增强）：标题变化时同步重算拼音索引（与任务侧
+    // _applyTaskUpdate 同口径：两串是同一标题的两个派生视图，必须同算同存）。
+    final effTitle =
+        (title != null && title.trim().isNotEmpty) ? title.trim() : old.title;
+    final titleChanged = effTitle != old.title;
     final updated = old.copyWith(
       title: (title != null && title.trim().isNotEmpty) ? title.trim() : null,
       emoji: emoji,
@@ -856,6 +960,12 @@ class HabitProvider extends ChangeNotifier {
           : null,
       clearDailyTarget: clearDailyTarget || (dailyTarget != null && dailyTarget <= 0),
       graceDays: graceDays?.clamp(0, 3),
+      // A3（v3.1.1 功能增强）：单位写入侧夹取（null = 不修改；'' = 清除）。
+      unit: unit == null ? null : Habit.clampUnit(unit),
+      // A4（v3.1.1 功能增强）：标题变化才重算拼音索引（null = 保留旧值）。
+      pinyinInitials:
+          titleChanged ? PinyinIndex.initials(effTitle) : null,
+      pinyinFull: titleChanged ? PinyinIndex.full(effTitle) : null,
     );
     _habits[idx] = updated;
     final ok = await _persistHabits();
@@ -1254,7 +1364,16 @@ class HabitProvider extends ChangeNotifier {
         if (e is! Map) {
           throw FormatException('第 ${i + 1} 条习惯不是对象，备份可能已损坏');
         }
-        parsedHabits.add(Habit.fromJson(Map<String, dynamic>.from(e)));
+        var h = Habit.fromJson(Map<String, dynamic>.from(e));
+        // A4（v3.1.1 功能增强）：与任务侧 P1-2 同口径——恢复后按标题重算拼音
+        // 索引（旧版备份两串多为空串，直接采用会导致恢复后习惯拼音搜索失效）。
+        if (h.title.isNotEmpty) {
+          h = h.copyWith(
+            pinyinInitials: PinyinIndex.initials(h.title),
+            pinyinFull: PinyinIndex.full(h.title),
+          );
+        }
+        parsedHabits.add(h);
       }
       newHabits = parsedHabits;
     }
@@ -1349,6 +1468,8 @@ class HabitProvider extends ChangeNotifier {
     '累计达标(天)',
     '提醒',
     '每日目标',
+    // A3（v3.1.1 功能增强）：量化单位列（无单位回空串，与布尔习惯目标列同口径）。
+    '单位',
     '宽限日(天)',
     '是否归档',
   ];
@@ -1367,6 +1488,8 @@ class HabitProvider extends ChangeNotifier {
         checkInCount(h),
         h.reminderMinute == null ? '' : _fmtMinute(h.reminderMinute!),
         h.isQuantified ? '${h.dailyTarget}' : '',
+        // A3：单位列——统一走 [Habit.clampUnit] 净化（防旁路脏数据入导出）。
+        Habit.clampUnit(h.unit),
         h.graceDays,
         h.archived ? '是' : '否',
       ];

@@ -263,6 +263,29 @@ class NotificationService {
   /// 用函数字段注入，避免 service 反向依赖 TaskProvider（与 onNotificationTap 同模式）。
   static DateTime? Function(DateTime scheduled)? dndDefer;
 
+  /// A2（v3.1.1 功能增强）：全局提醒临时静音窗口**终点**（绝对时刻；null = 未静音）。
+  ///
+  /// 由 TaskProvider 从 prefs `reminders_muted_until` 读入并在变更时同步注入
+  /// （与 [lockScreenPrivate] / [dndDefer] 同模式，service 不反向依赖 Provider）。
+  ///
+  /// 语义与勿扰同族但更严格（并集判定，见 [isReminderMuted]）：
+  /// - 落点（含勿扰顺延后的最终时刻）落在窗口内 → **直接不排**，错过不补发；
+  /// - 窗口外的未来落点照常排（「窗口外未来提醒仍在」）；
+  /// - 静音结束（用户恢复 / 到期 / 冷启动发现已过期）由 TaskProvider 全量重排，
+  ///   只补挂未来的落点；窗口内错过的提醒按承诺不补发。
+  /// - 专注进行中的常驻进度 / 完成通知与「打卡 / 完成」确认条**不在静音范围**
+  ///   （它们是进行态回执，不是「提醒」），相关方法无需判静音。
+  static DateTime? remindersMutedUntil;
+
+  /// A2：时刻 [fireAt] 是否落在临时静音窗口内（`fireAt <= mutedUntil` 即命中）。
+  /// 与勿扰取**并集**语义：落点先经勿扰顺延，再用本判定兜一道，任一命中即静音。
+  /// [fireAt] 可以是本地 DateTime 或 tz.TZDateTime（两者均按绝对时刻比较）。
+  static bool isReminderMuted(DateTime fireAt) {
+    final until = remindersMutedUntil;
+    if (until == null) return false;
+    return !fireAt.isAfter(until);
+  }
+
   /// 把任务 id（字符串）映射成一个稳定的通知 id：优先用数字本身（本 App 的
   /// id 都是纯数字字符串），兜底用 hashCode。schedule / cancel 必须走同一函数，
   /// 否则编辑/删除时取消会错位。
@@ -815,6 +838,13 @@ class NotificationService {
           base = deferred;
         }
       }
+      // A2（v3.1.1 功能增强）：临时静音窗口内的落点直接不排（错过不补发）。
+      // 判定放在勿扰顺延**之后**——顺延可能把落点推进/推出静音窗口，
+      // 最终时刻才是真实投递时刻。静音结束后的全量重排只补挂未来落点。
+      if (isReminderMuted(base)) {
+        AppLog.d('[通知] 未调度 id=${task.id}：落点处于临时静音窗口内');
+        return false;
+      }
       final tz.TZDateTime when = tz.TZDateTime(
           loc, base.year, base.month, base.day, base.hour, base.minute);
       // 打印实际调度时刻（含时区），便于在 debug 控制台核对是否准时。
@@ -926,7 +956,11 @@ class NotificationService {
       return false;
     }
     try {
-      final occurrences = _nextRepeatOccurrences(task);
+      // A2（v3.1.1 功能增强）：静音窗口内的落点从预挂序列剔除（错过不补发），
+      // 窗口外落点照常排。过滤放在签名计算之前，签名反映的是**真实下发**
+      // 的落点集——静音开始 / 结束都会改变签名，从而触发真正的重挂。
+      final occurrences =
+          _nextRepeatOccurrences(task).where((e) => !isReminderMuted(e)).toList();
       if (occurrences.isEmpty) {
         // 一个合法落点都没有（跳过日密集 / 已临近结束日）→ 清掉旧闹钟，宁可不响
         // 也不在错误的日期响（与 interval 的 S11 口径一致）。
@@ -1194,7 +1228,11 @@ class NotificationService {
       return false;
     }
     try {
-      final occurrences = _nextHabitOccurrences(habit, checkedToday: checkedToday);
+      // A2（v3.1.1 功能增强）：同 scheduleRepeatReminder——静音窗口内的习惯落点
+      // 从预挂序列剔除，窗口外落点照常排；签名反映真实下发的落点集。
+      final occurrences = _nextHabitOccurrences(habit, checkedToday: checkedToday)
+          .where((e) => !isReminderMuted(e))
+          .toList();
       if (occurrences.isEmpty) {
         // 一个合法落点都没有（理论不可达：reminderMinute 已非空）→ 清掉已挂闹钟，
         // 避免残留旧槽位在错误日期继续响。
@@ -1586,6 +1624,12 @@ class NotificationService {
           when = tz.TZDateTime.from(deferred, _loc ?? tz.UTC);
         }
       }
+      // A2（v3.1.1 功能增强）：静音窗口内的简报这一班不投（错过不补发）。
+      // 简报只挂「下一班」，静音结束后由重排挂出下一班（当天错过的不再补）。
+      if (isReminderMuted(when)) {
+        AppLog.d('[通知] 未调度简报：投递时刻处于临时静音窗口内');
+        return false;
+      }
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
@@ -1693,6 +1737,11 @@ class NotificationService {
       final target = nextHabitNudgeTime(nudgeMinute, from: now);
       final when = tz.TZDateTime(
           loc, target.year, target.month, target.day, target.hour, target.minute);
+      // A2（v3.1.1 功能增强）：静音窗口内的挽留这一班不投（错过不补发）。
+      if (isReminderMuted(when)) {
+        AppLog.d('[通知] 未调度习惯挽留：投递时刻处于临时静音窗口内');
+        return false;
+      }
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
@@ -1760,6 +1809,13 @@ class NotificationService {
           when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
               deferred.hour, deferred.minute);
         }
+      }
+      // A2（v3.1.1 功能增强）：静音窗口内的预告这一班不投（错过不补发），
+      // 并清掉可能已挂的旧预告（与「无预告可发」同口径，不留残留）。
+      if (isReminderMuted(when)) {
+        await _plugin.cancel(trashExpireNotifyId);
+        AppLog.d('[通知] 未调度回收站预告：投递时刻处于临时静音窗口内');
+        return;
       }
       final mode = await _scheduleMode;
       // 标题/正文：聚合最多展示前几条任务名，避免通知体过长。
@@ -2022,8 +2078,11 @@ class NotificationService {
     } else {
       // 达标判定：无参数（布尔习惯路径）视为已打卡；有参数则严格按 value >= target
       // ——哪怕 value<=0 的异常态也如实显示「已记 0/x」，不再谎报「已打卡 ✓」。
+      // A3（v3.1.1 功能增强）：x/y 与单位统一走 [Habit.progressLabelOf] 单一真源。
+      // met 为 false 时 flow 分析已把 value 提升为非空（布尔局部变量传播），
+      // 无需 value!。
       final met = value == null || target == null || value >= target;
-      title = met ? '已打卡 ✓' : '已记 $value/$target';
+      title = met ? '已打卡 ✓' : '已记 ${habit.progressLabelOf(value)}';
       body = met
           ? '${habit.emoji} ${habit.title}'
           : '${habit.emoji} ${habit.title} · 未达标，继续加油';
@@ -2090,9 +2149,10 @@ class NotificationService {
     if (!enabled) return;
     final String body;
     if (habit.isQuantified && value != null && target != null) {
+      // A3（v3.1.1 功能增强）：x/y 与单位统一走 [Habit.progressLabelOf] 单一真源。
       body = value >= target
-          ? '${habit.emoji} ${habit.title} · 今日 $value/$target（仍达标）'
-          : '${habit.emoji} ${habit.title} · 今日 $value/$target';
+          ? '${habit.emoji} ${habit.title} · 今日 ${habit.progressLabelOf(value)}（仍达标）'
+          : '${habit.emoji} ${habit.title} · 今日 ${habit.progressLabelOf(value)}';
     } else if (value != null && value > 0) {
       body = '${habit.emoji} ${habit.title} · 今日记录已回退';
     } else {
@@ -2275,7 +2335,7 @@ class NotificationService {
         habitConfirmNotifyIdOf(habit.id),
         '打卡未保存',
         '${habit.emoji} ${habit.title} · 保存失败，点右侧按钮重试'
-            '${value != null && target != null ? '（当前 $value/$target）' : ''}',
+            '${value != null && target != null ? '（当前 ${habit.progressLabelOf(value)}）' : ''}',
         detail,
         payload: '$payloadHabitPrefix${habit.id}',
       );
@@ -2318,7 +2378,7 @@ class NotificationService {
         habitConfirmNotifyIdOf(habit.id),
         '撤销未保存',
         '${habit.emoji} ${habit.title} · 撤销未保存，请重试'
-            '${value != null && target != null ? '（当前 $value/$target）' : ''}',
+            '${value != null && target != null ? '（当前 ${habit.progressLabelOf(value)}）' : ''}',
         detail,
         payload:
             '$payloadHabitPrefix${habitEntityWithDate(habit.id, habitConfirmDateKey(DateTime.now()))}',

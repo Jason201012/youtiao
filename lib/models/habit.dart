@@ -1,3 +1,7 @@
+// A4（v3.1.1 功能增强）：拼音首字母 / 全拼字段由 [PinyinIndex] 单一真源计算
+// （与 Task 侧同源），本模型只承载派生结果。
+import 'package:todolist/services/pinyin_index.dart';
+
 /// 一个习惯：可每日/按周几打卡，记录连续与累计次数。
 ///
 /// 与任务模型解耦：习惯自成一套轻量模型，仅依赖 SQLite 的整段 JSON 存储
@@ -45,6 +49,33 @@ class Habit {
   /// 序列化为 `graceDays`，旧数据缺省 0（向后兼容，零迁移）。
   final int graceDays;
 
+  /// A3（v3.1.1 功能增强）：量化单位的展示文案（≤[maxUnitLength] 字符，如
+  /// 「杯 / 页 / 次 / 分钟 / 公里」）。空串 = 无单位（旧行为，展示「6/8」）。
+  ///
+  /// 只影响展示与导出，不参与任何统计 / 达成判定；序列化为 `unit`，
+  /// 旧数据缺省空串（向后兼容，零迁移）。
+  final String unit;
+
+  /// A3（v3.1.1 功能增强）：习惯列表排序权重（展示层语义，双精度以便插位）。
+  ///
+  /// 值越小越靠前；同值按 [createdAt]（创建顺序）兜底，因此旧数据全 0 时
+  /// 展示顺序与升级前逐位一致（零迁移）。只影响列表展示，不影响打卡 / 统计 /
+  /// 连续天数；归档习惯不参与排序。序列化为 `order`，旧数据缺省 0。
+  final double order;
+
+  /// A4（v3.1.1 功能增强）：标题拼音首字母串（小写），供习惯搜索按首字母命中
+  /// （如「每天阅读」→ "mtyd"）。派生字段：由 [PinyinIndex] 在新建 / 编辑 /
+  /// 加载时计算，旧数据缺省空串（向后兼容，零迁移；空串 = 搜索侧跳过该路径）。
+  final String pinyinInitials;
+
+  /// A4（v3.1.1 功能增强）：标题拼音全拼串（小写、无分隔，如「每天阅读」→
+  /// "meiyuedu"）。与 [pinyinInitials] 同为派生字段，全拼搜索（敲 "yuedu"）
+  /// 的数据源；旧数据缺省空串（零迁移），加载路径按标题回填补齐。
+  final String pinyinFull;
+
+  /// A3：量化单位的合法上界（读写两侧共用，与 [maxDailyTarget] 同惯例）。
+  static const int maxUnitLength = 6;
+
   const Habit({
     required this.id,
     required this.title,
@@ -58,6 +89,10 @@ class Habit {
     this.weeklyGoal = 0,
     this.dailyTarget,
     this.graceDays = 0,
+    this.unit = '',
+    this.order = 0,
+    this.pinyinInitials = '',
+    this.pinyinFull = '',
   });
 
   /// 某天是否应打卡（按 weekday 过滤；空列表=每天）。
@@ -118,6 +153,20 @@ class Habit {
   double progressRatioOf(int value) =>
       (value / effectiveTarget).clamp(0.0, 1.0).toDouble();
 
+  /// A3（v3.1.1 功能增强）：量化进度「x/y(+单位)」的**单一真源**。
+  ///
+  /// 此前「今日 6/8」的拼串散在习惯行 / 今日页 / 今日卡 / 通知确认条四处
+  /// （且无单位承载），加单位时必然漏改。全部展示点与 CSV / Excel 导出
+  /// 统一消费本方法：
+  /// - 无单位（旧行为）：`'6/8'`，与升级前逐字节一致；
+  /// - 有单位：`'6/8 杯'`（单位与数值间一个空格）。
+  /// 前缀文案（「今日」「已达标」等）由调用方按语境拼接，不进本方法。
+  String progressLabelOf(int value) {
+    final base = '$value/$effectiveTarget';
+    final u = unit.trim();
+    return u.isEmpty ? base : '$base $u';
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
@@ -131,6 +180,10 @@ class Habit {
         'weeklyGoal': weeklyGoal,
         'dailyTarget': dailyTarget,
         'graceDays': graceDays,
+        'unit': unit,
+        'order': order,
+        'pinyinInitials': pinyinInitials,
+        'pinyinFull': pinyinFull,
       };
 
   factory Habit.fromJson(Map<String, dynamic> j) {
@@ -163,7 +216,24 @@ class Habit {
       // 目标量 <=0 / 非整数 → 视为布尔习惯；宽限日夹到 [0,3]。
       dailyTarget: _clampTarget(j['dailyTarget']),
       graceDays: ((j['graceDays'] as num?)?.toInt() ?? 0).clamp(0, 3),
+      // A3（v3.1.1 功能增强）：备份是不可信输入——单位截到上界、非法类型回空串；
+      // order 兜底 0（与「旧数据缺省」同态）。
+      unit: clampUnit(j['unit']),
+      order: (j['order'] as num?)?.toDouble() ?? 0,
+      // A4（v3.1.1 功能增强）：旧数据缺省空串（零迁移）；加载 / 恢复路径按标题回填。
+      pinyinInitials: j['pinyinInitials'] as String? ?? '',
+      pinyinFull: j['pinyinFull'] as String? ?? '',
     );
+  }
+
+  /// A3：单位夹取（读 / 写两侧共用真源，与 [clampWeeklyGoalTo] 同惯例）——
+  /// 非字符串 / 空串回 `''`；超 [maxUnitLength] 截断（截断而非丢弃：语义保留
+  /// 优先，与「目标量越界夹取」同取向）。
+  static String clampUnit(dynamic v) {
+    if (v is! String) return '';
+    final s = v.trim();
+    if (s.isEmpty) return '';
+    return s.length > maxUnitLength ? s.substring(0, maxUnitLength) : s;
   }
 
   /// 解析可选时间戳（L7，v3.0.8 审计：`archivedAt`）。脏数据 / 非字符串一律
@@ -198,6 +268,7 @@ class Habit {
   ///
   /// 注意 [reminderMinute] 与 [dailyTarget] 都是可空字段，传 null 无法与「不修改」区分，
   /// 因此清除提醒必须显式传 `clearReminder: true`，取消量化目标传 `clearDailyTarget: true`。
+  /// A3：[unit] 的「清除」值就是空串（空串本身合法），直接传 `unit: ''` 即可。
   Habit copyWith({
     String? title,
     String? emoji,
@@ -212,6 +283,10 @@ class Habit {
     int? dailyTarget,
     bool clearDailyTarget = false,
     int? graceDays,
+    String? unit,
+    double? order,
+    String? pinyinInitials,
+    String? pinyinFull,
   }) =>
       Habit(
         id: id,
@@ -228,5 +303,11 @@ class Habit {
         weeklyGoal: weeklyGoal ?? this.weeklyGoal,
         dailyTarget: clearDailyTarget ? null : (dailyTarget ?? this.dailyTarget),
         graceDays: graceDays ?? this.graceDays,
+        unit: unit ?? this.unit,
+        order: order ?? this.order,
+        // A4：派生字段默认保留旧值（与 Task.pinyinInitials 同口径），
+        // 由调用方在标题变化时重算。
+        pinyinInitials: pinyinInitials ?? this.pinyinInitials,
+        pinyinFull: pinyinFull ?? this.pinyinFull,
       );
 }

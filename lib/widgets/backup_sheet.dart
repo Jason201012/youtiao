@@ -10,6 +10,7 @@ import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
 import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/backup_validator.dart';
+import 'package:todolist/services/backup_summary.dart';
 import 'package:todolist/services/backup_crypto.dart';
 import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/notification_service.dart';
@@ -421,26 +422,39 @@ class BackupSheet {
       }
       // 当前也为空：空覆盖空无数据损失，走下方常规确认即可。
     }
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text('从备份恢复？'),
-        content: const Text('这将用备份文件覆盖当前所有任务、习惯、设置与专注记录，且不可撤销。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(d, true),
-            child: const Text('恢复'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
+    // A1（v3.1.1 功能增强）：确认前先解析出摘要——解析一次、复用到整个恢复
+    // 流程（含干跑与 restoreFromJson 的入参），不产生二次 jsonDecode。
+    final Map<String, dynamic> data;
     try {
-      final data = jsonDecode(plaintext) as Map<String, dynamic>;
+      data = jsonDecode(plaintext) as Map<String, dynamic>;
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('恢复失败：文件格式不正确（$e）')),
+        );
+      }
+      return;
+    }
+    final summary = await BackupSummary.fromMap(
+      data,
+      encrypted: plaintext != raw, // 走过解密路径即为加密备份
+      currentTaskCount: provider.tasks.length,
+      currentHabitCount: habitProvider.habits.length,
+      currentFocusCount: focusProvider.sessions.length,
+    );
+    final confirm = await _showRestoreConfirm(
+      context,
+      title: '从备份恢复？',
+      summary: summary,
+      confirmLabel: '恢复',
+    );
+    if (confirm == null || !confirm.$1) return;
+    // A1 范围选择：关闭「同时恢复设置」时跳过 applyAppPrefs 与偏好重载，
+    // 只恢复任务 / 习惯 / 专注 / 模板 / 附件（文案已在开关副标题说明）。
+    final restoreSettings = confirm.$2;
+    // A1：恢复前自动快照——失败不阻断恢复，但结果里如实提示「不可回滚」。
+    final snapOk = await provider.writePreRestoreSnapshot();
+    try {
       // 先干跑解析专注/习惯/打卡：任一失败则在任务被覆盖前抛错，
       // 避免「任务已恢复、专注失败」的部分恢复假象（修复前 tasks 已被清空）。
       if (data['focus_sessions'] is List) {
@@ -464,6 +478,8 @@ class BackupSheet {
       // 但任一步 IO 失败都应明确告诉用户哪一步失败，而不是笼统的「格式不正确」。
       // 任一步失败不中断已成功的前序步骤（各自已落盘），仅累计错误并提示。
       final failures = <String>[];
+      // A1：快照失败记入结果提示（warning 性质，恢复本身继续）。
+      if (!snapOk) failures.add('恢复前快照未生成（本次恢复不可回滚）');
       // P3-10（v2.9.4 审计）：rescheduleReminders 仅在「本次会调 provider.load()」
       // 时才让位 —— load() 内部会重排任务提醒，且读到的是恢复后的新 DND/时区。
       // 若在此处再排一次，用的是**旧偏好**排出的结果，会被 load() 立刻覆盖，
@@ -471,9 +487,12 @@ class BackupSheet {
       // ⚠️ 备份不含 prefs（旧备份）时下方 `if (data['prefs'] is Map)` 不成立、
       // provider.load() 不会执行 —— 此时必须由 restoreFromJson 自己重排，
       // 否则 restoreFromJson 的 cancelAll() 之后任务提醒全部漏挂。
+      // A1：范围选择同口径——关「同时恢复设置」时 load() 同样不会执行，
+      // 必须由 restoreFromJson 自己重排。
       final blobStats = await provider.restoreFromJson(plaintext,
           includeTrash: includeTrash,
-          rescheduleReminders: data['prefs'] is! Map);
+          rescheduleReminders:
+              !(restoreSettings && data['prefs'] is Map));
       // P3-6（v3.0.8 审计）：消费任务落盘结果并入 failures——旧实现丢弃，
       // 「已恢复」可能在任务未写库时上报（重启后恢复条目全部蒸发；习惯侧已于
       // v3.0.6 消费 bool，任务侧这里是不对称的漏网口）。
@@ -516,7 +535,8 @@ class BackupSheet {
         failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
             '${blobStats.templatesTotal} 条，其余已跳过）');
       }
-      // P2-19：恢复偏好（仅当备份含 prefs 字段；老备份无则保持现有偏好不动）。
+      // P2-19：恢复偏好（仅当备份含 prefs 字段且用户选择「同时恢复设置」；
+      // 老备份无则保持现有偏好不动，A1 范围选择关闭时同样保持）。
       // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences。
       //
       // P2-1（v2.8.8 审计）：写回 prefs ≠ 内存生效。TaskProvider 的
@@ -532,7 +552,7 @@ class BackupSheet {
       // 重启才生效。这里补齐与自动备份还原路径完全一致的重载，使恢复即时生效。
       // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
       // 改用 refreshEnabled() 仅刷新开关、不触发锁。
-      if (data['prefs'] is Map) {
+      if (restoreSettings && data['prefs'] is Map) {
         try {
           await applyAppPrefs(Map<String, dynamic>.from(data['prefs'] as Map));
           await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
@@ -595,6 +615,74 @@ class BackupSheet {
         );
       }
     }
+  }
+
+  /// A1（v3.1.1 功能增强）：恢复确认框——差异摘要 + 「同时恢复设置」开关 +
+  /// 「备份比当前旧 N 天」弱提示（不阻止，只提醒）。
+  /// 返回 (confirmed, restoreSettings)；用户取消（含点弹层外）返回 null。
+  /// 两条恢复路径（文件 / 本地快照）共用，摘要文案由 [BackupSummary.describe]
+  /// 单一真源生成。
+  static Future<(bool, bool)?> _showRestoreConfirm(
+    BuildContext context, {
+    required String title,
+    required BackupSummary summary,
+    required String confirmLabel,
+  }) {
+    var restoreSettings = true; // 默认开：保持既有「含偏好恢复」的行为
+    return showDialog<(bool, bool)>(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setState) => AlertDialog(
+          title: Text(title),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(summary.describe(),
+                      style: const TextStyle(fontSize: 13, height: 1.5)),
+                  // A1：旧备份弱提示——不阻止恢复，只提醒用户确认状态。
+                  if (summary.ageDays >= 1) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '提示：这份备份比当前旧 ${summary.ageDays} 天，'
+                      '恢复前请确认它确实是你想要的状态。',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(context).colorScheme.error),
+                    ),
+                  ],
+                  const Divider(height: 24),
+                  // A1 范围选择：默认开（保持现有行为）；关闭时只恢复
+                  // 任务/习惯/专注/模板/附件，不恢复偏好设置。
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('同时恢复设置'),
+                    subtitle: const Text(
+                        '关闭则不恢复早间简报、勿扰时段、提醒时区、应用锁等设置',
+                        style: TextStyle(fontSize: 12)),
+                    value: restoreSettings,
+                    onChanged: (v) => setState(() => restoreSettings = v),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(d),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(d, (true, restoreSettings)),
+              child: Text(confirmLabel),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// 解密导入时弹出口令输入框；返回输入的口令，用户取消则返回 null。
@@ -672,24 +760,6 @@ class BackupSheet {
     final themeProvider = context.read<ThemeProvider>();
     final appLockProvider = context.read<AppLockProvider>();
     final onboardingProvider = context.read<OnboardingProvider>();
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text('从自动备份还原？'),
-        content: Text('这将用 ${entry.label} 的本地快照覆盖当前所有任务、习惯、设置与专注记录，且不可撤销。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(d, true),
-            child: const Text('还原'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
     try {
       // L-09：快照虽是本地文件，仍按统一上限预检（异常膨胀 / 被外部改写时兜底）。
       final size = await entry.file.length();
@@ -775,8 +845,38 @@ class BackupSheet {
           if (wipe != true) return;
         }
       }
-      // L-08：加密快照已解密为 plaintext，未加密则 plaintext == raw。
-      final data = jsonDecode(plaintext) as Map<String, dynamic>;
+      // A1（v3.1.1 功能增强）：确认前先解析出摘要（校验器已通过、加密已解开；
+      // 解析一次复用到整个恢复流程）。原「校验前的通用确认框」由本摘要确认框
+      // 替代——先看到要恢复什么，再决定是否继续。
+      final Map<String, dynamic> data;
+      try {
+        data = jsonDecode(plaintext) as Map<String, dynamic>;
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('还原失败：快照格式不正确（$e）')),
+          );
+        }
+        return;
+      }
+      final summary = await BackupSummary.fromMap(
+        data,
+        encrypted: plaintext != raw, // 走过解密路径即为加密快照
+        currentTaskCount: provider.tasks.length,
+        currentHabitCount: habitProvider.habits.length,
+        currentFocusCount: focusProvider.sessions.length,
+      );
+      final confirm = await _showRestoreConfirm(
+        context,
+        title: '从 ${entry.label} 的快照还原？',
+        summary: summary,
+        confirmLabel: '还原',
+      );
+      if (confirm == null || !confirm.$1) return;
+      // A1 范围选择：关闭「同时恢复设置」时跳过偏好恢复（与 _doRestore 同口径）。
+      final restoreSettings = confirm.$2;
+      // A1：恢复前自动快照——失败不阻断还原，但结果里如实提示「不可回滚」。
+      final snapOk = await provider.writePreRestoreSnapshot();
       // 干跑解析专注/习惯/打卡（与 _doRestore 一致）。
       if (data['focus_sessions'] is List) {
         (data['focus_sessions'] as List)
@@ -794,11 +894,14 @@ class BackupSheet {
             .toList();
       }
       final failures = <String>[];
+      // A1：快照失败记入结果提示（warning 性质，还原本身继续）。
+      if (!snapOk) failures.add('恢复前快照未生成（本次还原不可回滚）');
       // P3-10（v2.9.4 审计）：同 _doRestore，消费附件还原统计；并按「本次是否会
-      // 调 provider.load()」决定任务提醒的重排责任。
+      // 调 provider.load()」决定任务提醒的重排责任（A1 范围选择同口径）。
       final blobStats = await provider.restoreFromJson(plaintext,
           includeTrash: includeTrash,
-          rescheduleReminders: data['prefs'] is! Map);
+          rescheduleReminders:
+              !(restoreSettings && data['prefs'] is Map));
       // P3-6（v3.0.8 审计）：同 _doRestore，消费任务落盘结果并入 failures。
       if (!blobStats.persisted) {
         failures.add('任务（写入未保存，重启可能丢失）');
@@ -831,9 +934,11 @@ class BackupSheet {
       }
       // 还原 App 级偏好（外观/锁/专注/免打扰/通用开关）。
       // 写回 SharedPreferences 后，触发各 Provider 重新读取使内存态即时生效。
+      // A1：仅当用户选择「同时恢复设置」且备份含 prefs 时执行；范围选择关闭
+      // 或老备份无偏好段时保持现有偏好不动。
       // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
       // 改用 refreshEnabled() 仅刷新开关、不触发锁。
-      if (data['prefs'] is Map) {
+      if (restoreSettings && data['prefs'] is Map) {
         try {
           await applyAppPrefs(data['prefs'] as Map<String, dynamic>);
           await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
@@ -939,8 +1044,15 @@ class _AutoBackupSection extends StatelessWidget {
                 for (final entry in items)
                   ListTile(
                     dense: true,
-                    leading: const Icon(Symbols.history),
-                    title: Text('${entry.label} 快照'),
+                    // A1：恢复前快照用专属图标 + 「回滚点」措辞，与日常快照区分。
+                    leading: Icon(entry.preRestore
+                        ? Symbols.settings_backup_restore
+                        : Symbols.history),
+                    title: Text(entry.preRestore
+                        ? '${entry.label}（回滚点）'
+                        : '${entry.label} 快照'),
+                    subtitle: Text(entry.statusLabel,
+                        style: const TextStyle(fontSize: 12)),
                     trailing: const Icon(Symbols.restore),
                     onTap: () {
                       Navigator.pop(context); // 收起外层弹层

@@ -721,9 +721,11 @@ class _HabitTile extends StatelessWidget {
                             // U3-1 / P3-4（v2.9.6 审计）：休息日整块 meta 不再渲染
                             // ——按钮位已显示共享常量 [kHabitRestDayLabel]
                             // （原「今日休息」，四种写法之一），不再同屏重复。
+                            // A3（v3.1.1 功能增强）：x/y 与单位统一走
+                            // [Habit.progressLabelOf] 单一真源（含单位后缀）。
                             met
-                                ? '今日 ${status.value}/${status.target} · 已达标'
-                                : '今日 ${status.value}/${status.target}',
+                                ? '今日 ${status.habit.progressLabelOf(status.value)} · 已达标'
+                                : '今日 ${status.habit.progressLabelOf(status.value)}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(

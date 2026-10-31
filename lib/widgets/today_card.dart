@@ -492,15 +492,17 @@ class _HabitRow extends StatelessWidget {
     // 「每周一三五 · 8 杯水」在周二（休息日）显示「今日 0/8」，
     // 与布尔习惯的「今天不打卡」口径不一致；现休息日统一显示「今天不打卡」
     // （有记录时仍优先展示进度，保留补录事实）。
+    // A3（v3.1.1 功能增强）：x/y 与单位统一走 [Habit.progressLabelOf]
+    // 单一真源（含单位后缀；无单位时与旧文案逐字节一致）。
     final label = checked
         ? (status.habit.isQuantified
             ? (status.met
-                ? '已达标 ${status.value}/${status.target}'
-                : '今日 ${status.value}/${status.target}')
+                ? '已达标 ${status.habit.progressLabelOf(status.value)}'
+                : '今日 ${status.habit.progressLabelOf(status.value)}')
             : '已打卡')
         : (status.shouldCheckIn
             ? (status.habit.isQuantified
-                ? '今日 ${status.value}/${status.target}'
+                ? '今日 ${status.habit.progressLabelOf(status.value)}'
                 : '待打卡')
             : '今天不打卡');
     return Padding(

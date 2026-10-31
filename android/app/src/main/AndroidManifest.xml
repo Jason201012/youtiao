@@ -13,8 +13,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 前台守护服务类型：specialUse（提醒保活），targetSdk 34+ 必须声明对应类型权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- 专注结束自动写入系统日历所需权限（add_2_calendar 在运行时请求） -->
-    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- 专注结束自动写入系统日历所需权限（add_2_calendar 在运行时请求）。
+         顺手发现 #2（v3.1.1 功能增强报告）：READ_CALENDAR 自声明以来从未被
+         任何代码使用（全仓检索 CalendarContract / READ_CALENDAR 零命中，
+         日历能力只有 add_2_calendar 的「写入」），移除以收窄隐私权限面；
+         WRITE_CALENDAR 保留（专注事件写入需要）。后续若做 C3 系统日历只读
+         叠加，再按「运行时申请、默认关闭」重新声明。 -->
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <!-- 附件（P0-1）：拍照所需相机权限 -->
     <uses-permission android:name="android.permission.CAMERA" />

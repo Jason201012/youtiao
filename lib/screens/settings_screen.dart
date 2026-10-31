@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.1.1');
+      if (mounted) setState(() => _version = '3.1.2');
     }
   }
 
@@ -807,6 +807,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool get _isCustomTz =>
       _tzOverride.isNotEmpty && !_tzOptions.any((o) => o.$1 == _tzOverride);
 
+  // ===== 全局提醒临时静音（A2，v3.1.1 功能增强）=====
+
+  /// A2：静音行的行内展示文案（null/已过期 → 关闭；否则「M/D HH:mm」）。
+  static String _muteUntilLabel(DateTime until) {
+    final now = DateTime.now();
+    if (!until.isAfter(now)) return '关闭';
+    final p = (int n) => n.toString().padLeft(2, '0');
+    return '至 ${until.month}/${until.day} ${p(until.hour)}:${p(until.minute)}';
+  }
+
+  /// A2：选择临时静音窗口并立即生效。四档：1 小时 / 今天 / 到明天 08:00 / 关闭。
+  /// 「今天」= 今日 23:59:59（跨零点自然失效）；「到明天 08:00」恒指明天（含
+  /// 当前尚在凌晨的场景，语义与文案一致，不做「今天还没到 8 点就指向今天」的特判）。
+  Future<void> _pickMuteWindow(BuildContext ctx, TaskProvider p) async {
+    final picked = await showDialog<String>(
+      context: ctx,
+      builder: (d) => AlertDialog(
+        title: const Text('临时静音'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const ListTile(
+                dense: true,
+                title: Text('静音期间任务 / 习惯提醒、早晚简报、'
+                    '漏卡挽留与回收站预告都不再响；'),
+                subtitle: Text('静音结束后的提醒照常，窗口内错过的提醒不补发。'
+                    '专注进行中的常驻通知不受影响。'),
+              ),
+              ListTile(
+                leading: const Icon(Symbols.schedule),
+                title: const Text('静音 1 小时'),
+                onTap: () => Navigator.pop(d, '1h'),
+              ),
+              ListTile(
+                leading: const Icon(Symbols.today),
+                title: const Text('静音到今天结束'),
+                onTap: () => Navigator.pop(d, 'today'),
+              ),
+              ListTile(
+                leading: const Icon(Symbols.bedtime),
+                title: const Text('静音到明天 08:00'),
+                onTap: () => Navigator.pop(d, 'tomorrow8'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Symbols.notifications_active),
+                title: const Text('恢复提醒（关闭静音）'),
+                onTap: () => Navigator.pop(d, 'off'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+    final now = DateTime.now();
+    DateTime? until;
+    switch (picked) {
+      case '1h':
+        until = now.add(const Duration(hours: 1));
+      case 'today':
+        until = DateTime(now.year, now.month, now.day, 23, 59, 59);
+      case 'tomorrow8':
+        until = DateTime(now.year, now.month, now.day + 1, 8);
+      case 'off':
+        until = null;
+      default:
+        return;
+    }
+    await p.setRemindersMutedUntil(until);
+    if (mounted) {
+      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+        content: Text(until == null
+            ? '已恢复提醒（临时静音已关闭）'
+            : '提醒已临时静音至 ${_muteUntilLabel(until).replaceFirst('至 ', '')}'),
+      ));
+    }
+  }
+
   /// P3-3：手动输入 IANA 时区名；保存前用 tz.getLocation 校验，非法留在弹层提示。
   Future<String?> _promptCustomTimezone(BuildContext ctx) async {
     final ctrl = TextEditingController(
@@ -1339,6 +1426,20 @@ String _formatIdle(int seconds) {
                               .openExactAlarmSettings();
                         }
                       },
+                    ),
+                    // A2（v3.1.1 功能增强）：全局提醒临时静音——开会 / 休假 /
+                    // 陪家人时一键「接下来别响」，不必改勿扰区间或逐个关通知。
+                    const SizedBox(height: AppColors.contentGap),
+                    Consumer<TaskProvider>(
+                      builder: (context, provider, _) => SettingsRow(
+                        icon: Symbols.notifications_paused,
+                        label: '临时静音',
+                        subtitle: '静音期间任务/习惯提醒与简报都不响，错过不补发',
+                        value: provider.remindersMuted
+                            ? _muteUntilLabel(provider.remindersMutedUntil!)
+                            : '关闭',
+                        onTap: () => _pickMuteWindow(context, provider),
+                      ),
                     ),
                     const SizedBox(height: 24),
                     _GroupTitle('简报推送'),

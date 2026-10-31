@@ -77,13 +77,46 @@ class HabitScreen extends StatelessWidget {
                     const SizedBox(height: AppColors.contentGap),
                     if (habit.activeHabits.isEmpty)
                       const _EmptyHint()
-                    else
-                      ...habit.activeHabits.map(
-                        (h) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _HabitTile(habit: h),
-                        ),
+                    else if (habit.activeHabits.length == 1)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _HabitTile(habit: habit.activeHabits.first),
+                      )
+                    else ...[
+                      // A3（v3.1.1 功能增强）：习惯列表长按拖拽排序——
+                      // ReorderableListView 收缩内嵌在页滚动里（自身不滚动），
+                      // 长按整行进入拖拽；松手落盘（失败如实提示并回滚）。
+                      ReorderableListView(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        padding: EdgeInsets.zero,
+                        buildDefaultDragHandles: true,
+                        onReorder: (oldIndex, newIndex) async {
+                          final ok =
+                              await habit.reorderHabits(oldIndex, newIndex);
+                          if (!ok && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('排序未保存，请重试')),
+                            );
+                          }
+                        },
+                        children: [
+                          for (final h in habit.activeHabits)
+                            Padding(
+                              key: ValueKey(h.id),
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: _HabitTile(habit: h),
+                            ),
+                        ],
                       ),
+                      const SizedBox(height: 8),
+                      Text('长按习惯可拖动调整顺序',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant)),
+                    ],
                     // 新P2-2（v2.9.7 审计）：归档习惯的取消归档入口——见
                     // [_ArchivedSection] 文档。
                     if (habit.archivedHabits.isNotEmpty) ...[
@@ -134,6 +167,78 @@ const List<Color> kHabitPalette = [
   Color(0xFF965400),
   Color(0xFF8B4A82),
 ];
+
+/// A3（v3.1.1 功能增强）：量化单位预设（新建 / 编辑弹层共用，单一真源）。
+const List<String> kHabitUnitPresets = ['杯', '页', '次', '分钟', '公里', '个'];
+
+/// A3（v3.1.1 功能增强）：量化单位编辑器（新建 / 编辑弹层共用单一真源）：
+/// 自由输入（≤[Habit.maxUnitLength] 字符）+ 预设 chips 快捷填充；为空 = 无单位
+/// （保持旧文案「6/8」）。输入实时回写 [controller]，保存时由调用方统一提交。
+class _HabitUnitEditor extends StatelessWidget {
+  final TextEditingController controller;
+  final AppColorsExt ext;
+  const _HabitUnitEditor({required this.controller, required this.ext});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('单位', style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text('显示在进度旁，如「6/8 杯」；留空不显示',
+                  style: TextStyle(fontSize: 12, color: ext.meta)),
+            ),
+            SizedBox(
+              width: 96,
+              child: TextField(
+                controller: controller,
+                maxLength: Habit.maxUnitLength,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14),
+                decoration: InputDecoration(
+                  isDense: true,
+                  counterText: '',
+                  hintText: '如「杯」',
+                  filled: true,
+                  fillColor: ext.chip,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppColors.cardRadius),
+                    borderSide: BorderSide.none,
+                  ),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          // AnimatedBuilder 监听 controller：自由输入 / 点 chip 后选中态即时同步。
+          children: kHabitUnitPresets
+              .map((u) => AnimatedBuilder(
+                    animation: controller,
+                    builder: (_, __) => ChoiceChip(
+                      label: Text(u),
+                      selected: controller.text == u,
+                      onSelected: (sel) {
+                        // 点已选中的 chip = 清空；点未选中的 = 填入。
+                        controller.text = sel ? u : '';
+                      },
+                    ),
+                  ))
+              .toList(),
+        ),
+      ],
+    );
+  }
+}
 
 /// U2-2（v2.9.6 审计）：休息日点击写入口的统一反馈——此前习惯列表行的
 /// 圆圈 / ✎ / +1 在休息日 `onTap: null`，但 `HitTestBehavior.opaque` 仍吞掉
@@ -668,7 +773,8 @@ class _HabitTile extends StatelessWidget {
     final primary = Theme.of(context).colorScheme.primary;
     final quantified = habit.isQuantified;
     final value = hp.todayValue(habit);
-    final target = habit.effectiveTarget;
+    // A3（v3.1.1 功能增强）：x/y 与单位统一走 [Habit.progressLabelOf]，
+    // 分母（effectiveTarget）在真源内部取，本方法不再单独持有 target。
     // T1-2：量化习惯用「达成」判定，布尔习惯等价于原「已打卡」。
     final checked = quantified ? hp.isTargetMetToday(habit) : hp.isCheckedToday(habit);
     final streak = hp.currentStreak(habit);
@@ -730,7 +836,11 @@ class _HabitTile extends StatelessWidget {
                             ),
                             child: Text(
                               // U3-1（v2.9.6 审计）：休息日文案走共享常量。
-                              restDay ? kHabitRestDayLabel : '今日 $value/$target',
+                              // A3（v3.1.1 功能增强）：x/y 与单位统一走
+                              // [Habit.progressLabelOf] 单一真源（含单位后缀）。
+                              restDay
+                                  ? kHabitRestDayLabel
+                                  : '今日 ${habit.progressLabelOf(value)}',
                               style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
@@ -869,7 +979,11 @@ class _HabitTile extends StatelessWidget {
                               // 计数 pill 却仍原样渲染 `0/8`——「左说不打卡、右报 0/8」，
                               // 用户无从判断该不该点。两处同属一个语义，统一读 [restDay]。
                               // U3-1（v2.9.6 审计）：文案统一为共享常量（原「休息」）。
-                              restDay ? kHabitRestDayLabel : '$value/$target',
+                              // A3（v3.1.1 功能增强）：x/y 与单位统一走
+                              // [Habit.progressLabelOf] 单一真源。
+                              restDay
+                                  ? kHabitRestDayLabel
+                                  : habit.progressLabelOf(value),
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 fontSize: 12,
@@ -1277,6 +1391,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   static const List<String> _emojis = kHabitEmojis;
 
   final _titleCtl = TextEditingController();
+  /// A3（v3.1.1 功能增强）：量化单位输入（空 = 无单位）。
+  final _unitCtl = TextEditingController();
   /// P3-4（v3.0.7 审计）：提交中守卫——「添加」异步化（await addHabit）后
   /// 出现了以前不存在的异步窗口，双击会并发两次 addHabit（各自分配不同 id）
   /// 生成两条重复习惯；且成功分支还会对已 pop 的 context 再调 Navigator.pop。
@@ -1316,6 +1432,7 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
   @override
   void dispose() {
     _titleCtl.dispose();
+    _unitCtl.dispose();
     super.dispose();
   }
 
@@ -1534,6 +1651,11 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                 : '打卡时按数量累加，达到 $_dailyTarget 才算当日达成',
             style: TextStyle(fontSize: 12, color: ext.meta),
           ),
+          // A3（v3.1.1 功能增强）：量化单位（仅量化习惯显示）。
+          if (_dailyTarget != null) ...[
+            const SizedBox(height: 12),
+            _HabitUnitEditor(controller: _unitCtl, ext: ext),
+          ],
           // T1-4：宽限日——每周允许漏卡 N 天而不断签，降低「一次失手前功尽弃」的挫败。
           const SizedBox(height: 12),
           Row(
@@ -1594,6 +1716,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                         weeklyGoal: _weeklyGoal,
                         dailyTarget: _dailyTarget,
                         graceDays: _graceDays,
+                        // A3（v3.1.1 功能增强）：随新建一并提交（空串 = 无单位）。
+                        unit: _unitCtl.text,
                       );
                       if (!ok) {
                         // P3-4（v3.0.7 审计）：失败分支解除守卫（按钮恢复可点），
@@ -2411,6 +2535,9 @@ class _HabitEditSheet extends StatefulWidget {
 class _HabitEditSheetState extends State<_HabitEditSheet> {
   late final TextEditingController _titleCtl =
       TextEditingController(text: widget.habit.title);
+  // A3（v3.1.1 功能增强）：量化单位输入（初值取现有单位；空 = 无单位）。
+  late final TextEditingController _unitCtl =
+      TextEditingController(text: widget.habit.unit);
   late final Set<int> _weekdays = {...widget.habit.weekdays};
   // P3-7（v2.9.6 审计）：初值取「生效值」——编辑层保存时写入侧会按新计划天数
   // 收敛，打开时显示生效值与该行为一致（裸字段可能是保真的超界原值）。
@@ -2444,6 +2571,7 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
   @override
   void dispose() {
     _titleCtl.dispose();
+    _unitCtl.dispose();
     super.dispose();
   }
 
@@ -2490,6 +2618,8 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       dailyTarget: _dailyTarget,
       clearDailyTarget: _dailyTarget == null,
       graceDays: _graceDays,
+      // A3（v3.1.1 功能增强）：随保存一并提交（空串 = 清除单位）。
+      unit: _unitCtl.text,
     );
     if (!mounted) return;
     if (!ok) {
@@ -2894,6 +3024,11 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
                   : '打卡时按数量累加，达到 $_dailyTarget 才算当日达成',
               style: TextStyle(fontSize: 12, color: ext.meta),
             ),
+            // A3（v3.1.1 功能增强）：量化单位（仅量化习惯显示；空 = 无单位）。
+            if (_dailyTarget != null) ...[
+              const SizedBox(height: 12),
+              _HabitUnitEditor(controller: _unitCtl, ext: ext),
+            ],
             const SizedBox(height: 16),
             // T1-4：宽限日。
             Row(

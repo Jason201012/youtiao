@@ -48,6 +48,7 @@ class PaletteCommand {
   /// 每个动作需由宿主注入对应回调；未注入时面板安全提示「当前不可用」。
   static const Set<String> actionCommands = {
     'done', // 完成首页选中项
+    'pin', // A5：置顶首页选中项
     'new', // 唤起快速录入
     'trash', // 回收站
     'tags', // 标签管理
@@ -58,6 +59,7 @@ class PaletteCommand {
   /// 动作命令 → 展示名（面板提示用）。
   static const Map<String, String> actionLabels = {
     'done': '完成选中项',
+    'pin': '置顶选中项',
     'new': '新建任务',
     'trash': '回收站',
     'tags': '标签管理',
