@@ -333,16 +333,21 @@ class _FocusScreenState extends State<FocusScreen> {
   /// 停止（手动结束当前番茄钟，按已逝时间补录）。
   Future<void> _onStop(FocusProvider focus) async {
     if (!focus.hasActive) return;
-    await focus.stopTimer();
+    // P3-2（v3.1.0 审计）：stopTimer 透传补录落盘结果——失败时不再谎报
+    // 「已记录本次专注」（记录仅存内存、重启即丢）。
+    final ok = await focus.stopTimer();
     await _audio.stop();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('已记录本次专注'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(ok
+            ? '已记录本次专注'
+            : (focus.dbLoadFailed
+                ? '安全模式下更改不会保存：已阻止写入以保护数据，请先修复或恢复后再试'
+                : '写入失败：本次专注未保存，请重试')),
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   @override
@@ -844,13 +849,26 @@ class _RecordList extends StatelessWidget {
                 );
                 return ok ?? false;
               },
-              onDismissed: (_) {
+              onDismissed: (_) async {
                 final removed = s;
                 // P2-9（v2.9.6 审计）：removeSession 现已与 addSession 对称——
                 // 删除即扣减任务累计专注（onFocusRemoved → removeFocusSec），
                 // 撤销再经 addSession 回填，两侧相抵；此前删除不扣、撤销又加，
                 // 任务「已专注」凭空多出一段。
-                focus.removeSession(s.id);
+                // P3-2（v3.1.0 审计）：落盘失败（返回 null，内存已回滚）时如实
+                // 提示，不再弹「已删除 + 撤销」的假横幅。
+                final deleted = await focus.removeSession(s.id);
+                if (!context.mounted) return;
+                if (deleted == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(focus.dbLoadFailed
+                          ? '安全模式下更改不会保存：已阻止写入以保护数据，请先修复或恢复后再试'
+                          : '写入失败：数据未保存，请重试'),
+                    ),
+                  );
+                  return;
+                }
                 // P3-4 / U3-1：此前硬编码 4 秒；改走唯一实现（10 秒 + 超时提示）。
                 showUndoSnackBar(
                   context,
@@ -862,8 +880,7 @@ class _RecordList extends StatelessWidget {
                     if (focus.sessions.any((e) => e.id == removed.id)) {
                       return false;
                     }
-                    focus.addSession(removed);
-                    return true;
+                    return focus.addSession(removed);
                   },
                 );
               },
@@ -903,6 +920,9 @@ class _RecordList extends StatelessWidget {
   }
 
   Future<void> _confirmClear(BuildContext context, FocusProvider focus) async {
+    // P3-2（v3.1.0 审计）：今天没有记录时无需确认与提示（clearToday 空列表的
+    // 「未生效」语义专指落盘失败，与「无物可清」区分开）。
+    if (focus.sessionsOn(DateTime.now()).isEmpty) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -925,23 +945,35 @@ class _RecordList extends StatelessWidget {
       // 批量清空反而「不可撤销」，保护力度与风险倒挂。clearToday 返回被删
       // 记录（含 P2-9 的对称扣减），撤销经 addSession 逐条原样回填（含 taskId
       // 的记录会同步回填任务累计专注，与删除时的扣减相抵）。
-      final removed = focus.clearToday();
-      if (context.mounted) {
-        showUndoSnackBar(
-          context,
-          content: undoContent('已清空今日专注记录（${removed.length} 条）'),
-          onUndo: () async {
-            // 新U3-2（v2.9.7 审计）：同 id 记录已在列表（重复撤销）→ 整批按
-            // 失效处理，避免部分回填造成「一半恢复一半丢失」的中间态。
-            final existing = focus.sessions.map((e) => e.id).toSet();
-            if (removed.any((s) => existing.contains(s.id))) return false;
-            for (final s in removed) {
-              focus.addSession(s);
-            }
-            return true;
-          },
+      // P3-2（v3.1.0 审计）：await 落盘结果——空列表 = 未生效（今天无记录或
+      // 落盘失败已回滚），如实提示而不是弹「已清空 0 条」的假横幅。
+      final removed = await focus.clearToday();
+      if (!context.mounted) return;
+      if (removed.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(focus.dbLoadFailed
+                ? '安全模式下更改不会保存：已阻止写入以保护数据，请先修复或恢复后再试'
+                : '写入失败：数据未保存，请重试'),
+          ),
         );
+        return;
       }
+      showUndoSnackBar(
+        context,
+        content: undoContent('已清空今日专注记录（${removed.length} 条）'),
+        onUndo: () async {
+          // 新U3-2（v2.9.7 审计）：同 id 记录已在列表（重复撤销）→ 整批按
+          // 失效处理，避免部分回填造成「一半恢复一半丢失」的中间态。
+          final existing = focus.sessions.map((e) => e.id).toSet();
+          if (removed.any((s) => existing.contains(s.id))) return false;
+          var ok = true;
+          for (final s in removed) {
+            if (!await focus.addSession(s)) ok = false;
+          }
+          return ok;
+        },
+      );
     }
   }
 }

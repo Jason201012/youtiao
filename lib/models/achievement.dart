@@ -41,7 +41,7 @@ class AchievementContext {
   /// 已创建习惯数（含归档）。
   final int habitCount;
 
-  /// 已完成任务数（来自 TaskProvider）。
+  /// 历史完成事件数（occurrence 级，P2-1：不随午夜重置回落）。
   final int completedTasks;
 
   /// 累计专注分钟（来自 FocusProvider）。
@@ -88,17 +88,24 @@ class AchievementContext {
     FocusProvider focus,
     HabitProvider habit,
   ) {
-    // —— 任务侧：单日峰值 / 早鸟 / 夜猫 ——
+    // —— 任务侧：累计完成 / 单日峰值 / 早鸟 / 夜猫 ——
+    // P2-1（v3.1.0 审计）：全部升级为 occurrence 级 [Task.completionEventDays]——
+    // 旧实现按「当前 done + completedAt」计数：重复任务每天完成却被午夜重置，
+    // 「累计完成 50/200」会随重置**倒退**，单日峰值也系统性偏低。
+    // 早鸟 / 夜猫例外：[doneDates] 只存日期不含时刻，历史完成事件无时刻可判，
+    // 只能继续按当前仍 done 的 [completedAt] 统计（能力边界，见下方注释）。
     final perDay = <DateTime, int>{};
     int early = 0;
     int night = 0;
     for (final t in task.tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final c = t.completedAt!;
-      final d = DateTime(c.year, c.month, c.day);
-      perDay[d] = (perDay[d] ?? 0) + 1;
-      if (c.hour < 9) early++;
-      if (c.hour >= 22) night++;
+      for (final d in t.completionEventDays) {
+        perDay[d] = (perDay[d] ?? 0) + 1;
+      }
+      final c = t.completedAt;
+      if (t.done && c != null) {
+        if (c.hour < 9) early++;
+        if (c.hour >= 22) night++;
+      }
     }
     int maxInDay = 0;
     for (final v in perDay.values) {
@@ -150,7 +157,10 @@ class AchievementContext {
       longestStreak: maxStreak,
       currentStreak: habit.overallCurrentStreak,
       habitCount: habit.habitCount,
-      completedTasks: task.completed,
+      // P2-1（v3.1.0 审计）：「累计完成」从「当前 done 数」改为**历史完成事件数**
+      // （各任务 completionEventDays 之和）——不随午夜重置回落，重复任务每天
+      // 完成都计入。与 desc「累计完成 N 个任务」的语义一致（每天喝水每天算一次）。
+      completedTasks: task.tasks.fold(0, (a, t) => a + t.completionEventDays.length),
       focusMinutes: focus.totalSec ~/ 60,
       pomodoroCount: pomodoro,
       focusDays: focusDates.length,

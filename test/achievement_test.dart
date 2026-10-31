@@ -260,7 +260,10 @@ void main() {
       );
       expect(ctx.pomodoroCount, 2); // 只有两条 completed 的专注
       expect(ctx.focusDays, 2); // 8/3、8/4（休息那天不算）
-      expect(ctx.focusMinutes, (1500 * 3 + 1500) ~/ 60); // 含休息的历史口径
+      // P2-4（v3.1.0 审计）：totalSec 改为只算**专注阶段**——旧口径「含休息」
+      // 让成就「累计专注分钟」被休息灌水，与 focusSecOn/todayFocusSec 的
+      // 阶段口径打架。三个 focus 段 1500*3 秒 = 75 分钟（休息 1500 秒不再计入）。
+      expect(ctx.focusMinutes, 1500 * 3 ~/ 60);
     });
 
     test('习惯侧字段接自 HabitProvider', () async {

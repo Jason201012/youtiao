@@ -37,6 +37,11 @@ class HabitProvider extends ChangeNotifier {
   bool _dbLoadFailed = false;
   bool get dbLoadFailed => _dbLoadFailed;
 
+  /// P1-1（v3.1.0 审计）：测试钩子——同 FocusProvider.markDbLoadFailedForTest。
+  /// 「加载失败 → 写入被拒」的守卫语义由回归测试显式置位后钉死。
+  @visibleForTesting
+  void markDbLoadFailedForTest() => _dbLoadFailed = true;
+
   /// U2-1（v3.0.5 审计）：通知 action 路径 show 确认条后登记（见
   /// [_confirmShownMarks]）。仅供 main 的通知 action 回调调用。
   void markConfirmShown(String habitId) =>
@@ -647,7 +652,13 @@ class HabitProvider extends ChangeNotifier {
     // 当前对象存在则以其为准；不存在（独立 Habit 对象的直接写入，如统计/
     // 分享等历史用法）回落实参，保持既有调用契约不破。
     final live = byId(habit.id) ?? habit;
-    if (live.archived) return true;
+    // P3-8（v3.1.0 审计）：归档早退从「返回 true」改为 **false**。旧语义把
+    // 「拒绝写入」谎报成「落盘成功」——UI 已禁用归档习惯的写按钮、通知侧也有
+    // 前置守卫，目前不爆发；但任何未来新增的批量/程序入口都会把「未写入」当
+    // 成功，与全仓「bool = 落盘成功」的契约冲突。归档语义 = 退场，写入被拒，
+    // 如实返回 false（休息日的幂等早退仍返回 true：那是「无需打卡」而非错误，
+    // 两者语义不同，不合并处理）。
+    if (live.archived) return false;
     // 休息日守卫同样按当前 weekdays 判定（改星期后旧弹层仍按旧 weekdays 放行
     // 的旁路）。仅限「写今天」——补卡（过去日期）按产品语义不限计划日，
     // UI（详情弹层「补卡」）对该路径有独立说明，不受此限。
@@ -1446,7 +1457,17 @@ class HabitProvider extends ChangeNotifier {
   /// Future 正常完成，外层「按写入结果回报」的分支（main._doHabitCheckIn /
   /// _doHabitUndo 的 .catchError）属**不可达死代码**——DB 写入失败时通知栏
   /// 照样谎报「已打卡 ✓ / 已记 x/y」。现在把结果透传给调用方，由其按结果分支。
+  ///
+  /// P1-1（v3.1.0 审计）：安全模式写盘守卫——与 [TaskProvider._persist]（S13）
+  /// 同口径。此前只有任务侧拦截：本 Provider 加载失败只置 [dbLoadFailed] 给 UI
+  /// 换文案，写入路径完全不读它——「加载失败 → 内存空 → 用户随便写一次」会让
+  /// [LocalDatabase.replaceHabits]（差量合并 + 删掉库中多出来的 id）把库中
+  /// **全部历史习惯**覆盖成内存态（一次新建/打卡 = 抹掉全部习惯，不可逆），
+  /// 且 UI 报「保存成功」。置守卫后返回 false，各写入口既有的「失败回滚内存 +
+  /// 如实提示」分支自然生效；habit_screen 的失败文案注释「此后 _persist 恒
+  /// false」自此才与实现相符。
   Future<bool> _persistHabits() async {
+    if (_dbLoadFailed) return false;
     try {
       await LocalDatabase.instance.replaceHabits(_habits);
       return true;
@@ -1457,7 +1478,10 @@ class HabitProvider extends ChangeNotifier {
   }
 
   /// P2-1（v3.0.4 审计）：同 [_persistHabits]，返回落盘是否成功。
+  /// P1-1（v3.1.0 审计）：安全模式守卫同上——否则一次打卡会把整张 check_ins
+  /// 表覆盖成只剩这一条。
   Future<bool> _persistCheckIns() async {
+    if (_dbLoadFailed) return false;
     try {
       await LocalDatabase.instance.replaceCheckIns(_checkIns);
       return true;

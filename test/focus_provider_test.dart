@@ -249,7 +249,7 @@ void main() {
   });
 
   group('onFocusRecorded 回调（专注回填到任务，v2.3.4 新增）', () {
-    test('addSession 带 taskId 时触发回调，传 (taskId, durationSec)', () {
+    test('addSession 带 taskId 时触发回调，传 (taskId, durationSec)', () async {
       final p = FocusProvider();
       String? gotId;
       int? gotSec;
@@ -258,7 +258,9 @@ void main() {
         gotSec = sec;
       };
       final now = DateTime.now();
-      p.addSession(FocusSession(
+      // P3-2（v3.1.0 审计）：addSession 改 async，任务回填挪到落盘成功之后
+      // 触发——须 await 后再断言（旧实现同步 void、回调立即触发）。
+      await p.addSession(FocusSession(
         id: 's', taskId: 't-1', taskTitle: '写代码', plannedSec: 600,
         durationSec: 600, completed: true, phase: FocusPhase.focus,
         startedAt: now.subtract(const Duration(seconds: 600)), endedAt: now));
@@ -266,11 +268,11 @@ void main() {
       expect(gotSec, 600);
     });
 
-    test('addSession 无 taskId 时不触发回调', () {
+    test('addSession 无 taskId 时不触发回调', () async {
       final p = FocusProvider();
       var calls = 0;
       p.onFocusRecorded = (_, __) => calls++;
-      p.addSession(mk(1, 600));
+      await p.addSession(mk(1, 600));
       expect(calls, 0);
     });
   });

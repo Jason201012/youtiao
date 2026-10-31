@@ -244,15 +244,18 @@ void main() {
         startedAt: now.subtract(const Duration(minutes: 10)),
         endedAt: now,
       );
-      focus.addSession(s);
+      // P3-2（v3.1.0 审计）：addSession / removeSession / clearToday 均改为
+      // await 落盘结果——旧契约是同步 void/Future 即完成，任务回填在内存修改
+      // 后立即发生；现在回调挪到落盘成功后触发（落盘失败不扣不回填）。
+      await focus.addSession(s);
       expect(p.byId('1')!.focusSecTotal, 600);
 
-      final removed = focus.removeSession('s1');
+      final removed = await focus.removeSession('s1');
       expect(removed, isNotNull, reason: 'removeSession 返回被删记录（可撤销）');
       expect(p.byId('1')!.focusSecTotal, 0,
           reason: 'P2-9：删除即扣减——旧实现不扣，撤销后凭空多一段');
 
-      focus.addSession(removed!); // 撤销删除
+      await focus.addSession(removed!); // 撤销删除
       expect(p.byId('1')!.focusSecTotal, 600,
           reason: '撤销回填与删除扣减相抵，两侧口径对称');
     });
@@ -263,7 +266,7 @@ void main() {
       p.removeFocusSec('1', 999999);
       expect(p.byId('1')!.focusSecTotal, 0, reason: '不为负');
       final focus = FocusProvider();
-      expect(focus.removeSession('不存在'), isNull, reason: '幂等');
+      expect(await focus.removeSession('不存在'), isNull, reason: '幂等');
     });
 
     test('P3-15：clearToday 返回被删列表，撤销逐条恢复', () async {
@@ -282,13 +285,14 @@ void main() {
         startedAt: now.subtract(const Duration(minutes: 5)),
         endedAt: now,
       );
-      focus.addSession(s);
-      final removed = focus.clearToday();
+      await focus.addSession(s);
+      final removed = await focus.clearToday(); // P3-2：await 落盘结果
       expect(removed.length, 1);
       expect(focus.sessions.where((x) => x.id == 's1'), isEmpty);
       expect(p.byId('1')!.focusSecTotal, 0, reason: '清空同步扣减');
       for (final x in removed) {
-        focus.addSession(x); // 撤销
+        // P3-2：addSession 改 async（回填挪到落盘成功后触发），撤销须 await。
+        await focus.addSession(x); // 撤销
       }
       expect(focus.sessions.length, 1);
       expect(p.byId('1')!.focusSecTotal, 300, reason: '撤销回填，两侧相抵');

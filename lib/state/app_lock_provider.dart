@@ -85,10 +85,26 @@ class AppLockProvider extends ChangeNotifier {
   /// 与 [load] 的区别：[load] 会在冷启动时按 `_enabled` 设置首帧是否需验证
   /// （`_locked = _enabled`），但还原发生在 App 前台运行期，若强行锁屏会打断用户操作，
   /// 因此这里只同步开关与生物特征可用性，真正的重新上锁交由下次生命周期回调处理。
+  ///
+  /// P2-3（v3.1.0 审计）：恢复路径补上与 [setEnabled] 同等的**硬件门槛**——
+  /// 备份可携带 app_lock_enabled=true，恢复把它写进 prefs；若本机未录入生物
+  /// 识别也无锁屏凭据，下一次回前台就会锁死在解锁页（设置页不可达）。这里
+  /// 检测到「开关为开但生物识别不可用」时强制写回 false，与「启用必有门槛」
+  /// 的启用校验一致；配合解锁页新增的「无法验证？关闭应用锁」出口（main
+  /// AppLockGate），两道防线共同消除不可解锁路径。
   Future<void> refreshEnabled() async {
     final prefs = await SharedPreferences.getInstance();
-    _enabled = prefs.getBool(_kEnabled) ?? false;
+    var enabled = prefs.getBool(_kEnabled) ?? false;
     await probeBiometric();
+    if (enabled && !_biometricAvailable) {
+      enabled = false;
+      try {
+        await prefs.setBool(_kEnabled, false);
+      } catch (e) {
+        AppLog.d('[AppLock] 恢复后强制关闭应用锁失败（内存仍按关闭处理）：$e');
+      }
+    }
+    _enabled = enabled;
     notifyListeners();
   }
 

@@ -5,6 +5,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
+import 'package:todolist/widgets/undo_snack_bar.dart';
 import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/quick_entry_sheet.dart';
 
@@ -484,14 +485,53 @@ class _TagManageScreenState extends State<TagManageScreen> {
             TextButton(
               onPressed: target != null
                   ? () async {
+                      // P3-6（v3.1.0 审计）：合并前二次确认——旧实现选中目标后
+                      // 立即执行，既无确认（影响多少条任务）也无撤销，与同页
+                      // 「删除标签」反而有确认的保护力度倒挂；合并错目标只能
+                      // 逐条任务手工改回。
+                      final affected = provider.tagTaskCount(source);
+                      final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (cctx) => AlertDialog(
+                          title: const Text('确认合并'),
+                          content: Text(
+                            '将把 $affected 条任务上的「$source」改名为「$target」'
+                            '（source 标签将被移除）。执行后 10 秒内可撤销。',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(cctx, false),
+                              child: const Text('取消'),
+                            ),
+                            FilledButton(
+                              onPressed: () => Navigator.pop(cctx, true),
+                              child: const Text('合并'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirmed != true || !context.mounted) return;
                       // P2-2（v3.0.7 审计）：mergeTags 透传落盘结果——失败如实
                       // 提示（合并未落库），不静默 pop。
-                      final ok = await provider.mergeTags(source, target!);
-                      if (!ok && context.mounted) {
+                      final (changed, batchId, ok) =
+                          await provider.mergeTags(source, target!);
+                      if (!context.mounted) return;
+                      if (!ok) {
                         showTaskPersistFailedHint(context, provider: provider);
                         return;
                       }
-                      if (context.mounted) Navigator.pop(d);
+                      Navigator.pop(d);
+                      // P3-6：撤销横幅——复用 batchUpdateAs 的定向快照（任务
+                      // tags）+ 归档集合迁移还原（undoMergeTags）。
+                      showUndoSnackBar(
+                        context,
+                        content:
+                            '已合并「$source」到「$target」（$changed 条任务）',
+                        onUndo: () async {
+                          final r = await provider.undoMergeTags(batchId);
+                          return r.applied && r.saved;
+                        },
+                      );
                     }
                   : null,
               child: const Text('合并'),

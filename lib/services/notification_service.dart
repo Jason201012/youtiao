@@ -1534,13 +1534,21 @@ class NotificationService {
   /// 而非「排程当下」来聚合数据，否则会出现「周一晚上排的周二晨报，说的是周一的口径」。
   /// 抽成公共方法是为了让 [scheduleBriefing] 与排程方（daily_briefing）共用同一口径，
   /// 避免两边各算一套、日后其中一处改动导致日期漂移。
+  ///
+  /// P3-7（v3.1.0 审计）：跨天用**构造器日历进位**（`day + 1`，DateTime 构造器
+  /// 按日历归一化溢出值）而非 `add(Duration(days: 1))`——后者是「+24 小时」，
+  /// 在启用 DST 的时区（提醒时区支持自定义 IANA）跨越切换日时，简报会提前或
+  /// 推迟 1 小时，与「固定时刻推送」的设定不符。与任务侧 P3-2（v3.0.4）的
+  /// 回收站 cutoff 同族修法。
   tz.TZDateTime nextBriefingTime(int hour, int minute) {
     final loc = _loc ?? tz.UTC;
     final hh = hour.clamp(0, 23);
     final mm = minute.clamp(0, 59);
     final now = tz.TZDateTime.now(loc);
     final when = tz.TZDateTime(loc, now.year, now.month, now.day, hh, mm);
-    return when.isAfter(now) ? when : when.add(const Duration(days: 1));
+    return when.isAfter(now)
+        ? when
+        : tz.TZDateTime(loc, now.year, now.month, now.day + 1, hh, mm);
   }
 
   /// P0-1 早晚简报调度：每日在 [hour]:[minute] 重复触发一条本地通知（setAlarmClock，
@@ -1635,9 +1643,14 @@ class NotificationService {
     final hh = nudgeMinute ~/ 60;
     final mm = nudgeMinute % 60;
     // 今天这个时刻已过就顺延到明天——与简报同一套路，避免排一个过去的时间点。
+    // P3-7（v3.1.0 审计）：跨天改用构造器日历进位（`day + 1`，DateTime 构造器
+    // 按日历归一化溢出值），不用 `add(Duration(days: 1))` 的「+24 小时」——
+    // DST 切换日会墙钟漂移 1 小时，与 [nextBriefingTime] 同族修法。
     var when = DateTime(now.year, now.month, now.day, hh, mm);
     final nowMinutes = now.hour * 60 + now.minute;
-    if (nowMinutes >= nudgeMinute) when = when.add(const Duration(days: 1));
+    if (nowMinutes >= nudgeMinute) {
+      when = DateTime(now.year, now.month, now.day + 1, hh, mm);
+    }
     // F4：排程前感知勿扰区间——若落点恰在勿扰时段内，按既有 dndDefer 顺延，
     // 避免挽留撞进勿扰被静默吞掉。
     final defer = dndDefer;

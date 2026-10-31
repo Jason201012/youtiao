@@ -1189,6 +1189,18 @@ void main() async {
 
   // 专注结束回填累计专注时长到关联任务（任务行展示「已专注 X 分钟」）。
   focus.onFocusRecorded = (taskId, sec) => task.addFocusSec(taskId, sec);
+  // P3-2（v3.1.0 审计）：专注会话落盘失败的 UI 透出——消费方是 Provider 内部
+  // 无 BuildContext 的路径（番茄循环自动推进 / 杀后台补录），经这里弹全局提示。
+  FocusProvider.onSessionPersistFailed = () {
+    final ctx = _navigatorKey.currentContext;
+    if (ctx == null) return;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      const SnackBar(content: Text('写入失败：专注记录未保存，请重试')),
+    );
+  };
+  // P3-4（v3.1.0 审计）：启动时查询一次系统通知权限状态（Android 13+），
+  // 供设置页「权限被拒」常驻提示展示真实状态；此后每次回前台同步刷新。
+  unawaited(task.refreshNotificationPermission());
   // P2-9（v2.9.6 审计）：专注记录删除时对称扣减任务累计专注——此前只加不减，
   // 「删除记录 → 撤销删除」会把同一段时长回填两次，任务「已专注」虚高，
   // 污染详情页「预估 vs 实际」偏差与排程建议。
@@ -1589,6 +1601,12 @@ class _MainScaffoldState extends State<MainScaffold>
       try {
         Provider.of<FocusProvider>(context, listen: false).noteAppResumed();
       } catch (_) {}
+      // P3-4（v3.1.0 审计）：回前台刷新系统通知权限状态——用户在系统设置里
+      // 开/关权限后，设置页的「权限被拒」常驻提示据此更新（启动时也查一次）。
+      try {
+        unawaited(Provider.of<TaskProvider>(context, listen: false)
+            .refreshNotificationPermission());
+      } catch (_) {}
       // P1-8（部分修复）：简报正文是「调度时烘焙」的，若当天一直没打开 App，
       // 到点弹出的会是启动那刻的旧数据。这里在每次回到前台时用最新 Provider
       // 状态重烘焙并重排，使简报反映「最后一次打开 App 时」的真实数据。
@@ -1701,14 +1719,20 @@ class _MainScaffoldState extends State<MainScaffold>
       const HabitScreen(),
       const SettingsScreen(),
     ];
-    return Consumer<AppLockProvider>(
-      builder: (context, appLock, _) {
-        // P3-12（v2.9.6 审计）：此前的 `context.watch<TaskProvider>()` 让**任何**
-        // 任务变更都重建整个 MainScaffold（含 IndexedStack 里全部已访问页），
-        // 重建面由 1 页放大到最多 6 页。本 builder 实际只消费 `dbLoadFailed`
-        // 一个布尔值，改用 `select` 精确订阅。
-        final safeMode =
-            context.select<TaskProvider, bool>((t) => t.dbLoadFailed);
+  return Consumer<AppLockProvider>(
+    builder: (context, appLock, _) {
+      // P3-12（v2.9.6 审计）：此前的 `context.watch<TaskProvider>()` 让**任何**
+      // 任务变更都重建整个 MainScaffold（含 IndexedStack 里全部已访问页），
+      // 重建面由 1 页放大到最多 6 页。本 builder 实际只消费 `dbLoadFailed`
+      // 一个布尔值，改用 `select` 精确订阅。
+      // P1-1（v3.1.0 审计）：安全模式横幅并入习惯 / 专注两侧的 dbLoadFailed——
+      // 此前横幅只看任务侧：任务加载成功时，习惯/专注加载失败对用户完全不可见
+      //（顶部无提示），而此时任何一次写入都会被 Provider 拒绝落盘（P1-1 守卫），
+      // 用户只会看到「保存失败」，不知根因。
+      final safeMode =
+          context.select<TaskProvider, bool>((t) => t.dbLoadFailed) ||
+              context.select<HabitProvider, bool>((h) => h.dbLoadFailed) ||
+              context.select<FocusProvider, bool>((f) => f.dbLoadFailed);
         final scaffold = Scaffold(
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
           body: SafeArea(
@@ -1985,7 +2009,9 @@ class _DbSafeModeBanner extends StatelessWidget {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                '数据库加载失败，已进入只读安全模式：本次修改不会保存。'
+                // P1-1（v3.1.0 审计）：横幅现覆盖任务/习惯/专注三侧安全模式，
+                // 文案从「数据库加载失败」泛化为「数据加载失败」。
+                '数据加载失败，已进入只读安全模式：本次修改不会保存。'
                 '请前往「设置 → 备份与恢复」导出或修复数据。',
                 style: TextStyle(
                   color: scheme.onErrorContainer,
@@ -2043,11 +2069,56 @@ class AppLockGate extends StatelessWidget {
                   icon: const Icon(Symbols.fingerprint),
                   label: const Text('使用生物识别解锁'),
                 ),
+                // P2-3（v3.1.0 审计）：不可解锁路径的兜底出口——备份恢复可把
+                // app_lock_enabled=true 写进「未录入指纹且无锁屏密码」的设备
+                // （恢复路径历史上绕过了 setEnabled 的硬件门槛校验），此后每次
+                // 回前台都锁死在本页，设置页不可达，唯一出路是清除应用数据
+                // （等于丢掉全部本地数据）。提供「二次确认 + 风险说明」的关闭
+                // 入口，保证用户不会永久失去自己的数据。
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: () => _confirmDisableLock(context),
+                  child: Text(
+                    '无法验证？关闭应用锁',
+                    style: TextStyle(fontSize: 13, color: ext.meta),
+                  ),
+                ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  /// P2-3（v3.1.0 审计）：解锁页的「关闭应用锁」二次确认。风险说明如实——
+  /// 该入口意味着「无需验证即可进入」，设备遗失场景下保护失效，故仅在
+  /// 「生物识别不可用」的锁定死路上提供。
+  static Future<void> _confirmDisableLock(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('关闭应用锁'),
+        content: const Text(
+          '本机当前无法完成生物识别验证（未录入指纹/面容，或无锁屏密码）。'
+          '关闭应用锁后可直接进入应用，如需再次启用请到「设置 → 安全」开启。\n\n'
+          '若这不是你本人的操作，请勿关闭。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dctx, true),
+            child: const Text('关闭应用锁'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    // setEnabled(false)：落盘 + 解除锁定态（MainScaffold 随即切回主界面）。
+    if (!context.mounted) return;
+    await context.read<AppLockProvider>().setEnabled(false);
   }
 }

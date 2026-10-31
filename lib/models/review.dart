@@ -25,7 +25,7 @@ class WeeklyReview {
   final int pomodoroCount;
   /// 本周整体习惯达成率 0..1（实际打卡 / 应打卡，跨所有活动习惯）。
   final double habitRate;
-  /// 本周各习惯「应打卡」总次数（仅活动习惯、仅其设定的星期）。
+  /// 本周各习惯「应打卡」总次数（全量含归档、按创建/归档日夹取，P3-1）。
   final int habitExpected;
   /// 本周各习惯「已打卡」总次数。
   final int habitDone;
@@ -43,7 +43,7 @@ class WeeklyReview {
   /// 本周专注去向 Top（按累计专注秒数降序，最多 3 条，仅含带任务名的会话）。
   final List<TaskFocusStat> focusTop;
 
-  /// 每个活动习惯的本周进度。
+  /// 每个习惯的本周进度（全量含归档，与月报口径一致，P3-1）。
   final List<HabitWeekStat> habits;
 
   const WeeklyReview({
@@ -102,18 +102,26 @@ class WeeklyReview {
     }
     for (final t in task.tasks) {
       catTotal[t.category] = catTotal[t.category]! + 1;
-      if (t.done && t.completedAt != null && _inWeek(t.completedAt!, start, end)) {
+      // P2-1（v3.1.0 审计）：完成统计升级为 occurrence 级——按 [Task.completionEventDays]
+      // （doneDates ∪ completedAt）遍历，重复任务每天完成都计入；旧实现只看
+      // `done && completedAt`，重复任务被午夜重置后一次都进不了周报，与同卡
+      // 「周目标」（weeklyCompletedCount，occurrence 级）自相矛盾。
+      for (final d in t.completionEventDays) {
+        if (!_inWeek(d, start, end)) continue;
         completedCount++;
         catDone[t.category] = catDone[t.category]! + 1;
-        final idx = _dayIndex(t.completedAt!, start);
+        final idx = _dayIndex(d, start);
         if (idx >= 0 && idx < 7) trend[idx]++;
       }
     }
     final lastTrend = List.filled(7, 0);
     final prevStart = start.subtract(const Duration(days: 7));
     for (final t in task.tasks) {
-      if (t.done && t.completedAt != null && _inWeek(t.completedAt!, prevStart, start.subtract(const Duration(days: 1)))) {
-        final idx = _dayIndex(t.completedAt!, prevStart);
+      for (final d in t.completionEventDays) {
+        if (!_inWeek(d, prevStart, start.subtract(const Duration(days: 1)))) {
+          continue;
+        }
+        final idx = _dayIndex(d, prevStart);
         if (idx >= 0 && idx < 7) lastTrend[idx]++;
       }
     }
@@ -131,23 +139,26 @@ class WeeklyReview {
       if (s.phase == FocusPhase.focus) {
         focusSec += s.durationSec;
         if (s.completed) pomodoroCount++;
-      }
-      if (s.taskId == null) continue;
-      final ex = focusMap[s.taskId!];
-      if (ex == null) {
-        focusMap[s.taskId!] = TaskFocusStat(
-          taskId: s.taskId!,
-          title: s.taskTitle ?? '任务',
-          totalSec: s.durationSec,
-          count: 1,
-        );
-      } else {
-        focusMap[s.taskId!] = TaskFocusStat(
-          taskId: ex.taskId,
-          title: ex.title,
-          totalSec: ex.totalSec + s.durationSec,
-          count: ex.count + 1,
-        );
+        // P2-4（v3.1.0 审计）：专注去向只统计**专注阶段**——旧实现taskId 判定
+        // 在 phase 过滤之外，番茄循环的休息段（带 taskId 落库的历史数据）会把
+        // 休息时长记进任务，与同卡「专注(分)」（只算 focus 阶段）对不上账。
+        if (s.taskId == null) continue;
+        final ex = focusMap[s.taskId!];
+        if (ex == null) {
+          focusMap[s.taskId!] = TaskFocusStat(
+            taskId: s.taskId!,
+            title: s.taskTitle ?? '任务',
+            totalSec: s.durationSec,
+            count: 1,
+          );
+        } else {
+          focusMap[s.taskId!] = TaskFocusStat(
+            taskId: ex.taskId,
+            title: ex.title,
+            totalSec: ex.totalSec + s.durationSec,
+            count: ex.count + 1,
+          );
+        }
       }
     }
     final focusTop = focusMap.values.toList()
@@ -160,21 +171,33 @@ class WeeklyReview {
     int habitExpected = 0;
     int habitDone = 0;
     final habits = <HabitWeekStat>[];
-    final checkedCache = <String, Set<DateTime>>{};
-    for (final h in habit.activeHabits) {
+    // P3-1（v3.1.0 审计）：周报习惯口径对齐 [PeriodReview.fromProviders]——
+    // ① 遍历源从 activeHabits 改为**全量含归档**（本周归档的习惯此前当周打卡
+    //    与应打卡一起整段消失，历史被改写；归档不清历史数据，与月报/成就一致）；
+    // ② 「应打卡」按 createdAt / archivedAt 夹取（周三新建的每天习惯，当周
+    //    应打卡 = 周三~周日 5 天，而不是整周 7 天——旧实现把达成率上限压到 3/7）。
+    for (final h in habit.habits) {
+      // 习惯创建之前的日子不计入「应打卡」（与月报同理由）。
+      final cs = h.createdAt;
+      final from = _laterOf(
+          start, DateTime(cs.year, cs.month, cs.day));
+      // 归档日之后不再计入「应打卡」；归档日当天仍算计划内（与月报同口径）。
+      final ar = h.archivedAt;
+      final to = ar != null
+          ? _earlierOf(end, DateTime(ar.year, ar.month, ar.day))
+          : end;
       int expected = 0;
-      for (int i = 0; i < 7; i++) {
-        if (h.shouldCheckInOn(start.add(Duration(days: i)))) expected++;
+      if (!from.isAfter(to)) {
+        final days = to.difference(from).inDays + 1;
+        for (int i = 0; i < days; i++) {
+          if (h.shouldCheckInOn(from.add(Duration(days: i)))) expected++;
+        }
       }
       // T1-2：口径用「达标日」（量化习惯需当日累计量达目标），与周报 / 月报
       // 的统计口径保持同源，避免同一习惯在不同报表里给出不同达成率。
-      final checked =
-          checkedCache.putIfAbsent(h.id, () => habit.metDays(h, 7));
-      int done = 0;
-      for (int i = 0; i < 7; i++) {
-        final day = start.add(Duration(days: i));
-        if (checked.contains(day)) done++;
-      }
+      // P3-1：改用 [metDaysBetween] 直接按本周区间取（旧实现借 metDays(h,7)
+      // 的近 7 天窗口再过滤本周，结果等价但语义绕）。
+      final done = habit.metDaysBetween(h, start, end).length;
       habitExpected += expected;
       habitDone += done;
       habits.add(HabitWeekStat(
@@ -227,6 +250,12 @@ class WeeklyReview {
     final d = DateTime(x.year, x.month, x.day);
     return !d.isBefore(start) && !d.isAfter(end);
   }
+
+  /// P3-1（v3.1.0 审计）：两日期中较晚者（应打卡区间下界夹取用）。
+  static DateTime _laterOf(DateTime a, DateTime b) => a.isAfter(b) ? a : b;
+
+  /// P3-1（v3.1.0 审计）：两日期中较早者（应打卡区间上界夹取用）。
+  static DateTime _earlierOf(DateTime a, DateTime b) => a.isBefore(b) ? a : b;
 
   /// [x] 相对 [start]（周一）的周内下标 0..6，不在范围内返回 -1。
   static int _dayIndex(DateTime x, DateTime start) {

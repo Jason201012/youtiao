@@ -489,7 +489,10 @@ void main() {
       await hp.updateHabit(h, archived: true);
       // 旧详情弹层仍持「归档前」的快照 h——守卫必须看当前对象（已归档）。
       final ok = await hp.setCheckInValue(h, today(), 1);
-      expect(ok, isTrue, reason: '归档写入 = 无操作成功（幂等口径），不是失败');
+      // P3-8（v3.1.0 审计）：返回契约从「无操作成功（true）」改为 **false**——
+      // 归档写入被拒必须如实上报，否则任何未来的批量/程序入口都会把「未写入」
+      // 当成功（全仓「bool = 落盘成功」契约）。落盘结果不变：不真实写入。
+      expect(ok, isFalse, reason: '归档写入 = 拒绝写入，如实返回 false');
       expect(hp.checkInValueOn(h, today()), 0, reason: '不得真实落盘');
     });
 

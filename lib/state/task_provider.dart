@@ -599,6 +599,11 @@ class TaskProvider extends ChangeNotifier {
   /// （[`_applyTaskUpdate`] 不 notify / 不落库），循环后统一 notify + 落库一次。
   ///
   /// P2-2（v3.0.7 审计）：返回落盘是否成功（无实际变更 = true 无操作）。
+  ///
+  /// P3-5（v3.1.0 审计）：归档集合迁移消费落盘结果——N9 只修了
+  /// archiveTag/unarchiveTag，同族的 rename/merge/delete 仍把 `_persistTagArchive`
+  /// 的 bool 丢掉：prefs 写失败时任务表的标签已改、归档集合却回退，重启后
+  /// 「标签名变了、归档态还是旧的」。改动前留快照，失败回滚并返回 false。
   Future<bool> renameTag(String oldName, String newName) async {
     if (oldName == newName || newName.trim().isEmpty) return true;
     final trimmed = newName.trim();
@@ -609,6 +614,7 @@ class TaskProvider extends ChangeNotifier {
         if (_applyTaskUpdate(t.copyWith(tags: newTags))) changed = true;
       }
     }
+    final archivedSnapshot = Set<String>.of(_archivedTags);
     // 归档状态迁移：旧标签已归档 → 新标签继承归档状态
     if (_archivedTags.remove(oldName)) {
       _archivedTags.add(trimmed);
@@ -618,19 +624,38 @@ class TaskProvider extends ChangeNotifier {
       notifyListeners();
       ok = await _persist();
     }
-    await _persistTagArchive();
+    final okArchive = await _persistTagArchive();
+    if (!okArchive) {
+      _archivedTags
+        ..clear()
+        ..addAll(archivedSnapshot);
+      notifyListeners();
+      return false;
+    }
     return ok;
   }
 
   /// 合并标签：把 [source] 标签的所有任务改为 [target] 标签，然后删除 [source]。
-  /// P2-23：同样改为「逐条改内存 + 单次落库」，消除 N 倍写放大。
+  /// P2-23：任务改写走「逐条改内存 + 单次落库」，消除 N 倍写放大。
   ///
-  /// P2-2（v3.0.7 审计）：返回落盘是否成功（无实际变更 = true 无操作）。
-  Future<bool> mergeTags(String source, String target) async {
-    if (source == target) return true;
-    var changed = false;
-    for (final t in _tasks) {
-      if (t.tags.contains(source)) {
+  /// P3-6（v3.1.0 审计）：返回 `(changed, batchId, saved)`——任务改写收编进
+  /// [batchUpdateAs]（改前快照 + 定向撤销日志 + 单次落库），UI 据此挂 10 秒
+  /// 撤销横幅（[undoMergeTags]）；合并前由调用方弹确认（显示影响条数）。
+  ///
+  /// P3-5（v3.1.0 审计）：归档集合迁移消费落盘结果、失败回滚（同 [renameTag]）。
+  Future<(int, int, bool)> mergeTags(String source, String target) async {
+    if (source == target) return (0, 0, true);
+    final archivedSnapshot = Set<String>.of(_archivedTags);
+    // 先快照命中列表再改写：batchUpdateAs 内部同样按 id 回查，两步一致。
+    final ids = _tasks
+        .where((t) => t.tags.contains(source))
+        .map((t) => t.id)
+        .toList();
+    var batchId = 0;
+    var changed = 0;
+    var okTasks = true;
+    if (ids.isNotEmpty) {
+      (batchId, changed, okTasks) = await batchUpdateAs(ids, (t) {
         final newTags = <String>[];
         for (final e in t.tags) {
           if (e == source) {
@@ -639,23 +664,68 @@ class TaskProvider extends ChangeNotifier {
             if (!newTags.contains(e)) newTags.add(e);
           }
         }
-        if (_applyTaskUpdate(t.copyWith(tags: newTags))) changed = true;
-      }
+        return t.copyWith(tags: newTags);
+      });
     }
-    _archivedTags.remove(source);
-    var ok = true;
-    if (changed) {
+    // 归档集合迁移：source 已归档 → target 继承归档状态。
+    final sourceWasArchived = _archivedTags.remove(source);
+    if (sourceWasArchived) _archivedTags.add(target);
+    final okArchive = await _persistTagArchive();
+    if (!okArchive) {
+      _archivedTags
+        ..clear()
+        ..addAll(archivedSnapshot);
       notifyListeners();
-      ok = await _persist();
+      return (changed, batchId, false);
     }
-    await _persistTagArchive();
-    return ok;
+    // P3-6：登记合并撤销条目（归档集合还原信息）。任务部分无改动时
+    // batchId 为 0（batchUpdateAs 早退未分配），这里补分配一个仅供归档还原。
+    if (changed > 0 || sourceWasArchived) {
+      final undoId = batchId == 0 ? _nextBatchId++ : batchId;
+      _mergeUndoLog[undoId] = _MergeUndoEntry(
+        source: source,
+        target: target,
+        sourceWasArchived: sourceWasArchived,
+      );
+      _trimUndoLog(_mergeUndoLog);
+      if (batchId == 0) batchId = undoId;
+      notifyListeners(); // 归档集合变化通知筛选刷新（与 archiveTag 同口径）
+    }
+    return (changed, batchId, okTasks && okArchive);
   }
 
-  /// 删除标签：从所有任务中移除 [name]。
-  /// P2-23：同样改为「逐条改内存 + 单次落库」。
-  ///
+  /// P3-6（v3.1.0 审计）：撤销一次标签合并——按 [mergeTags] 返回的 batchId
+  /// 定向还原：任务 tags 复用 [undoBatchEdit] 的快照，归档集合迁移一并还原。
+  Future<({bool applied, bool saved})> undoMergeTags(int batchId) async {
+    final entry = _mergeUndoLog.remove(batchId);
+    if (entry == null) return (applied: false, saved: false);
+    final taskResult = await undoBatchEdit(batchId);
+    // 归档集合还原：target 撤销继承，source 回归（若原本归档）。
+    var archiveChanged = false;
+    final archivedSnapshot = Set<String>.of(_archivedTags);
+    if (entry.sourceWasArchived) {
+      if (_archivedTags.remove(entry.target)) archiveChanged = true;
+      if (_archivedTags.add(entry.source)) archiveChanged = true;
+    }
+    var okArchive = true;
+    if (archiveChanged) {
+      okArchive = await _persistTagArchive();
+      if (!okArchive) {
+        _archivedTags
+          ..clear()
+          ..addAll(archivedSnapshot);
+      }
+    }
+    if (taskResult.applied || archiveChanged) notifyListeners();
+    return (
+      applied: entry.sourceWasArchived ? true : taskResult.applied,
+      saved: taskResult.saved && okArchive,
+    );
+  }
+
   /// P2-2（v3.0.7 审计）：返回落盘是否成功（无实际变更 = true 无操作）。
+  ///
+  /// P3-5（v3.1.0 审计）：归档集合消费落盘结果、失败回滚（同 [renameTag]）。
   Future<bool> deleteTag(String name) async {
     var changed = false;
     for (final t in _tasks) {
@@ -664,13 +734,21 @@ class TaskProvider extends ChangeNotifier {
         if (_applyTaskUpdate(t.copyWith(tags: newTags))) changed = true;
       }
     }
+    final archivedSnapshot = Set<String>.of(_archivedTags);
     _archivedTags.remove(name);
     var ok = true;
     if (changed) {
       notifyListeners();
       ok = await _persist();
     }
-    await _persistTagArchive();
+    final okArchive = await _persistTagArchive();
+    if (!okArchive) {
+      _archivedTags
+        ..clear()
+        ..addAll(archivedSnapshot);
+      notifyListeners();
+      return false;
+    }
     return ok;
   }
 
@@ -1399,6 +1477,7 @@ class TaskProvider extends ChangeNotifier {
       // 残留的撤销横幅就可能复活 / 回写恢复前快照（同 [restoreFromJson]）。
       _editUndoLog.clear();
       _deleteUndoLog.clear();
+      _mergeUndoLog.clear(); // P3-6（v3.1.0 审计）：合并撤销同样随重载作废
       _tasks
         ..clear()
         ..addAll(loadedTasks);
@@ -1518,7 +1597,8 @@ class TaskProvider extends ChangeNotifier {
     // 每日任务：若今天之前已完成且未到截止日期，则重置为未完成，实现「每天循环」提醒。
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
     //  App 启动时的兜底，并在 App 前台时由 _startMidnightWatch 周期性刷新。）
-    _resetDailyIfNeeded();
+    // P3-8（v3.1.0 审计）：await 落盘结果（签名改 Future<bool>）。
+    unawaited(_resetDailyIfNeeded());
     // P1-1：记录本次启动的日边界基线——启动阶段 main.dart 已显式重排过一次简报 /
     // 挽留，这里同步基线可避免紧随其后的第一次 15 分钟守护再做一次冗余重排。
     _lastResetDay = _ymd(DateTime.now());
@@ -1539,7 +1619,15 @@ class TaskProvider extends ChangeNotifier {
   /// 于是「每天喝水」第二天**永远不会被重置回未完成**，一直挂在「已完成」区，
   /// 与 [Task.isRepeatEnded] / [Task.repeatsOn] 两套判定脱节。
   /// 重复任务是否继续循环只由 `repeatsOn`（内含 repeatUntil + skipDates）决定。
-  bool _resetDailyIfNeeded() {
+  ///
+  /// P3-8（v3.1.0 审计）：签名改 `Future<bool>`，落盘结果不再丢弃——旧实现
+  /// `if (dailyDirty) _persist();` 既不 await 也不看结果：午夜重置写库失败时
+  /// 内存已重置、库仍是「已完成」，次日冷启动任务继续显示已完成且无任何提示，
+  /// 提醒已按新状态重排，形成「列表说未完成、库说已完成」的分歧。现在 await
+  /// 并在失败时记日志（无 UI 上下文可弹）；内存态与库的偏差由后续任意一次
+  /// 成功写入的全量替换自愈（与任务侧「修改类写入口不内存回滚」口径一致），
+  /// 安全模式下 [_persist] 恒 false 也会在此留痕。
+  Future<bool> _resetDailyIfNeeded() async {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     var dailyDirty = false;
@@ -1555,7 +1643,13 @@ class TaskProvider extends ChangeNotifier {
         }
       }
     }
-    if (dailyDirty) _persist();
+    if (dailyDirty) {
+      final ok = await _persist();
+      if (!ok) {
+        AppLog.d('[TaskProvider] 午夜重置落盘失败（重置仅存内存，'
+            '重启前将由下一次成功写入自愈）');
+      }
+    }
     return dailyDirty;
   }
 
@@ -1590,7 +1684,7 @@ class TaskProvider extends ChangeNotifier {
       await _cleanupTrashIfNeeded(persist: true);
       _syncTrashExpireNotice();
     }
-    final changed = _resetDailyIfNeeded();
+    final changed = await _resetDailyIfNeeded(); // P3-8：await 落盘结果
     if (_notificationsEnabled) _rescheduleOneShotReminders();
     // F-2：习惯打卡提醒同样是一次性闹钟，需在每次守护周期补挂（见 [onGuardTick]）。
     if (_notificationsEnabled) onGuardTick?.call();
@@ -1796,6 +1890,7 @@ class TaskProvider extends ChangeNotifier {
     // P2-3「整体重载前清撤销缓冲」同口径。
     _editUndoLog.clear();
     _deleteUndoLog.clear();
+    _mergeUndoLog.clear(); // P3-6（v3.1.0 审计）：合并撤销同样作废
     NotificationService.instance.cancelTrashExpireNotice(); // P1-12：首启清空时取消预告
     _recomputeIdSeq(); // 重置自增 id 起点（空库 → 8 起）
     notifyListeners();
@@ -3534,6 +3629,10 @@ class TaskProvider extends ChangeNotifier {
   /// 删除撤销的定向缓冲（结构同上，但值是「任务 + 邻居锚点」）。
   final Map<int, _DeleteUndoEntry> _deleteUndoLog = {};
 
+  /// P3-6（v3.1.0 审计）：合并撤销的定向缓冲（batchId → 归档集合还原信息）。
+  /// 任务部分的快照在 [_editUndoLog]（由 batchUpdateAs 登记共用 batchId）。
+  final Map<int, _MergeUndoEntry> _mergeUndoLog = {};
+
   /// 自增操作 id（删除 / 批量编辑共用一个序列，两套缓冲本身相互独立）。
   int _nextBatchId = 1;
 
@@ -3862,15 +3961,24 @@ class TaskProvider extends ChangeNotifier {
   ///
   /// P2-2（v3.0.7 审计）：返回落盘是否成功（不在回收站 = false）。旧实现
   /// fire-and-forget：DB 异常时列表已恢复、重启又回回收站且零反馈。
+  ///
+  /// P3-3（v3.1.0 审计）：顺序从「插回 → 挂提醒 → 落盘」改为「插回 → 落盘 →
+  /// 成功后才挂提醒」——旧顺序在写库失败时系统闹钟已挂出，重启后任务回到
+  /// 回收站，而对一个「已删除」的任务的一次性截止提醒仍会准点弹出。与
+  /// P3-5（v3.0.8 审计）「破坏性/副作用操作移到落盘确认之后」的纪律对齐；
+  /// 失败分支根本不触碰通知（内存保留恢复态与 UI 一致，重启自回回收站），
+  /// 无需幂等撤销已挂提醒。
   Future<bool> restoreFromTrash(String id) async {
     final i = _trash.indexWhere((t) => t.id == id);
     if (i == -1) return false;
     final t = _trash.removeAt(i);
     final restored = t.copyWith(deletedAt: null);
     _tasks.insert(0, restored);
-    _scheduleRemindersFor(restored);
     notifyListeners();
     final ok = await _persist();
+    if (ok) {
+      _scheduleRemindersFor(restored); // P3-3：先落盘、成功后再挂提醒
+    }
     _syncTrashExpireNotice(); // P1-12：恢复后重排
     return ok;
   }
@@ -4025,6 +4133,7 @@ class TaskProvider extends ChangeNotifier {
     // 合法撤销机会。
     _editUndoLog.clear();
     _deleteUndoLog.clear();
+    _mergeUndoLog.clear(); // P3-6（v3.1.0 审计）：合并撤销同上作废
     // P1-2：恢复后统一按标题重算拼音首字母（旧版备份 pinyinInitials 多为空串，
     // 直接采用会导致恢复后拼音搜索静默失效），保证搜索始终可用。
     _tasks
@@ -4498,6 +4607,22 @@ class _DeleteUndoEntry {
   final List<Task> tasks;
   final List<({String? prevId, String? nextId})> anchors;
   _DeleteUndoEntry(this.tasks, this.anchors);
+}
+
+/// P3-6（v3.1.0 审计）：标签合并撤销的归档集合还原信息。
+/// 任务部分的改前快照由 batchUpdateAs 登记进 [_editUndoLog]，与 [_mergeUndoLog]
+/// 共用同一个 batchId；撤销时两侧一起还原。
+class _MergeUndoEntry {
+  final String source;
+  final String target;
+
+  /// 合并时 source 是否处于归档态（true = 撤销时把归档态还给 source）。
+  final bool sourceWasArchived;
+  const _MergeUndoEntry({
+    required this.source,
+    required this.target,
+    required this.sourceWasArchived,
+  });
 }
 
 /// 自动备份快照的轻量描述（供「备份与恢复」面板列出与还原）。

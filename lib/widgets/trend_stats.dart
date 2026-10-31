@@ -35,12 +35,17 @@ class _TrendStatsState extends State<TrendStats> {
     return List.generate(n, (i) => today.subtract(Duration(days: n - 1 - i)));
   }
 
+  // P2-1（v3.1.0 审计）：三个计数器全部升级为 occurrence 级 [Task.completionEventDays]
+  // ——旧实现只看 `done && completedAt`，重复任务每天完成却被午夜重置，
+  // 「完成趋势」对重复任务用户几乎恒为 0。
+
   List<int> _dailyCounts(List<DateTime> days) {
     final counts = List.filled(days.length, 0);
     for (final t in widget.tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final idx = days.indexWhere((x) => x.isAtSameMomentAs(_d(t.completedAt!)));
-      if (idx != -1) counts[idx]++;
+      for (final d in t.completionEventDays) {
+        final idx = days.indexWhere((x) => x.isAtSameMomentAs(d));
+        if (idx != -1) counts[idx]++;
+      }
     }
     return counts;
   }
@@ -53,10 +58,11 @@ class _TrendStatsState extends State<TrendStats> {
   List<int> _monthlyCounts(List<DateTime> months) {
     final counts = List.filled(months.length, 0);
     for (final t in widget.tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final d = t.completedAt!;
-      final idx = months.indexWhere((m) => m.year == d.year && m.month == d.month);
-      if (idx != -1) counts[idx]++;
+      for (final d in t.completionEventDays) {
+        final idx =
+            months.indexWhere((m) => m.year == d.year && m.month == d.month);
+        if (idx != -1) counts[idx]++;
+      }
     }
     return counts;
   }
@@ -65,7 +71,9 @@ class _TrendStatsState extends State<TrendStats> {
     final today = _d(DateTime.now());
     int n = 0;
     for (final t in widget.tasks) {
-      if (t.done && t.completedAt != null && _d(t.completedAt!) == today) n++;
+      for (final d in t.completionEventDays) {
+        if (d == today) n++;
+      }
     }
     return n;
   }

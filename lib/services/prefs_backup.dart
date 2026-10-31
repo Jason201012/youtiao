@@ -50,17 +50,20 @@ const List<String> _backedUpPrefKeys = <String>[
   'lock_screen_private',      // 锁屏隐藏通知内容（L-06）
   'flag_secure',              // 防截屏/录屏（L-07）
   'allow_external_links',     // 备注外链点击（L-12）
-  // 早晚简报
-  'briefing_morning_enabled',
-  'briefing_morning_hour',
-  'briefing_morning_minute',
-  'briefing_evening_enabled',
-  'briefing_evening_hour',
-  'briefing_evening_minute',
-  // 习惯漏卡挽留（P1-7）
-  'habit_nudge_enabled',
-  'habit_nudge_hour',
-  'habit_nudge_minute',
+  // 早晚简报（P2-2，v3.1.0 审计：旧白名单写的是 briefing_morning_* 等
+  // **幽灵键**——TaskProvider 实际读写 brief_morning_on / brief_morning_h /
+  // brief_morning_m、brief_evening_*、habit_nudge_on / habit_nudge_min（见
+  // task_provider 顶部常量），导出必然为空、恢复必然写不中，用户改过的
+  // 时刻静默回默认。逐项以 Provider 常量为准确认，勿再手抄显示文案）。
+  'brief_morning_on',
+  'brief_morning_h',
+  'brief_morning_m',
+  'brief_evening_on',
+  'brief_evening_h',
+  'brief_evening_m',
+  // 习惯漏卡挽留（P1-7；P2-2 同上改真实键名）
+  'habit_nudge_on',
+  'habit_nudge_min',
   // 归档标签 / 自动备份口令关闭后的清理用标记
   'archived_tags',
   // P2-1（v2.8.7 审计）：提醒时区覆盖（v2.8.7 新增偏好键）。与 P2-12 同型——
@@ -68,6 +71,17 @@ const List<String> _backedUpPrefKeys = <String>[
   // 恢复侧配套：applyAppPrefs 写回后必须调 NotificationService.reloadTimezoneOverride()
   // 重解析内存时区并全量重排（见 backup_sheet 恢复流程），否则仅落盘、本轮不生效。
   'reminder_timezone_override',
+];
+
+/// P2-2（v3.1.0 审计）：刻意**不**进白名单的键及策略说明。
+///
+/// - `auto_backup_encrypt`（自动备份加密开关）：口令按设计存于
+///   flutter_secure_storage、不随备份导出——若把开关迁过去，换机恢复后
+///   「开关开着、口令缺失」，每日自动快照会**因缺口令持续失败**（比明文
+///   降级更糟）。不迁移 + 恢复完成后在结果提示里说明「需重新设置」，
+///   避免静默从加密降级为明文。
+const List<String> _neverBackedUpPrefKeys = <String>[
+  'auto_backup_encrypt',
 ];
 
 /// 读取白名单内的偏好键，返回可被 JSON 序列化的 `{key: value}` 映射。
@@ -78,6 +92,9 @@ Future<Map<String, dynamic>> collectAppPrefs() async {
   final prefs = await SharedPreferences.getInstance();
   final out = <String, dynamic>{};
   for (final k in _backedUpPrefKeys) {
+    // P2-2（v3.1.0 审计）：显式排除段二道闸——即使该键日后被误加回白名单，
+    // 也不会出现在备份里（与 applyAppPrefs 的白名单判断互为冗余防线）。
+    if (_neverBackedUpPrefKeys.contains(k)) continue;
     if (!prefs.containsKey(k)) continue;
     final v = prefs.get(k);
     if (v is bool || v is int || v is double || v is String) {

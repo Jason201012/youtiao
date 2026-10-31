@@ -241,21 +241,24 @@ class PeriodReview {
     int prevCompletedCount = 0;
     final categoryCount = <Category, int>{for (final c in Category.values) c: 0};
     final doneDays = <DateTime>{};
+    // P2-1（v3.1.0 审计）：完成统计升级为 occurrence 级——按 [Task.completionEventDays]
+    // 遍历（doneDates ∪ completedAt）。旧实现只看 `done && completedAt` 单槽，
+    // 重复任务被午夜重置后其历史完成从月报 / 年报中整段消失。
     for (final t in task.tasks) {
-      if (!t.done || t.completedAt == null) continue;
-      final d = _dateOnly(t.completedAt!);
-      if (_inRange(d, prevRange.$1, prevRange.$2)) prevCompletedCount++;
-      if (!_inRange(d, start, end)) continue;
-      completedCount++;
-      categoryCount[t.category] = categoryCount[t.category]! + 1;
-      doneDays.add(d);
-      // 月报按「日」、年报按「月」、学期按「跨年月偏移」定位桶。
-      final idx = period == ReviewPeriod.month
-          ? d.day - 1
-          : (period == ReviewPeriod.semester
-              ? (d.year - start.year) * 12 + (d.month - start.month)
-              : d.month - 1);
-      if (idx >= 0 && idx < bucketCount) buckets[idx]++;
+      for (final d in t.completionEventDays) {
+        if (_inRange(d, prevRange.$1, prevRange.$2)) prevCompletedCount++;
+        if (!_inRange(d, start, end)) continue;
+        completedCount++;
+        categoryCount[t.category] = categoryCount[t.category]! + 1;
+        doneDays.add(d);
+        // 月报按「日」、年报按「月」、学期按「跨年月偏移」定位桶。
+        final idx = period == ReviewPeriod.month
+            ? d.day - 1
+            : (period == ReviewPeriod.semester
+                ? (d.year - start.year) * 12 + (d.month - start.month)
+                : d.month - 1);
+        if (idx >= 0 && idx < bucketCount) buckets[idx]++;
+      }
     }
 
     int bestBucketIndex = -1;
@@ -303,22 +306,25 @@ class PeriodReview {
         } else {
           focusUntrackedSec += s.durationSec;
         }
+        // P2-4（v3.1.0 审计）：专注去向只统计**专注阶段**——旧实现 taskId 判定
+        // 在 phase 过滤之外，番茄循环休息段（历史数据带 taskId 落库）会把休息
+        // 时长记进任务，与同卡「专注(分)」对不上账。
+        if (s.taskId == null) continue;
+        final ex = focusMap[s.taskId!];
+        focusMap[s.taskId!] = ex == null
+            ? TaskFocusStat(
+                taskId: s.taskId!,
+                title: s.taskTitle ?? '任务',
+                totalSec: s.durationSec,
+                count: 1,
+              )
+            : TaskFocusStat(
+                taskId: ex.taskId,
+                title: ex.title,
+                totalSec: ex.totalSec + s.durationSec,
+                count: ex.count + 1,
+              );
       }
-      if (s.taskId == null) continue;
-      final ex = focusMap[s.taskId!];
-      focusMap[s.taskId!] = ex == null
-          ? TaskFocusStat(
-              taskId: s.taskId!,
-              title: s.taskTitle ?? '任务',
-              totalSec: s.durationSec,
-              count: 1,
-            )
-          : TaskFocusStat(
-              taskId: ex.taskId,
-              title: ex.title,
-              totalSec: ex.totalSec + s.durationSec,
-              count: ex.count + 1,
-            );
     }
     final focusTop = focusMap.values.toList()
       ..sort((a, b) => b.totalSec.compareTo(a.totalSec));

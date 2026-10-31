@@ -1103,6 +1103,37 @@ class Task {
     return done && completedAt != null && isSameDay(completedAt!, day);
   }
 
+  /// P2-1（v3.1.0 审计）：该任务的全部「完成事件日」（date-only 集合）。
+  ///
+  /// 完成类统计（周报 / 月报 / 年报 / 成就 / 看板趋势）的**行级单一真源**：
+  /// 一次性任务 = [completedAt] 所在日（当前仍 done 时）；重复任务 = [doneDates]
+  /// 的全部历史落点。此前这些统计直读 `completedAt` 单槽，而重复任务的
+  /// completedAt 会在午夜重置时被清空——「连续 3 天完成每天喝水」在周报 /
+  /// 成就里一次都算不上，与 occurrence 级的周目标（weeklyCompletedCount）
+  /// 同屏打架。本集合与 [completionDayCounts]（TaskProvider，聚合版）口径一致。
+  Set<DateTime> get completionEventDays {
+    final set = <DateTime>{};
+    for (final k in doneDates) {
+      // 解析口径与 TaskProvider._parseYmdSafe 对齐（P2-1 同源约束）：
+      // 严格逐字段校验（m 1..12 / d 1..31），脏串一律跳过——若沿用
+      // _parseYmdOrNull 的「只查形态」，'2026-13-40' 会被 DateTime 构造器
+      // 归一化成 2027 年的日期，污染跨年区间的完成统计。
+      final parts = k.split('-');
+      if (parts.length != 3) continue;
+      final y = int.tryParse(parts[0]);
+      final m = int.tryParse(parts[1]);
+      final d = int.tryParse(parts[2]);
+      if (y == null || m == null || d == null) continue;
+      if (y < 1970 || y > 9999 || m < 1 || m > 12 || d < 1 || d > 31) continue;
+      set.add(DateTime(y, m, d));
+    }
+    if (done && completedAt != null) {
+      final c = completedAt!;
+      set.add(DateTime(c.year, c.month, c.day));
+    }
+    return set;
+  }
+
   /// F3 / P2-1：重复是否已结束（[repeatUntil] 严格早于 [now] 所在日）。
   ///
   /// 「结束重复」把 [repeatUntil] 设为昨天，此后：首页「重复」分区不再收录它

@@ -566,14 +566,23 @@ class BackupSheet {
       } catch (_) {}
 
       if (context.mounted) {
+        // P2-2（v3.1.0 审计）：自动备份加密开关（auto_backup_encrypt）刻意不随
+        // 备份迁移（口令在 secure storage、跨设备不存在）——恢复后开关回到
+        // 关闭，属「静默降级」；在这里显式告知，不再无声。
+        const encryptHint =
+            '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
         if (failures.isEmpty) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('已从备份恢复')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('已从备份恢复$encryptHint'),
+              duration: Duration(seconds: 6),
+            ),
+          );
         } else {
           // 任务已成功恢复，但部分子系统失败：提示具体步骤，便于用户重试用子集。
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('任务已恢复，但以下步骤失败：${failures.join('、')}'),
+              content: Text('任务已恢复，但以下步骤失败：${failures.join('、')}$encryptHint'),
               duration: const Duration(seconds: 6),
             ),
           );
@@ -854,11 +863,15 @@ class BackupSheet {
         await habitProvider.scheduleAllReminders();
       } catch (_) {}
       if (context.mounted) {
+        // P2-2（v3.1.0 审计）：同 _doRestore——自动备份加密开关不随备份迁移，
+        // 恢复后显式告知（不静默降级）。
+        const encryptHint =
+            '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: failures.isEmpty
-                ? Text('已从 ${entry.label} 的自动备份还原')
-                : Text('任务已还原，但：${failures.join('、')}'),
+                ? Text('已从 ${entry.label} 的自动备份还原$encryptHint')
+                : Text('任务已还原，但：${failures.join('、')}$encryptHint'),
             duration: const Duration(seconds: 6),
           ),
         );

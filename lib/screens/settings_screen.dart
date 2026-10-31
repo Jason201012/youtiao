@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.1.0');
+      if (mounted) setState(() => _version = '3.1.1');
     }
   }
 
@@ -487,6 +487,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       Text('$label × ${report.countOf(type)}',
                           style: const TextStyle(fontWeight: FontWeight.w600)),
                     ],
+                  ),
+                  // P3-6（v3.1.0 审计）：渲染处理动作说明——meta 每条的第三段
+                  // 此前解构为 `action` 后从未使用（analyzer 直接报 unused），
+                  // 用户在点「修复」前看不到每种问题会被怎么处理，尤其
+                  // 「超期回收站」是不可恢复的彻底删除。
+                  Padding(
+                    padding: const EdgeInsets.only(left: 24, top: 2),
+                    child: Text('处理：$action',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(dctx).colorScheme.onSurfaceVariant)),
                   ),
                   // P3-14（v2.9.9 审计）：逐条明细。
                   // P3-21（v3.0.0 审计）：明细改**全量**列出——弹层内容本身在
@@ -966,6 +977,82 @@ String _formatIdle(int seconds) {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
+                    // P3-4（v3.1.0 审计）：通知权限被系统拒绝的常驻提示——
+                    // P2-10 落地了 `notificationPermissionDenied` getter 与
+                    // `refreshNotificationPermission()`（启动 / 回前台刷新），
+                    // 但 UI 从未消费：Android 13+ 用户拒绝权限后开关显示
+                    // 「已开启」、全部提醒静默失效，只有点「发送测试通知」
+                    // 才偶然发现。现按 getter 常驻提示（附重新检查 action）。
+                    Selector<TaskProvider, bool?>(
+                      selector: (_, p) => p.notificationPermissionDenied,
+                      builder: (context, denied, _) {
+                        if (denied != true) return const SizedBox.shrink();
+                        return Padding(
+                          padding:
+                              const EdgeInsets.only(bottom: AppColors.contentGap),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .errorContainer,
+                              borderRadius:
+                                  BorderRadius.circular(AppColors.cardRadius),
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(Symbols.warning_amber_rounded,
+                                    size: 18,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onErrorContainer),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    '系统通知权限已被拒绝：提醒将无法送达。'
+                                    '请到系统 设置 → 应用 → 有条 → 通知 开启「允许通知」。',
+                                    style: TextStyle(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onErrorContainer,
+                                      fontSize: 12,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                TextButton(
+                                  onPressed: () async {
+                                    await provider
+                                        .refreshNotificationPermission();
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                              provider.notificationPermissionDenied ==
+                                                      true
+                                                  ? '仍未授权：请先在系统设置中开启通知'
+                                                  : '已检测到通知权限'),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  child: Text('重新检查',
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onErrorContainer)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                     SettingsRow(
                       icon: Symbols.notifications,
                       label: '通知提醒',

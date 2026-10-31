@@ -38,6 +38,21 @@ class FocusProvider extends ChangeNotifier {
 
   final List<FocusSession> _sessions = [];
 
+  /// P1-1（v3.1.0 审计）：专注侧安全模式标志——与 TaskProvider / HabitProvider
+  /// 的 dbLoadFailed 同口径。此前 [load] 没有 try/catch：`_sessions` 先 clear、
+  /// `await db.loadFocus()` 后抛错，异常被 main._safeLoad 吞掉——内存为空且
+  /// 无任何提示，随后任意一次 [addSession] 的整表替换写入（replaceFocus）会把
+  /// 库中**全部历史专注记录**覆盖成只剩这一条，UI 报「保存成功」。置位后由
+  /// [_persist] 拒绝落盘，main 顶部安全模式横幅统一提示。
+  bool _dbLoadFailed = false;
+  bool get dbLoadFailed => _dbLoadFailed;
+
+  /// P1-1（v3.1.0 审计）：测试钩子——「加载失败置位」在宿主测试环境无法用
+  /// 真实坏库复现（内存后端读写同构），由回归测试显式置位后验证
+  /// [_persist] 的拒绝语义（与 task_provider 的 @visibleForTesting 门槛同型）。
+  @visibleForTesting
+  void markDbLoadFailedForTest() => _dbLoadFailed = true;
+
   /// 自定义专注时长（秒），默认 30 分钟。
   int _customSec = 30 * 60;
   int get customSec => _customSec;
@@ -91,6 +106,22 @@ class FocusProvider extends ChangeNotifier {
     pendingTaskTitle = title;
     jumpToFocusTab?.call();
     notifyListeners();
+  }
+
+  /// P3-2（v3.1.0 审计）：专注会话落盘失败时的 UI 透出回调——由 main 注入。
+  /// 消费方是没有 BuildContext 的内部路径（番茄循环 tick 自动推进、杀后台
+  /// 补录），它们无法直接弹 SnackBar；注入式回调 + 未注入静默跳过，与
+  /// [HabitProvider.onHabitsChanged] 同一模式。
+  static void Function()? onSessionPersistFailed;
+
+  void _notifySessionPersistFailed() {
+    final cb = onSessionPersistFailed;
+    if (cb == null) return;
+    try {
+      cb();
+    } catch (e) {
+      AppLog.d('[FocusProvider] 落盘失败回调异常（已忽略）：$e');
+    }
   }
 
   /// 专注会话记录后的回调：(taskId, durationSec)。由 main 接线到
@@ -168,23 +199,37 @@ class FocusProvider extends ChangeNotifier {
     if (pr != null && pr > 0) _pomoRounds = pr;
     // —— 专注会话从旧版 SP JSON 迁移到 SQLite（仅首次：DB 为空且旧 key 存在）——
     final db = LocalDatabase.instance;
-    // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。
-    // 与 HabitProvider.load() 保持一致，避免宿主环境下 databaseFactory 未初始化。
-    if (!LocalDatabase.testUseMemory) {
-      await db.db;
-    }
-    // L9（v3.0.8 审计）：同 TaskProvider.load——损坏旧 JSON 抛错时保留 key、
-    // 按空库继续（migrate 在 replaceFocus 之前中止，不覆盖写）。
-    if (await db.focusEmpty && prefs.getString(_kFocus) != null) {
-      try {
-        await db.migrateFocusFromPrefs(prefs);
-      } catch (e, s) {
-        AppLog.d('[FocusProvider] 旧版 SP 数据迁移失败（已保留旧 key）：$e\n$s');
+    // P1-1（v3.1.0 审计）：DB 打开 / 迁移 / 读取统一纳入 try/catch——旧实现
+    // 无守卫，任何一处抛错都会一路冒到 main._safeLoad 被吞（内存空、无提示），
+    // 随后任何一次成功写入（replaceFocus 整表替换）都会把库中全部历史专注
+    // 记录覆盖成单条。失败时清空内存并置安全模式：由 [_persist] 拒绝后续
+    // 写入、main 顶部安全模式横幅统一提示。
+    try {
+      // 内存后端（测试）无需打开真实 SQLite；仅在生产（非内存）模式确保建表。
+      // 与 HabitProvider.load() 保持一致，避免宿主环境下 databaseFactory 未初始化。
+      if (!LocalDatabase.testUseMemory) {
+        await db.db;
       }
+      // L9（v3.0.8 审计）：同 TaskProvider.load——损坏旧 JSON 抛错时保留 key、
+      // 按空库继续（migrate 在 replaceFocus 之前中止，不覆盖写）。迁移自身的
+      // 失败保留独立 catch：旧 key 保留、按空库继续，不因此置安全模式。
+      if (await db.focusEmpty && prefs.getString(_kFocus) != null) {
+        try {
+          await db.migrateFocusFromPrefs(prefs);
+        } catch (e, s) {
+          AppLog.d('[FocusProvider] 旧版 SP 数据迁移失败（已保留旧 key）：$e\n$s');
+        }
+      }
+      final loaded = await db.loadFocus();
+      _sessions
+        ..clear()
+        ..addAll(loaded);
+      _dbLoadFailed = false; // 加载成功即脱离安全模式
+    } catch (e, s) {
+      AppLog.d('[FocusProvider] 专注会话加载失败（专注记录暂不可用）：$e\n$s');
+      _sessions.clear();
+      _dbLoadFailed = true;
     }
-    _sessions
-      ..clear()
-      ..addAll(await db.loadFocus());
     // 恢复进行中的番茄钟：杀后台 / 重启后据此恢复，避免时长丢失。
     final rawA = prefs.getString(_kActive);
     if (rawA != null) {
@@ -283,8 +328,21 @@ class FocusProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _persist() async {
-    await LocalDatabase.instance.replaceFocus(_sessions);
+  /// P3-2（v3.1.0 审计）：返回落盘是否成功——旧实现 `Future<void>` 丢弃结果，
+  /// 写库失败时记录只活在内存、重启即丢且无提示。
+  ///
+  /// P1-1（v3.1.0 审计）：安全模式写盘守卫——与 TaskProvider._persist（S13）同
+  /// 口径。加载失败后内存不全，replaceFocus 是整表替换，任一次成功写入都会把
+  /// 库中全部历史专注记录覆盖成内存态（完成一次专注 = 抹掉全部历史）。
+  Future<bool> _persist() async {
+    if (_dbLoadFailed) return false;
+    try {
+      await LocalDatabase.instance.replaceFocus(_sessions);
+      return true;
+    } catch (e) {
+      AppLog.d('[FocusProvider] 持久化专注会话失败：$e');
+      return false;
+    }
   }
 
   /// 持久化进行中的番茄钟运行态；无进行中则删除该 key。
@@ -467,16 +525,23 @@ class FocusProvider extends ChangeNotifier {
 
   /// 手动停止：按已逝时间补录一条（未完成），并清空进行中状态、取消完成通知。
   /// 手动停止视为放弃当前循环，回合计数一并清零。
-  Future<void> stopTimer() async {
-    if (!hasActive) return;
+  ///
+  /// P3-2（v3.1.0 审计）：返回补录是否落盘成功（无补录 = true），供停止按钮
+  /// 如实提示——旧实现丢弃 `_persist()` 结果，写库失败时记录重启即丢且零反馈。
+  Future<bool> stopTimer() async {
+    if (!hasActive) return true;
     final elapsed = activeTotalSec - remainingSec;
     _tickTimer?.cancel();
+    var ok = true;
     if (elapsed > 0) {
       final now = DateTime.now();
+      // P2-4（v3.1.0 审计）：休息段手动停止同样不把会话记到任务上（与
+      // [_recordAndAdvance] 的落库口径一致）。
+      final bool isFocusPhase = activePhase == FocusPhase.focus;
       final s = FocusSession(
         id: _nextSessionId(),
-        taskId: activeTaskId,
-        taskTitle: activeTaskTitle,
+        taskId: isFocusPhase ? activeTaskId : null,
+        taskTitle: isFocusPhase ? activeTaskTitle : null,
         plannedSec: activeTotalSec,
         durationSec: elapsed,
         completed: false,
@@ -485,7 +550,8 @@ class FocusProvider extends ChangeNotifier {
         startedAt: now.subtract(Duration(seconds: elapsed)),
         endedAt: now,
       );
-      addSession(s);
+      ok = await addSession(s);
+      if (!ok) _notifySessionPersistFailed();
       _maybeExportToCalendar(s);
     }
     final hadInterrupt = activeInterruptCount > 0;
@@ -498,6 +564,7 @@ class FocusProvider extends ChangeNotifier {
     }
     await _persistActive();
     notifyListeners();
+    return ok;
   }
 
   void _resetActive() {
@@ -609,10 +676,15 @@ class FocusProvider extends ChangeNotifier {
     final now = DateTime.now();
     final cap = start.add(Duration(seconds: total));
     final ended = cap.isAfter(now) ? now : cap;
+    // P2-4（v3.1.0 审计）：休息阶段的会话不携带任务——旧实现把 activeTaskId
+    // 原样带进休息段并触发任务累计回填，25/5 循环 4 轮后任务「已专注」显示
+    // 130 分钟（100 专注 + 30 休息）。运行态保留 activeTaskId（休息结束回到
+    // 专注阶段仍关联同一任务），只对**落库的会话**抹去任务关联。
+    final bool isFocusPhase = phase == FocusPhase.focus;
     final s = FocusSession(
       id: _nextSessionId(),
-      taskId: activeTaskId,
-      taskTitle: activeTaskTitle,
+      taskId: isFocusPhase ? activeTaskId : null,
+      taskTitle: isFocusPhase ? activeTaskTitle : null,
       plannedSec: total,
       durationSec: total,
       completed: true,
@@ -621,7 +693,10 @@ class FocusProvider extends ChangeNotifier {
       startedAt: start,
       endedAt: ended,
     );
-    addSession(s);
+    // P3-2（v3.1.0 审计）：await 落盘结果；失败经 [onSessionPersistFailed]
+    // 透给 UI 提示（tick 触发的自动推进没有 BuildContext）。
+    final ok = await addSession(s);
+    if (!ok) _notifySessionPersistFailed();
     _maybeExportToCalendar(s);
 
     // P0-4：本阶段收尾，清掉挽留通知；进入下一阶段前先把计数归零。
@@ -695,28 +770,46 @@ class FocusProvider extends ChangeNotifier {
     await NotificationService.instance.cancelFocusDone();
   }
 
-  void addSession(FocusSession s) {
+  /// P3-2（v3.1.0 审计）：返回落盘是否成功。新增写入**不回滚内存**（与任务侧
+  /// addFocusSec「修改类写入口不内存回滚」口径一致——回滚会让用户刚跑完的
+  /// 专注在 UI 上凭空消失），失败由调用方如实提示；安全模式下恒 false（P1-1）。
+  ///
+  /// P2-4（v3.1.0 审计）：任务累计回填（[onFocusRecorded]）仅限**专注阶段**会话
+  /// ——休息段带 taskId 的历史数据不再把休息时长记到任务上。回调整体挪到
+  /// **落盘成功之后**：落盘失败时任务累计与库内状态保持一致（都未生效）。
+  Future<bool> addSession(FocusSession s) async {
     _sessions.add(s);
-    if (s.taskId != null) {
+    final ok = await _persist();
+    if (ok && s.taskId != null && s.phase == FocusPhase.focus) {
       onFocusRecorded?.call(s.taskId!, s.durationSec);
     }
-    _persist();
     notifyListeners();
+    return ok;
   }
 
-  /// 删除单条专注记录（按 id）。返回被删的那条（供撤销原样恢复，P3-5）；
-  /// id 不存在返回 null。
+  /// 删除单条专注记录（按 id）。
   ///
   /// P2-9（v2.9.6 审计）：删除与新增**对称**——带 taskId 的记录删除时经
   /// [onFocusRemoved] 扣减任务累计专注（此前只加不减，撤销删除再回填即双倍）。
-  FocusSession? removeSession(String id) {
+  ///
+  /// P3-2（v3.1.0 审计）：返回被删记录；**null = 删除未生效**（id 不存在，或
+  /// 落盘失败已回滚内存）——旧实现 `_persist()` 丢弃结果：删除可能只生效在
+  /// 内存、重启「复活」，而横幅已承诺可撤销。落盘失败时插回原位并返回 null，
+  /// 调用方（focus_screen）据 null 如实提示。
+  Future<FocusSession?> removeSession(String id) async {
     final i = _sessions.indexWhere((s) => s.id == id);
     if (i == -1) return null;
     final s = _sessions.removeAt(i);
-    if (s.taskId != null) {
+    final ok = await _persist();
+    if (!ok) {
+      _sessions.insert(i, s);
+      notifyListeners();
+      return null;
+    }
+    if (s.taskId != null && s.phase == FocusPhase.focus) {
+      // P2-4：休息段（历史数据带 taskId）删除时不扣任务累计（写入侧已不回填）。
       onFocusRemoved?.call(s.taskId!, s.durationSec);
     }
-    _persist();
     notifyListeners();
     return s;
   }
@@ -724,9 +817,13 @@ class FocusProvider extends ChangeNotifier {
   /// 删除今天（date-only）的全部专注记录。返回被删的记录列表（供撤销整体
   /// 恢复，P3-15——同屏单条删除有 10 秒撤销，批量清空反而无保护，力度倒挂）。
   ///
-  /// P2-9 对称扣减：与 [removeSession] 同口径，带 taskId 的记录逐条经
-  /// [onFocusRemoved] 扣减；撤销恢复走 [addSession] 逐条回填，两侧相抵。
-  List<FocusSession> clearToday() {
+  /// P3-2（v3.1.0 审计）：**空列表 = 清空未生效**（今天本无记录，或落盘失败
+  /// 已回滚内存——调用方 focus_screen 判空后不再弹「已清空 0 条」的假横幅，
+  /// 落盘失败时给出如实提示）。
+  ///
+  /// P2-9 对称扣减：与 [removeSession] 同口径，带 taskId 的**专注阶段**记录
+  /// 逐条经 [onFocusRemoved] 扣减；撤销恢复走 [addSession] 逐条回填，两侧相抵。
+  Future<List<FocusSession>> clearToday() async {
     final t = DateTime.now();
     final today = DateTime(t.year, t.month, t.day);
     final removed = _sessions
@@ -736,12 +833,17 @@ class FocusProvider extends ChangeNotifier {
     if (removed.isEmpty) return const <FocusSession>[];
     _sessions.removeWhere((s) =>
         DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == today);
+    final ok = await _persist();
+    if (!ok) {
+      _sessions.addAll(removed);
+      notifyListeners();
+      return const <FocusSession>[];
+    }
     for (final s in removed) {
-      if (s.taskId != null) {
+      if (s.taskId != null && s.phase == FocusPhase.focus) {
         onFocusRemoved?.call(s.taskId!, s.durationSec);
       }
     }
-    _persist();
     notifyListeners();
     return removed;
   }
@@ -779,12 +881,15 @@ class FocusProvider extends ChangeNotifier {
   /// 今日专注总秒数（含休息阶段，历史口径）。
   int get todayTotalSec => totalSecOn(DateTime.now());
 
-  /// 专注时段分布（A2）：按「开始时刻的小时」把全部专注会话（含休息阶段）聚合到 24 个桶，
-  /// 返回长度 24 的 int 列表（下标 0..23 对应 00:00..23:00 的累计专注秒数）。
+  /// 专注时段分布（A2）：按「开始时刻的小时」把全部**专注阶段**会话聚合到
+  /// 24 个桶，返回长度 24 的 int 列表（下标 0..23 对应 00:00..23:00 的累计专注秒数）。
   /// 用于「专注时段分布图」自绘直方图。零新存储，纯基于现有 [_sessions] 现算。
+  /// P2-4（v3.1.0 审计）：旧实现含休息阶段——休息时段混进「专注时段分布」，
+  /// 与页面其它「专注阶段」口径打架。
   List<int> hourDistribution() {
     final buckets = List.filled(24, 0);
     for (final s in _sessions) {
+      if (s.phase != FocusPhase.focus) continue;
       final h = s.startedAt.hour.clamp(0, 23);
       buckets[h] += s.durationSec;
     }
@@ -794,8 +899,12 @@ class FocusProvider extends ChangeNotifier {
   /// 今日**专注阶段**总秒数（不含休息，推荐用于「今日专注」展示）。
   int get todayFocusSec => focusSecOn(DateTime.now());
 
-  /// 累计专注总秒数。
-  int get totalSec => _sessions.fold(0, (sum, s) => sum + s.durationSec);
+  /// 累计**专注阶段**总秒数（P2-4，v3.1.0 审计：不含休息——成就「累计专注
+  /// 分钟」与专注页「累计」消费本值，把休息算进去会让核心度量系统性偏高，
+  /// 且与 [focusSecOn] / [todayFocusSec] 的阶段口径打架）。
+  int get totalSec => _sessions
+      .where((s) => s.phase == FocusPhase.focus)
+      .fold(0, (sum, s) => sum + s.durationSec);
 
   /// 今日完成的番茄数（跑满预设时长的**专注**阶段；休息不计入）。
   int get todayCompleted => completedOn(DateTime.now());
@@ -825,17 +934,29 @@ class FocusProvider extends ChangeNotifier {
   /// 今日专注被打断次数（F2 展示闭环的今日入口）。
   int get todayInterruptCount => interruptCountOn(DateTime.now());
 
-  void clear() {
+  /// P3-2（v3.1.0 审计）：返回落盘是否成功（此前丢弃结果）。失败时内存回滚
+  /// ——清空族与删除族同口径，UI 显示的即已落盘的。
+  Future<bool> clear() async {
+    final snapshot = List<FocusSession>.of(_sessions);
     _sessions.clear();
-    _persist();
+    final ok = await _persist();
+    if (!ok) {
+      _sessions
+        ..clear()
+        ..addAll(snapshot);
+    }
     notifyListeners();
+    return ok;
   }
 
-  /// 按关联任务聚合的专注统计（仅含带 taskId 的会话）。
+  /// 按关联任务聚合的专注统计（仅含带 taskId 的**专注阶段**会话）。
   /// 返回按累计时长降序的列表，供「专注与任务关联统计」展示。
+  /// P2-4（v3.1.0 审计）：旧实现不过滤阶段——番茄循环的休息段（历史数据带
+  /// taskId 落库）把休息时长算进任务「已专注」，与任务详情/报表口径矛盾。
   List<TaskFocusStat> get taskStats {
     final map = <String, TaskFocusStat>{};
     for (final s in _sessions) {
+      if (s.phase != FocusPhase.focus) continue;
       if (s.taskId == null) continue;
       final existing = map[s.taskId!];
       if (existing == null) {
