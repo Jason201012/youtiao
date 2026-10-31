@@ -84,6 +84,14 @@
     border:1px solid var(--brand-ring);border-radius:99px;padding:4px 14px;font-weight:600;
   }
   .ver-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+  .hero-icon{
+    width:100px;height:100px;border-radius:24px;display:block;margin-bottom:20px;
+    box-shadow:0 2px 6px rgba(23,43,77,.12),0 16px 40px rgba(34,112,212,.22);
+    outline:1px solid var(--border);outline-offset:-1px;
+    transition:transform .25s ease;
+  }
+  .hero-icon:hover{transform:translateY(-3px) scale(1.02)}
+  @media (prefers-reduced-motion: reduce){ .hero-icon{transition:none} .hero-icon:hover{transform:none} }
   .hero h1{font-size:46px;line-height:1.25;font-weight:800;letter-spacing:1px;margin:18px 0 6px}
   .hero h1 .accent{color:var(--brand)}
   .hero .sub{font-size:19px;color:var(--text-2);margin-bottom:14px;font-weight:500}
@@ -256,6 +264,7 @@
 <div class="hero">
   <div class="wrap hero-grid">
     <div>
+      <img class="hero-icon" src="./icon.png" alt="有条应用图标" width="100" height="100">
       <span class="ver-chip"><span class="dot"></span><span id="verChip">v3.1.1 · 2026-10-31</span></span>
       <h1>任务 · 习惯 · 专注<br>一切都<span class="accent">有条</span>不紊</h1>
       <p class="sub">纯本地离线的 Android 效率应用</p>
