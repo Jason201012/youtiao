@@ -439,6 +439,7 @@ class BackupSheet {
       data,
       encrypted: plaintext != raw, // 走过解密路径即为加密备份
       currentTaskCount: provider.tasks.length,
+      currentTrashCount: provider.trash.length,
       currentHabitCount: habitProvider.habits.length,
       currentFocusCount: focusProvider.sessions.length,
     );
@@ -452,168 +453,229 @@ class BackupSheet {
     // A1 范围选择：关闭「同时恢复设置」时跳过 applyAppPrefs 与偏好重载，
     // 只恢复任务 / 习惯 / 专注 / 模板 / 附件（文案已在开关副标题说明）。
     final restoreSettings = confirm.$2;
-    // A1：恢复前自动快照——失败不阻断恢复，但结果里如实提示「不可回滚」。
-    final snapOk = await provider.writePreRestoreSnapshot();
+    // P3-5（v3.1.2 审计）：恢复全过程套不可取消的进度弹层（分阶段文案）——
+    // 快照组装 / 加密与多步恢复都在主 isolate 同步执行，大库 + 加密时表现为
+    // 「点了恢复就卡住」，用户可能反复点击。弹层在 finally 中自动收起。
+    Future<bool> runRestoreSteps(void Function(String) stage) async {
+      stage('正在生成恢复前回滚点…');
+      // A1：恢复前自动快照——失败不阻断恢复，但结果里如实提示「不可回滚」。
+      final snapOk = await provider.writePreRestoreSnapshot();
+      try {
+        stage('正在校验并恢复任务…');
+        // 先干跑解析专注/习惯/打卡：任一失败则在任务被覆盖前抛错，
+        // 避免「任务已恢复、专注失败」的部分恢复假象（修复前 tasks 已被清空）。
+        if (data['focus_sessions'] is List) {
+          (data['focus_sessions'] as List)
+              .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
+        if (data['habits'] is List) {
+          (data['habits'] as List)
+              .map((e) => Habit.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
+        if (data['check_ins'] is List) {
+          (data['check_ins'] as List)
+              .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
+              .toList();
+        }
+
+        // 🟡 修复 Bug3（部分恢复可观测性）：恢复分三步（任务 → 专注 → 习惯/打卡），
+        // 三步各自独立落盘，本身不存在「任务已换、习惯没换」的中间态残留数据问题，
+        // 但任一步 IO 失败都应明确告诉用户哪一步失败，而不是笼统的「格式不正确」。
+        // 任一步失败不中断已成功的前序步骤（各自已落盘），仅累计错误并提示。
+        final failures = <String>[];
+        // A1：快照失败记入结果提示（warning 性质，恢复本身继续）。
+        if (!snapOk) failures.add('恢复前快照未生成（本次恢复不可回滚）');
+        // P3-10（v2.9.4 审计）：rescheduleReminders 仅在「本次会调 provider.load()」
+        // 时才让位 —— load() 内部会重排任务提醒，且读到的是恢复后的新 DND/时区。
+        // 若在此处再排一次，用的是**旧偏好**排出的结果，会被 load() 立刻覆盖，
+        // 中间还多出一个错时提醒窗口。
+        // ⚠️ 备份不含 prefs（旧备份）时下方 `if (data['prefs'] is Map)` 不成立、
+        // provider.load() 不会执行 —— 此时必须由 restoreFromJson 自己重排，
+        // 否则 restoreFromJson 的 cancelAll() 之后任务提醒全部漏挂。
+        // A1：范围选择同口径——关「同时恢复设置」时 load() 同样不会执行，
+        // 必须由 restoreFromJson 自己重排。
+        final blobStats = await provider.restoreFromJson(plaintext,
+            includeTrash: includeTrash,
+            rescheduleReminders:
+                !(restoreSettings && data['prefs'] is Map));
+        // P3-6（v3.0.8 审计）：消费任务落盘结果并入 failures——旧实现丢弃，
+        // 「已恢复」可能在任务未写库时上报（重启后恢复条目全部蒸发；习惯侧已于
+        // v3.0.6 消费 bool，任务侧这里是不对称的漏网口）。
+        if (!blobStats.persisted) {
+          failures.add('任务（写入未保存，重启可能丢失）');
+        }
+        // P3-10（v2.9.4 审计）：附件还原的「部分失败」（超单文件上限 / 非法文件名 /
+        // 体积截断）此前被 restoreFromJson 直接丢弃，用户只看到「已从备份恢复」，
+        // 却在附件列表里发现附件不见了。这里把统计并入既有 failures 机制，
+        // 让「任务恢复了、附件丢了」如实告知。
+        final blobNote = blobStats.summary();
+        if (blobNote != null) failures.add(blobNote);
+        stage('正在恢复专注与习惯…');
+        // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
+        final focusList = data['focus_sessions'];
+        if (focusList is List) {
+          try {
+            // P2-3（v3.1.2 审计）：消费落盘结果——安全模式（dbLoadFailed）下
+            // _persist 恒 false，restoreSessions 已回滚内存；不消费会把
+            // 「写入未保存」假报成「已恢复」，重启后专注历史静默蒸发。
+            final ok = await focusProvider.restoreSessions(focusList);
+            if (!ok) failures.add('专注记录（写入未保存，重启可能丢失）');
+          } catch (e) {
+            failures.add('专注记录（$e）');
+          }
+        }
+        // 仅当备份含习惯/打卡字段时才恢复，避免老备份把现有习惯清空。
+        if (data['habits'] is List || data['check_ins'] is List) {
+          try {
+            // U2-1（v3.0.6 审计）：消费 restoreFromJson 的落盘结果——旧实现
+            // Future<void> 忽略：本步写库失败时 UI 仍报「已恢复」，重启后恢复的
+            // 习惯/打卡静默丢失。并入既有 failures 机制如实告知。
+            final ok = await habitProvider.restoreFromJson(data);
+            if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
+          } catch (e) {
+            failures.add('习惯/打卡（$e）');
+          }
+        }
+        // M2（v3.0.8 审计）：恢复用户模板（覆盖同 id）。单条损坏跳过；
+        // 失败数并入 failures（≥1 条失败时提示，不打断主流程）。
+        // N7（v3.0.9 审计）：恢复已下沉进 provider.restoreFromJson（见其
+        // user_templates 段处理与 RestoreBlobsStats.templates*）——此处不再
+        // 重复恢复（避免双恢复 / 失败数双计），仅按透出统计如实提示。
+        if (blobStats.templatesTotal > 0 && blobStats.templatesFailed > 0) {
+          failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
+              '${blobStats.templatesTotal} 条，其余已跳过）');
+        }
+        stage('正在恢复偏好设置…');
+        // P2-19：恢复偏好（仅当备份含 prefs 字段且用户选择「同时恢复设置」；
+        // 老备份无则保持现有偏好不动，A1 范围选择关闭时同样保持）。
+        // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences。
+        //
+        // P2-1（v2.8.8 审计）：写回 prefs ≠ 内存生效。TaskProvider 的
+        // dndEnabled / dndStartHour / dndEndHour / snoozeMinutes / trashRetentionDays /
+        // focusGoalMinutes / weeklyGoalCount / autoBackupEnabled / appLockIdleSeconds /
+        // calendarLunar / lockScreenPrivate / screenSecurityEnabled / allowExternalLinks /
+        // briefingMorning* / briefingEvening* / habitNudge* 等**全部是 load() 从 prefs
+        // 读入的内存字段**，getter 直接返回内存值——原实现只调 refreshAfterPrefs()
+        // （= notifyListeners 纯刷新 UI），恢复的偏好本会话不生效：设置页仍显示旧值
+        // （用户误以为恢复失败）、实际行为仍按旧值运行（免打扰 / 延后时长 / 回收站
+        // 保留期 / 早晚简报与习惯挽留时刻 / 自动备份开关），且
+        // rescheduleFixedTimeReminders() 会用旧时刻把简报与挽留重排一遍，直到下次
+        // 重启才生效。这里补齐与自动备份还原路径完全一致的重载，使恢复即时生效。
+        // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
+        // 改用 refreshEnabled() 仅刷新开关、不触发锁。
+        if (restoreSettings && data['prefs'] is Map) {
+          try {
+            await applyAppPrefs(
+                Map<String, dynamic>.from(data['prefs'] as Map));
+            await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
+            await focusProvider.load();
+            await habitProvider.load();
+            await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
+            await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
+            await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
+          } catch (e) {
+            failures.add('偏好（$e）');
+            // P3-10（v2.9.4 审计）：上面传了 rescheduleReminders: false，若在此
+            // 抛错就跳过了 provider.load()（本次唯一的任务提醒重排点），
+            // 而 restoreFromJson 已 cancelAll() —— 任务提醒会全部漏挂。
+            // 这里用现有（旧）偏好补排一次，宁可按旧 DND 排也不能不排。
+            provider.rescheduleAllNotifications();
+          }
+        }
+        stage('正在重排提醒…');
+        // P2-1/P2-2（v2.8.7 审计）：恢复后重建通知。
+        // ① restoreFromJson 内部的 cancelAll 会把任务提醒之外的简报 / 挽留 /
+        //    回收站预告 / 习惯打卡闹钟一并清空（原流程只重排任务提醒）；
+        // ② 恢复的偏好可能携带「提醒时区」覆盖——applyAppPrefs 只写回
+        //    SharedPreferences，NotificationService 内存时区不会自动刷新，
+        //    不重解析则本轮会话仍按旧时区调度，时区设置形同静默丢失。
+        // 因此先重解析时区，再按恢复后的数据全量重排（含习惯打卡闹钟）。
+        try {
+          await NotificationService.reloadTimezoneOverride();
+        } catch (_) {}
+        await rescheduleFixedTimeReminders(
+            provider, focusProvider, habitProvider);
+        try {
+          await habitProvider.scheduleAllReminders();
+        } catch (_) {}
+
+        if (context.mounted) {
+          // P2-2（v3.1.0 审计）：自动备份加密开关（auto_backup_encrypt）刻意不随
+          // 备份迁移（口令在 secure storage、跨设备不存在）——恢复后开关回到
+          // 关闭，属「静默降级」；在这里显式告知，不再无声。
+          const encryptHint =
+              '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
+          if (failures.isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('已从备份恢复$encryptHint'),
+                duration: Duration(seconds: 6),
+              ),
+            );
+          } else {
+            // 任务已成功恢复，但部分子系统失败：提示具体步骤，便于用户重试用子集。
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                    '任务已恢复，但以下步骤失败：${failures.join('、')}$encryptHint'),
+                duration: const Duration(seconds: 6),
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('恢复失败：文件格式不正确或任务恢复出错（$e）')),
+          );
+        }
+      }
+      return true;
+    }
+
+    await _withRestoreProgress(context, runRestoreSteps);
+  }
+
+  /// P3-5（v3.1.2 审计）：恢复过程进度层——[run] 执行期间显示不可取消的模态
+  /// 弹层（barrierDismissible=false + PopScope canPop=false），分阶段文案经
+  /// [stage] 更新；无论成功失败，弹层都在 finally 中收起后再返回，保证结果
+  /// SnackBar 可见。两条恢复路径（文件 / 本地快照）共用。
+  static Future<T> _withRestoreProgress<T>(
+    BuildContext context,
+    Future<T> Function(void Function(String stage) stage) run,
+  ) async {
+    final stage = ValueNotifier<String>('正在准备恢复…');
+    final dialog = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: ValueListenableBuilder<String>(
+            valueListenable: stage,
+            builder: (_, s, __) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text(s, style: const TextStyle(fontSize: 13)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
     try {
-      // 先干跑解析专注/习惯/打卡：任一失败则在任务被覆盖前抛错，
-      // 避免「任务已恢复、专注失败」的部分恢复假象（修复前 tasks 已被清空）。
-      if (data['focus_sessions'] is List) {
-        (data['focus_sessions'] as List)
-            .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
-            .toList();
-      }
-      if (data['habits'] is List) {
-        (data['habits'] as List)
-            .map((e) => Habit.fromJson(e as Map<String, dynamic>))
-            .toList();
-      }
-      if (data['check_ins'] is List) {
-        (data['check_ins'] as List)
-            .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
-            .toList();
-      }
-
-      // 🟡 修复 Bug3（部分恢复可观测性）：恢复分三步（任务 → 专注 → 习惯/打卡），
-      // 三步各自独立落盘，本身不存在「任务已换、习惯没换」的中间态残留数据问题，
-      // 但任一步 IO 失败都应明确告诉用户哪一步失败，而不是笼统的「格式不正确」。
-      // 任一步失败不中断已成功的前序步骤（各自已落盘），仅累计错误并提示。
-      final failures = <String>[];
-      // A1：快照失败记入结果提示（warning 性质，恢复本身继续）。
-      if (!snapOk) failures.add('恢复前快照未生成（本次恢复不可回滚）');
-      // P3-10（v2.9.4 审计）：rescheduleReminders 仅在「本次会调 provider.load()」
-      // 时才让位 —— load() 内部会重排任务提醒，且读到的是恢复后的新 DND/时区。
-      // 若在此处再排一次，用的是**旧偏好**排出的结果，会被 load() 立刻覆盖，
-      // 中间还多出一个错时提醒窗口。
-      // ⚠️ 备份不含 prefs（旧备份）时下方 `if (data['prefs'] is Map)` 不成立、
-      // provider.load() 不会执行 —— 此时必须由 restoreFromJson 自己重排，
-      // 否则 restoreFromJson 的 cancelAll() 之后任务提醒全部漏挂。
-      // A1：范围选择同口径——关「同时恢复设置」时 load() 同样不会执行，
-      // 必须由 restoreFromJson 自己重排。
-      final blobStats = await provider.restoreFromJson(plaintext,
-          includeTrash: includeTrash,
-          rescheduleReminders:
-              !(restoreSettings && data['prefs'] is Map));
-      // P3-6（v3.0.8 审计）：消费任务落盘结果并入 failures——旧实现丢弃，
-      // 「已恢复」可能在任务未写库时上报（重启后恢复条目全部蒸发；习惯侧已于
-      // v3.0.6 消费 bool，任务侧这里是不对称的漏网口）。
-      if (!blobStats.persisted) {
-        failures.add('任务（写入未保存，重启可能丢失）');
-      }
-      // P3-10（v2.9.4 审计）：附件还原的「部分失败」（超单文件上限 / 非法文件名 /
-      // 体积截断）此前被 restoreFromJson 直接丢弃，用户只看到「已从备份恢复」，
-      // 却在附件列表里发现附件不见了。这里把统计并入既有 failures 机制，
-      // 让「任务恢复了、附件丢了」如实告知。
-      final blobNote = blobStats.summary();
-      if (blobNote != null) failures.add(blobNote);
-      // 备份含专注记录时才覆盖；旧备份无此字段则保留现有专注数据不破坏。
-      final focusList = data['focus_sessions'];
-      if (focusList is List) {
-        try {
-          await focusProvider.restoreSessions(focusList);
-        } catch (e) {
-          failures.add('专注记录（$e）');
-        }
-      }
-      // 仅当备份含习惯/打卡字段时才恢复，避免老备份把现有习惯清空。
-      if (data['habits'] is List || data['check_ins'] is List) {
-        try {
-          // U2-1（v3.0.6 审计）：消费 restoreFromJson 的落盘结果——旧实现
-          // Future<void> 忽略：本步写库失败时 UI 仍报「已恢复」，重启后恢复的
-          // 习惯/打卡静默丢失。并入既有 failures 机制如实告知。
-          final ok = await habitProvider.restoreFromJson(data);
-          if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
-        } catch (e) {
-          failures.add('习惯/打卡（$e）');
-        }
-      }
-      // M2（v3.0.8 审计）：恢复用户模板（覆盖同 id）。单条损坏跳过；
-      // 失败数并入 failures（≥1 条失败时提示，不打断主流程）。
-      // N7（v3.0.9 审计）：恢复已下沉进 provider.restoreFromJson（见其
-      // user_templates 段处理与 RestoreBlobsStats.templates*）——此处不再
-      // 重复恢复（避免双恢复 / 失败数双计），仅按透出统计如实提示。
-      if (blobStats.templatesTotal > 0 && blobStats.templatesFailed > 0) {
-        failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
-            '${blobStats.templatesTotal} 条，其余已跳过）');
-      }
-      // P2-19：恢复偏好（仅当备份含 prefs 字段且用户选择「同时恢复设置」；
-      // 老备份无则保持现有偏好不动，A1 范围选择关闭时同样保持）。
-      // applyAppPrefs 内部已做白名单净化，写入 SharedPreferences。
-      //
-      // P2-1（v2.8.8 审计）：写回 prefs ≠ 内存生效。TaskProvider 的
-      // dndEnabled / dndStartHour / dndEndHour / snoozeMinutes / trashRetentionDays /
-      // focusGoalMinutes / weeklyGoalCount / autoBackupEnabled / appLockIdleSeconds /
-      // calendarLunar / lockScreenPrivate / screenSecurityEnabled / allowExternalLinks /
-      // briefingMorning* / briefingEvening* / habitNudge* 等**全部是 load() 从 prefs
-      // 读入的内存字段**，getter 直接返回内存值——原实现只调 refreshAfterPrefs()
-      // （= notifyListeners 纯刷新 UI），恢复的偏好本会话不生效：设置页仍显示旧值
-      // （用户误以为恢复失败）、实际行为仍按旧值运行（免打扰 / 延后时长 / 回收站
-      // 保留期 / 早晚简报与习惯挽留时刻 / 自动备份开关），且
-      // rescheduleFixedTimeReminders() 会用旧时刻把简报与挽留重排一遍，直到下次
-      // 重启才生效。这里补齐与自动备份还原路径完全一致的重载，使恢复即时生效。
-      // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
-      // 改用 refreshEnabled() 仅刷新开关、不触发锁。
-      if (restoreSettings && data['prefs'] is Map) {
-        try {
-          await applyAppPrefs(Map<String, dynamic>.from(data['prefs'] as Map));
-          await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
-          await focusProvider.load();
-          await habitProvider.load();
-          await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
-          await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
-          await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
-        } catch (e) {
-          failures.add('偏好（$e）');
-          // P3-10（v2.9.4 审计）：上面传了 rescheduleReminders: false，若在此
-          // 抛错就跳过了 provider.load()（本次唯一的任务提醒重排点），
-          // 而 restoreFromJson 已 cancelAll() —— 任务提醒会全部漏挂。
-          // 这里用现有（旧）偏好补排一次，宁可按旧 DND 排也不能不排。
-          provider.rescheduleAllNotifications();
-        }
-      }
-      // P2-1/P2-2（v2.8.7 审计）：恢复后重建通知。
-      // ① restoreFromJson 内部的 cancelAll 会把任务提醒之外的简报 / 挽留 /
-      //    回收站预告 / 习惯打卡闹钟一并清空（原流程只重排任务提醒）；
-      // ② 恢复的偏好可能携带「提醒时区」覆盖——applyAppPrefs 只写回
-      //    SharedPreferences，NotificationService 内存时区不会自动刷新，
-      //    不重解析则本轮会话仍按旧时区调度，时区设置形同静默丢失。
-      // 因此先重解析时区，再按恢复后的数据全量重排（含习惯打卡闹钟）。
+      return await run((s) => stage.value = s);
+    } finally {
+      final nav = Navigator.of(context, rootNavigator: true);
+      if (nav.canPop()) nav.pop();
       try {
-        await NotificationService.reloadTimezoneOverride();
+        await dialog;
       } catch (_) {}
-      await rescheduleFixedTimeReminders(provider, focusProvider, habitProvider);
-      try {
-        await habitProvider.scheduleAllReminders();
-      } catch (_) {}
-
-      if (context.mounted) {
-        // P2-2（v3.1.0 审计）：自动备份加密开关（auto_backup_encrypt）刻意不随
-        // 备份迁移（口令在 secure storage、跨设备不存在）——恢复后开关回到
-        // 关闭，属「静默降级」；在这里显式告知，不再无声。
-        const encryptHint =
-            '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
-        if (failures.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('已从备份恢复$encryptHint'),
-              duration: Duration(seconds: 6),
-            ),
-          );
-        } else {
-          // 任务已成功恢复，但部分子系统失败：提示具体步骤，便于用户重试用子集。
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('任务已恢复，但以下步骤失败：${failures.join('、')}$encryptHint'),
-              duration: const Duration(seconds: 6),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('恢复失败：文件格式不正确或任务恢复出错（$e）')),
-        );
-      }
+      stage.dispose();
     }
   }
 
@@ -657,15 +719,24 @@ class BackupSheet {
                   const Divider(height: 24),
                   // A1 范围选择：默认开（保持现有行为）；关闭时只恢复
                   // 任务/习惯/专注/模板/附件，不恢复偏好设置。
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('同时恢复设置'),
-                    subtitle: const Text(
-                        '关闭则不恢复早间简报、勿扰时段、提醒时区、应用锁等设置',
-                        style: TextStyle(fontSize: 12)),
-                    value: restoreSettings,
-                    onChanged: (v) => setState(() => restoreSettings = v),
-                  ),
+                  // P3-4（v3.1.2 审计）：备份不含偏好段时开关完全无效——隐藏
+                  // 开关并如实说明，避免「设置被跳过 / 已恢复」的误判。
+                  if (summary.prefKeys.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 4),
+                      child: Text('此备份未包含设置，仅恢复数据',
+                          style: TextStyle(fontSize: 12)),
+                    )
+                  else
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('同时恢复设置'),
+                      subtitle: const Text(
+                          '关闭则不恢复早间简报、勿扰时段、提醒时区、应用锁等设置',
+                          style: TextStyle(fontSize: 12)),
+                      value: restoreSettings,
+                      onChanged: (v) => setState(() => restoreSettings = v),
+                    ),
                 ],
               ),
             ),
@@ -863,6 +934,7 @@ class BackupSheet {
         data,
         encrypted: plaintext != raw, // 走过解密路径即为加密快照
         currentTaskCount: provider.tasks.length,
+        currentTrashCount: provider.trash.length,
         currentHabitCount: habitProvider.habits.length,
         currentFocusCount: focusProvider.sessions.length,
       );
@@ -875,112 +947,126 @@ class BackupSheet {
       if (confirm == null || !confirm.$1) return;
       // A1 范围选择：关闭「同时恢复设置」时跳过偏好恢复（与 _doRestore 同口径）。
       final restoreSettings = confirm.$2;
-      // A1：恢复前自动快照——失败不阻断还原，但结果里如实提示「不可回滚」。
-      final snapOk = await provider.writePreRestoreSnapshot();
-      // 干跑解析专注/习惯/打卡（与 _doRestore 一致）。
-      if (data['focus_sessions'] is List) {
-        (data['focus_sessions'] as List)
-            .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
-            .toList();
-      }
-      if (data['habits'] is List) {
-        (data['habits'] as List)
-            .map((e) => Habit.fromJson(e as Map<String, dynamic>))
-            .toList();
-      }
-      if (data['check_ins'] is List) {
-        (data['check_ins'] as List)
-            .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
-            .toList();
-      }
-      final failures = <String>[];
-      // A1：快照失败记入结果提示（warning 性质，还原本身继续）。
-      if (!snapOk) failures.add('恢复前快照未生成（本次还原不可回滚）');
-      // P3-10（v2.9.4 审计）：同 _doRestore，消费附件还原统计；并按「本次是否会
-      // 调 provider.load()」决定任务提醒的重排责任（A1 范围选择同口径）。
-      final blobStats = await provider.restoreFromJson(plaintext,
-          includeTrash: includeTrash,
-          rescheduleReminders:
-              !(restoreSettings && data['prefs'] is Map));
-      // P3-6（v3.0.8 审计）：同 _doRestore，消费任务落盘结果并入 failures。
-      if (!blobStats.persisted) {
-        failures.add('任务（写入未保存，重启可能丢失）');
-      }
-      final blobNote = blobStats.summary();
-      if (blobNote != null) failures.add(blobNote);
-      final focusList = data['focus_sessions'];
-      if (focusList is List) {
-        try {
-          await focusProvider.restoreSessions(focusList);
-        } catch (e) {
-          failures.add('专注记录（$e）');
+      // P3-5（v3.1.2 审计）：同 _doRestore——还原全过程套不可取消的进度弹层。
+      Future<bool> runRestoreSteps(void Function(String) stage) async {
+        stage('正在生成恢复前回滚点…');
+        // A1：恢复前自动快照——失败不阻断还原，但结果里如实提示「不可回滚」。
+        final snapOk = await provider.writePreRestoreSnapshot();
+        stage('正在校验并恢复任务…');
+        // 干跑解析专注/习惯/打卡（与 _doRestore 一致）。
+        if (data['focus_sessions'] is List) {
+          (data['focus_sessions'] as List)
+              .map((e) => FocusSession.fromJson(e as Map<String, dynamic>))
+              .toList();
         }
-      }
-      if (data['habits'] is List || data['check_ins'] is List) {
-        try {
-          // U2-1（v3.0.6 审计）：同 _doRestore——消费落盘结果并入 failures。
-          final ok = await habitProvider.restoreFromJson(data);
-          if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
-        } catch (e) {
-          failures.add('习惯/打卡（$e）');
+        if (data['habits'] is List) {
+          (data['habits'] as List)
+              .map((e) => Habit.fromJson(e as Map<String, dynamic>))
+              .toList();
         }
-      }
-      // M2（v3.0.8 审计）：自动快照还原路径同样恢复用户模板。
-      // N7（v3.0.9 审计）：同 _doRestore——恢复已下沉进
-      // provider.restoreFromJson，此处仅按透出统计提示，不重复恢复。
-      if (blobStats.templatesTotal > 0 && blobStats.templatesFailed > 0) {
-        failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
-            '${blobStats.templatesTotal} 条，其余已跳过）');
-      }
-      // 还原 App 级偏好（外观/锁/专注/免打扰/通用开关）。
-      // 写回 SharedPreferences 后，触发各 Provider 重新读取使内存态即时生效。
-      // A1：仅当用户选择「同时恢复设置」且备份含 prefs 时执行；范围选择关闭
-      // 或老备份无偏好段时保持现有偏好不动。
-      // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
-      // 改用 refreshEnabled() 仅刷新开关、不触发锁。
-      if (restoreSettings && data['prefs'] is Map) {
-        try {
-          await applyAppPrefs(data['prefs'] as Map<String, dynamic>);
-          await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
-          await focusProvider.load();
-          await habitProvider.load();
-          await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
-          await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
-          await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
-        } catch (e) {
-          failures.add('偏好设置（$e）');
-          // P3-10（v2.9.4 审计）：走到这里说明本次已让 restoreFromJson 跳过
-          // 任务提醒重排（rescheduleReminders: false），但 provider.load()
-          // 没跑成 —— 叠加 restoreFromJson 已 cancelAll()，任务提醒会全部漏挂。
-          // 用现有（旧）偏好补排一次：宁可按旧 DND 排，也不能不排。
-          provider.rescheduleAllNotifications();
+        if (data['check_ins'] is List) {
+          (data['check_ins'] as List)
+              .map((e) => CheckIn.fromJson(e as Map<String, dynamic>))
+              .toList();
         }
+        final failures = <String>[];
+        // A1：快照失败记入结果提示（warning 性质，还原本身继续）。
+        if (!snapOk) failures.add('恢复前快照未生成（本次还原不可回滚）');
+        // P3-10（v2.9.4 审计）：同 _doRestore，消费附件还原统计；并按「本次是否会
+        // 调 provider.load()」决定任务提醒的重排责任（A1 范围选择同口径）。
+        final blobStats = await provider.restoreFromJson(plaintext,
+            includeTrash: includeTrash,
+            rescheduleReminders:
+                !(restoreSettings && data['prefs'] is Map));
+        // P3-6（v3.0.8 审计）：同 _doRestore，消费任务落盘结果并入 failures。
+        if (!blobStats.persisted) {
+          failures.add('任务（写入未保存，重启可能丢失）');
+        }
+        final blobNote = blobStats.summary();
+        if (blobNote != null) failures.add(blobNote);
+        stage('正在恢复专注与习惯…');
+        final focusList = data['focus_sessions'];
+        if (focusList is List) {
+          try {
+            // P2-3（v3.1.2 审计）：同 _doRestore——消费专注落盘结果并入 failures。
+            final ok = await focusProvider.restoreSessions(focusList);
+            if (!ok) failures.add('专注记录（写入未保存，重启可能丢失）');
+          } catch (e) {
+            failures.add('专注记录（$e）');
+          }
+        }
+        if (data['habits'] is List || data['check_ins'] is List) {
+          try {
+            // U2-1（v3.0.6 审计）：同 _doRestore——消费落盘结果并入 failures。
+            final ok = await habitProvider.restoreFromJson(data);
+            if (!ok) failures.add('习惯/打卡（写入未保存，重启可能丢失）');
+          } catch (e) {
+            failures.add('习惯/打卡（$e）');
+          }
+        }
+        // M2（v3.0.8 审计）：自动快照还原路径同样恢复用户模板。
+        // N7（v3.0.9 审计）：同 _doRestore——恢复已下沉进
+        // provider.restoreFromJson，此处仅按透出统计提示，不重复恢复。
+        if (blobStats.templatesTotal > 0 && blobStats.templatesFailed > 0) {
+          failures.add('用户模板（恢复 ${blobStats.templatesRestored}/'
+              '${blobStats.templatesTotal} 条，其余已跳过）');
+        }
+        stage('正在恢复偏好设置…');
+        // 还原 App 级偏好（外观/锁/专注/免打扰/通用开关）。
+        // 写回 SharedPreferences 后，触发各 Provider 重新读取使内存态即时生效。
+        // A1：仅当用户选择「同时恢复设置」且备份含 prefs 时执行；范围选择关闭
+        // 或老备份无偏好段时保持现有偏好不动。
+        // 注意：AppLockProvider 不能用 load()（会立即 _locked=true 锁屏），
+        // 改用 refreshEnabled() 仅刷新开关、不触发锁。
+        if (restoreSettings && data['prefs'] is Map) {
+          try {
+            await applyAppPrefs(data['prefs'] as Map<String, dynamic>);
+            await provider.load(); // 重读任务 + 免打扰/延后/目标/后台保活/自动备份等
+            await focusProvider.load();
+            await habitProvider.load();
+            await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
+            await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
+            await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
+          } catch (e) {
+            failures.add('偏好设置（$e）');
+            // P3-10（v2.9.4 审计）：走到这里说明本次已让 restoreFromJson 跳过
+            // 任务提醒重排（rescheduleReminders: false），但 provider.load()
+            // 没跑成 —— 叠加 restoreFromJson 已 cancelAll()，任务提醒会全部漏挂。
+            // 用现有（旧）偏好补排一次：宁可按旧 DND 排，也不能不排。
+            provider.rescheduleAllNotifications();
+          }
+        }
+        stage('正在重排提醒…');
+        // P2-1/P2-2（v2.8.7 审计）：与 _doRestore 同口径——restoreFromJson 的
+        // cancelAll 清空了简报/挽留/回收站预告/习惯打卡闹钟；且恢复的偏好可能
+        // 携带「提醒时区」覆盖，须先重解析内存时区再全量重排，否则本轮会话
+        // 仍按旧时区调度（设置形同静默丢失）。
+        try {
+          await NotificationService.reloadTimezoneOverride();
+        } catch (_) {}
+        await rescheduleFixedTimeReminders(
+            provider, focusProvider, habitProvider);
+        try {
+          await habitProvider.scheduleAllReminders();
+        } catch (_) {}
+        if (context.mounted) {
+          // P2-2（v3.1.0 审计）：同 _doRestore——自动备份加密开关不随备份迁移，
+          // 恢复后显式告知（不静默降级）。
+          const encryptHint =
+              '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: failures.isEmpty
+                  ? Text('已从 ${entry.label} 的自动备份还原$encryptHint')
+                  : Text('任务已还原，但：${failures.join('、')}$encryptHint'),
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
+        return true;
       }
-      // P2-1/P2-2（v2.8.7 审计）：与 _doRestore 同口径——restoreFromJson 的
-      // cancelAll 清空了简报/挽留/回收站预告/习惯打卡闹钟；且恢复的偏好可能
-      // 携带「提醒时区」覆盖，须先重解析内存时区再全量重排，否则本轮会话
-      // 仍按旧时区调度（设置形同静默丢失）。
-      try {
-        await NotificationService.reloadTimezoneOverride();
-      } catch (_) {}
-      await rescheduleFixedTimeReminders(provider, focusProvider, habitProvider);
-      try {
-        await habitProvider.scheduleAllReminders();
-      } catch (_) {}
-      if (context.mounted) {
-        // P2-2（v3.1.0 审计）：同 _doRestore——自动备份加密开关不随备份迁移，
-        // 恢复后显式告知（不静默降级）。
-        const encryptHint =
-            '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: failures.isEmpty
-                ? Text('已从 ${entry.label} 的自动备份还原$encryptHint')
-                : Text('任务已还原，但：${failures.join('、')}$encryptHint'),
-            duration: const Duration(seconds: 6),
-          ),
-        );
-      }
+
+      await _withRestoreProgress(context, runRestoreSteps);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1044,12 +1130,14 @@ class _AutoBackupSection extends StatelessWidget {
                 for (final entry in items)
                   ListTile(
                     dense: true,
-                    // A1：恢复前快照用专属图标 + 「回滚点」措辞，与日常快照区分。
+                    // A1：恢复前快照用专属图标，与日常快照区分。
+                    // U-12②（v3.1.2 审计）：label 已含「恢复前」后缀，不再叠
+                    // 加「（回滚点）」——「… 恢复前（回滚点）」属措辞重复。
                     leading: Icon(entry.preRestore
                         ? Symbols.settings_backup_restore
                         : Symbols.history),
                     title: Text(entry.preRestore
-                        ? '${entry.label}（回滚点）'
+                        ? entry.label
                         : '${entry.label} 快照'),
                     subtitle: Text(entry.statusLabel,
                         style: const TextStyle(fontSize: 12)),

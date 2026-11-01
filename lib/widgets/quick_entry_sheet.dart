@@ -116,6 +116,10 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   /// 剪贴板（不自动读、不后台轮询、不进任何存储）；读取后 trim、截断 500 字，
   /// 填入输入框并交给现有解析器实时预览（识别 chip 同步回显）。
   /// 剪贴板无文本时轻提示，不打断录入。
+  ///
+  /// U-8（v3.1.2 审计）：改为**插入到光标处**而非整体替换——旧实现
+  /// `_controller.value = …` 会覆盖用户已输入的内容；超长截断时 SnackBar
+  /// 说明，不再静默丢字。选区非法（未聚焦 / 越界）时退化为追加到末尾。
   Future<void> _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = (data?.text ?? '').trim();
@@ -128,12 +132,32 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
       }
       return;
     }
-    final clipped = text.length > 500 ? text.substring(0, 500) : text;
+    var clipped = text;
+    var truncated = false;
+    if (clipped.length > 500) {
+      clipped = clipped.substring(0, 500);
+      truncated = true;
+    }
+    final current = _controller.text;
+    final sel = _controller.selection;
+    // isValid：start/end 均 >= 0（未聚焦时为 -1 的「无选区」视为非法）。
+    final baseSel = (sel.isValid &&
+            sel.start <= current.length &&
+            sel.end <= current.length)
+        ? sel
+        : TextSelection.collapsed(offset: current.length);
+    final newText = current.replaceRange(baseSel.start, baseSel.end, clipped);
     _controller.value = TextEditingValue(
-      text: clipped,
-      selection: TextSelection.collapsed(offset: clipped.length),
+      text: newText,
+      selection: TextSelection.collapsed(offset: baseSel.start + clipped.length),
     );
-    _onChanged(clipped);
+    _onChanged(newText);
+    if (truncated && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('剪贴板内容超过 500 字，已截断'),
+        duration: Duration(milliseconds: 1200),
+      ));
+    }
   }
 
   /// 直接入库并关闭

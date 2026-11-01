@@ -179,6 +179,8 @@ class TaskProvider extends ChangeNotifier {
     NotificationService.remindersMutedUntil = until;
     notifyListeners();
     await _persistSettings();
+    // U-3：无论通知总开关状态，横幅/设置行都消费静音态——到期 Timer 一并重挂。
+    _armMuteExpiryTimer();
     if (!_notificationsEnabled) return;
     if (until != null) {
       await _cancelScheduledReminderNotifications();
@@ -193,24 +195,71 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  /// U-3（v3.1.2 审计）：静音到期一次性 Timer——`remindersMuted` 是按 now
+  /// 现算的，到期若没有任何重建触发，首页横幅 / 设置行会一直显示「静音中」，
+  /// 直到 15 分钟守护兜底。挂到期 Timer 到点自愈（清键 + 全量重排 + 通知 UI），
+  /// 恢复不再依赖守护轮次。解除静音 / 重新设置时旧 Timer 先取消。
+  Timer? _muteExpiryTimer;
+
+  void _armMuteExpiryTimer() {
+    _muteExpiryTimer?.cancel();
+    _muteExpiryTimer = null;
+    final u = _remindersMutedUntil;
+    if (u == null) return;
+    final delay = u.difference(DateTime.now());
+    if (delay <= Duration.zero) {
+      // 已过期（setRemindersMutedUntil 入口已归一，理论不可达）——立即自愈。
+      _autoRestoreIfMuteExpired();
+      return;
+    }
+    _muteExpiryTimer = Timer(delay, _autoRestoreIfMuteExpired);
+  }
+
+  @override
+  void dispose() {
+    // U-3：随 Provider 生命周期取消到期 Timer，避免泄漏（回调触碰已释放状态）。
+    _muteExpiryTimer?.cancel();
+    _muteExpiryTimer = null;
+    super.dispose();
+  }
+
   /// A2：撤销全部「提醒类」已排通知（静音开始时调用）。
   /// 逐类显式取消而非 cancelAll——后者会连专注进行中常驻通知与确认条一并清掉，
   /// 违背 A2「不取消非提醒类通知」的边界。
+  ///
+  /// P3-6（v3.1.2 审计）：习惯侧传 `keepConfirm: true`——9 号槽「已打卡 ✓ /
+  /// 撤销」确认条是进行态回执而非提醒，静音开始不得连带清掉（否则用户刚通过
+  /// 通知打卡留下的确认条与撤销入口会消失，与发布承诺矛盾）。
+  ///
+  /// U-4（v3.1.2 审计）：取消按 32 一批并发——旧实现逐条 await（每任务 2 次、
+  /// 每习惯 1 次内部再 10 次平台往返，全串行），大库（500 条任务）≈ 上千次
+  /// 通道往返串行等待，设置页明显卡顿。平台通道调用本身线程安全，单个取消
+  /// 失败仍吞异常不阻断（与原语义一致）。
   Future<void> _cancelScheduledReminderNotifications() async {
     final n = NotificationService.instance;
-    for (final t in _tasks) {
-      try {
-        await n.cancel(t.id); // 一次性截止提醒 + snooze（同 id 段撤销）
-        await n.cancelRepeatReminder(t.id);
-      } catch (_) {}
+    Future<void> inBatches(List<Future<void> Function()> jobs) async {
+      const batch = 32;
+      for (var i = 0; i < jobs.length; i += batch) {
+        await Future.wait([
+          for (final job in jobs.skip(i).take(batch)) job().catchError((_) {}),
+        ]);
+      }
     }
+
+    await inBatches([
+      for (final t in _tasks)
+        () async {
+          await n.cancel(t.id); // 一次性截止提醒 + snooze（同 id 段撤销）
+          await n.cancelRepeatReminder(t.id);
+        },
+    ]);
     final habit = HabitProvider.instanceOrNull;
     if (habit != null) {
-      for (final h in habit.habits) {
-        try {
-          await n.cancelHabitReminder(h.id);
-        } catch (_) {}
-      }
+      await inBatches([
+        // P3-6：keepConfirm——保留 9 号槽「已打卡 ✓ / 撤销」确认条。
+        for (final h in habit.habits)
+          () => n.cancelHabitReminder(h.id, keepConfirm: true),
+      ]);
     }
     try {
       await n.cancelBriefing(true);
@@ -276,6 +325,10 @@ class TaskProvider extends ChangeNotifier {
 
   /// 覆写今日三件（去重、截断到 [kDailyMitMax]、过滤已不存在的 id）并落盘。
   /// 返回落盘是否成功。
+  ///
+  /// U-9（v3.1.2 审计）：落盘失败时回滚内存——MIT 是纯偏好存储，不像任务库
+  /// 有「后续任意写入口顺带全量落盘」的自愈，若内存不回滚，UI 显示已选中 /
+  /// 已移出而重启后回到旧状态，「看似成功实则未保存」。回滚后再次通知 UI。
   Future<bool> setTodayMit(List<String> ids) async {
     final key = _ymd(DateTime.now());
     final valid = ids
@@ -283,10 +336,20 @@ class TaskProvider extends ChangeNotifier {
         .take(kDailyMitMax)
         .where((id) => _tasks.any((t) => t.id == id))
         .toList();
+    final prev = _dailyMit[key];
     _dailyMit[key] = valid;
     _pruneOldMit(keepKey: key);
     notifyListeners();
-    return _persistDailyMit();
+    final ok = await _persistDailyMit();
+    if (!ok) {
+      if (prev == null) {
+        _dailyMit.remove(key);
+      } else {
+        _dailyMit[key] = prev;
+      }
+      notifyListeners();
+    }
+    return ok;
   }
 
   /// 把某任务加入 / 移出今日三件。已满（[kDailyMitMax]）时返回 false
@@ -664,18 +727,30 @@ class TaskProvider extends ChangeNotifier {
     return _markStaleEncryptedBackups();
   }
 
-  /// P2-4：把 `backup/auto/` 下所有 `.enc.json` 加密快照改名为
-  /// `<日期>.stale.enc.json`（日期部分保持不变）。
+  /// P2-4：把 `backup/auto/` 与 `backup/pre-restore/` 下所有 `.enc.json`
+  /// 加密快照改名为 `<原名>.stale.enc.json`（原名保持不变）。
   ///
   /// - 恢复面板（[listAutoBackups]）跳过 stale 文件——它们已不可用当前口令解开；
-  /// - 滚动保留（[_rotateAutoBackups]）仍按文件名日期把它们当最旧的一批淘汰，
-  ///   约 7 天内自然清完，无需立即删除（保留文件本体，万一用户找回旧口令仍可手工解）。
+  /// - 滚动保留（[_rotateAutoBackups] / [_rotatePreRestoreSnapshots]）仍按
+  ///   文件名时间把它们当最旧的一批淘汰，数日内自然清完，无需立即删除
+  ///   （保留文件本体，万一用户找回旧口令仍可手工解）。
   /// 返回成功改名的文件数；失败逐文件静默，不阻断换口令主流程。
+  ///
+  /// P3-3（v3.1.2 审计）：恢复前快照（pre-restore）纳入同款 stale 标记——
+  /// 此前只标 backup/auto，换口令后旧口令加密的回滚点仍以「已加密」正常
+  /// 列出、点了必失败，用户无法判断哪个回滚点可用。
   Future<int> _markStaleEncryptedBackups() async {
+    final auto = await _markStaleEncryptedBackupsIn('backup/auto');
+    final pre = await _markStaleEncryptedBackupsIn('backup/pre-restore');
+    return auto + pre;
+  }
+
+  /// [_markStaleEncryptedBackups] 的单目录实现。
+  Future<int> _markStaleEncryptedBackupsIn(String relDir) async {
     var n = 0;
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final base = Directory('${dir.path}/backup/auto');
+      final base = Directory('${dir.path}/$relDir');
       if (!await base.exists()) return 0;
       for (final f in base.listSync().whereType<File>().toList()) {
         final name = _autoBackupName(f);
@@ -689,7 +764,7 @@ class TaskProvider extends ChangeNotifier {
         } catch (_) {}
       }
     } catch (e) {
-      AppLog.d('标记旧口令快照失败（忽略）：$e');
+      AppLog.d('标记旧口令快照失败（忽略，$relDir）：$e');
     }
     return n;
   }
@@ -835,6 +910,8 @@ class TaskProvider extends ChangeNotifier {
   /// P3-6（v3.1.0 审计）：返回 `(changed, batchId, saved)`——任务改写收编进
   /// [batchUpdateAs]（改前快照 + 定向撤销日志 + 单次落库），UI 据此挂 10 秒
   /// 撤销横幅（[undoMergeTags]）；合并前由调用方弹确认（显示影响条数）。
+  /// U-10（v3.1.2 审计）：batchId == 0 = 无可撤销变更（0 条任务受影响且
+  /// source 未归档，未登记撤销条目）——UI 不得对 batchId 0 弹撤销横幅。
   ///
   /// P3-5（v3.1.0 审计）：归档集合迁移消费落盘结果、失败回滚（同 [renameTag]）。
   Future<(int, int, bool)> mergeTags(String source, String target) async {
@@ -1143,7 +1220,11 @@ class TaskProvider extends ChangeNotifier {
   Future<bool> writePreRestoreSnapshot() async {
     try {
       final now = DateTime.now();
-      final (payload, _, _) = await _buildSnapshotPayload(now);
+      // P3-2（v3.1.2 审计）：不再丢弃 attachmentsStripped——附件被剥离的
+      // 回滚点若不标注，用户会以为「有回滚点就万事大吉」，实际回滚后任务
+      // 仍挂着已不存在的附件引用。剥离事实写进文件名（.noattach 中缀），
+      // 恢复面板副标题随之如实标注「不含附件」。
+      final (payload, attachmentsStripped, _) = await _buildSnapshotPayload(now);
       final budget = _autoBackupEncrypt
           ? (DataIo.maxExportPayloadBytes * 3 ~/ 4) - (1 << 20)
           : DataIo.maxExportPayloadBytes;
@@ -1154,7 +1235,10 @@ class TaskProvider extends ChangeNotifier {
       final plain = const JsonEncoder.withIndent('  ').convert(payload);
       final body = buildBackupPayload(
           plain, encryptOn: _autoBackupEncrypt, pass: _autoBackupPass);
-      final suffix = _autoBackupEncrypt ? '.enc.json' : '.json';
+      // 后缀次序固定为 [.noattach][.enc].json——保证 endsWith('.enc.json')
+      // 的加密判定与列表解析在两种标记组合下都成立。
+      final noAttachMark = attachmentsStripped ? '.noattach' : '';
+      final suffix = '$noAttachMark${_autoBackupEncrypt ? '.enc' : ''}.json';
       final p = (int n) => n.toString().padLeft(2, '0');
       final name = 'pre-restore-'
           '${now.year}${p(now.month)}${p(now.day)}-'
@@ -1288,17 +1372,28 @@ class TaskProvider extends ChangeNotifier {
         final preFiles = preDir
             .listSync()
             .whereType<File>()
-            .where((f) => f.path.endsWith('.json'))
+            // P3-3（v3.1.2 审计）：stale（换口令后已不可解）同样不出现在面板，
+            // 与 backup/auto 口径一致——否则旧口令加密回滚点仍以「已加密」
+            // 正常列出，点进去只能失败。
+            .where((f) =>
+                f.path.endsWith('.json') &&
+                !_autoBackupName(f).contains('.stale.'))
             .toList();
         preFiles.sort(
             (a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
         for (final f in preFiles) {
           final name = _autoBackupName(f);
           final encrypted = name.endsWith('.enc.json');
-          final stem = encrypted
+          var stem = encrypted
               ? name.substring(
                   0, name.length - '.enc.json'.length)
               : name.substring(0, name.length - '.json'.length);
+          // P3-2（v3.1.2 审计）：附件剥离标记（.noattach）不参与时间戳解析，
+          // 摘出后透传给面板副标题如实标注。
+          final stripped = stem.endsWith('.noattach');
+          if (stripped) {
+            stem = stem.substring(0, stem.length - '.noattach'.length);
+          }
           // pre-restore-YYYYMMDD-HHMMSS
           final m = RegExp(r'^pre-restore-(\d{8})-(\d{6})$').firstMatch(stem);
           if (m == null) continue;
@@ -1321,6 +1416,7 @@ class TaskProvider extends ChangeNotifier {
             file: f,
             encrypted: encrypted,
             preRestore: true,
+            attachmentsStripped: stripped,
           ));
         }
       }
@@ -1835,7 +1931,14 @@ class TaskProvider extends ChangeNotifier {
     }
     // F-8（v2.8.5 审计）：interval 任务缺 repeatAnchor 的自愈（详见
     // [_healRepeatAnchors]）。一次性写回数据库，之后不再反复触发。
-    if (_healRepeatAnchors()) {
+    // P2-1（v3.1.2 审计）：旧任务拼音索引回填并入同一次落盘——历史版本只落库
+    // initials（pinyinFull 为空串），若不回填，升级后存量任务的全拼搜索永远
+    // 命中不了，与发布说明「加载后自动补齐」矛盾（习惯侧 A4 已有同款）。
+    var healed = _healRepeatAnchors();
+    if (_healPinyinIndexes()) {
+      healed = true;
+    }
+    if (healed) {
       await _persist();
     }
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
@@ -1896,6 +1999,9 @@ class TaskProvider extends ChangeNotifier {
       }
     }
     NotificationService.remindersMutedUntil = _remindersMutedUntil;
+    // U-3（v3.1.2 审计）：冷启动带出未过期的静音窗口——到期 Timer 一并挂上，
+    // 到期自愈不依赖守护轮次。
+    _armMuteExpiryTimer();
     // A5（v3.1.1 功能增强）：今日三件——旧数据无键 = 未选择（零迁移）。
     await _loadDailyMit(prefs);
     NotificationService.instance.enabled = _notificationsEnabled;
@@ -2194,6 +2300,26 @@ class TaskProvider extends ChangeNotifier {
         changed = true;
         AppLog.d('[F-8] interval 任务缺锚点已补为今天：id=${t.id} "${t.title}"');
       }
+    }
+    return changed;
+  }
+
+  /// P2-1（v3.1.2 审计）：旧任务拼音索引回填——标题非空但任一索引串为空时按
+  /// 标题补算两串。历史版本只落库 `pinyinInitials`（`pinyinFull` 恒空串），
+  /// 不回填则存量任务的全拼搜索永远无结果；与习惯侧 load 回填（A4）同一
+  /// 「零迁移 + 加载回填」纪律。返回是否有回填、由调用方统一落库；只执行于
+  /// load / 覆盖恢复，内存补算幂等（标题无汉字者结果本就为空串）。
+  bool _healPinyinIndexes() {
+    var changed = false;
+    for (var i = 0; i < _tasks.length; i++) {
+      final t = _tasks[i];
+      if (t.title.isEmpty) continue;
+      if (t.pinyinFull.isNotEmpty && t.pinyinInitials.isNotEmpty) continue;
+      _tasks[i] = t.copyWith(
+        pinyinInitials: Task.computePinyinInitials(t.title),
+        pinyinFull: Task.computePinyinFull(t.title),
+      );
+      changed = true;
     }
     return changed;
   }
@@ -2962,9 +3088,10 @@ class TaskProvider extends ChangeNotifier {
 
   /// 切换任务置顶/星标状态：置顶任务在所属分区内固定排最前（优先于手动 order）。
   ///
-  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false）。当前无 App 内
-  /// 调用点（命令面板/行内菜单均未接线），签名随本轮 provider 统一约定迁移，
-  /// 保证后续入口开箱即是透传语义。
+  /// P2-2（v3.0.7 审计）：返回落盘是否成功（任务不存在 = false）。
+  /// U-11③（v3.1.2 审计）：注释更实——A5（v3.1.1 功能增强）起已有三个 App 内
+  /// 接线入口：任务详情页置顶按钮、首页多选批量 /pin、命令面板 `/pin`；
+  /// 本签名自 v3.0.7 起即为透传语义，入口开箱即用。
   Future<bool> togglePinned(String id) async {
     final i = _tasks.indexWhere((t) => t.id == id);
     if (i == -1) return false;
@@ -4994,11 +5121,16 @@ class AutoBackupEntry {
   /// A1（v3.1.1 功能增强）：是否为「恢复前快照」（backup/pre-restore/ 下、
   /// 时间戳文件名）。面板以此区分标签；还原流程与普通快照完全一致。
   final bool preRestore;
+  /// P3-2（v3.1.2 审计）：该快照生成时附件是否因体积超限被剥离（文件名带
+  /// .noattach 标记）。回滚点不含附件字节——回滚后任务仍挂着已不存在的附件
+  /// 引用，面板必须如实标注，不得让人误以为「有回滚点就万事大吉」。
+  final bool attachmentsStripped;
   const AutoBackupEntry({
     required this.date,
     required this.file,
     this.encrypted = false,
     this.preRestore = false,
+    this.attachmentsStripped = false,
   });
 
   /// 友好展示：M月D日（恢复前快照附 HH:mm，便于区分同日多次恢复的回滚点）。
@@ -5010,8 +5142,11 @@ class AutoBackupEntry {
         : base;
   }
 
-  /// 副标题：明确标注加密状态（L-08 的知情权部分）。
-  String get statusLabel => encrypted ? '已加密' : '明文';
+  /// 副标题：明确标注加密状态（L-08 的知情权部分）与附件剥离事实（P3-2）。
+  String get statusLabel {
+    final enc = encrypted ? '已加密' : '明文';
+    return attachmentsStripped ? '$enc · 不含附件' : enc;
+  }
 }
 
 /// 监听 App 生命周期：回到前台（resumed）时补一次每日重置检查，

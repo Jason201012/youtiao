@@ -54,81 +54,110 @@ class HabitScreen extends StatelessWidget {
               actions: [CommandPaletteButton(currentIndex: 4)],
             ),
             Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(
-                    AppColors.pagePadX, 8, AppColors.pagePadX, 20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _OverviewCard(
-                      todayDone: todayDone,
-                      total: total,
-                      currentStreak: habit.overallCurrentStreak,
-                      totalCheckIns: habit.totalCheckIns,
+              // P3-8（v3.1.2 审计）：页面滚动改为 CustomScrollView——习惯列表
+              // 用 SliverReorderableList 融入页面滚动，拖到屏幕边缘时可自动
+              // 滚动（旧实现 shrinkWrap + NeverScrollableScrollPhysics 内嵌
+              // 在 SingleChildScrollView 里，列表自身不滚，习惯多于一屏时
+              // 无法一次把底部条目拖到顶部，只能「滚一屏、拖一段」）。
+              child: CustomScrollView(
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(
+                        AppColors.pagePadX, 8, AppColors.pagePadX, 0),
+                    sliver: SliverList(
+                      delegate: SliverChildListDelegate([
+                        _OverviewCard(
+                          todayDone: todayDone,
+                          total: total,
+                          currentStreak: habit.overallCurrentStreak,
+                          totalCheckIns: habit.totalCheckIns,
+                        ),
+                        if (habit.habitCount > 0) ...[
+                          const SizedBox(height: 24),
+                          const _HeatmapCard(),
+                          const SizedBox(height: 24),
+                          const _StreakSection(),
+                        ],
+                        const SizedBox(height: 24),
+                        _SectionTitle('今日习惯'),
+                        const SizedBox(height: AppColors.contentGap),
+                        if (habit.activeHabits.isEmpty) const _EmptyHint(),
+                      ]),
                     ),
-                    if (habit.habitCount > 0) ...[
-                      const SizedBox(height: 24),
-                      const _HeatmapCard(),
-                      const SizedBox(height: 24),
-                      const _StreakSection(),
-                    ],
-                    const SizedBox(height: 24),
-                    _SectionTitle('今日习惯'),
-                    const SizedBox(height: AppColors.contentGap),
-                    if (habit.activeHabits.isEmpty)
-                      const _EmptyHint()
-                    else if (habit.activeHabits.length == 1)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: _HabitTile(habit: habit.activeHabits.first),
-                      )
-                    else ...[
-                      // A3（v3.1.1 功能增强）：习惯列表长按拖拽排序——
-                      // ReorderableListView 收缩内嵌在页滚动里（自身不滚动），
-                      // 长按整行进入拖拽；松手落盘（失败如实提示并回滚）。
-                      ReorderableListView(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        padding: EdgeInsets.zero,
-                        buildDefaultDragHandles: true,
-                        onReorder: (oldIndex, newIndex) async {
+                  ),
+                  if (habit.activeHabits.length == 1)
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: AppColors.pagePadX),
+                      sliver: SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _HabitTile(habit: habit.activeHabits.first),
+                        ),
+                      ),
+                    )
+                  else if (habit.activeHabits.length > 1)
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: AppColors.pagePadX),
+                      sliver: SliverReorderableList(
+                        // P3-8：迁移 onReorderItem（onReorder 自 v3.41.0 起废弃，
+                        // analyzer 已给 info，未来升级会编译失败）。语义差异：
+                        // onReorderItem 的 newIndex 已是「移除项后的最终落点」，
+                        // 而 [HabitProvider.reorderHabits] 按旧 onReorder 约定
+                        // 实现（newIndex 需 -1 校正，测试已钉死）——此处换算回
+                        // 旧口径，provider 单一真源语义不变。
+                        onReorderItem: (oldIndex, newIndex) async {
+                          final legacy =
+                              newIndex > oldIndex ? newIndex + 1 : newIndex;
                           final ok =
-                              await habit.reorderHabits(oldIndex, newIndex);
+                              await habit.reorderHabits(oldIndex, legacy);
                           if (!ok && context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(content: Text('排序未保存，请重试')),
                             );
                           }
                         },
-                        children: [
-                          for (final h in habit.activeHabits)
-                            Padding(
-                              key: ValueKey(h.id),
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: _HabitTile(habit: h),
-                            ),
-                        ],
+                        itemBuilder: (ctx, i) {
+                          final h = habit.activeHabits[i];
+                          return Padding(
+                            key: ValueKey(h.id),
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: _HabitDragRow(index: i, habit: h),
+                          );
+                        },
+                        itemCount: habit.activeHabits.length,
                       ),
-                      const SizedBox(height: 8),
-                      Text('长按习惯可拖动调整顺序',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant)),
-                    ],
-                    // 新P2-2（v2.9.7 审计）：归档习惯的取消归档入口——见
-                    // [_ArchivedSection] 文档。
-                    if (habit.archivedHabits.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      _ArchivedSection(habits: habit.archivedHabits),
-                    ],
-                    const SizedBox(height: 24),
-                    _SectionTitle('成就'),
-                    const SizedBox(height: AppColors.contentGap),
-                    _AchievementGrid(ctx: ctx),
-                  ],
-                ),
+                    ),
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(
+                        AppColors.pagePadX, 0, AppColors.pagePadX, 20),
+                    sliver: SliverList(
+                      delegate: SliverChildListDelegate([
+                        if (habit.activeHabits.length > 1) ...[
+                          const SizedBox(height: 8),
+                          // P3-8：拖拽入口已收窄为行首手柄，提示随之改如实。
+                          Text('拖动行首手柄可调整顺序',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant)),
+                        ],
+                        // 新P2-2（v2.9.7 审计）：归档习惯的取消归档入口——见
+                        // [_ArchivedSection] 文档。
+                        if (habit.archivedHabits.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          _ArchivedSection(habits: habit.archivedHabits),
+                        ],
+                        const SizedBox(height: 24),
+                        _SectionTitle('成就'),
+                        const SizedBox(height: AppColors.contentGap),
+                        _AchievementGrid(ctx: ctx),
+                      ]),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -575,7 +604,9 @@ Future<void> promptHabitTodayQuantity(
     current: cur,
     min: 0,
     max: 9999,
-    hint: '目标 ${habit.effectiveTarget}；填 0 = 清空今日记录',
+    hint: '目标 ${habit.effectiveTarget}'
+        '${habit.unit.trim().isEmpty ? '' : ' ${habit.unit.trim()}'}'
+        '；填 0 = 清空今日记录',
   );
   if (v == null) return;
   // P3-2（v3.0.5 审计）：「设置数量」对话框消费落盘结果，失败如实提示
@@ -758,6 +789,37 @@ class _EmptyHint extends StatelessWidget {
               style: TextStyle(color: ext.meta)),
         ],
       ),
+    );
+  }
+}
+
+/// P3-8（v3.1.2 审计）：习惯行 + 行首专用拖拽手柄——拖拽入口收窄到手柄
+/// （与首页任务行的手柄同款交互），行内的「+1」长按（设数量）与提醒 chip
+/// 长按（取消提醒）等业务长按不再被拖拽手势抢占（旧实现整行长按进入拖拽，
+/// 用户摸不到哪块能拖、哪块是业务动作）。
+class _HabitDragRow extends StatelessWidget {
+  final int index;
+  final Habit habit;
+  const _HabitDragRow({required this.index, required this.habit});
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = appColors(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        ReorderableDragStartListener(
+          index: index,
+          child: Container(
+            width: 24,
+            height: 56,
+            alignment: Alignment.center,
+            child: Icon(Symbols.drag_indicator, size: 20, color: ext.meta),
+          ),
+        ),
+        const SizedBox(width: 2),
+        Expanded(child: _HabitTile(habit: habit)),
+      ],
     );
   }
 }
@@ -1825,7 +1887,9 @@ class _HabitDetailSheet extends StatelessWidget {
         builder: (d) => AlertDialog(
           title: Text('$dayLabel 已有打卡'),
           content: Text(habit.isQuantified
-              ? '该日已记录 $existing 个单位（目标 ${habit.effectiveTarget}）。'
+              // P3-7（v3.1.2 审计）：接 progressLabelOf——「已记录 5/8 杯」替代
+              // 手拼的「已记录 5 个单位（目标 8）」（无单位且两套口径）。
+              ? '该日已记录 ${habit.progressLabelOf(existing)}。'
                   '可以撤销这条记录，或修改数量。'
               : '该日已打过卡。可以撤销它，撤销后连续天数与热力图会同步回退。'),
           actions: [
@@ -1910,7 +1974,9 @@ class _HabitDetailSheet extends StatelessWidget {
         current: habit.effectiveTarget,
         min: 1,
         max: 9999,
-        hint: '目标 ${habit.effectiveTarget}',
+        // P3-7（v3.1.2 审计）：输入提示补单位（与「设今日数量」同口径）。
+        hint: '目标 ${habit.effectiveTarget}'
+            '${habit.unit.trim().isEmpty ? '' : ' ${habit.unit.trim()}'}',
       );
       if (v == null) return;
       value = v;
@@ -2114,7 +2180,9 @@ class _HabitDetailSheet extends StatelessWidget {
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
                             child: Text(
+                              // P3-7（v3.1.2 审计）：详情头部的每日目标同样带单位。
                               '每日目标 $target'
+                              '${habit.unit.trim().isEmpty ? '' : ' ${habit.unit.trim()}'}'
                               '${habit.graceDays > 0 ? ' · 宽限 ${habit.graceDays} 天/周（漏卡不断签）' : ''}',
                               style: TextStyle(fontSize: 12, color: ext.meta),
                             ),
@@ -2215,9 +2283,13 @@ class _HabitDetailSheet extends StatelessWidget {
                             // 卡片下方就是「今天不打卡（不在计划的打卡日）」，上半
                             // 报数字、下半说不打卡，自相矛盾（v2.9.5 的 P3-6 只改了
                             // 列表侧两处，详情弹层漏网）。现在数字分支同样读 [restDay]。
+                            // P3-7（v3.1.2 审计）：接 progressLabelOf 单一真源——
+                            // 旧实现手拼 '$todayValue / $target'（分隔空格还与列表
+                            // 的 6/8 不一致、无单位），同一习惯列表「今日 6/8 杯」
+                            // 详情「6 / 8」会让用户怀疑单位没保存成功。
                             restDay
                                 ? kHabitRestDayLabel
-                                : '$todayValue / $target${metToday ? ' · 已达标' : ''}',
+                                : '${habit.progressLabelOf(todayValue)}${metToday ? ' · 已达标' : ''}',
                             style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w700,
@@ -2231,8 +2303,11 @@ class _HabitDetailSheet extends StatelessWidget {
                       const SizedBox(height: 10),
                       // P3-6（v2.9.3 审计）：量化习惯补「本周累计 / 周目标量」——
                       // weeklyValue / weeklyValueTarget 此前定义后零消费。
+                      // P3-7（v3.1.2 审计）：单位贯穿——周目标量同样带单位
+                      //（与 progressLabelOf 同族口径：单位与数值间一个空格）。
                       Text(
-                        '本周累计 ${hp.weeklyValue(habit)} / ${hp.weeklyValueTarget(habit)}'
+                        '本周累计 ${hp.weeklyValue(habit)}/${hp.weeklyValueTarget(habit)}'
+                        '${habit.unit.trim().isEmpty ? '' : ' ${habit.unit.trim()}'}'
                         '（计划日 × 每日目标）',
                         style: TextStyle(fontSize: 12, color: ext.meta),
                       ),

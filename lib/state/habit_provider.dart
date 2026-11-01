@@ -1543,8 +1543,11 @@ class HabitProvider extends ChangeNotifier {
       final reminder =
           h.reminderMinute == null ? '无' : _fmtMinute(h.reminderMinute!);
       // T1-2：量化习惯补显示「每日目标 / 累计量」，否则 MD 副本看不出量级。
-      final target = h.isQuantified ? ' ｜ 每日目标 ${h.dailyTarget}' : '';
-      final value = h.isQuantified ? ' ｜ 累计量 ${totalValue(h)}' : '';
+      // P3-7（v3.1.2 审计）：单位贯穿——目标与累计量统一带单位（无单位时
+      // 不追加任何后缀，与升级前逐字节一致）。
+      final unitSuffix = h.unit.trim().isEmpty ? '' : ' ${h.unit.trim()}';
+      final target = h.isQuantified ? ' ｜ 每日目标 ${h.dailyTarget}$unitSuffix' : '';
+      final value = h.isQuantified ? ' ｜ 累计量 ${totalValue(h)}$unitSuffix' : '';
       final grace = h.graceDays > 0 ? ' ｜ 宽限 ${h.graceDays} 天/周' : '';
       buf.writeln('- ${_mdText(h.emoji)} ${_mdText(h.title)} ｜ 当前连续 '
           '${currentStreak(h)} 天 · 最长 ${longestStreak(h)} 天 · 累计达标 '

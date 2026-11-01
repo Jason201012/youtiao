@@ -125,6 +125,11 @@ void main() {
       );
 
   /// 「最近 N 天每天完成一次」的重复任务（occurrence 历史在 doneDates）。
+  ///
+  /// P3-10（v3.1.2 审计）：仅用于**无时间窗**的消费方（成就——按全部事件计数）。
+  /// 周报 / 月报等窗口型统计请用 [weeklyDone] / [monthlyDone]——本方法用
+  /// `now-1 / now-2` 造历史，每月 1–2 日会落到上个月（月报必挂）、周一运行会
+  /// 跨周（周报必挂），「全量绿」只在特定日期成立。
   Task dailyDone(int days, {String id = 'r1'}) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -143,6 +148,55 @@ void main() {
       completedAt: now,
       repeat: RepeatType.daily,
       doneDates: doneDates,
+    );
+  }
+
+  /// P3-10（v3.1.2 审计）：周报专用夹具——三个完成事件全部锚定在**本周
+  /// 一/二/三**（doneDates），completedAt 与周一重合（事件集合按日去重）。
+  /// 无论周几运行，事件都落在当前周内，completedCount 恒 = 3（旧单槽口径
+  /// 恒 = 1，断言仍具区分力）。
+  Task weeklyDone({String id = 'r1'}) {
+    final now = DateTime.now();
+    final monday = DateTime(now.year, now.month, now.day)
+        .subtract(Duration(days: now.weekday - 1));
+    String ymd(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    return Task(
+      id: id,
+      title: '每天喝水',
+      priority: Priority.medium,
+      category: Category.work,
+      status: TaskStatus.done,
+      completedAt: monday,
+      repeat: RepeatType.daily,
+      doneDates: [
+        ymd(monday),
+        ymd(monday.add(const Duration(days: 1))),
+        ymd(monday.add(const Duration(days: 2))),
+      ],
+    );
+  }
+
+  /// P3-10（v3.1.2 审计）：月报专用夹具——anchor 固定在当月 15 日（月报支持
+  /// [PeriodReview.fromProviders] 的 anchor 入参），doneDates = 13/14 日、
+  /// completedAt = 15 日。所有月份（含 2 月）都有这三天，completedCount 恒 = 3，
+  /// 与运行日期无关。
+  Task monthlyDone({String id = 'r1'}) {
+    final now = DateTime.now();
+    String ymd(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    return Task(
+      id: id,
+      title: '每天喝水',
+      priority: Priority.medium,
+      category: Category.work,
+      status: TaskStatus.done,
+      completedAt: DateTime(now.year, now.month, 15),
+      repeat: RepeatType.daily,
+      doneDates: [
+        ymd(DateTime(now.year, now.month, 13)),
+        ymd(DateTime(now.year, now.month, 14)),
+      ],
     );
   }
 
@@ -269,18 +323,22 @@ void main() {
   });
 
   group('P2-1 周报 / 月报 / 成就 occurrence 化（v3.1.0 审计）', () {
-    test('周报：重复任务近 2 天历史 + 今天完成 → completedCount=3（旧实现 1）',
-        () async {
-      final p = await buildWith([dailyDone(2)]);
+    test('周报：重复任务本周 3 次完成 → completedCount=3（旧实现 1）', () async {
+      // P3-10（v3.1.2 审计）：夹具锚定本周一/二/三，任何日期运行都稳定。
+      final p = await buildWith([weeklyDone()]);
       final r = WeeklyReview.fromProviders(p, FocusProvider(), HabitProvider());
       expect(r.completedCount, 3,
           reason: 'occurrence 级：3 次完成各计 1 次，与周目标口径一致');
     });
 
     test('月报：同任务 completedCount=3、buckets 命中', () async {
-      final p = await buildWith([dailyDone(2)]);
+      // P3-10（v3.1.2 审计）：anchor 固定当月 15 日 + 事件锚定 13/14/15 日，
+      // 每月 1–2 日运行不再把事件落到上个月（旧夹具用 now-1/now-2）。
+      final p = await buildWith([monthlyDone()]);
+      final now = DateTime.now();
       final r = PeriodReview.fromProviders(p, FocusProvider(), HabitProvider(),
-          period: ReviewPeriod.month);
+          period: ReviewPeriod.month,
+          anchor: DateTime(now.year, now.month, 15));
       expect(r.completedCount, 3);
       expect(r.buckets.any((v) => v > 0), isTrue);
     });
@@ -410,12 +468,32 @@ void main() {
           reason: '持久层一并改回（不只是内存）');
     });
 
-    testWidgets('解锁页提供「无法验证？关闭应用锁」出口，二次确认后解除',
+    testWidgets('解锁页出口仅在死路渲染；关闭前强制验证，失败经二次确认后解除',
         (tester) async {
+      // P1-1（v3.1.2 审计）：出口收窄 + 关闭前强制 authenticate——本用例钉住
+      // 「死路 + 验证失败」路径；验证通过的路径见下一条。local_auth 需桩：
+      // 无 mock 时通道调用在 FakeAsync 下永不完成，二次确认框不会出现。
+      const authCh = MethodChannel('plugins.flutter.io/local_auth');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(authCh, (call) async {
+        switch (call.method) {
+          case 'canCheckBiometrics':
+          case 'isDeviceSupported':
+            return false; // 死路：设备无任何可用凭据
+          case 'authenticate':
+            return false; // 锁屏密码降级验证也失败
+          default:
+            return null;
+        }
+      });
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
       await prefs.setBool('app_lock_enabled', true);
       final lock = AppLockProvider();
+      // P1-1：关闭前强制 authenticate 走的是「已启用」分支——必须先 load()
+      //（旧用例不 load 也成立：旧流程只走确认框；新流程 authenticate 对
+      // 未启用态直接放行，测不到「验证失败才进确认框」）。
+      await lock.load();
 
       await tester.pumpWidget(MultiProvider(
         providers: [ChangeNotifierProvider.value(value: lock)],
@@ -424,11 +502,12 @@ void main() {
         child: MaterialApp(theme: lightTheme, home: const AppLockGate()),
       ));
       expect(find.text('无法验证？关闭应用锁'), findsOneWidget,
-          reason: 'P2-3：旧解锁页只有生物识别一个按钮，无任何出口');
-
+          reason: '死路（!biometricAvailable）必须提供出口（P2-3 v3.1.0）');
+      // P1-1：点出口先强制一次 authenticate（桩已返回 false）→ 二次确认框。
       await tester.tap(find.text('无法验证？关闭应用锁'));
       await tester.pumpAndSettle();
-      // 二次确认对话框出现，点确认按钮。
+      expect(find.text('取消'), findsOneWidget,
+          reason: '验证失败后进入二次确认（旧实现直接弹确认）');
       await tester.tap(find.widgetWithText(FilledButton, '关闭应用锁'));
       await tester.pumpAndSettle();
 
@@ -437,6 +516,41 @@ void main() {
           (await SharedPreferences.getInstance()).getBool('app_lock_enabled'),
           isFalse,
           reason: '关闭出口必须真实落盘（下次回前台不再上锁）');
+    });
+
+    testWidgets('P1-1：出口强制验证通过 → 解锁且不关闭应用锁', (tester) async {
+      const authCh = MethodChannel('plugins.flutter.io/local_auth');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(authCh, (call) async {
+        switch (call.method) {
+          case 'canCheckBiometrics':
+          case 'isDeviceSupported':
+            return false; // 死路形态（出口可见）
+          case 'authenticate':
+            return true; // 锁屏密码降级验证成功
+          default:
+            return null;
+        }
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+      await prefs.setBool('app_lock_enabled', true);
+      final lock = AppLockProvider();
+      await lock.load(); // P1-1：authenticate 需「已启用」分支（同上一条）
+
+      await tester.pumpWidget(MultiProvider(
+        providers: [ChangeNotifierProvider.value(value: lock)],
+        child: MaterialApp(theme: lightTheme, home: const AppLockGate()),
+      ));
+      await tester.tap(find.text('无法验证？关闭应用锁'));
+      await tester.pumpAndSettle();
+
+      expect(lock.locked, isFalse, reason: '验证通过即正常解锁');
+      expect(lock.appLockEnabled, isTrue,
+          reason: 'P1-1：验证通过**不得**关闭应用锁（旧实现两键即绕过）');
+      expect(
+          (await SharedPreferences.getInstance()).getBool('app_lock_enabled'),
+          isTrue);
     });
   });
 

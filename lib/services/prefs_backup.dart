@@ -71,10 +71,6 @@ const List<String> _backedUpPrefKeys = <String>[
   // 恢复侧配套：applyAppPrefs 写回后必须调 NotificationService.reloadTimezoneOverride()
   // 重解析内存时区并全量重排（见 backup_sheet 恢复流程），否则仅落盘、本轮不生效。
   'reminder_timezone_override',
-  // A2（v3.1.1 功能增强）：全局提醒临时静音窗口（ISO 时间戳；null = 未静音）。
-  // 静音是用户显式设置的短期状态，换机 / 恢复后保持，避免「刚恢复完又被旧静音噤声」
-  // 的反向困惑；过期的窗口由 TaskProvider.load() 按未静音兜底。
-  'reminders_muted_until',
   // A5（v3.1.1 功能增强）：今日三件（MIT）选中的任务 id（JSON map，按日期键）。
   // 纯偏好存储、零迁移；旧备份无此键时保持现有选择（不覆盖）。
   'daily_mit',
@@ -87,8 +83,14 @@ const List<String> _backedUpPrefKeys = <String>[
 ///   「开关开着、口令缺失」，每日自动快照会**因缺口令持续失败**（比明文
 ///   降级更糟）。不迁移 + 恢复完成后在结果提示里说明「需重新设置」，
 ///   避免静默从加密降级为明文。
+/// - `reminders_muted_until`（全局提醒临时静音窗口）：U-6（v3.1.2 审计）——
+///   静音是**本机短期状态**（类似勿扰的一次性会话），不是用户偏好：恢复一份
+///   「当时静音到明天」的旧备份会让当前设备立刻被静音，用户「莫名其妙又被
+///   噤声」且无从预期。改为本机状态不迁移：导出侧经二道闸排除，恢复侧
+///   applyAppPrefs 白名单过滤同样丢弃旧备份携带的该键（旧备份兼容）。
 const List<String> _neverBackedUpPrefKeys = <String>[
   'auto_backup_encrypt',
+  'reminders_muted_until',
 ];
 
 /// 读取白名单内的偏好键，返回可被 JSON 序列化的 `{key: value}` 映射。

@@ -91,7 +91,8 @@ class AppLockProvider extends ChangeNotifier {
   /// 识别也无锁屏凭据，下一次回前台就会锁死在解锁页（设置页不可达）。这里
   /// 检测到「开关为开但生物识别不可用」时强制写回 false，与「启用必有门槛」
   /// 的启用校验一致；配合解锁页新增的「无法验证？关闭应用锁」出口（main
-  /// AppLockGate），两道防线共同消除不可解锁路径。
+  /// AppLockGate，P1-1 v3.1.2 审计收窄：仅在 !biometricAvailable 死路渲染，
+  /// 且关闭前强制一次 authenticate），两道防线共同消除不可解锁路径。
   Future<void> refreshEnabled() async {
     final prefs = await SharedPreferences.getInstance();
     var enabled = prefs.getBool(_kEnabled) ?? false;

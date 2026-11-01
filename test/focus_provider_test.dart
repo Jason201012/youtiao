@@ -61,7 +61,9 @@ void main() {
   });
 
   group('会话统计', () {
-    test('totalSec / todayTotalSec / todayCompleted / totalSecOn', () {
+    // U-11①（v3.1.2 审计）：todayTotalSec 已删除——今日含休息口径改用
+    // totalSecOn(now) 表达（同一真源，无独立 getter）。
+    test('totalSec / totalSecOn / todayCompleted', () {
       final p = FocusProvider();
       final today = DateTime.now();
       final yesterday = today.subtract(const Duration(days: 1));
@@ -69,7 +71,7 @@ void main() {
       p.addSession(mk(2, 300, endedAt: today));
       p.addSession(mk(3, 100, endedAt: yesterday));
       expect(p.totalSec, 1000);
-      expect(p.todayTotalSec, 900);
+      expect(p.totalSecOn(today), 900);
       expect(p.todayCompleted, 2);
       expect(p.totalSecOn(yesterday), 100);
     });
@@ -243,8 +245,8 @@ void main() {
         startedAt: t.subtract(const Duration(seconds: 300)), endedAt: t));
       expect(p.todayFocusSec, 600);
       expect(p.todayCompleted, 1);
-      // 总时长仍含休息
-      expect(p.todayTotalSec, 900);
+      // 今日含休息总时长（原 todayTotalSec 已删，同口径走 totalSecOn）
+      expect(p.totalSecOn(t), 900);
     });
   });
 

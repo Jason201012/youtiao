@@ -163,8 +163,13 @@ class HomeScreenState extends State<HomeScreen> {
     if (mounted && _searching) setState(() => _searchHistory = list);
   }
 
-  /// 退出搜索模式并清空关键字
+  /// 退出搜索模式并清空关键字。
+  /// U-7（v3.1.2 审计）：退出时查询非空则记录历史——实时搜索下用户点结果
+  /// 即离开、几乎不会按回车，「回车提交」作为唯一记录点会让搜索历史形同虚设；
+  /// 退出搜索（返回键 / 左箭头）且查询非空是更自然的记录时机。
   void _exitSearch() {
+    final q = _searchCtl.text.trim();
+    if (q.isNotEmpty) _recordSearchHistory(q);
     _searchCtl.clear();
     setState(() => _searching = false);
     widget.onSearchingChanged?.call(false);
@@ -946,8 +951,24 @@ class _MuteBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final ext = appColors(context);
     final p = context.read<TaskProvider>();
+    // U-1（v3.1.2 审计）：跨天静音补日期——只显示 HH:mm 时「静音到明天 08:00」
+    // 看起来像今天 08:00（已过去）。今天只给时刻；明天标「明天」；更远给 M月D日
+    //（与设置页的 M/D HH:mm 口径对齐）。
+    final now = DateTime.now();
+    final isToday = until.year == now.year &&
+        until.month == now.month &&
+        until.day == now.day;
+    final tomorrow = DateTime(now.year, now.month, now.day + 1);
+    final isTomorrow = until.year == tomorrow.year &&
+        until.month == tomorrow.month &&
+        until.day == tomorrow.day;
     final hh = until.hour.toString().padLeft(2, '0');
     final mm = until.minute.toString().padLeft(2, '0');
+    final when = isToday
+        ? '$hh:$mm'
+        : isTomorrow
+            ? '明天 $hh:$mm'
+            : '${until.month}月${until.day}日 $hh:$mm';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
@@ -960,7 +981,7 @@ class _MuteBanner extends StatelessWidget {
           Icon(Symbols.notifications_paused, size: 18, color: ext.meta),
           const SizedBox(width: 8),
           Expanded(
-            child: Text('提醒已静音至 $hh:$mm',
+            child: Text('提醒已静音至 $when',
                 style: TextStyle(fontSize: 13, color: ext.meta)),
           ),
           TextButton(
@@ -995,9 +1016,11 @@ class _TodayMitCardState extends State<_TodayMitCard> {
     final ext = appColors(context);
     final scheme = Theme.of(context).colorScheme;
     final ids = provider.todayMit;
-    // 空态才给建议（已选后建议即收起，避免两列表互相干扰）。
-    final suggestions =
-        ids.isEmpty ? provider.suggestMitCandidates() : const <Task>[];
+    // P2-2（v3.1.2 审计）：建议列表常驻——不再按 `ids.isEmpty` 收起。已选 id
+    // 由 suggestMitCandidates 内部排除，选中 1 件后其余建议仍可继续添加，
+    // 「最多 3 件」的承诺在 UI 上可达；满 3 件后建议行置灰仅提示。
+    final suggestions = provider.suggestMitCandidates();
+    final mitFull = ids.length >= TaskProvider.kDailyMitMax;
 
     return Container(
       width: double.infinity,
@@ -1042,16 +1065,22 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                 // 惰性过滤已兜住悬空 id，这里只为类型收窄兜底。
                 if (t == null) return const SizedBox.shrink();
                 return _mitRow(context, provider, t);
-              })
-            else if (suggestions.isNotEmpty) ...[
+              }),
+            if (suggestions.isNotEmpty) ...[
               Padding(
-                padding: const EdgeInsets.only(left: 8),
-                child: Text('从建议中挑选今天最重要的几件事：',
-                    style: TextStyle(fontSize: 12, color: ext.meta)),
+                // P2-2：top 随「是否已有已选行」变化，不能用 const。
+                padding: EdgeInsets.only(left: 8, top: ids.isEmpty ? 0 : 6),
+                child: Text(
+                  ids.isEmpty
+                      ? '从建议中挑选今天最重要的几件事：'
+                      : '继续添加（最多 ${TaskProvider.kDailyMitMax} 件）：',
+                  style: TextStyle(fontSize: 12, color: ext.meta),
+                ),
               ),
               const SizedBox(height: 4),
-              ...suggestions.map((t) => _suggestRow(context, provider, t)),
-            ] else
+              ...suggestions.map(
+                  (t) => _suggestRow(context, provider, t, full: mitFull)),
+            ] else if (ids.isEmpty)
               Padding(
                 padding: const EdgeInsets.only(left: 8),
                 child: Text('今天暂无到期任务——先在首页添加几条待办吧',
@@ -1061,6 +1090,24 @@ class _TodayMitCardState extends State<_TodayMitCard> {
         ],
       ),
     );
+  }
+
+  /// U-9（v3.1.2 审计）：今日三件写入失败的专用消费——`toggleTodayMit` 的
+  /// false 有两个互斥语义：「已满 3 件被拒」与「落盘失败（内存已回滚）」，
+  /// 通用 [consumeTaskWriteResult] 的「任务写入失败」文案面向任务库（MIT 是
+  /// 偏好存储，没有「后续操作顺带保存」的自愈），语义不符。
+  Future<void> _consumeMitToggle(
+      BuildContext context, TaskProvider provider, String id) async {
+    final ok = await provider.toggleTodayMit(id);
+    if (ok || !context.mounted) return;
+    final now = provider.todayMit;
+    final fullRejected =
+        now.length >= TaskProvider.kDailyMitMax && !now.contains(id);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(fullRejected
+          ? '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先移出一件再添加'
+          : '保存失败：今日三件未生效，请重试'),
+    ));
   }
 
   /// 已选行：圆圈（完成，带撤销）+ 标题（进详情）+ 移出。
@@ -1106,12 +1153,7 @@ class _TodayMitCardState extends State<_TodayMitCard> {
             visualDensity: VisualDensity.compact,
             tooltip: '移出今日三件',
             icon: Icon(Symbols.close, size: 16, color: ext.meta),
-            onPressed: () => consumeTaskWriteResult(
-              context,
-              provider,
-              t.id,
-              provider.toggleTodayMit(t.id),
-            ),
+            onPressed: () => _consumeMitToggle(context, provider, t.id),
           ),
         ],
       ),
@@ -1119,7 +1161,10 @@ class _TodayMitCardState extends State<_TodayMitCard> {
   }
 
   /// 建议行：「+」采纳 + 标题。点击即加入今日三件（可再次点移出）。
-  Widget _suggestRow(BuildContext context, TaskProvider provider, Task t) {
+  /// P2-2（v3.1.2 审计）：[full]（已满 3 件）时「+」置灰、点击仅提示，
+  /// 不再静默拒绝。
+  Widget _suggestRow(BuildContext context, TaskProvider provider, Task t,
+      {required bool full}) {
     final ext = appColors(context);
     final scheme = Theme.of(context).colorScheme;
     return Padding(
@@ -1128,15 +1173,11 @@ class _TodayMitCardState extends State<_TodayMitCard> {
         children: [
           InkWell(
             customBorder: const CircleBorder(),
-            onTap: () => consumeTaskWriteResult(
-              context,
-              provider,
-              t.id,
-              provider.toggleTodayMit(t.id),
-            ),
+            onTap: () => _consumeMitToggle(context, provider, t.id),
             child: Padding(
               padding: const EdgeInsets.all(6),
-              child: Icon(Icons.add_circle_outline, size: 20, color: ext.meta),
+              child: Icon(Icons.add_circle_outline,
+                  size: 20, color: full ? ext.meta.withValues(alpha: 0.35) : ext.meta),
             ),
           ),
           const SizedBox(width: 6),

@@ -11,6 +11,8 @@
 ///
 /// 纯 Dart（不依赖 flutter），可直接单测；解析复用调用方已 jsonDecode 的
 /// Map，不产生二次解析。
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 class BackupSummary {
@@ -35,6 +37,7 @@ class BackupSummary {
   final List<String> changedPrefKeys;
   // 当前对比
   final int currentTaskCount;
+  final int currentTrashCount;
   final int currentHabitCount;
   final int currentFocusCount;
 
@@ -57,6 +60,7 @@ class BackupSummary {
     this.prefKeys = const [],
     this.changedPrefKeys = const [],
     this.currentTaskCount = 0,
+    this.currentTrashCount = 0,
     this.currentHabitCount = 0,
     this.currentFocusCount = 0,
   });
@@ -69,6 +73,7 @@ class BackupSummary {
     Map<String, dynamic> data, {
     bool encrypted = false,
     required int currentTaskCount,
+    int currentTrashCount = 0,
     required int currentHabitCount,
     required int currentFocusCount,
   }) async {
@@ -124,7 +129,11 @@ class BackupSummary {
       prefs.forEach((k, v) {
         if (k is! String) return;
         backupPrefKeys.add(k);
-        if (!sp.containsKey(k) || sp.get(k) != v) changed.add(k);
+        // P3-1（v3.1.2 审计）：列表键深比较——备份 JSON 解码出的 List 是
+        // List<dynamic>，SharedPreferences 返回 List<String>，Dart 的 `==`
+        // 是引用比较，直接 `!=` 会把内容完全相同的列表键（focus_sound_types /
+        // archived_tags 等）恒判为「与当前不同」。归一化后比较。
+        if (!sp.containsKey(k) || !_prefEquals(sp.get(k), v)) changed.add(k);
       });
       changed.sort();
     }
@@ -148,12 +157,83 @@ class BackupSummary {
       prefKeys: backupPrefKeys,
       changedPrefKeys: changed,
       currentTaskCount: currentTaskCount,
+      currentTrashCount: currentTrashCount,
       currentHabitCount: currentHabitCount,
       currentFocusCount: currentFocusCount,
     );
   }
 
   static List _listOf(dynamic v) => v is List ? v : const [];
+
+  /// P3-1（v3.1.2 审计）：偏好值等价比较。两值分别来自「JSON 域」（备份）
+  /// 与「SharedPreferences 域」（当前），List 的运行时类型不同但内容可能
+  /// 一致；jsonEncode 归一化后按串比较。任一侧不可编码（实际不可达：值均
+  /// 源自 JSON/SP 的合法标量）时退回引用比较语义（判不等，宁可多报不漏报）。
+  static bool _prefEquals(dynamic a, dynamic b) {
+    if (a == b) return true;
+    final ea = _tryEncode(a);
+    final eb = _tryEncode(b);
+    if (ea == null || eb == null) return false;
+    return ea == eb;
+  }
+
+  static String? _tryEncode(dynamic v) {
+    try {
+      return jsonEncode(v);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// U-12①（v3.1.2 审计）：差异键名 → 用户可读标签。摘要面向用户展示，
+  /// 直接给 `archived_tags` 这类英文键名非用户语言；未登记的键回退原键名
+  /// （新增白名单键漏登记只影响可读性，不影响正确性）。
+  static const Map<String, String> _prefKeyLabels = {
+    'theme_mode': '主题模式',
+    'theme_follow_system': '跟随系统深浅色',
+    'theme_use_dynamic': '动态取色',
+    'theme_seed': '主题色',
+    'theme_pure_black': '纯黑模式',
+    'app_lock_enabled': '应用锁',
+    'app_lock_idle_seconds': '应用锁自动锁定时长',
+    'focus_pomo_enabled': '番茄循环',
+    'focus_pomo_focus_sec': '专注时长',
+    'focus_pomo_short_sec': '短休息时长',
+    'focus_pomo_long_sec': '长休息时长',
+    'focus_pomo_rounds': '番茄轮数',
+    'focus_custom_sec': '自定义专注时长',
+    'focus_sound_type': '提示音类型',
+    'focus_sound_types': '提示音多选',
+    'focus_sound_volume': '提示音音量',
+    'focus_sys_calendar': '专注写入系统日历',
+    'focus_goal_minutes': '每日专注目标',
+    'dnd_enabled': '免打扰',
+    'dnd_start': '免打扰开始时刻',
+    'dnd_end': '免打扰结束时刻',
+    'snooze_minutes': '提醒延后时长',
+    'weekly_goal_count': '每周完成目标',
+    'trash_retention_days': '回收站保留期',
+    'background_guard': '后台保活',
+    'onboarding_seen': '引导页标记',
+    'auto_backup_enabled': '自动备份',
+    'calendar_lunar': '日历农历显示',
+    'lock_screen_private': '锁屏隐藏通知内容',
+    'flag_secure': '防截屏/录屏',
+    'allow_external_links': '备注外链点击',
+    'brief_morning_on': '早间简报开关',
+    'brief_morning_h': '早间简报时刻（时）',
+    'brief_morning_m': '早间简报时刻（分）',
+    'brief_evening_on': '晚间简报开关',
+    'brief_evening_h': '晚间简报时刻（时）',
+    'brief_evening_m': '晚间简报时刻（分）',
+    'habit_nudge_on': '习惯挽留开关',
+    'habit_nudge_min': '习惯挽留时刻',
+    'archived_tags': '归档标签',
+    'reminder_timezone_override': '提醒时区',
+    'daily_mit': '今日三件',
+  };
+
+  static String _prefLabel(String key) => _prefKeyLabels[key] ?? key;
 
   static DateTime? _tryParse(dynamic v) =>
       v is String ? DateTime.tryParse(v) : null;
@@ -178,6 +258,9 @@ class BackupSummary {
     final gen = fmt(generatedAt);
     if (gen != null) lines.add('生成于 $gen${ageDays > 0 ? '（$ageDays 天前）' : ''}');
     if (appVersion != null) lines.add('应用版本：$appVersion');
+    // U-11⑤（v3.1.2 审计）：schemaVersion 此前计算后从不展示——摘要补一行，
+    // 让用户能核对备份的数据格式版本。
+    if (schemaVersion != null) lines.add('数据格式版本：v$schemaVersion');
     if (encrypted) lines.add('已加密（口令验证通过）');
     lines.add(
         '数据量：任务 $taskCount、回收站 $trashCount、习惯 $habitCount、'
@@ -191,16 +274,24 @@ class BackupSummary {
         ? null
         : '${fmt(earliestFocusAt) ?? '—'} ~ ${fmt(latestFocusAt) ?? '—'}';
     if (focusRange != null) lines.add('专注记录范围：$focusRange');
-    lines.add('当前对比：任务 $currentTaskCount、习惯 $currentHabitCount、'
-        '专注 $currentFocusCount；恢复将覆盖现有数据，备份中不存在的当前任务'
-        '将不会被保留');
+    // U-12③（v3.1.2 审计）：当前对比补回收站条数，与「备份中不存在的当前
+    // 任务/回收站条目将不会被保留」的警示对称。
+    lines.add('当前对比：任务 $currentTaskCount、回收站 $currentTrashCount、'
+        '习惯 $currentHabitCount、专注 $currentFocusCount；恢复将覆盖现有数据，'
+        '备份中不存在的当前任务/回收站条目将不会被保留');
     if (changedPrefKeys.isNotEmpty) {
+      // U-12①（v3.1.2 审计）：展示用户可读标签而非英文键名。
+      final labels = changedPrefKeys.map(_prefLabel).toList();
       lines.add(
-          '设置差异：${changedPrefKeys.length} 个偏好键与当前不同'
-          '（${changedPrefKeys.take(6).join('、')}'
-          '${changedPrefKeys.length > 6 ? ' 等' : ''}）');
+          '设置差异：${labels.length} 项偏好与当前不同'
+          '（${labels.take(6).join('、')}'
+          '${labels.length > 6 ? ' 等' : ''}）');
     } else if (prefKeys.isNotEmpty) {
       lines.add('设置：与当前无差异（${prefKeys.length} 个键）');
+    } else {
+      // P3-4（v3.1.2 审计）：备份无偏好段时如实说明——旧版/纯任务备份恢复时
+      // 「同时恢复设置」开关无效，摘要与确认框口径一致。
+      lines.add('设置：此备份未包含设置（仅恢复数据）');
     }
     return lines.join('\n');
   }

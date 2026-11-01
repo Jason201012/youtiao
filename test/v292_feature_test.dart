@@ -757,7 +757,9 @@ void main() {
       await pumpDetailSheet(tester, hp, h);
 
       expect(find.text('今日进度'), findsOneWidget);
-      expect(find.text('3 / 8'), findsOneWidget);
+      // P3-7（v3.1.2 审计）：详情页接 progressLabelOf 单一真源——分隔与列表
+      // 同口径（无空格 '3/8'，旧手拼是 '3 / 8'）。
+      expect(find.text('3/8'), findsOneWidget);
       expect(find.text('设置数量'), findsOneWidget);
       expect(find.text('清空今日'), findsOneWidget);
       // 主按钮是「+1」而不是布尔习惯的「已打卡」

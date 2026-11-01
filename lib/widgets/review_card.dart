@@ -360,8 +360,11 @@ class HabitProgressRow extends StatelessWidget {
                 // 于是这段叙事等于没说话。现补「个单位」量词，并在能换算时
                 // 附「≈ N 天目标量」（240 单位 / 每日 8 杯 = 30 天），
                 // 让抽象总量落回习惯自身的时间尺度上。
+                // P3-7（v3.1.2 审计）：习惯设了单位时用真实单位替代泛化的
+                // 「个单位」（与 progressLabelOf / 导出同一单位口径）。
                 habit.isQuantified && valueSum > 0
-                    ? '$done/$expected · 累计 $valueSum 个单位'
+                    ? '$done/$expected · 累计 $valueSum'
+                        '${habit.unit.trim().isEmpty ? ' 个单位' : ' ${habit.unit.trim()}'}'
                         '${_valueUnitHint()}'
                     : '$done/$expected',
                 style: TextStyle(

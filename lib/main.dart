@@ -2060,6 +2060,11 @@ class AppLockGate extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final ext = appColors(context);
     final onBg = scheme.onBackground;
+    // P1-1（v3.1.2 审计）：出口必须消费真实可用性——仅在「设备无任何可用
+    // 凭据」的锁定死路（!biometricAvailable）时渲染。生物识别可用时本页
+    // 主按钮即唯一出路，杜绝「拿到设备两键即可绕过应用锁」的安全回归
+    // （此前按钮无条件渲染 + 确认即 setEnabled(false)，应用锁形同虚设）。
+    final bioOk = context.watch<AppLockProvider>().biometricAvailable;
     return Scaffold(
       backgroundColor: scheme.background,
       body: SafeArea(
@@ -2098,14 +2103,19 @@ class AppLockGate extends StatelessWidget {
                 // 回前台都锁死在本页，设置页不可达，唯一出路是清除应用数据
                 // （等于丢掉全部本地数据）。提供「二次确认 + 风险说明」的关闭
                 // 入口，保证用户不会永久失去自己的数据。
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () => _confirmDisableLock(context),
-                  child: Text(
-                    '无法验证？关闭应用锁',
-                    style: TextStyle(fontSize: 13, color: ext.meta),
+                // P1-1（v3.1.2 审计）：该出口仅在 !biometricAvailable 的真实
+                // 死路渲染；且点击后先强制一次系统验证（含锁屏密码降级），
+                // 验证通过即正常解锁、无需关闭应用锁。
+                if (!bioOk) ...[
+                  const SizedBox(height: 16),
+                  TextButton(
+                    onPressed: () => _confirmDisableLock(context),
+                    child: Text(
+                      '无法验证？关闭应用锁',
+                      style: TextStyle(fontSize: 13, color: ext.meta),
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -2114,17 +2124,24 @@ class AppLockGate extends StatelessWidget {
     );
   }
 
-  /// P2-3（v3.1.0 审计）：解锁页的「关闭应用锁」二次确认。风险说明如实——
-  /// 该入口意味着「无需验证即可进入」，设备遗失场景下保护失效，故仅在
-  /// 「生物识别不可用」的锁定死路上提供。
+  /// P2-3（v3.1.0 审计）：解锁页的「关闭应用锁」二次确认。
+  /// P1-1（v3.1.2 审计）：两道收窄——①入口仅在 `!biometricAvailable`（设备
+  /// 无任何可用凭据的真实死路）渲染，杜绝「两键绕过」；②关闭前先强制一次
+  /// 系统验证（允许降级用锁屏密码）：验证成功即正常解锁，无需关闭应用锁；
+  /// 验证失败（取消 / 异常 / 无凭据）才进入二次确认。文案如实描述死路场景。
   static Future<void> _confirmDisableLock(BuildContext context) async {
+    final lock = context.read<AppLockProvider>();
+    // 第一步：强制再验证一次。成功 → authenticate 已解除锁定并切回主界面。
+    final verified = await lock.authenticate(reason: '验证身份以关闭应用锁');
+    if (verified || !context.mounted) return;
+    // 第二步：验证未通过 → 二次确认，文案与「设备无可用凭据」的实际场景一致。
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dctx) => AlertDialog(
         title: const Text('关闭应用锁'),
         content: const Text(
-          '本机当前无法完成生物识别验证（未录入指纹/面容，或无锁屏密码）。'
-          '关闭应用锁后可直接进入应用，如需再次启用请到「设置 → 安全」开启。\n\n'
+          '本机未检测到可用的指纹 / 面容，且锁屏密码验证未通过。'
+          '关闭应用锁后无需验证即可进入应用，如需再次启用请到「设置 → 安全」开启。\n\n'
           '若这不是你本人的操作，请勿关闭。',
         ),
         actions: [

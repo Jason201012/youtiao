@@ -523,6 +523,11 @@ class _TagManageScreenState extends State<TagManageScreen> {
                       Navigator.pop(d);
                       // P3-6：撤销横幅——复用 batchUpdateAs 的定向快照（任务
                       // tags）+ 归档集合迁移还原（undoMergeTags）。
+                      // U-10（v3.1.2 审计）：batchId == 0 表示本次合并没有产生
+                      // 任何可撤销变更（0 条任务受影响且 source 未归档，
+                      // mergeTags 未登记撤销条目）——此时不再承诺撤销，避免
+                      // 「点撤销必报已失效」的死横幅。
+                      if (batchId == 0) return;
                       showUndoSnackBar(
                         context,
                         content:

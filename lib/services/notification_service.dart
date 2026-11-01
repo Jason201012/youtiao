@@ -277,13 +277,17 @@ class NotificationService {
   ///   （它们是进行态回执，不是「提醒」），相关方法无需判静音。
   static DateTime? remindersMutedUntil;
 
-  /// A2：时刻 [fireAt] 是否落在临时静音窗口内（`fireAt <= mutedUntil` 即命中）。
+  /// A2：时刻 [fireAt] 是否落在临时静音窗口内（`fireAt < mutedUntil` 即命中）。
   /// 与勿扰取**并集**语义：落点先经勿扰顺延，再用本判定兜一道，任一命中即静音。
   /// [fireAt] 可以是本地 DateTime 或 tz.TZDateTime（两者均按绝对时刻比较）。
+  ///
+  /// U-2（v3.1.2 审计）：边界改**严格小于**——旧实现 `<=`（!isAfter）会让正好
+  /// 落在静音终点的每日提醒（如「静音到明天 08:00」时每天 08:00 的习惯闹钟）
+  /// 被跳过且错过不补发；严格 `<` 后终点时刻的提醒照常投递。
   static bool isReminderMuted(DateTime fireAt) {
     final until = remindersMutedUntil;
     if (until == null) return false;
-    return !fireAt.isAfter(until);
+    return fireAt.isBefore(until);
   }
 
   /// 把任务 id（字符串）映射成一个稳定的通知 id：优先用数字本身（本 App 的
@@ -1361,7 +1365,12 @@ class NotificationService {
 
   /// 取消某习惯的全部每日提醒通知（F-2 起 0..7 号槽位承载「接下来 8 次」）。
   /// 取消失败（插件未初始化 / 平台不支持）不应阻断删除习惯等主流程，故整体吞异常。
-  Future<void> cancelHabitReminder(String id) async {
+  ///
+  /// P3-6（v3.1.2 审计）：[keepConfirm] —— 9 号槽「已打卡 ✓ / 撤销」确认条是
+  /// **进行态回执而非提醒**，A2 静音路径传 `keepConfirm: true` 保留它（兑现
+  /// 「确认条不受静音影响」的承诺：静音开始不该连带清掉用户刚打卡留下的
+  /// 确认条与撤销入口）；删除 / 归档 / 重排等路径维持默认 `false` 全清。
+  Future<void> cancelHabitReminder(String id, {bool keepConfirm = false}) async {
     _armedSignatures.remove('habit:$id');
     try {
       for (var d = 0; d < _kScheduleSlots; d++) {
@@ -1373,8 +1382,10 @@ class NotificationService {
       // P3-4（v3.0.1 审计）：打卡 / 撤销确认通知占用独立的 9 号槽
       // （[habitConfirmNotifyIdOf]），此前从未被任何取消路径覆盖——删除 /
       // 归档习惯后，通知栏里指向已不存在习惯的「已打卡 ✓ / 撤销」确认条
-      // 会永久残留。一并清掉。
-      await _plugin.cancel(habitConfirmNotifyIdOf(id));
+      // 会永久残留。一并清掉（静音路径除外，见 [keepConfirm]）。
+      if (!keepConfirm) {
+        await _plugin.cancel(habitConfirmNotifyIdOf(id));
+      }
     } catch (e) {
       AppLog.d('[通知] 取消习惯提醒失败 id=$id: $e');
     }
@@ -1452,6 +1463,13 @@ class NotificationService {
             deferred.hour, deferred.minute);
       }
     }
+    // U-5（v3.1.2 审计）：snooze 落点纳入静音判定——静音窗口内点「稍后提醒」
+    // 不应再响。此前主要靠「静音开始已取消 snooze」兜住，但通知竞态 / 在途
+    // 残留场景下（窗口内仍可见的旧通知）点「稍后提醒」会绕过静音。
+    if (isReminderMuted(when)) {
+      AppLog.d('[通知] 未 snooze id=${task.id}：落点落在临时静音窗口内');
+      return false;
+    }
     // S4 修复：作废在途兜底定时器（若有），使本次 snooze 的提醒能正常弹出。
     _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
     final chId = playSound ? _chSound : _chSilent;
@@ -1520,6 +1538,12 @@ class NotificationService {
         when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
             deferred.hour, deferred.minute);
       }
+    }
+    // U-5（v3.1.2 审计）：与任务 snooze 同款——落点纳入静音判定（竞态 / 在途
+    // 残留通知场景下，窗口内点「稍后提醒」不再绕过静音）。
+    if (isReminderMuted(when)) {
+      AppLog.d('[通知] 未 snooze 习惯 id=${habit.id}：落点落在临时静音窗口内');
+      return false;
     }
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(

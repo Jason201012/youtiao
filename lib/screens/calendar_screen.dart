@@ -399,8 +399,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
     // [planMinutesOn]（与排程建议同源兜底、跨天只在首日计、暂停/跳过不计）。
     final planMin = planMinutesOn(provider, date);
     final isFuture = date.isAfter(today);
+    // P3-9（v3.1.2 审计）：日格改用 focusSecOn（仅**专注阶段**）——totalSecOn
+    // 含休息段，25/5 番茄 4 轮后日历显示 130 分、专注页与周报显示 100 分，
+    // 同一天两个口径。P2-4（v3.1.0 审计）已统一专注页 / 报表 / 成就 / 时段
+    // 分布，此处补上最后一个漏网面。
     final focusMin =
-        (Provider.of<FocusProvider>(context, listen: false).totalSecOn(date) / 60)
+        (Provider.of<FocusProvider>(context, listen: false).focusSecOn(date) /
+                60)
             .round();
     final focusLabel =
         focusMin >= 60 ? '${(focusMin / 60).toStringAsFixed(1)}h' : '${focusMin}分';

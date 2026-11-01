@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/focus_session.dart';
@@ -878,8 +879,9 @@ class FocusProvider extends ChangeNotifier {
     return list;
   }
 
-  /// 今日专注总秒数（含休息阶段，历史口径）。
-  int get todayTotalSec => totalSecOn(DateTime.now());
+  // U-11①（v3.1.2 审计）：`todayTotalSec` 已删除——lib/ 内零调用，且「今日
+  // 含休息总秒数」的命名与 `todayFocusSec`（今日专注阶段）家族语义相反，是
+  // 一颗误用陷阱；需要同口径时用 `totalSecOn(DateTime.now())`（测试已同步）。
 
   /// 专注时段分布（A2）：按「开始时刻的小时」把全部**专注阶段**会话聚合到
   /// 24 个桶，返回长度 24 的 int 列表（下标 0..23 对应 00:00..23:00 的累计专注秒数）。
@@ -936,6 +938,11 @@ class FocusProvider extends ChangeNotifier {
 
   /// P3-2（v3.1.0 审计）：返回落盘是否成功（此前丢弃结果）。失败时内存回滚
   /// ——清空族与删除族同口径，UI 显示的即已落盘的。
+  ///
+  /// U-11②（v3.1.2 审计）：lib/ 内零调用（App 内清空走 removeSession /
+  /// clearToday 族），仅测试用作「全量清空」夹具——标注 @visibleForTesting，
+  /// 防止生产代码误用出一颗「一键清光专注历史」的入口。
+  @visibleForTesting
   Future<bool> clear() async {
     final snapshot = List<FocusSession>.of(_sessions);
     _sessions.clear();
@@ -1014,13 +1021,25 @@ class FocusProvider extends ChangeNotifier {
 
   /// 从备份恢复专注会话列表（[list] 为 FocusSession 的 JSON 列表）。
   /// 仅在备份含 [focus_sessions] 字段时调用；缺失则保留现有数据不覆盖。
-  Future<void> restoreSessions(List<dynamic> list) async {
+  ///
+  /// P2-3（v3.1.2 审计）：返回落盘是否成功——此前结果被丢弃，安全模式
+  /// （dbLoadFailed）下 `_persist` 恒 false：内存已被覆盖、UI 显示「已恢复」、
+  /// 重启后专注历史静默回到恢复前。失败时回滚内存（与 clear / removeSession
+  /// 同口径），恢复侧据此把本项列入 failures 如实提示。
+  Future<bool> restoreSessions(List<dynamic> list) async {
+    final snapshot = List<FocusSession>.of(_sessions);
     _sessions
       ..clear()
       ..addAll(
           list.map((e) => FocusSession.fromJson(e as Map<String, dynamic>)));
-    await _persist();
+    final ok = await _persist();
+    if (!ok) {
+      _sessions
+        ..clear()
+        ..addAll(snapshot);
+    }
     notifyListeners();
+    return ok;
   }
 
   /// P3-11（v2.9.5 审计）：专注表列定义（CSV / Excel 共用的**单一真源**）。

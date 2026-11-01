@@ -196,7 +196,8 @@ void main() {
       expect(text, contains('任务 2'));
       expect(text, contains('2 天前'), reason: '旧备份弱提示的数据源');
       expect(text, contains('加密'));
-      expect(text, contains('备份中不存在的当前任务将不会被保留'));
+      // U-12③（v3.1.2 审计）：当前对比补回收站，警示措辞同步对齐。
+      expect(text, contains('备份中不存在的当前任务/回收站条目将不会被保留'));
     });
   });
 
@@ -254,8 +255,10 @@ void main() {
       expect(NotificationService.isReminderMuted(now), isFalse);
       NotificationService.remindersMutedUntil = now.add(const Duration(hours: 1));
       expect(NotificationService.isReminderMuted(now), isTrue);
+      // U-2（v3.1.2 审计）：边界改严格小于——终点时刻本身不再算命中
+      //（旧实现 <= 会吞掉正好落在终点的每日提醒且错过不补发）。
       expect(NotificationService.isReminderMuted(now.add(const Duration(hours: 1))),
-          isTrue, reason: '窗口终点时刻本身仍算命中（<= until）');
+          isFalse, reason: 'U-2：终点时刻照常投递（严格 < until）');
       expect(
           NotificationService.isReminderMuted(
               now.add(const Duration(hours: 1, minutes: 1))),
@@ -327,19 +330,28 @@ void main() {
       expect(sp.getString('reminders_muted_until'), isNull);
     });
 
-    test('reminders_muted_until / daily_mit 进 prefs 备份白名单（往返）', () async {
+    test('daily_mit 进 prefs 备份白名单（往返）；reminders_muted_until 改本机状态不迁移（U-6）',
+        () async {
       final sp = await SharedPreferences.getInstance();
-      await sp.setString('reminders_muted_until', '2026-11-01T10:00:00.000');
+      const localMuted = '2026-11-01T10:00:00.000';
+      await sp.setString('reminders_muted_until', localMuted);
       await sp.setString('daily_mit', '{"2026-10-31":["1"]}');
       final collected = await collectAppPrefs();
-      expect(collected['reminders_muted_until'], '2026-11-01T10:00:00.000');
       expect(collected['daily_mit'], '{"2026-10-31":["1"]}');
-      // applyAppPrefs 往返（先清后恢复）。
+      // U-6（v3.1.2 审计）：静音是本机短期状态（非用户偏好），导出侧排除。
+      expect(collected.containsKey('reminders_muted_until'), isFalse);
+
+      // applyAppPrefs 往返（先清后恢复）；旧备份携带的静音键同样写不进。
       await sp.remove('reminders_muted_until');
-      await applyAppPrefs(collected);
+      await sp.remove('daily_mit');
+      await applyAppPrefs(<String, dynamic>{
+        ...collected,
+        'reminders_muted_until': '2030-01-01T00:00:00.000',
+      });
       final sp2 = await SharedPreferences.getInstance();
-      expect(sp2.getString('reminders_muted_until'), '2026-11-01T10:00:00.000');
       expect(sp2.getString('daily_mit'), '{"2026-10-31":["1"]}');
+      expect(sp2.getString('reminders_muted_until'), isNull,
+          reason: '恢复不再「莫名其妙又被静音」（本机状态保留）');
     });
   });
 
