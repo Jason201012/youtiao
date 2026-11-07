@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard;
+import 'package:flutter/services.dart' show Clipboard, MaxLengthEnforcement;
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/attachment.dart';
@@ -20,6 +20,31 @@ import 'package:todolist/widgets/task_toggle_undo.dart';
 /// 输入时实时解析并把识别结果以 chip 形式回显，让用户随打随确认系统的理解，
 /// 不必先学语法。解析不满意时可一键「更多选项」转入完整编辑弹层，草稿原样带过去。
 class QuickEntrySheet extends StatefulWidget {
+  /// U-2（v3.1.4 审计）：快速录入输入长度的**唯一真源**。旧实现只在粘贴
+  /// 路径手截 500 字，手输不受限，提示却写「输入内容最多 500 字」；现在
+  /// TextField 的 maxLength 与粘贴合并共用本常量，规则与文案终于一致。
+  static const int maxInputLength = 500;
+
+  /// U-2（v3.1.4 审计）：按 UTF-16 码元截断且不切断代理对（emoji）。
+  /// `String.substring` 直接截会把一个 emoji 的高 / 低代理项拆开，写出
+  /// 无法解码的孤立代理；这里发现切点落在代理对中间就回退一个码元。
+  @visibleForTesting
+  static String clipToUtf16Safe(String s, int maxUnits) {
+    if (s.length <= maxUnits) return s;
+    var end = maxUnits;
+    if (end > 0 && end < s.length) {
+      final before = s.codeUnitAt(end - 1);
+      final after = s.codeUnitAt(end);
+      if (before >= 0xD800 &&
+          before <= 0xDBFF &&
+          after >= 0xDC00 &&
+          after <= 0xDFFF) {
+        end -= 1;
+      }
+    }
+    return s.substring(0, end);
+  }
+
   /// U-3（v3.1.3 审计）：粘贴合并的**纯函数**（可单测，不依赖 State）。
   ///
   /// 旧实现只对「剪贴板文本本身」截 500 字：输入框已有 480 字时再粘 500 字，
@@ -31,7 +56,7 @@ class QuickEntrySheet extends StatefulWidget {
     String current,
     TextSelection selection,
     String pasted, {
-    int maxLength = 500,
+    int maxLength = maxInputLength,
   }) {
     final valid = selection.isValid &&
         selection.start >= 0 &&
@@ -45,7 +70,7 @@ class QuickEntrySheet extends StatefulWidget {
     var clipped = pasted;
     var truncated = false;
     if (clipped.length > room) {
-      clipped = room <= 0 ? '' : clipped.substring(0, room);
+      clipped = room <= 0 ? '' : clipToUtf16Safe(clipped, room);
       truncated = true;
     }
     return (
@@ -123,8 +148,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     super.initState();
     // 分享建任务等场景：预填 initialText 并立即解析出标题/截止时间回显 chip。
     if (widget.initialText != null && widget.initialText!.isNotEmpty) {
-      _controller.text = widget.initialText!;
-      _parsed = TaskParser.parse(widget.initialText!);
+      // U-2（v3.1.4 审计）：分享入口的预填文本同样受 500 字上限约束；
+      // maxLength 只拦用户编辑，不会截断 controller 的初始值。
+      final clipped = QuickEntrySheet.clipToUtf16Safe(
+          widget.initialText!, QuickEntrySheet.maxInputLength);
+      _controller.text = clipped;
+      _parsed = TaskParser.parse(clipped);
     }
     // P1-11：预填分享接收的附件（已落盘暂存目录），保存后挂到任务。
     if (widget.initialAttachment != null) {
@@ -179,7 +208,7 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     _onChanged(r.text);
     if (r.truncated && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('输入内容最多 500 字，超出部分已截断'),
+        content: Text('输入内容最多 500 字（含粘贴），超出部分已截断'),
         duration: Duration(milliseconds: 1200),
       ));
     }
@@ -368,10 +397,15 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
                   autofocus: true,
                   minLines: 2,
                   maxLines: 4,
+                  // U-2（v3.1.4 审计）：手输与粘贴同口径上限（此前只有粘贴
+                  // 被截，输入框可远超 500 字，提示文案因此不实）。
+                  maxLength: QuickEntrySheet.maxInputLength,
+                  maxLengthEnforcement: MaxLengthEnforcement.enforced,
                   textInputAction: TextInputAction.done,
                   onChanged: _onChanged,
                   onSubmitted: (_) => _submit(),
                   decoration: InputDecoration(
+                    counterText: '', // 不显示计数器，避免挤高输入区
                     hintText: '例如：明天下午3点 交周报 !高 #工作',
                     hintStyle: TextStyle(color: ext.meta, fontSize: 15),
                     filled: true,

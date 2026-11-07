@@ -54,6 +54,28 @@ class FocusProvider extends ChangeNotifier {
   @visibleForTesting
   void markDbLoadFailedForTest() => _dbLoadFailed = true;
 
+  /// P2-1（v3.1.4 审计）：与任务 / 习惯侧同款的安全模式重试出口。
+  /// [load] 成功分支已清零 `_dbLoadFailed`，重试成功即可让恢复 / 新增专注
+  /// 记录重新落盘，不必等下一次冷启动。
+  bool _loadInFlight = false;
+  bool get loadInFlight => _loadInFlight;
+
+  Future<bool> retryLoad() async {
+    if (_loadInFlight) return false;
+    _loadInFlight = true;
+    notifyListeners();
+    try {
+      await load();
+    } catch (e, s) {
+      AppLog.d('[FocusProvider] 重试加载失败，仍在只读安全模式：$e\n$s');
+      return false;
+    } finally {
+      _loadInFlight = false;
+      notifyListeners();
+    }
+    return !_dbLoadFailed;
+  }
+
   /// 自定义专注时长（秒），默认 30 分钟。
   int _customSec = 30 * 60;
   int get customSec => _customSec;

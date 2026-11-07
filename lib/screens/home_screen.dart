@@ -1115,7 +1115,7 @@ class _TodayMitCardState extends State<_TodayMitCard> {
             ] else if (ids.isEmpty)
               Padding(
                 padding: const EdgeInsets.only(left: 8),
-                child: Text('今天暂无到期任务——先在首页添加几条待办吧',
+                child: Text('暂无建议任务，点右上角「自选」从全部待办里挑',
                     style: TextStyle(fontSize: 12, color: ext.meta)),
               ),
           ],
@@ -1145,9 +1145,10 @@ class _TodayMitCardState extends State<_TodayMitCard> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  /// P3-8（v3.1.3 审计）：自选任务弹层——池子是**全部未完成任务**
-  /// （[TaskProvider.selectableMitTasks]，支持标题 / 标签 / 分类搜索），
-  /// 已选行置灰；满员时与 U-4 使用同一句提示，不静默拒绝。
+  /// U-1（v3.1.4 审计）：选一件就 `Navigator.pop` 的旧实现要加 3 件得反复
+  /// 打开弹层、重新输入搜索词。改为**多选 + 完成**：查询与勾选集合都留在
+  /// dialog 的 State 里，切选 / 改搜索词都不重建弹层；已有选择不可取消
+  /// （移出走卡片上的 ×），名额在弹层内实时限制，不会静默截断。
   Future<void> _openMitPicker(
       BuildContext context, TaskProvider provider) async {
     final chosen = provider.todayMit;
@@ -1158,14 +1159,16 @@ class _TodayMitCardState extends State<_TodayMitCard> {
       ));
       return;
     }
-    final picked = await showDialog<String>(
+    final picked = await showDialog<List<String>>(
       context: context,
       builder: (dctx) {
         var query = '';
+        final selected = <String>{...chosen};
         return StatefulBuilder(builder: (sctx, setDialogState) {
           final pool = provider.selectableMitTasks(query: query);
           return AlertDialog(
-            title: const Text('自选今日三件'),
+            title: Text(
+                '自选今日三件（${selected.length}/${TaskProvider.kDailyMitMax}）'),
             content: SizedBox(
               width: double.maxFinite,
               height: 360,
@@ -1189,10 +1192,12 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                             itemCount: pool.length,
                             itemBuilder: (_, i) {
                               final t = pool[i];
-                              final selected = chosen.contains(t.id);
+                              final already = chosen.contains(t.id);
+                              final checked = selected.contains(t.id);
                               return ListTile(
                                 dense: true,
-                                enabled: !selected,
+                                enabled: !already,
+                                selected: checked,
                                 title: Text(
                                   t.title.isEmpty ? '(无标题)' : t.title,
                                   maxLines: 1,
@@ -1200,13 +1205,37 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                                 ),
                                 subtitle: Text(t.category.label,
                                     style: const TextStyle(fontSize: 11)),
-                                trailing: selected
+                                trailing: already
                                     ? const Text('已选',
                                         style: TextStyle(fontSize: 11))
-                                    : null,
-                                onTap: selected
+                                    : Icon(
+                                        checked
+                                            ? Icons.check_box
+                                            : Icons.check_box_outline_blank,
+                                        size: 18),
+                                onTap: already
                                     ? null
-                                    : () => Navigator.pop(dctx, t.id),
+                                    : () {
+                                        if (!checked &&
+                                            selected.length >=
+                                                TaskProvider.kDailyMitMax) {
+                                          ScaffoldMessenger.of(dctx)
+                                              .showSnackBar(SnackBar(
+                                            content: Text(
+                                                '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先取消一个选择'),
+                                            duration:
+                                                const Duration(milliseconds: 900),
+                                          ));
+                                          return;
+                                        }
+                                        setDialogState(() {
+                                          if (checked) {
+                                            selected.remove(t.id);
+                                          } else {
+                                            selected.add(t.id);
+                                          }
+                                        });
+                                      },
                               );
                             },
                           ),
@@ -1219,13 +1248,30 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                 onPressed: () => Navigator.pop(dctx),
                 child: const Text('取消'),
               ),
+              FilledButton(
+                onPressed: () => Navigator.pop(
+                    dctx,
+                    selected
+                        .where((id) => !chosen.contains(id))
+                        .toList()),
+                child: const Text('完成'),
+              ),
             ],
           );
         });
       },
     );
-    if (picked == null || !context.mounted) return;
-    await _consumeMitToggle(context, provider, picked);
+    if (picked == null || picked.isEmpty || !context.mounted) return;
+    // U-1：多选结果一次落盘，名额 / 悬空 id / 失败回执由 provider 统一裁决。
+    final result = await provider.addTodayMitBatch(picked);
+    if (!context.mounted) return;
+    if (result == MitToggleOutcome.ok) return;
+    final msg = result == MitToggleOutcome.full
+        ? '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先移出一件再添加'
+        : result == MitToggleOutcome.invalid
+            ? '该任务已不存在，无法加入今日三件'
+            : '保存失败：今日三件未生效，请重试';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   /// 已选行：圆圈（完成，带撤销）+ 标题（进详情）+ 移出。

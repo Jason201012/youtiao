@@ -206,7 +206,13 @@ const List<String> kHabitUnitPresets = ['杯', '页', '次', '分钟', '公里',
 class _HabitUnitEditor extends StatelessWidget {
   final TextEditingController controller;
   final AppColorsExt ext;
-  const _HabitUnitEditor({required this.controller, required this.ext});
+  /// P3-8（v3.1.4 审计）：单位变化时通知父级重建目标预览 / 说明文案。
+  /// 旧实现只让预设 chip 的 AnimatedBuilder 监听 controller，父级不重建，
+  /// 输入「公里」或点「杯」后上方仍显示「8 / 天」，直到改目标 / 切频率
+  /// 触发别的 setState 才刷新。
+  final ValueChanged<String>? onChanged;
+  const _HabitUnitEditor(
+      {required this.controller, required this.ext, this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -226,6 +232,7 @@ class _HabitUnitEditor extends StatelessWidget {
               child: TextField(
                 controller: controller,
                 maxLength: Habit.maxUnitLength,
+                onChanged: onChanged, // P3-8（v3.1.4 审计）：预览随输入刷新
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 14),
                 decoration: InputDecoration(
@@ -259,6 +266,9 @@ class _HabitUnitEditor extends StatelessWidget {
                       onSelected: (sel) {
                         // 点已选中的 chip = 清空；点未选中的 = 填入。
                         controller.text = sel ? u : '';
+                        // P3-8：直接改 controller.text 不会触发 TextField 的
+                        // onChanged，必须显式通知父级，否则预设 chip 同样是旧预览。
+                        onChanged?.call(controller.text);
                       },
                     ),
                   ))
@@ -1720,7 +1730,11 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           // A3（v3.1.1 功能增强）：量化单位（仅量化习惯显示）。
           if (_dailyTarget != null) ...[
             const SizedBox(height: 12),
-            _HabitUnitEditor(controller: _unitCtl, ext: ext),
+            _HabitUnitEditor(
+              controller: _unitCtl,
+              ext: ext,
+              onChanged: (_) => setState(() {}),
+            ),
           ],
           // T1-4：宽限日——每周允许漏卡 N 天而不断签，降低「一次失手前功尽弃」的挫败。
           const SizedBox(height: 12),
@@ -3112,7 +3126,11 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
             // A3（v3.1.1 功能增强）：量化单位（仅量化习惯显示；空 = 无单位）。
             if (_dailyTarget != null) ...[
               const SizedBox(height: 12),
-              _HabitUnitEditor(controller: _unitCtl, ext: ext),
+              _HabitUnitEditor(
+              controller: _unitCtl,
+              ext: ext,
+              onChanged: (_) => setState(() {}),
+            ),
             ],
             const SizedBox(height: 16),
             // T1-4：宽限日。

@@ -16,6 +16,24 @@ import 'package:todolist/models/task.dart';
 /// 仅管理文件落盘与读取；附件元数据（[AttachmentRef]）随 [Task] 一同存于 SQLite。
 /// 备份时由 [collectBlobs] 把二进制读为 base64 内联进加密信封，还原时由 [restoreBlobs]
 /// 写回正式目录——整个链路不触发任何网络请求。
+/// P3-7（v3.1.4 审计）：一条附件的**纯数据来源**（不含文件句柄 / 插件状态），
+/// 可安全跨 isolate 传递。Dart 不支持类内嵌套类，故定义在顶层。
+///
+/// 快照 payload 组装此前在主 isolate 内跑完 [AttachmentService.collectBlobs]
+/// （逐个文件 readAsBytes + base64.encode），大附件库首启白屏、恢复进度层
+/// 动画冻结。现在主 isolate 只解析出这些轻量路径，真正的文件读取 / base64 /
+/// 裁剪 / 序列化 / 加密全部交给后台 isolate。
+class AttachmentBlobSource {
+  final String taskId;
+  final Map<String, dynamic> refJson;
+  final String path;
+  const AttachmentBlobSource({
+    required this.taskId,
+    required this.refJson,
+    required this.path,
+  });
+}
+
 class AttachmentService {
   static const String _attachmentsDirName = 'attachments';
   static const String _stagingDirName = '_staging';
@@ -301,6 +319,87 @@ class AttachmentService {
   static Future<File> fileFor(String taskId, AttachmentRef ref) async {
     final dir = await dirFor(taskId);
     return _safeFileFor(dir, ref.fileName);
+  }
+
+  /// P3-7（v3.1.4 审计）：一条附件的**纯数据来源**（不含任何打开的文件句柄 /
+  /// 插件状态），可安全跨 isolate 传递。
+  ///
+  /// 快照 payload 组装此前在主 isolate 内跑完 [collectBlobs]（逐个文件
+  /// `readAsBytes` + `base64.encode`），大附件库首启白屏、恢复进度层动画冻结。
+  /// 现在主 isolate 只解析出这些轻量路径，真正的文件读取 / base64 / 裁剪 /
+  /// 序列化 / 加密全部交给后台 isolate。
+  /// 主 isolate 侧的「附件路径规划」：每个任务只做一次目录解析（[dirFor]），
+  /// 不读文件字节。返回值为可跨 isolate 的纯数据 record。
+  static Future<({List<AttachmentBlobSource> sources, int skipped})>
+      planBlobSources(List<Task> tasks) async {
+    final sources = <AttachmentBlobSource>[];
+    var skipped = 0;
+    for (final t in tasks) {
+      if (t.attachments.isEmpty) continue;
+      if (!_isSafeSegment(t.id)) {
+        skipped += t.attachments.length;
+        continue;
+      }
+      final dir = await dirFor(t.id);
+      var count = 0;
+      for (final ref in t.attachments) {
+        if (count >= maxAttachmentsPerTask) {
+          skipped++;
+          continue;
+        }
+        if (!_isSafeSegment(ref.fileName)) {
+          skipped++;
+          continue;
+        }
+        try {
+          sources.add(AttachmentBlobSource(
+            taskId: t.id,
+            refJson: ref.toJson(),
+            path: _safeFileFor(dir, ref.fileName).path,
+          ));
+          count++;
+        } catch (_) {
+          skipped++;
+        }
+      }
+    }
+    return (sources: sources, skipped: skipped);
+  }
+
+  /// [collectBlobs] 的**同步 / 无插件依赖**版本，供后台 isolate 调用。
+  /// 输出结构与 [collectBlobs] 逐字段一致（含 `__skipped` 统计键），因此
+  /// BackupValidator 与 restoreBlobs 的既有契约不变。
+  static Map<String, dynamic> collectBlobsFromSourcesSync(
+      List<AttachmentBlobSource> sources,
+      {int preSkipped = 0}) {
+    final out = <String, dynamic>{};
+    var oversize = 0;
+    var skipped = preSkipped;
+    for (final src in sources) {
+      try {
+        final file = File(src.path);
+        if (!file.existsSync()) {
+          skipped++;
+          continue;
+        }
+        final bytes = file.readAsBytesSync();
+        if (bytes.length > maxAttachmentBytes) {
+          oversize++;
+          continue;
+        }
+        final items = out[src.taskId] as List<Map<String, dynamic>>? ??
+            <Map<String, dynamic>>[];
+        items.add({'ref': src.refJson, 'data': base64.encode(bytes)});
+        out[src.taskId] = items;
+      } catch (_) {
+        skipped++;
+      }
+    }
+    out['__skipped'] = {
+      'oversize': oversize,
+      'missingOrInvalid': skipped,
+    };
+    return out;
   }
 
   /// 收集备份所需的附件二进制：遍历任务列表，把每个附件文件读为 base64 内联进

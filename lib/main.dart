@@ -1174,6 +1174,11 @@ void main() async {
     // 新的一天（错日写入；payload 日期校验是第二道防线）。cancel 不受通知
     // 总开关管辖（历史残留该清就清），故放在 notificationsEnabled 早退之前。
     habit.cancelAllConfirmNotifications();
+    // P3-3（v3.1.4 审计）：设置页承诺「开启后每天自动生成本地快照」，但
+    // 此前只有冷启动 / 打开自动备份开关 / 打开加密三条入口。前台守护让进程
+    // 长期存活时，跨天回调只重排简报与挽留，数周不杀进程就没有新快照。
+    // 这里补一次受三侧健康检查 + _autoBackupInFlight + 日期早退保护的触发。
+    unawaited(task.triggerAutoBackup());
     if (!task.notificationsEnabled) return;
     unawaited(rescheduleBriefings(task, focus, habit));
     rescheduleHabitNudge(habit,
@@ -2027,8 +2032,70 @@ class _TabKeepAliveState extends State<_TabKeepAlive> {
 /// 不写数据库。并补上真正可点的「重试加载」出口：旧横幅只是纯文本，而
 /// `_dbLoadFailed` 成功后从不清零，用户被困在「导出 / 恢复都写不进去」的
 /// 死局里，唯一出路是杀进程重启。
-class _DbSafeModeBanner extends StatelessWidget {
+/// P2-1 / P3-6（v3.1.4 审计）：横幅由三侧 `dbLoadFailed` 聚合，重试也必须
+/// 三侧一起做。旧实现只调 `task.retryLoad()`，习惯 / 专注仍不可写时回执却
+/// 无条件说「已解除」；且加载中按钮不禁用、安全模式期间的内存编辑会被
+/// `load()` 静默丢弃。现在改为 StatefulWidget：逐侧重试、按真实结果回执、
+/// 有未保存编辑时先二次确认。
+class _DbSafeModeBanner extends StatefulWidget {
   const _DbSafeModeBanner();
+
+  @override
+  State<_DbSafeModeBanner> createState() => _DbSafeModeBannerState();
+}
+
+class _DbSafeModeBannerState extends State<_DbSafeModeBanner> {
+  bool _retrying = false;
+
+  Future<void> _retry() async {
+    if (_retrying) return;
+    final task = context.read<TaskProvider>();
+    final habit = context.read<HabitProvider>();
+    final focus = context.read<FocusProvider>();
+    // P3-6：安全模式期间新增 / 修改的任务只存于内存，重试成功后会被数据库
+    // 内容整体替换，旧实现无任何确认。
+    if (task.hasUnsavedSafeModeEdits && mounted) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('重新加载数据？'),
+          content: const Text(
+              '重试会按数据库内容重建列表，安全模式期间未保存的修改将丢失。建议先到「设置 → 备份与恢复」导出备份。'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('继续重试')),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+    }
+    setState(() => _retrying = true);
+    try {
+      // 三侧写入口互不共享，各自 Provider 内已有 _loadInFlight 互斥。
+      await Future.wait([
+        if (task.dbLoadFailed) task.retryLoad(),
+        if (habit.dbLoadFailed) habit.retryLoad(),
+        if (focus.dbLoadFailed) focus.retryLoad(),
+      ]);
+    } finally {
+      if (mounted) setState(() => _retrying = false);
+    }
+    if (!mounted) return;
+    final still = <String>[
+      if (task.dbLoadFailed) '任务',
+      if (habit.dbLoadFailed) '习惯',
+      if (focus.dbLoadFailed) '专注',
+    ];
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(still.isEmpty
+          ? '数据已重新加载，只读安全模式已解除'
+          : '仍有${still.join('、')}数据无法写入，请先导出备份或稍后重试'),
+    ));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2038,6 +2105,21 @@ class _DbSafeModeBanner extends StatelessWidget {
       fontSize: 13,
       height: 1.3,
     );
+    final taskFailed =
+        context.select<TaskProvider, bool>((t) => t.dbLoadFailed);
+    final habitFailed =
+        context.select<HabitProvider, bool>((h) => h.dbLoadFailed);
+    final focusFailed =
+        context.select<FocusProvider, bool>((f) => f.dbLoadFailed);
+    final failed = <String>[
+      if (taskFailed) '任务',
+      if (habitFailed) '习惯',
+      if (focusFailed) '专注',
+    ];
+    final busy = _retrying ||
+        context.select<TaskProvider, bool>((t) => t.loadInFlight) ||
+        context.select<HabitProvider, bool>((h) => h.loadInFlight) ||
+        context.select<FocusProvider, bool>((f) => f.loadInFlight);
     return Material(
       color: scheme.errorContainer,
       child: Padding(
@@ -2054,24 +2136,24 @@ class _DbSafeModeBanner extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '数据加载失败，已进入只读安全模式：任务数据不会写入数据库，'
-                    '设置仍可查看与修改。请前往「设置 → 备份与恢复」导出或修复数据。',
+                    // P2-1：按失败集合生成，不再笼统写「任务数据不会写入」——
+                    // 任务正常、习惯故障时任务其实可以写。
+                    '数据加载失败，已进入只读安全模式：${failed.join('、')}数据不会写入数据库，'
+                    '其余数据仍可正常使用；设置可查看与修改。请前往「设置 → 备份与恢复」导出或修复数据。',
                     style: textStyle,
                   ),
                   const SizedBox(height: 4),
                   TextButton.icon(
-                    onPressed: () async {
-                      final task = context.read<TaskProvider>();
-                      final ok = await task.retryLoad();
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text(ok
-                            ? '数据已重新加载，只读安全模式已解除'
-                            : '仍无法读取数据库，请先导出备份或稍后重试'),
-                      ));
-                    },
-                    icon: const Icon(Icons.refresh, size: 16),
-                    label: const Text('重试加载任务数据', style: TextStyle(fontSize: 12)),
+                    onPressed: busy ? null : _retry,
+                    icon: busy
+                        ? const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh, size: 16),
+                    label: Text('重试加载${failed.join('、')}数据',
+                        style: const TextStyle(fontSize: 12)),
                     style: TextButton.styleFrom(
                       foregroundColor: scheme.onErrorContainer,
                       visualDensity: VisualDensity.compact,
@@ -2125,7 +2207,9 @@ class AppLockGate extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  '已开启应用锁，验证身份以进入',
+                  // U-4（v3.1.4 审计）：authenticate 用 biometricOnly: false，
+                  // 允许锁屏密码降级；旧副标题无条件写「生物识别」会误导。
+                  '已开启应用锁，${bioOk ? '可用生物识别或锁屏密码' : '请用设备锁屏密码'}验证身份',
                   style: TextStyle(fontSize: 14, color: ext.meta),
                 ),
                 const SizedBox(height: 28),
@@ -2133,8 +2217,10 @@ class AppLockGate extends StatelessWidget {
                   onPressed: () => context
                       .read<AppLockProvider>()
                       .authenticate(reason: '验证身份以进入有条'),
-                  icon: const Icon(Symbols.fingerprint),
-                  label: const Text('使用生物识别解锁'),
+                  icon: Icon(bioOk ? Symbols.fingerprint : Symbols.lock),
+                  // U-4（v3.1.4 审计）：仅锁屏密码的设备上旧文案「使用生物识别
+                  // 解锁」与真实可用凭据不符，用户会误判自己无法解锁。
+                  label: Text(bioOk ? '使用生物识别解锁' : '使用锁屏密码解锁'),
                 ),
                 // P2-3（v3.1.0 审计）：不可解锁路径的兜底出口——备份恢复可把
                 // app_lock_enabled=true 写进「未录入指纹且无锁屏密码」的设备

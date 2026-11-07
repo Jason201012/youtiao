@@ -43,6 +43,29 @@ class HabitProvider extends ChangeNotifier {
   @visibleForTesting
   void markDbLoadFailedForTest() => _dbLoadFailed = true;
 
+  /// P2-1（v3.1.4 审计）：安全模式横幅自 v3.1.0 起由任务 / 习惯 / 专注三侧
+  /// 聚合，但 v3.1.3 的重试出口只有 `TaskProvider.retryLoad()`。仅习惯库
+  /// 损坏时用户点「重试」会看到「已解除」而横幅仍在，习惯打卡仍被拒写盘，
+  /// 唯一出路是杀进程重启。这里补齐习惯侧的显式修复出口。
+  bool _loadInFlight = false;
+  bool get loadInFlight => _loadInFlight;
+
+  Future<bool> retryLoad() async {
+    if (_loadInFlight) return false;
+    _loadInFlight = true;
+    notifyListeners();
+    try {
+      await load(); // load() 成功即清零 _dbLoadFailed
+    } catch (e, s) {
+      AppLog.d('[HabitProvider] 重试加载失败，仍在只读安全模式：$e\n$s');
+      return false;
+    } finally {
+      _loadInFlight = false;
+      notifyListeners();
+    }
+    return !_dbLoadFailed;
+  }
+
   /// U2-1（v3.0.5 审计）：通知 action 路径 show 确认条后登记（见
   /// [_confirmShownMarks]）。仅供 main 的通知 action 回调调用。
   void markConfirmShown(String habitId) =>

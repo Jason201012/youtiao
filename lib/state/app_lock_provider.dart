@@ -29,6 +29,11 @@ class AppLockProvider extends ChangeNotifier {
   bool _biometricAvailable = false;
   bool get biometricAvailable => _biometricAvailable;
 
+  /// U-3（v3.1.4 审计）：最近一次 [refreshEnabled] 是否把备份恢复来的
+  /// 「应用锁已开启」强制关掉。恢复结果据此如实告知用户，不再静默降级。
+  bool _lastRefreshForceDisabled = false;
+  bool get lastRefreshForceDisabled => _lastRefreshForceDisabled;
+
   /// 当前是否需要验证。true=显示解锁页；false=已解锁可正常交互。
   bool _locked = false;
   bool get locked => _locked;
@@ -94,11 +99,13 @@ class AppLockProvider extends ChangeNotifier {
   /// AppLockGate，P1-1 v3.1.2 审计收窄：仅在 !biometricAvailable 死路渲染，
   /// 且关闭前强制一次 authenticate），两道防线共同消除不可解锁路径。
   Future<void> refreshEnabled() async {
+    _lastRefreshForceDisabled = false;
     final prefs = await SharedPreferences.getInstance();
     var enabled = prefs.getBool(_kEnabled) ?? false;
     await probeBiometric();
     if (enabled && !_biometricAvailable) {
       enabled = false;
+      _lastRefreshForceDisabled = true;
       try {
         await prefs.setBool(_kEnabled, false);
       } catch (e) {

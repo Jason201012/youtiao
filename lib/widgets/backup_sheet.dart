@@ -23,6 +23,41 @@ import 'package:todolist/state/theme_provider.dart';
 import 'package:todolist/state/app_lock_provider.dart';
 import 'package:todolist/state/onboarding_provider.dart';
 
+/// P2-2（v3.1.4 审计）：恢复前预演——备份里习惯 / 打卡 / 专注段为**空列表**
+/// 是危险信号。旧版本在习惯或专注库加载失败时照样生成当日快照（段为空），
+/// 面板却显示为正常快照；用户一旦从它恢复，`data['habits'] is List` 成立、
+/// 按空列表覆盖，本机习惯与专注历史被静默清空。这里至少给一次二次确认。
+/// 两条恢复路径（文件 / 本地快照）共用，避免只补一条又漏一条。
+Future<bool> confirmEmptyRestoreSections(
+    BuildContext context, Map<String, dynamic> data) async {
+  final empty = <String>[
+    if (data['habits'] is List && (data['habits'] as List).isEmpty) '习惯',
+    if (data['check_ins'] is List && (data['check_ins'] as List).isEmpty) '打卡记录',
+    if (data['focus_sessions'] is List &&
+        (data['focus_sessions'] as List).isEmpty)
+      '专注记录',
+  ];
+  if (empty.isEmpty) return true;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('这份备份可能不完整'),
+      content: Text(
+          '备份中的${empty.join('、')}为空。继续恢复会清空本机现有的${empty.join('、')}，且无法撤销。'
+          '建议先导出当前数据，或换一份完整备份。'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('仍要恢复')),
+      ],
+    ),
+  );
+  return ok == true;
+}
+
 /// 「备份与恢复」底部弹层：提供「备份到文件」「从备份恢复」，
 /// 并可选择是否把回收站一并备份 / 恢复。
 class BackupSheet {
@@ -443,6 +478,8 @@ class BackupSheet {
       currentHabitCount: habitProvider.habits.length,
       currentFocusCount: focusProvider.sessions.length,
     );
+    // P2-2（v3.1.4 审计）：空 habits / check_ins / focus 段先过一道确认。
+    if (!await confirmEmptyRestoreSections(context, data)) return;
     final confirm = await _showRestoreConfirm(
       context,
       title: '从备份恢复？',
@@ -462,9 +499,19 @@ class BackupSheet {
       // 无出口的死局（v3.1.2 报告方向③）。覆盖前先尝试重新加载一次：DB 已
       // 可访问即退出安全模式，本次恢复即可正常写库；仍失败则继续走恢复，
       // 结果里由 blobStats.persisted 如实提示「写入未保存」。
-      if (provider.dbLoadFailed) {
+      // P2-1（v3.1.4 审计）：三侧任一处于安全模式都先重试**对应** Provider。
+      // 旧实现只重试任务侧：习惯 / 专注仍不可写时 restoreSessions /
+      // habitProvider.restoreFromJson 恒返回 false，用户被引导「去恢复备份」
+      // 却永远落不了盘，与 v3.1.3 想解决的死局同构，只是换到另两个 Provider。
+      if (provider.dbLoadFailed ||
+          focusProvider.dbLoadFailed ||
+          habitProvider.dbLoadFailed) {
         stage('正在重试加载数据…');
-        await provider.retryLoad();
+        await Future.wait([
+          if (provider.dbLoadFailed) provider.retryLoad(),
+          if (focusProvider.dbLoadFailed) focusProvider.retryLoad(),
+          if (habitProvider.dbLoadFailed) habitProvider.retryLoad(),
+        ]);
       }
       stage('正在生成恢复前回滚点…');
       // A1：恢复前自动快照——失败不阻断恢复，但结果里如实提示「不可回滚」。
@@ -584,6 +631,12 @@ class BackupSheet {
             await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
             await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
             await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
+            // U-3（v3.1.4 审计）：refreshEnabled 在本机无可用生物识别时会把
+            // app_lock_enabled 强制写回 false；旧实现结果只提示「加密口令不迁移」，
+            // 用户以为应用锁已恢复，实际被静默关闭。并入 failures 如实告知。
+            if (appLockProvider.lastRefreshForceDisabled) {
+              failures.add('应用锁（本机无可用生物识别/凭据，已关闭；如需启用请到设置中开启）');
+            }
           } catch (e) {
             failures.add('偏好（$e）');
             // P3-10（v2.9.4 审计）：上面传了 rescheduleReminders: false，若在此
@@ -952,6 +1005,8 @@ class BackupSheet {
         currentHabitCount: habitProvider.habits.length,
         currentFocusCount: focusProvider.sessions.length,
       );
+      // P2-2（v3.1.4 审计）：与 _doRestore 同款的空段危险信号确认。
+      if (!await confirmEmptyRestoreSections(context, data)) return;
       final confirm = await _showRestoreConfirm(
         context,
         title: '从 ${entry.label} 的快照还原？',
@@ -963,10 +1018,16 @@ class BackupSheet {
       final restoreSettings = confirm.$2;
       // P3-5（v3.1.2 审计）：同 _doRestore——还原全过程套不可取消的进度弹层。
       Future<bool> runRestoreSteps(void Function(String) stage) async {
-        // P2-1（v3.1.3 审计）：与 _doRestore 同款的安全模式重试出口。
-        if (provider.dbLoadFailed) {
+        // P2-1（v3.1.4 审计）：与 _doRestore 同款的三侧重试出口。
+        if (provider.dbLoadFailed ||
+            focusProvider.dbLoadFailed ||
+            habitProvider.dbLoadFailed) {
           stage('正在重试加载数据…');
-          await provider.retryLoad();
+          await Future.wait([
+            if (provider.dbLoadFailed) provider.retryLoad(),
+            if (focusProvider.dbLoadFailed) focusProvider.retryLoad(),
+            if (habitProvider.dbLoadFailed) habitProvider.retryLoad(),
+          ]);
         }
         stage('正在生成恢复前回滚点…');
         // A1：恢复前自动快照——失败不阻断还原，但结果里如实提示「不可回滚」。
@@ -1046,6 +1107,12 @@ class BackupSheet {
             await themeProvider.load(); // 外观主题（load 内部已 notifyListeners）
             await onboardingProvider.load(); // 引导页标记（load 内部已 notifyListeners）
             await appLockProvider.refreshEnabled(); // 仅刷新开关，不触发锁屏
+            // U-3（v3.1.4 审计）：refreshEnabled 在本机无可用生物识别时会把
+            // app_lock_enabled 强制写回 false；旧实现结果只提示「加密口令不迁移」，
+            // 用户以为应用锁已恢复，实际被静默关闭。并入 failures 如实告知。
+            if (appLockProvider.lastRefreshForceDisabled) {
+              failures.add('应用锁（本机无可用生物识别/凭据，已关闭；如需启用请到设置中开启）');
+            }
           } catch (e) {
             failures.add('偏好设置（$e）');
             // P3-10（v2.9.4 审计）：走到这里说明本次已让 restoreFromJson 跳过
