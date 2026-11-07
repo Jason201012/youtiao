@@ -1007,6 +1007,16 @@ class _TodayMitCard extends StatefulWidget {
   State<_TodayMitCard> createState() => _TodayMitCardState();
 }
 
+/// U-4（v3.1.3 审计）：今日三件卡片标题文案的单一真源。满员时不再写
+/// 「继续添加（最多 3 件）」——下方建议全部置灰、点按弹「最多 3 件」，
+/// 旧文案与状态矛盾。抽成纯函数便于回归测试钉死。
+@visibleForTesting
+String mitTitleFor(int count, int max) {
+  if (count == 0) return '从建议中挑选今天最重要的几件事：';
+  if (count >= max) return '已满 $max 件，请先移出一件：';
+  return '继续添加（最多 $max 件）：';
+}
+
 class _TodayMitCardState extends State<_TodayMitCard> {
   bool _collapsed = false;
 
@@ -1044,6 +1054,28 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                         fontWeight: FontWeight.w700,
                         color: scheme.onSurface)),
               ),
+              // P3-8（v3.1.3 审计）：「自选任务」入口——建议池只含逾期 / 今天 /
+              // 高优先级，候选不足 3 条或想选池外任务时卡片此前永远到不了 3/3。
+              // 满员时降低视觉权重，点击给统一提示（见 [_openMitPicker]）。
+              TextButton.icon(
+                onPressed: () => _openMitPicker(context, provider),
+                icon: Icon(Icons.add,
+                    size: 15,
+                    color: mitFull
+                        ? ext.meta.withValues(alpha: 0.4)
+                        : scheme.primary),
+                label: Text('自选',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: mitFull
+                            ? ext.meta.withValues(alpha: 0.4)
+                            : scheme.primary)),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
               Text('${ids.length}/${TaskProvider.kDailyMitMax}',
                   style: TextStyle(fontSize: 12, color: ext.meta)),
               IconButton(
@@ -1071,9 +1103,9 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                 // P2-2：top 随「是否已有已选行」变化，不能用 const。
                 padding: EdgeInsets.only(left: 8, top: ids.isEmpty ? 0 : 6),
                 child: Text(
-                  ids.isEmpty
-                      ? '从建议中挑选今天最重要的几件事：'
-                      : '继续添加（最多 ${TaskProvider.kDailyMitMax} 件）：',
+                  // U-4（v3.1.3 审计）：满员时不再写「继续添加」，文案与
+                  // 下方建议全置灰的状态一致（单一真源见 [mitTitleFor]）。
+                  mitTitleFor(ids.length, TaskProvider.kDailyMitMax),
                   style: TextStyle(fontSize: 12, color: ext.meta),
                 ),
               ),
@@ -1098,16 +1130,102 @@ class _TodayMitCardState extends State<_TodayMitCard> {
   /// 偏好存储，没有「后续操作顺带保存」的自愈），语义不符。
   Future<void> _consumeMitToggle(
       BuildContext context, TaskProvider provider, String id) async {
-    final ok = await provider.toggleTodayMit(id);
-    if (ok || !context.mounted) return;
-    final now = provider.todayMit;
-    final fullRejected =
-        now.length >= TaskProvider.kDailyMitMax && !now.contains(id);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(fullRejected
-          ? '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先移出一件再添加'
-          : '保存失败：今日三件未生效，请重试'),
-    ));
+    // P3-1（v3.1.3 审计）：改消费具名结果，不再靠 `todayMit.length` 反猜失败
+    // 原因。悬空 id 占名额时旧实现会把「满员被拒」误报成「保存失败」。
+    final result = await provider.toggleTodayMitDetailed(id);
+    if (result == MitToggleOutcome.ok || !context.mounted) return;
+    String msg;
+    if (result == MitToggleOutcome.full) {
+      msg = '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先移出一件再添加';
+    } else if (result == MitToggleOutcome.invalid) {
+      msg = '该任务已不存在，无法加入今日三件';
+    } else {
+      msg = '保存失败：今日三件未生效，请重试';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  /// P3-8（v3.1.3 审计）：自选任务弹层——池子是**全部未完成任务**
+  /// （[TaskProvider.selectableMitTasks]，支持标题 / 标签 / 分类搜索），
+  /// 已选行置灰；满员时与 U-4 使用同一句提示，不静默拒绝。
+  Future<void> _openMitPicker(
+      BuildContext context, TaskProvider provider) async {
+    final chosen = provider.todayMit;
+    if (chosen.length >= TaskProvider.kDailyMitMax) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先移出一件再添加'),
+      ));
+      return;
+    }
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (dctx) {
+        var query = '';
+        return StatefulBuilder(builder: (sctx, setDialogState) {
+          final pool = provider.selectableMitTasks(query: query);
+          return AlertDialog(
+            title: const Text('自选今日三件'),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: '搜索标题 / 标签 / 分类',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (v) => setDialogState(() => query = v),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: pool.isEmpty
+                        ? const Center(child: Text('没有匹配的未完成任务'))
+                        : ListView.builder(
+                            itemCount: pool.length,
+                            itemBuilder: (_, i) {
+                              final t = pool[i];
+                              final selected = chosen.contains(t.id);
+                              return ListTile(
+                                dense: true,
+                                enabled: !selected,
+                                title: Text(
+                                  t.title.isEmpty ? '(无标题)' : t.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(t.category.label,
+                                    style: const TextStyle(fontSize: 11)),
+                                trailing: selected
+                                    ? const Text('已选',
+                                        style: TextStyle(fontSize: 11))
+                                    : null,
+                                onTap: selected
+                                    ? null
+                                    : () => Navigator.pop(dctx, t.id),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dctx),
+                child: const Text('取消'),
+              ),
+            ],
+          );
+        });
+      },
+    );
+    if (picked == null || !context.mounted) return;
+    await _consumeMitToggle(context, provider, picked);
   }
 
   /// 已选行：圆圈（完成，带撤销）+ 标题（进详情）+ 移出。

@@ -15,6 +15,8 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'prefs_backup.dart'; // P3-6（v3.1.3 审计）：与恢复执行侧共用不迁移键名单
+
 class BackupSummary {
   final DateTime? generatedAt;
   final int? schemaVersion;
@@ -128,6 +130,12 @@ class BackupSummary {
       final sp = await SharedPreferences.getInstance();
       prefs.forEach((k, v) {
         if (k is! String) return;
+        // P3-6（v3.1.3 审计）：applyAppPrefs 会丢弃「不随备份迁移」的本机状态
+        // 键（自动备份加密开关 / 临时静音窗口），旧备份里却常带着它们。若摘要
+        // 仍把它们列进「设置差异」，用户看到差异、切换「同时恢复设置」后却
+        // 毫无效果（标签表也没有这些键，只会回退显示英文键名）。此处与执行侧
+        // 共用同一份名单过滤，摘要只列真正会被应用的键。
+        if (neverBackedUpPrefKeys.contains(k)) return;
         backupPrefKeys.add(k);
         // P3-1（v3.1.2 审计）：列表键深比较——备份 JSON 解码出的 List 是
         // List<dynamic>，SharedPreferences 返回 List<String>，Dart 的 `==`

@@ -88,7 +88,10 @@ const List<String> _backedUpPrefKeys = <String>[
 ///   「当时静音到明天」的旧备份会让当前设备立刻被静音，用户「莫名其妙又被
 ///   噤声」且无从预期。改为本机状态不迁移：导出侧经二道闸排除，恢复侧
 ///   applyAppPrefs 白名单过滤同样丢弃旧备份携带的该键（旧备份兼容）。
-const List<String> _neverBackedUpPrefKeys = <String>[
+/// P3-6（v3.1.3 审计）：改为公开常量——恢复差异摘要（BackupSummary.fromMap）
+/// 必须与恢复执行侧共用同一份「不迁移键」名单，否则摘要会把这些键列为
+/// 「设置差异」，用户切换「同时恢复设置」后却永远不会生效。
+const List<String> neverBackedUpPrefKeys = <String>[
   'auto_backup_encrypt',
   'reminders_muted_until',
 ];
@@ -103,7 +106,7 @@ Future<Map<String, dynamic>> collectAppPrefs() async {
   for (final k in _backedUpPrefKeys) {
     // P2-2（v3.1.0 审计）：显式排除段二道闸——即使该键日后被误加回白名单，
     // 也不会出现在备份里（与 applyAppPrefs 的白名单判断互为冗余防线）。
-    if (_neverBackedUpPrefKeys.contains(k)) continue;
+    if (neverBackedUpPrefKeys.contains(k)) continue;
     if (!prefs.containsKey(k)) continue;
     final v = prefs.get(k);
     if (v is bool || v is int || v is double || v is String) {
@@ -130,6 +133,9 @@ Future<void> applyAppPrefs(Map<String, dynamic>? prefs) async {
   for (final entry in prefs.entries) {
     final k = entry.key;
     if (!_backedUpPrefKeys.contains(k)) continue; // 非白名单键直接丢弃
+    // P3-6（v3.1.3 审计）：与 collectAppPrefs / 恢复摘要共用的二道闸——即便
+    // 日后误把某个 never 键加回白名单，旧备份携带的本机状态也不会被写回。
+    if (neverBackedUpPrefKeys.contains(k)) continue;
     final v = entry.value;
     if (v is bool) {
       await sp.setBool(k, v);

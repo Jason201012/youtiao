@@ -782,20 +782,24 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
           title: task.title,
         );
       } else {
-        // U3-1（v3.0.4 审计）：服务层守卫早退（repeatEnded / 总开关关闭 /
-        // 调度异常）返回 false 时覆盖式回执「提醒已结束」，不再静默。
+        // U3-1（v3.0.4 审计）：服务层守卫早退返回 false 时覆盖式回执，不再静默。
+        // U-2（v3.1.3 审计）：U-5 让「落点命中临时静音」也返回 false，旧实现把
+        // 它和「调度异常」混为一谈弹「顺延失败」——静音生效不是失败。用服务层
+        // 同一个落点函数预判静音，再按原因分别回执。
+        final landing = NotificationService.instance.snoozeLandingTime(delay);
         NotificationService.instance
             .snoozeTaskReminder(task, delay: delay)
             .then((ok) {
           if (!ok) {
-            // U3-2（v3.0.5 审计）：走到此处的 false 只剩调度异常（done /
-            // repeatEnded 已上方预拦截；总开关关闭时回执自身早退）——重复
-            // 任务的既有 8 槽落点仍挂在外、下个周期照响，文案改「顺延失败」
-            // 不谎报「不会再响」。
+            final muted = NotificationService.isReminderMuted(landing);
+            // U3-2（v3.0.5 审计）：非静音的 false 只剩调度异常（done /
+            // repeatEnded 已上方预拦截）——重复任务的既有 8 槽落点仍挂在外、
+            // 下个周期照响，文案「顺延失败」不谎报「不会再响」。
             NotificationService.instance.showSnoozeUnavailableConfirm(
               taskId,
               title: task.title,
-              rescheduleFailed: true,
+              muted: muted,
+              rescheduleFailed: !muted,
             );
           }
         });
@@ -835,19 +839,22 @@ void _doSnooze(NavigatorState nav, String? taskId, String? habitId) {
           isHabit: true,
         );
       } else {
-        // U3-1（v3.0.4 审计）：服务层守卫早退（archived / 总开关关闭 /
-        // 调度异常）返回 false 时覆盖式回执，不再静默。
+        // U3-1（v3.0.4 审计）：服务层守卫早退返回 false 时覆盖式回执，不再静默。
+        // U-2（v3.1.3 审计）：与任务侧同款——静音命中不是「顺延失败」。
+        final landing = NotificationService.instance.snoozeLandingTime(delay);
         NotificationService.instance
             .snoozeHabitReminder(habit, delay: delay)
             .then((ok) {
           if (!ok) {
-            // U3-2（v3.0.5 审计）：false 只剩调度异常（archived 已上方预拦截；
-            // 总开关关闭时回执自身早退）——文案改「顺延失败」不谎报「不会再响」。
+            final muted = NotificationService.isReminderMuted(landing);
+            // U3-2（v3.0.5 审计）：非静音的 false 只剩调度异常（archived 已
+            // 上方预拦截）——文案「顺延失败」不谎报「不会再响」。
             NotificationService.instance.showSnoozeUnavailableConfirm(
               habitId,
               title: habit.title,
               isHabit: true,
-              rescheduleFailed: true,
+              muted: muted,
+              rescheduleFailed: !muted,
             );
           }
         });
@@ -2014,12 +2021,23 @@ class _TabKeepAliveState extends State<_TabKeepAlive> {
 
 /// S13 安全模式横幅：数据库加载失败时显示在顶部，提示用户当前为只读、
 /// 修改不会保存，并引导前往「设置 → 备份与恢复」导出/修复，避免误覆盖坏库。
+///
+/// P1-2 / P2-1（v3.1.3 审计）：文案不再笼统承诺「本次修改不会保存」——
+/// 修复后偏好由显式 setter 单独写盘（设置仍可查看与修改），只有**任务数据**
+/// 不写数据库。并补上真正可点的「重试加载」出口：旧横幅只是纯文本，而
+/// `_dbLoadFailed` 成功后从不清零，用户被困在「导出 / 恢复都写不进去」的
+/// 死局里，唯一出路是杀进程重启。
 class _DbSafeModeBanner extends StatelessWidget {
   const _DbSafeModeBanner();
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final textStyle = TextStyle(
+      color: scheme.onErrorContainer,
+      fontSize: 13,
+      height: 1.3,
+    );
     return Material(
       color: scheme.errorContainer,
       child: Padding(
@@ -2031,16 +2049,37 @@ class _DbSafeModeBanner extends StatelessWidget {
                 color: scheme.onErrorContainer, size: 20),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(
-                // P1-1（v3.1.0 审计）：横幅现覆盖任务/习惯/专注三侧安全模式，
-                // 文案从「数据库加载失败」泛化为「数据加载失败」。
-                '数据加载失败，已进入只读安全模式：本次修改不会保存。'
-                '请前往「设置 → 备份与恢复」导出或修复数据。',
-                style: TextStyle(
-                  color: scheme.onErrorContainer,
-                  fontSize: 13,
-                  height: 1.3,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '数据加载失败，已进入只读安全模式：任务数据不会写入数据库，'
+                    '设置仍可查看与修改。请前往「设置 → 备份与恢复」导出或修复数据。',
+                    style: textStyle,
+                  ),
+                  const SizedBox(height: 4),
+                  TextButton.icon(
+                    onPressed: () async {
+                      final task = context.read<TaskProvider>();
+                      final ok = await task.retryLoad();
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(ok
+                            ? '数据已重新加载，只读安全模式已解除'
+                            : '仍无法读取数据库，请先导出备份或稍后重试'),
+                      ));
+                    },
+                    icon: const Icon(Icons.refresh, size: 16),
+                    label: const Text('重试加载任务数据', style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(
+                      foregroundColor: scheme.onErrorContainer,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

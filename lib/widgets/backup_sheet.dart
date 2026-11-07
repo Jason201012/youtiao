@@ -457,6 +457,15 @@ class BackupSheet {
     // 快照组装 / 加密与多步恢复都在主 isolate 同步执行，大库 + 加密时表现为
     // 「点了恢复就卡住」，用户可能反复点击。弹层在 finally 中自动收起。
     Future<bool> runRestoreSteps(void Function(String) stage) async {
+      // P2-1（v3.1.3 审计）：安全模式下 `_persist` 恒 false，恢复的备份永远
+      // 无法落盘——用户被引导「去恢复备份」，恢复又提示「写入未保存」，是
+      // 无出口的死局（v3.1.2 报告方向③）。覆盖前先尝试重新加载一次：DB 已
+      // 可访问即退出安全模式，本次恢复即可正常写库；仍失败则继续走恢复，
+      // 结果里由 blobStats.persisted 如实提示「写入未保存」。
+      if (provider.dbLoadFailed) {
+        stage('正在重试加载数据…');
+        await provider.retryLoad();
+      }
       stage('正在生成恢复前回滚点…');
       // A1：恢复前自动快照——失败不阻断恢复，但结果里如实提示「不可回滚」。
       final snapOk = await provider.writePreRestoreSnapshot();
@@ -668,6 +677,11 @@ class BackupSheet {
       ),
     );
     try {
+      // P3-3（v3.1.3 审计）：`showDialog` 只是把路由 push 排进队列，旧实现
+      // 紧接着就进入快照组装，弹层首帧还没渲染就被同步活占住（配合
+      // encodeSnapshotOffMainThread 的 isolate 化才算真正兑现「弹层会转」）。
+      // 让出一次事件循环，保证弹层先完成 push + 首帧。
+      await Future<void>.delayed(Duration.zero);
       return await run((s) => stage.value = s);
     } finally {
       final nav = Navigator.of(context, rootNavigator: true);
@@ -949,6 +963,11 @@ class BackupSheet {
       final restoreSettings = confirm.$2;
       // P3-5（v3.1.2 审计）：同 _doRestore——还原全过程套不可取消的进度弹层。
       Future<bool> runRestoreSteps(void Function(String) stage) async {
+        // P2-1（v3.1.3 审计）：与 _doRestore 同款的安全模式重试出口。
+        if (provider.dbLoadFailed) {
+          stage('正在重试加载数据…');
+          await provider.retryLoad();
+        }
         stage('正在生成恢复前回滚点…');
         // A1：恢复前自动快照——失败不阻断还原，但结果里如实提示「不可回滚」。
         final snapOk = await provider.writePreRestoreSnapshot();

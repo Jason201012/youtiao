@@ -494,9 +494,12 @@ class _TagManageScreenState extends State<TagManageScreen> {
                         context: context,
                         builder: (cctx) => AlertDialog(
                           title: const Text('确认合并'),
+                          // U-1（v3.1.3 审计）：空合并不再承诺「10 秒内可撤销」。
                           content: Text(
-                            '将把 $affected 条任务上的「$source」改名为「$target」'
-                            '（source 标签将被移除）。执行后 10 秒内可撤销。',
+                            affected == 0
+                                ? '没有任务使用「$source」标签，合并不会产生任何变更。'
+                                : '将把 $affected 条任务上的「$source」改名为「$target」'
+                                    '（source 标签将被移除）。执行后 10 秒内可撤销。',
                           ),
                           actions: [
                             TextButton(
@@ -527,7 +530,16 @@ class _TagManageScreenState extends State<TagManageScreen> {
                       // 任何可撤销变更（0 条任务受影响且 source 未归档，
                       // mergeTags 未登记撤销条目）——此时不再承诺撤销，避免
                       // 「点撤销必报已失效」的死横幅。
-                      if (batchId == 0) return;
+                      if (batchId == 0) {
+                        // U-1（v3.1.3 审计）：空操作也要有「已完成」回执——
+                        // 旧实现确认框关闭、列表无变化、零提示，用户无法判断
+                        // 是没执行成功还是本来就没有任务用到该标签。
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text('标签「$source」下没有任务，合并未产生变更'),
+                          duration: const Duration(seconds: 2),
+                        ));
+                        return;
+                      }
                       showUndoSnackBar(
                         context,
                         content:

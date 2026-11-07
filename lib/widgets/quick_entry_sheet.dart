@@ -20,6 +20,41 @@ import 'package:todolist/widgets/task_toggle_undo.dart';
 /// 输入时实时解析并把识别结果以 chip 形式回显，让用户随打随确认系统的理解，
 /// 不必先学语法。解析不满意时可一键「更多选项」转入完整编辑弹层，草稿原样带过去。
 class QuickEntrySheet extends StatefulWidget {
+  /// U-3（v3.1.3 审计）：粘贴合并的**纯函数**（可单测，不依赖 State）。
+  ///
+  /// 旧实现只对「剪贴板文本本身」截 500 字：输入框已有 480 字时再粘 500 字，
+  /// 最终 980 字，所谓上限根本没生效。现在按「保留下来的原文长度」算剩余
+  /// 额度，保证**合并后总长** ≤ [maxLength]；同时把选区合法性校验收在一处
+  /// （未聚焦 / 越界退化为追加到末尾），返回新文本、光标位置与是否截断。
+  @visibleForTesting
+  static ({String text, int cursor, bool truncated}) mergeClipboardText(
+    String current,
+    TextSelection selection,
+    String pasted, {
+    int maxLength = 500,
+  }) {
+    final valid = selection.isValid &&
+        selection.start >= 0 &&
+        selection.end >= selection.start &&
+        selection.end <= current.length;
+    final sel = valid
+        ? selection
+        : TextSelection.collapsed(offset: current.length);
+    final kept = current.length - (sel.end - sel.start);
+    final room = maxLength - kept;
+    var clipped = pasted;
+    var truncated = false;
+    if (clipped.length > room) {
+      clipped = room <= 0 ? '' : clipped.substring(0, room);
+      truncated = true;
+    }
+    return (
+      text: current.replaceRange(sel.start, sel.end, clipped),
+      cursor: sel.start + clipped.length,
+      truncated: truncated,
+    );
+  }
+
   /// 可选预填文本（如分享入口转发过来的文字），非空时录入层预填并实时解析。
   final String? initialText;
   /// P2-8：分享来源包名（原生侧经 getCallingActivity 取得），非空时显示「来自 XX」。
@@ -122,39 +157,29 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   /// 说明，不再静默丢字。选区非法（未聚焦 / 越界）时退化为追加到末尾。
   Future<void> _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
+    // U-3（v3.1.3 审计）：`Clipboard.getData` 是异步的平台通道调用，等待期间
+    // 弹层可能已被关闭（dispose() 已执行）。旧实现之后直接写 `_controller` 并
+    // `setState`，会抛「TextEditingController used after disposed /
+    // setState() called after dispose()」。此处必须先确认仍挂载。
+    if (!mounted) return;
     final text = (data?.text ?? '').trim();
     if (text.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('剪贴板没有文本内容'),
-          duration: Duration(milliseconds: 900),
-        ));
-      }
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('剪贴板没有文本内容'),
+        duration: Duration(milliseconds: 900),
+      ));
       return;
     }
-    var clipped = text;
-    var truncated = false;
-    if (clipped.length > 500) {
-      clipped = clipped.substring(0, 500);
-      truncated = true;
-    }
-    final current = _controller.text;
-    final sel = _controller.selection;
-    // isValid：start/end 均 >= 0（未聚焦时为 -1 的「无选区」视为非法）。
-    final baseSel = (sel.isValid &&
-            sel.start <= current.length &&
-            sel.end <= current.length)
-        ? sel
-        : TextSelection.collapsed(offset: current.length);
-    final newText = current.replaceRange(baseSel.start, baseSel.end, clipped);
+    final r = QuickEntrySheet.mergeClipboardText(
+        _controller.text, _controller.selection, text);
     _controller.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: baseSel.start + clipped.length),
+      text: r.text,
+      selection: TextSelection.collapsed(offset: r.cursor),
     );
-    _onChanged(newText);
-    if (truncated && mounted) {
+    _onChanged(r.text);
+    if (r.truncated && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('剪贴板内容超过 500 字，已截断'),
+        content: Text('输入内容最多 500 字，超出部分已截断'),
         duration: Duration(milliseconds: 1200),
       ));
     }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate'; // P3-3（v3.1.3 审计）：快照序列化 / 加密移出主 isolate
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -24,6 +25,10 @@ import 'package:todolist/state/habit_provider.dart';
 
 /// 首页列表筛选（看板统计卡点击后跳转首页并套用）。
 enum TaskFilter { all, todo, done, overdue }
+
+/// P3-1（v3.1.3 审计）：今日三件切换的具名结果——`false` 不再一义多指。
+/// 详见 [TaskProvider.toggleTodayMitDetailed]。
+enum MitToggleOutcome { ok, full, invalid, persistFailed }
 
 /// 内存状态 + shared_preferences 持久化（任务列表与开关设置落盘，重启不丢）
 class TaskProvider extends ChangeNotifier {
@@ -331,10 +336,13 @@ class TaskProvider extends ChangeNotifier {
   /// 已移出而重启后回到旧状态，「看似成功实则未保存」。回滚后再次通知 UI。
   Future<bool> setTodayMit(List<String> ids) async {
     final key = _ymd(DateTime.now());
+    // P3-1（v3.1.3 审计）：先滤掉悬空 id，**再**截断上限。旧实现 `.take(3)`
+    // 在前：3 个有效 + 1 个已删 id 的列表里，若悬空 id 恰好排在前面，会把
+    // 一个有效任务挤掉，用户看到 2/3 还少一个名额却补不进来。
     final valid = ids
         .toSet()
-        .take(kDailyMitMax)
         .where((id) => _tasks.any((t) => t.id == id))
+        .take(kDailyMitMax)
         .toList();
     final prev = _dailyMit[key];
     _dailyMit[key] = valid;
@@ -352,18 +360,70 @@ class TaskProvider extends ChangeNotifier {
     return ok;
   }
 
-  /// 把某任务加入 / 移出今日三件。已满（[kDailyMitMax]）时返回 false
-  /// （UI 据此提示「最多 3 件」），落盘失败也返回 false。
-  Future<bool> toggleTodayMit(String id) async {
+  /// 今日键下的**有效** id（按原始顺序），惰性剔除已删 / 已入回收站的任务。
+  /// P3-1（v3.1.3 审计）：上限判断、加入、移出三条路径统一消费本方法，
+  /// 不再各自直接读 `_dailyMit[key]`（那里可能残留悬空 id）。
+  List<String> _validMitIds(String key) => (_dailyMit[key] ?? const <String>[])
+      .where((id) => _tasks.any((t) => t.id == id))
+      .toList();
+
+  /// P3-1（v3.1.3 审计）：加入 / 移出今日三件的**具名结果**。
+  ///
+  /// 旧实现用一个 `false` 同时承载「满员被拒」「落盘失败」「任务不存在」，
+  /// UI 只能靠 `todayMit.length` 反猜：悬空 id 占名额时有效 2/3、原始 3 个，
+  /// 点「+」早退 false，UI 判定「未满」→ 弹「保存失败：今日三件未生效」，
+  /// 与真实原因完全相反。返回枚举后文案与原因一一对应。
+  Future<MitToggleOutcome> toggleTodayMitDetailed(String id) async {
     final key = _ymd(DateTime.now());
-    final list = [..._dailyMit[key] ?? const <String>[]];
+    final list = _validMitIds(key);
     if (list.contains(id)) {
       list.remove(id);
-    } else {
-      if (list.length >= kDailyMitMax) return false;
-      list.add(id);
+      return await setTodayMit(list)
+          ? MitToggleOutcome.ok
+          : MitToggleOutcome.persistFailed;
     }
-    return setTodayMit(list);
+    if (!_tasks.any((t) => t.id == id)) return MitToggleOutcome.invalid;
+    if (list.length >= kDailyMitMax) return MitToggleOutcome.full;
+    list.add(id);
+    return await setTodayMit(list)
+        ? MitToggleOutcome.ok
+        : MitToggleOutcome.persistFailed;
+  }
+
+  /// 兼容既有调用方 / 测试的 bool 包装；UI 应改用 [toggleTodayMitDetailed]。
+  Future<bool> toggleTodayMit(String id) async =>
+      await toggleTodayMitDetailed(id) == MitToggleOutcome.ok;
+
+  /// P3-8（v3.1.3 审计）：「自选任务」候选池——**全部未完成任务**，而非
+  /// `suggestMitCandidates()` 的「逾期 / 今天 / 高优先级」三池。候选池不足 3
+  /// 条、或用户想选明天到期 / 无截止日的任务时，卡片此前没有任何补足入口。
+  /// [query] 为空时不过滤；命中标题 / 标签 / 分类，大小写不敏感。
+  List<Task> selectableMitTasks({String query = ''}) {
+    final q = query.trim().toLowerCase();
+    return _tasks.where((t) {
+      if (t.status != TaskStatus.todo) return false;
+      if (q.isEmpty) return true;
+      return t.title.toLowerCase().contains(q) ||
+          t.tags.any((tag) => tag.toLowerCase().contains(q)) ||
+          t.category.label.toLowerCase().contains(q);
+    }).toList();
+  }
+
+  /// P3-1（v3.1.3 审计）：彻底删除（不可撤销）时清掉 MIT 里的悬空 id。
+  /// 移入回收站的路径**故意不清**——用户撤销删除后原选择自动回来；读取侧
+  /// [todayMit] / [_validMitIds] 已惰性过滤，悬空 id 不再占名额。
+  void _pruneMitIds(Iterable<String> ids) {
+    final gone = ids.toSet();
+    if (gone.isEmpty) return;
+    var changed = false;
+    for (final entry in _dailyMit.entries.toList()) {
+      final kept = entry.value.where((id) => !gone.contains(id)).toList();
+      if (kept.length != entry.value.length) {
+        _dailyMit[entry.key] = kept;
+        changed = true;
+      }
+    }
+    if (changed) unawaited(_persistDailyMit());
   }
 
   /// 清理其它日期的 MIT 键（日切 / 覆写时调用）——报告要求「旧日期自动清理」，
@@ -1082,6 +1142,14 @@ class TaskProvider extends ChangeNotifier {
   /// 跨日首启时生成当日滚动快照；今天已有快照则跳过。失败静默（仅记录 _lastAutoBackupError）。
   Future<void> _autoBackupIfNeeded() async {
     if (!_autoBackupEnabled) return;
+    // P1-2（v3.1.3 审计）：安全模式下内存任务集可能为空、偏好开关也可能不是
+    // 用户真实值；main 在 `_safeLoad` 之后无条件触发本方法，旧实现会以空任务集
+    // 组装当日快照并覆盖同名文件（甚至用默认 `encrypt=false` 写出明文）。
+    // 只读保护期一律不写快照——这是「安全模式不写坏库」承诺的另一半。
+    if (_dbLoadFailed) {
+      AppLog.d('[TaskProvider] 只读安全模式：跳过当日自动备份');
+      return;
+    }
     final now = DateTime.now();
     final todayKey = _dateKey(now);
     if (_lastAutoBackupDate != null && _dateKey(_lastAutoBackupDate!) == todayKey) {
@@ -1106,7 +1174,12 @@ class TaskProvider extends ChangeNotifier {
   /// 供 [main] 在所有 Provider（FocusProvider / HabitProvider）加载完成后显式触发一次
   /// 跨日快照。必须在单例注册之后调用，否则快照内 focus_sessions / 习惯打卡会因
   /// [FocusProvider.instanceOrNull] / [HabitProvider.instanceOrNull] 尚未就绪而恒为空（P0-2）。
-  Future<void> triggerAutoBackup() => _autoBackupIfNeeded();
+  Future<void> triggerAutoBackup() async {
+    // P1-2（v3.1.3 审计）：与 [_autoBackupIfNeeded] 双重守门（启动入口即拦截，
+    // 无需等内部判定）；DB 仍处于只读安全模式时不产出任何快照。
+    if (_dbLoadFailed) return;
+    await _autoBackupIfNeeded();
+  }
 
   /// 把当前全部数据（任务 + 回收站 + 偏好 + 专注 + 习惯 + 打卡）写入当日滚动快照。
   /// 文件名 backup/auto/YYYY-MM-DD.json（开启加密时为 .enc.json），复用
@@ -1181,13 +1254,30 @@ class TaskProvider extends ChangeNotifier {
       notifyListeners();
       return _lastAutoBackupError;
     }
-    final plain = const JsonEncoder.withIndent('  ').convert(trimmedPayload);
-    // L-08：按开关决定是否加密。buildBackupPayload 在「要求加密但无口令」时抛
-    // BackupEncryptException，此处不捕获，交由 _autoBackupIfNeeded 记入错误提示。
-    final body =
-        buildBackupPayload(plain, encryptOn: _autoBackupEncrypt, pass: _autoBackupPass);
-    final suffix = _autoBackupEncrypt ? '.enc.json' : '.json';
-    await DataIo.saveToAppDocs('backup/auto/${_dateKey(now)}$suffix', body);
+    // P1-2（v3.1.3 审计）：同日已有任一形态的快照就不再覆盖。`_lastAutoBackupDate`
+    // 只能挡住「本次进程记得写过」的情况；冷启动 / 手工改过 prefs / 安全模式
+    // 下该值为 null，旧实现会用空任务集覆盖当天滚动快照中的一份有效数据。
+    // 判定放在编码之前——跳过路径不该白白做一次序列化 / AES。
+    if (await _autoBackupOfDayExists(now)) {
+      AppLog.d('[TaskProvider] 当日已存在自动快照，跳过覆盖：${_dateKey(now)}');
+      _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_kLastAutoBackup, _dateKey(now));
+      return null;
+    }
+    // P3-3（v3.1.3 审计）：JsonEncoder.withIndent + AES/PBKDF2 曾在主 isolate
+    // 同步执行，恢复进度弹层照转但动画冻结；与恢复前快照共用后台编码入口。
+    // 「要求加密但无口令」时 buildBackupPayload 抛 BackupEncryptException，
+    // 此处不捕获，交由 _autoBackupIfNeeded 记入错误提示（不静默降级为明文）。
+    final body = await encodeSnapshotOffMainThread(
+        trimmedPayload, _autoBackupEncrypt, _autoBackupPass);
+    // P3-2（v3.1.3 审计）：自动快照与恢复前快照同口径——附件被剥离时把事实
+    // 写进文件名，恢复面板才能如实标注「不含附件」。后缀次序固定为
+    // [.noattach][.enc].json，保证 endsWith('.enc.json') 判定恒成立。
+    final noAttachMark = attachmentsStripped ? '.noattach' : '';
+    final suffix = '$noAttachMark${_autoBackupEncrypt ? '.enc' : ''}.json';
+    final rel = 'backup/auto/${_dateKey(now)}$suffix';
+    await DataIo.saveToAppDocs(rel, body);
     _rotateAutoBackups();
     if (attachmentsStripped) {
       // 新P2-1：剥离事实不静默——记入设置页可见的错误栏（warning 性质：
@@ -1206,6 +1296,26 @@ class TaskProvider extends ChangeNotifier {
       return _lastAutoBackupError;
     }
     return null;
+  }
+
+  /// P1-2（v3.1.3 审计）：当日滚动快照是否已存在（明文 / 加密 / 含 .noattach
+  /// 四种形态任一即算）。`.stale.` 是换口令后不可解的旧信封，不算有效快照。
+  Future<bool> _autoBackupOfDayExists(DateTime now) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final base = Directory('${dir.path}/backup/auto');
+      if (!await base.exists()) return false;
+      final stem = _dateKey(now);
+      return base.listSync().whereType<File>().any((f) {
+        final n = _autoBackupName(f);
+        return n.startsWith(stem) &&
+            n.endsWith('.json') &&
+            !n.contains('.stale.');
+      });
+    } catch (e) {
+      AppLog.d('[TaskProvider] 检查当日快照失败（按不存在处理）：$e');
+      return false;
+    }
   }
 
   /// A1（v3.1.1 功能增强）：恢复前自动快照——真正覆盖前把当前全量状态写入
@@ -1232,9 +1342,10 @@ class TaskProvider extends ChangeNotifier {
         AppLog.d('[TaskProvider] 恢复前快照跳过：数据体积超过还原上限');
         return false;
       }
-      final plain = const JsonEncoder.withIndent('  ').convert(payload);
-      final body = buildBackupPayload(
-          plain, encryptOn: _autoBackupEncrypt, pass: _autoBackupPass);
+      // P3-3（v3.1.3 审计）：与自动快照共用后台编码入口，组装后的
+      // indent JSON / AES-GCM 不再占用主 isolate（进度弹层能真正转起来）。
+      final body = await encodeSnapshotOffMainThread(
+          payload, _autoBackupEncrypt, _autoBackupPass);
       // 后缀次序固定为 [.noattach][.enc].json——保证 endsWith('.enc.json')
       // 的加密判定与列表解析在两种标记组合下都成立。
       final noAttachMark = attachmentsStripped ? '.noattach' : '';
@@ -1346,11 +1457,16 @@ class TaskProvider extends ChangeNotifier {
         files.sort((a, b) => _autoBackupName(b).compareTo(_autoBackupName(a))); // 新→旧
         for (final f in files) {
           final name = _autoBackupName(f);
-          // 文件名形如 YYYY-MM-DD.json 或 YYYY-MM-DD.enc.json（加密快照）
+          // 文件名形如 YYYY-MM-DD[.noattach][.enc].json（P3-2：自动快照也
+          // 携带附件剥离标记，与 pre-restore 分支同款解析顺序）。
           final encrypted = name.endsWith('.enc.json');
-          final key = encrypted
+          var key = encrypted
               ? name.substring(0, name.length - '.enc.json'.length)
               : name.substring(0, name.length - '.json'.length);
+          final stripped = key.endsWith('.noattach');
+          if (stripped) {
+            key = key.substring(0, key.length - '.noattach'.length);
+          }
           final parts = key.split('-');
           if (parts.length == 3) {
             final y = int.tryParse(parts[0]);
@@ -1361,6 +1477,7 @@ class TaskProvider extends ChangeNotifier {
                 date: DateTime(y, m, d),
                 file: f,
                 encrypted: encrypted,
+                attachmentsStripped: stripped,
               ));
             }
           }
@@ -1509,7 +1626,9 @@ class TaskProvider extends ChangeNotifier {
     }
     final removed = _trash.length != before;
     if (removed && persist) {
-      final ok = await _persist();
+      // P1-3（v3.1.3 审计）：清理只写任务表。保留期由 setTrashRetentionDays
+      // 显式写偏好；load() 内的兜底清理更不该顺带把偏好全量重写。
+      final ok = await _persistTasksOnly();
       // P3-5（v3.0.8 审计）：文件删除移到落盘成功之后（见方法注释）。
       if (ok) {
         for (final t in expired) {
@@ -1860,9 +1979,90 @@ class TaskProvider extends ChangeNotifier {
   }
 
   // ===== 持久化（shared_preferences + sqflite）=====
+  /// P1-1 / P1-2 / P1-3（v3.1.3 审计）：**只读偏好**，与 SQLite 载入彻底解耦。
+  ///
+  /// 旧实现把这段读取放在 `load()` 尾部、DB 读取与回收站清理 / 拼音回填之后：
+  /// - 自愈或清理触发的 `_persist()` 会先经 `_persistSettings()` 把**构造器默认值**
+  ///   写回 prefs（用户的所有开关 / 保留期 / 自动备份加密被静默重置，P1-1）；
+  /// - 启动回收站清理用的是默认 30 天，选「永不 / 90 天」的条目被提前销毁
+  ///   且不可恢复（P1-3）；
+  /// - DB 读取失败时 `rethrow`，整段读取根本不执行，安全模式下内存恒为默认值，
+  ///   后续 `_persist()` 又把默认值写成真实设置（P1-2）。
+  ///
+  /// 现在设为 `load()` 的第一步：任何清理 / 自愈 / 落盘之前设置都已就绪，
+  /// 且 DB 失败时设置页仍显示用户真实偏好。只有「有原生副作用」的开关应用
+  /// （FLAG_SECURE / 前台服务）留在 `load()` 尾部，与 DB 结果同批生效。
+  Future<void> _loadSettings(SharedPreferences prefs) async {
+    _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
+    _soundEnabled = prefs.getBool(_kSound) ?? true;
+    _backgroundGuard = prefs.getBool(_kGuard) ?? true;
+    _snoozeMinutes = prefs.getInt(_kSnooze) ?? 10;
+    _dndEnabled = prefs.getBool(_kDndEnabled) ?? false;
+    _dndStartHour = prefs.getInt(_kDndStart) ?? 22;
+    _dndEndHour = prefs.getInt(_kDndEnd) ?? 7;
+    // P3-20（v3.0.0 审计）：读取侧归一（load 值域白名单）。
+    _trashRetentionDays = _normalizeTrashRetention(
+        prefs.getInt(_kTrashRetention) ?? 30);
+    _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
+    _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
+    _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
+    // P2-17：恢复最近一次成功快照日期（无记录则回退 null，本次启动会补写）。
+    final lastBackup = prefs.getString(_kLastAutoBackup);
+    if (lastBackup != null && lastBackup.length >= 10) {
+      final y = int.tryParse(lastBackup.substring(0, 4));
+      final m = int.tryParse(lastBackup.substring(5, 7));
+      final d = int.tryParse(lastBackup.substring(8, 10));
+      if (y != null && m != null && d != null) {
+        _lastAutoBackupDate = DateTime(y, m, d);
+      }
+    }
+    _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet();
+    _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true;
+    _lockScreenPrivate = prefs.getBool(_kLockScreenPrivate) ?? true;
+    NotificationService.lockScreenPrivate = _lockScreenPrivate;
+    _screenSecurityEnabled = prefs.getBool(_kScreenSecurity) ?? true;
+    _allowExternalLinks = prefs.getBool(_kAllowExternalLinks) ?? false;
+    _autoBackupEncrypt = prefs.getBool(_kAutoBackupEncrypt) ?? false;
+    // P1-1：口令改从密钥库读取（含旧版明文迁移），不再读 SharedPreferences 明文副本。
+    await _loadAutoBackupPass();
+    _appLockIdleSeconds = prefs.getInt(_kAppLockIdleSeconds) ?? 0;
+    _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
+    _briefingEveningHour = prefs.getInt(_kBriefEveningH) ?? 22;
+    _briefingEveningMinute = prefs.getInt(_kBriefEveningM) ?? 0;
+    _briefingMorningEnabled = prefs.getBool(_kBriefMorningOn) ?? true;
+    _briefingMorningHour = prefs.getInt(_kBriefMorningH) ?? 7;
+    _briefingMorningMinute = prefs.getInt(_kBriefMorningM) ?? 30;
+    _habitNudgeEnabled = prefs.getBool(_kHabitNudgeOn) ?? true;
+    _habitNudgeMinute = prefs.getInt(_kHabitNudgeMin) ?? 23 * 60;
+    // A2（v3.1.1 功能增强）：临时静音窗口——过期键顺手清掉。
+    final mutedRaw = prefs.getString(_kRemindersMutedUntil);
+    if (mutedRaw != null) {
+      final parsed = DateTime.tryParse(mutedRaw);
+      if (parsed != null && parsed.isAfter(DateTime.now())) {
+        _remindersMutedUntil = parsed;
+      } else {
+        await prefs.remove(_kRemindersMutedUntil);
+      }
+    }
+    NotificationService.remindersMutedUntil = _remindersMutedUntil;
+    // U-3（v3.1.2 审计）：冷启动带出未过期的静音窗口到期 Timer。
+    _armMuteExpiryTimer();
+    await _loadDailyMit(prefs);
+    NotificationService.instance.enabled = _notificationsEnabled;
+  }
+
   /// 启动时调用：从本地读取任务列表与开关设置；首次启动则保留 7 条 mock 并落盘。
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
+    // P1-1（v3.1.3 审计）：偏好读取必须先于任何清理 / 自愈 / 落盘。
+    // `_settingsLoaded` 门闩只在「已进入 load 但尚未读完设置」的窗口内为 false，
+    // 默认 true 以兼容「未调用 load() 就直接调 setter」的调用方（含既有测试）。
+    _settingsLoaded = false;
+    try {
+      await _loadSettings(prefs);
+    } finally {
+      _settingsLoaded = true;
+    }
     // 确保数据库已打开（首次启动会建表）。内存测试后端无需真实 SQLite，跳过打开。
     final db = LocalDatabase.instance;
     // 快照内置首启示例：下面的 DB 载入会用库内容覆盖 _tasks（clear + addAll），
@@ -1911,11 +2111,14 @@ class TaskProvider extends ChangeNotifier {
       // 全新安装：DB 为空 → 回填内置 7 条示例并落库；置位标志，
       // 避免「从零开始」后重启又被塞回。
       _tasks.addAll(builtInSamples);
-      await _persist();
+      // P1-1（v3.1.3 审计）：首启预置只写任务表，偏好由 setter 显式写。
+      await _persistTasksOnly();
       await prefs.setBool(_kSeeded, true);
     } else {
       // 兜底清理：App 启动时按保留期移除过期回收站条目（原生 MidnightResetReceiver
       // 负责「App 已关闭」的每日 00:00 清理，这里覆盖 App 已开、长期未跨午夜边界的情况）。
+      // P1-3（v3.1.3 审计）：`_loadSettings` 已先读到用户真实保留期，
+      // 这里的启动清理不再用构造器默认 30 天误删「永不 / 90 天」条目。
       await _cleanupTrashIfNeeded(persist: true);
       // P2-2（v3.0.2 审计）：启动兜底——清理「整目录孤儿」附件。原生午夜路径
       // 的 cleanupExpiredTrashResources 自 v2.8.6 起漏接线（本轮已补），历史漏删
@@ -1939,72 +2142,12 @@ class TaskProvider extends ChangeNotifier {
       healed = true;
     }
     if (healed) {
-      await _persist();
+      // P1-1（v3.1.3 审计）：load() 内的自愈只写任务表，绝不碰偏好。
+      await _persistTasksOnly();
     }
-    _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
-    _soundEnabled = prefs.getBool(_kSound) ?? true;
-    _backgroundGuard = prefs.getBool(_kGuard) ?? true;
-    _snoozeMinutes = prefs.getInt(_kSnooze) ?? 10;
-    _dndEnabled = prefs.getBool(_kDndEnabled) ?? false;
-    _dndStartHour = prefs.getInt(_kDndStart) ?? 22;
-    _dndEndHour = prefs.getInt(_kDndEnd) ?? 7;
-    // P3-20（v3.0.0 审计）：读取侧归一（load 值域白名单）——合法值域为
-    // 7/30/90/-1 及其它正天数；0 与负值一律归一为 -1（永不清理）。旧实现
-    // 原样接受「0」，会在启动/午夜兜底清理时以 cutoff=now 清空整个回收站
-    // 且无快照（0 仅可经手改备份/历史残留写入，UI 值域不含 0）。
-    _trashRetentionDays = _normalizeTrashRetention(
-        prefs.getInt(_kTrashRetention) ?? 30);
-    _focusGoalMinutes = prefs.getInt(_kFocusGoal) ?? 120;
-    _weeklyGoalCount = prefs.getInt(_kWeeklyGoal) ?? 0;
-    _autoBackupEnabled = prefs.getBool(_kAutoBackup) ?? true;
-    // P2-17：恢复最近一次成功快照日期（无记录则回退 null，本次启动会补写）。
-    final lastBackup = prefs.getString(_kLastAutoBackup);
-    if (lastBackup != null && lastBackup.length >= 10) {
-      final y = int.tryParse(lastBackup.substring(0, 4));
-      final m = int.tryParse(lastBackup.substring(5, 7));
-      final d = int.tryParse(lastBackup.substring(8, 10));
-      if (y != null && m != null && d != null) {
-        _lastAutoBackupDate = DateTime(y, m, d);
-      }
-    }
-    _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet(); // P1-13
-    _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true; // P0-3
-    // L-06 / L-07 / L-12：隐私相关开关（默认值见各字段注释）。
-    _lockScreenPrivate = prefs.getBool(_kLockScreenPrivate) ?? true;
-    NotificationService.lockScreenPrivate = _lockScreenPrivate;
-    _screenSecurityEnabled = prefs.getBool(_kScreenSecurity) ?? true;
-    _allowExternalLinks = prefs.getBool(_kAllowExternalLinks) ?? false;
-    _autoBackupEncrypt = prefs.getBool(_kAutoBackupEncrypt) ?? false;
-    // P1-1：口令改从密钥库读取（含旧版明文迁移），不再读 SharedPreferences 明文副本。
-    await _loadAutoBackupPass();
-    _appLockIdleSeconds = prefs.getInt(_kAppLockIdleSeconds) ?? 0; // P1-2
-    _briefingEveningEnabled = prefs.getBool(_kBriefEveningOn) ?? true;
-    _briefingEveningHour = prefs.getInt(_kBriefEveningH) ?? 22;
-    _briefingEveningMinute = prefs.getInt(_kBriefEveningM) ?? 0;
-    _briefingMorningEnabled = prefs.getBool(_kBriefMorningOn) ?? true;
-    _briefingMorningHour = prefs.getInt(_kBriefMorningH) ?? 7;
-    _briefingMorningMinute = prefs.getInt(_kBriefMorningM) ?? 30;
-    _habitNudgeEnabled = prefs.getBool(_kHabitNudgeOn) ?? true;
-    _habitNudgeMinute = prefs.getInt(_kHabitNudgeMin) ?? 23 * 60;
-    // A2（v3.1.1 功能增强）：临时静音窗口——旧数据无键 = 未静音（零迁移）；
-    // 冷启动发现已过期的时间戳按「未静音」兜底并顺手清键（重启仍保持静音，
-    // 过期则自动恢复，无需等守护轮次）。
-    final mutedRaw = prefs.getString(_kRemindersMutedUntil);
-    if (mutedRaw != null) {
-      final parsed = DateTime.tryParse(mutedRaw);
-      if (parsed != null && parsed.isAfter(DateTime.now())) {
-        _remindersMutedUntil = parsed;
-      } else {
-        await prefs.remove(_kRemindersMutedUntil);
-      }
-    }
-    NotificationService.remindersMutedUntil = _remindersMutedUntil;
-    // U-3（v3.1.2 审计）：冷启动带出未过期的静音窗口——到期 Timer 一并挂上，
-    // 到期自愈不依赖守护轮次。
-    _armMuteExpiryTimer();
-    // A5（v3.1.1 功能增强）：今日三件——旧数据无键 = 未选择（零迁移）。
-    await _loadDailyMit(prefs);
-    NotificationService.instance.enabled = _notificationsEnabled;
+    // P1-1 / P1-2 / P1-3（v3.1.3 审计）：偏好已在 load() 开头由 [_loadSettings]
+    // 读取完毕（含 DB 读取失败的安全模式路径），此处不再重复读，也不允许
+    // 任何写盘路径早于它。
     // P2-6（v2.9.4 审计）：把**有原生副作用**的两个开关纳入 load() 的应用范围。
     //
     // 此前这两个字段在 load() 里是直写内存（见上方 `_backgroundGuard = …` 与
@@ -2047,7 +2190,30 @@ class TaskProvider extends ChangeNotifier {
     if (_notificationsEnabled) _rescheduleAllActive();
     _recomputeIdSeq();
     _startMidnightWatch();
+    // P2-1（v3.1.3 审计）：与习惯侧（habit_provider.dart:152）/ 专注侧
+    // （focus_provider.dart:228）对齐——**成功加载后清零安全模式标志**。
+    // 旧实现只在失败时置 true、成功时从不清零：一次 DB 抖动后即便数据库
+    // 已修好、备份恢复后再次 load() 成功，`_persist()` 仍恒 false，用户被
+    // 困在「恢复备份 → 提示写入未保存 → 再恢复还是不保存」的死局里。
+    // DB 失败分支在上方 rethrow，不会走到这一行。
+    _dbLoadFailed = false;
     notifyListeners();
+  }
+
+  /// P2-1（v3.1.3 审计）：安全模式的显式修复出口（供横幅 / 设置页按钮调用）。
+  ///
+  /// 只做「重新从数据库载入」这一件事：DB 已可访问时读到真实任务并顺势清零
+  /// [_dbLoadFailed]，后续 `_persist()` 恢复正常；DB 仍坏则保持安全模式并返回
+  /// false，**绝不**用内存态（可能为空 / 是刚恢复但未落盘的备份数据）强行覆盖
+  /// 尚可抢救的坏库。调用方需知悉：成功重试会以数据库内容重建内存列表。
+  Future<bool> retryLoad() async {
+    try {
+      await load();
+    } catch (e, s) {
+      AppLog.d('[TaskProvider] 重试加载失败，仍保持只读安全模式：$e\n$s');
+      return false;
+    }
+    return !_dbLoadFailed;
   }
 
   /// 把「已完成、且今天是其循环日、且上次完成早于今天」的重复任务重置为未完成。
@@ -2209,8 +2375,18 @@ class TaskProvider extends ChangeNotifier {
     WidgetsBinding.instance.addObserver(_LifecycleObserver(this));
   }
 
+  /// P1-1（v3.1.3 审计）：偏好读取完成门闩。默认 `true`——未进入 [load] 的
+  /// 调用方（含直接调 setter 的既有测试）不受限；仅 `load()` 内「已开始但
+  /// 尚未读完设置」的窗口为 `false`，此时任何写回都被拒绝，绝不把构造器
+  /// 默认值当作用户偏好落盘。与「load 内只调 [_persistTasksOnly]」互为二道闸。
+  bool _settingsLoaded = true;
+
   /// 仅持久化开关/主题等偏好（写入 SharedPreferences）。任务数据由 [_persist] 落 SQLite。
   Future<void> _persistSettings() async {
+    if (!_settingsLoaded) {
+      AppLog.d('[TaskProvider] 偏好尚未读取完成，拒绝写回默认值');
+      return;
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kNotify, _notificationsEnabled);
     await prefs.setBool(_kSound, _soundEnabled);
@@ -2257,20 +2433,34 @@ class TaskProvider extends ChangeNotifier {
   /// main._doComplete / _doTaskUndo 按结果分支（失败不谎报）。
   Future<bool> _persist() async {
     if (_dbLoadFailed) {
-      // S13 修复：安全模式下禁止向可疑数据库落盘，避免用内存态覆盖尚可抢救的坏库。
-      // 仅持久化偏好到 SharedPreferences（与任务库解耦、风险低）；任务变更仅存内存、
-      // 重启不保留。用户应前往「设置 → 备份与恢复」导出/修复后再正常加载。
-      try {
-        await _persistSettings();
-      } catch (_) {
-        // 偏好落盘失败也无妨，安全模式下本就不依赖持久化。
-      }
-      // P2-1（v3.0.5 审计）：安全模式下任务**未**落盘（重启即回退），如实返回
-      // false——通知 action 据此不弹「已完成 ✓」谎报。
+      // P1-2（v3.1.3 审计）：安全模式必须名副其实地「只读」。旧实现在此仍调
+      // `_persistSettings()`，而 DB 失败时偏好读取块被 rethrow 跳过、内存全是
+      // 默认值——横幅承诺「本次修改不会保存」，实际却把全部用户设置写成默认值。
+      // 设置改动一律走显式 setter（它们直接调 `_persistSettings`），与任务落盘
+      // 解耦，故此处**什么都不写**。
+      // P2-1（v3.0.5 审计）：任务未落盘（重启即回退），如实返回 false——
+      // 通知 action 据此不弹「已完成 ✓」谎报。
       return false;
     }
     try {
       await _persistSettings();
+    } catch (e, s) {
+      AppLog.d('TaskProvider 偏好持久化失败：$e\n$s');
+      return false;
+    }
+    return _persistTasksOnly();
+  }
+
+  /// P1-1（v3.1.3 审计）：**只写任务表 / 回收站**，不碰 SharedPreferences。
+  ///
+  /// `load()` 内的首启预置、回收站兜底清理、repeatAnchor / 拼音自愈都是
+  /// 「任务数据修复」，与偏好无关；旧实现统一调 [_persist]，顺带把当时的
+  /// 内存设置（读取前置前 = 构造器默认值）全量写回 prefs，是 P1-1 的根因。
+  /// 单一真源：[_persist] 也在写完偏好后委托本方法，两条路径的 DB 写入、失败
+  /// 日志与桌面小组件刷新口径完全一致。
+  Future<bool> _persistTasksOnly() async {
+    if (_dbLoadFailed) return false;
+    try {
       await LocalDatabase.instance.replaceTasks(_tasks, _trash);
       // 任务变更后主动刷新桌面小组件（今日任务列表），不必等系统定时刷新兜底。
       requestWidgetRefresh();
@@ -2304,21 +2494,36 @@ class TaskProvider extends ChangeNotifier {
     return changed;
   }
 
-  /// P2-1（v3.1.2 审计）：旧任务拼音索引回填——标题非空但任一索引串为空时按
-  /// 标题补算两串。历史版本只落库 `pinyinInitials`（`pinyinFull` 恒空串），
-  /// 不回填则存量任务的全拼搜索永远无结果；与习惯侧 load 回填（A4）同一
-  /// 「零迁移 + 加载回填」纪律。返回是否有回填、由调用方统一落库；只执行于
-  /// load / 覆盖恢复，内存补算幂等（标题无汉字者结果本就为空串）。
+  /// P2-1（v3.1.2 审计）/ P3-7（v3.1.3 审计）：按标题重算两串，返回「确实
+  /// 有变化」的新对象；无变化返回 null，调用方据此决定是否落盘。
+  ///
+  /// P3-7 的关键修正：旧实现的触发条件是「任一索引串为空就重算」，而纯英文 /
+  /// 数字 / 标点 / emoji 标题经 PinyinIndex 计算**本来就该是空串**——重算后
+  /// 仍然为空，下一次 `load()` 又满足条件 → 每次冷启动都全量重写任务表 +
+  /// 刷新桌面小组件（大库启动变慢、闪存写放大），叠加 P1-1 还会每次重置设置。
+  /// 现在只对「补算结果非空、且与现值不同」的任务返回新对象；生僻字导致
+  /// full 恒空但 initials 已正确时同样不再反复触发。
+  ///
+  /// 同时作为 [restoreFromTrash] 的单任务入口（P3-5）：恢复自回收站的旧任务
+  /// 不必等下一次冷启动才有全拼索引。
+  Task? _tryHealPinyin(Task t) {
+    if (t.title.isEmpty) return null;
+    final initials = Task.computePinyinInitials(t.title);
+    final full = Task.computePinyinFull(t.title);
+    if (initials.isEmpty && full.isEmpty) return null;
+    if (initials == t.pinyinInitials && full == t.pinyinFull) return null;
+    return t.copyWith(pinyinInitials: initials, pinyinFull: full);
+  }
+
+  /// P2-1（v3.1.2 审计）：旧任务拼音索引回填，返回是否有回填、由调用方统一
+  /// 落库。历史版本只落库 `pinyinInitials`（`pinyinFull` 恒空串），不回填则
+  /// 存量任务的全拼搜索永远无结果。
   bool _healPinyinIndexes() {
     var changed = false;
     for (var i = 0; i < _tasks.length; i++) {
-      final t = _tasks[i];
-      if (t.title.isEmpty) continue;
-      if (t.pinyinFull.isNotEmpty && t.pinyinInitials.isNotEmpty) continue;
-      _tasks[i] = t.copyWith(
-        pinyinInitials: Task.computePinyinInitials(t.title),
-        pinyinFull: Task.computePinyinFull(t.title),
-      );
+      final healed = _tryHealPinyin(_tasks[i]);
+      if (healed == null) continue;
+      _tasks[i] = healed;
       changed = true;
     }
     return changed;
@@ -2441,6 +2646,11 @@ class TaskProvider extends ChangeNotifier {
   /// 覆盖掉尚可抢救的坏库；UI 据此展示安全模式横幅引导用户导出/修复。
   bool _dbLoadFailed = false;
   bool get dbLoadFailed => _dbLoadFailed;
+
+  /// P1-2 / P2-1（v3.1.3 审计）：与习惯侧 / 专注侧同款的测试钩子，用于在不
+  /// 真的破坏 SQLite 的前提下验证「安全模式只读」与 [retryLoad] 推出路径。
+  @visibleForTesting
+  void markDbLoadFailedForTest() => _dbLoadFailed = true;
 
   /// 回收站（已删除但可恢复的任务，按删除时间倒序）
   final List<Task> _trash = [];
@@ -4455,7 +4665,9 @@ class TaskProvider extends ChangeNotifier {
     final i = _trash.indexWhere((t) => t.id == id);
     if (i == -1) return false;
     final t = _trash.removeAt(i);
-    final restored = t.copyWith(deletedAt: null);
+    // P3-5（v3.1.3 审计）：从回收站恢复的旧任务（v3.1.2 前创建、索引为空）
+    // 就地补算拼音，全拼搜索当次即可命中，不必等下一次冷启动的 load() heal。
+    final restored = (_tryHealPinyin(t) ?? t).copyWith(deletedAt: null);
     _tasks.insert(0, restored);
     notifyListeners();
     final ok = await _persist();
@@ -4512,6 +4724,7 @@ class TaskProvider extends ChangeNotifier {
   Future<bool> permanentDelete(String id) async {
     if (!_trash.any((t) => t.id == id)) return false;
     _trash.removeWhere((t) => t.id == id);
+    _pruneMitIds([id]); // P3-1（v3.1.3 审计）：不可撤销的删除清掉悬空 MIT id
     _cancelRemindersFor(id);
     // P2-22：彻底删除后必须作废删除撤销缓冲中的对应项。此前 permanentDelete /
     // clearTrash 物理删除了附件却不清撤销缓冲，撤销窗口内先彻底删除再点撤销 →
@@ -4536,6 +4749,7 @@ class TaskProvider extends ChangeNotifier {
       _cancelRemindersFor(id);
     }
     _trash.clear();
+    _pruneMitIds(ids); // P3-1（v3.1.3 审计）：同上，清空回收站清掉悬空 MIT id
     // P2-22：清空回收站后同样作废删除撤销缓冲（附件已物理删除，不允许复活）。
     // U1-2：改为清空整张定向缓冲（不再只是「最近一次」那一条）。
     if (_deleteUndoLog.isNotEmpty) _deleteUndoLog.clear();
@@ -5160,5 +5374,34 @@ class _LifecycleObserver extends WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       unawaited(_provider.checkDailyReset());
     }
+  }
+}
+
+/// P3-3（v3.1.3 审计）：快照序列化的**单一真源**（同步、无实例状态）。
+///
+/// 顶层函数而非实例方法：`Isolate.run` 的闭包若捕获 `TaskProvider`（内含
+/// ChangeNotifier / Stream / Timer 等不可跨 isolate 的对象）会直接抛
+/// `Illegal argument in isolate message`。这里只接收纯 JSON 结构的 payload
+/// 与两个标量，隔离边界干净。
+String encodeSnapshotSync(
+    Map<String, dynamic> payload, bool encryptOn, String? pass) {
+  final plain = const JsonEncoder.withIndent('  ').convert(payload);
+  return buildBackupPayload(plain, encryptOn: encryptOn, pass: pass);
+}
+
+/// P3-3（v3.1.3 审计）：把 indent JSON + 加密移出 UI isolate。
+///
+/// 大库（数万条任务 / 内联附件）时 `JsonEncoder.withIndent` 与 PBKDF2 都是
+/// 纯 CPU 同步活，放在主 isolate 会让「不可取消的恢复进度层」出得来却冻住。
+/// isolate 传递失败（如某段携带了不可传递对象）时回退到同步编码：宁可这一
+/// 次动画卡，也绝不丢掉回滚点 / 当日快照。
+Future<String> encodeSnapshotOffMainThread(
+    Map<String, dynamic> payload, bool encryptOn, String? pass) async {
+  try {
+    return await Isolate.run(
+        () => encodeSnapshotSync(payload, encryptOn, pass));
+  } catch (e) {
+    AppLog.d('[TaskProvider] 后台编码快照失败，回退主 isolate：$e');
+    return encodeSnapshotSync(payload, encryptOn, pass);
   }
 }

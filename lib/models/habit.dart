@@ -167,6 +167,21 @@ class Habit {
     return u.isEmpty ? base : '$base $u';
   }
 
+  /// P3-4（v3.1.3 审计）：「数量 + 单位」的单一真源。
+  ///
+  /// [progressLabelOf] 承载的是「x/y 杯」这类**进度**；新建/编辑层的目标显示、
+  /// 详情「≥ 目标才计一天」需要的是**单个数量**带单位。此前这 5 处各自手拼
+  /// `'$_dailyTarget / 天'` / `'≥ ${habit.effectiveTarget}'`，加了单位字段却
+  /// 没横向推广：同一个习惯列表写「今日 6/8 杯」、编辑层仍写「8 / 天」。
+  /// 静态版本供「尚无 Habit 实例」的编辑层使用；无单位时逐字节等于旧文案。
+  static String quantityLabel(int value, String unit) {
+    final u = unit.trim();
+    return u.isEmpty ? '$value' : '$value $u';
+  }
+
+  /// [quantityLabel] 的实例便捷入口（详情 / 概览等已持有 Habit 的展示面）。
+  String quantityLabelOf(int value) => quantityLabel(value, unit);
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,

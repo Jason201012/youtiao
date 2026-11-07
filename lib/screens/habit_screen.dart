@@ -1694,7 +1694,10 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
                   if (v != null) setState(() => _dailyTarget = v);
                 },
                 child: Text(
-                  _dailyTarget == null ? '关闭（按天打卡）' : '$_dailyTarget / 天',
+                  // P3-4（v3.1.3 审计）：目标显示接单位真源（有单位时「8 杯 / 天」）。
+                  _dailyTarget == null
+                      ? '关闭（按天打卡）'
+                      : '${Habit.quantityLabel(_dailyTarget!, _unitCtl.text)} / 天',
                   style: TextStyle(color: primary),
                 ),
               ),
@@ -1710,7 +1713,8 @@ class _AddHabitSheetState extends State<_AddHabitSheet> {
           Text(
             _dailyTarget == null
                 ? '开启后可「+1」累加数量，达标才算完成（如喝水、阅读页数）'
-                : '打卡时按数量累加，达到 $_dailyTarget 才算当日达成',
+                // P3-4（v3.1.3 审计）：说明文案与目标显示同口径带单位。
+                : '打卡时按数量累加，达到 ${Habit.quantityLabel(_dailyTarget!, _unitCtl.text)} 才算当日达成',
             style: TextStyle(fontSize: 12, color: ext.meta),
           ),
           // A3（v3.1.1 功能增强）：量化单位（仅量化习惯显示）。
@@ -2243,16 +2247,18 @@ class _HabitDetailSheet extends StatelessWidget {
                     // U3-3（v2.9.4 审计）：「达标」对新用户是裸术语（量化习惯里
                     // 指「当日累计量 ≥ 每日目标」），补 Tooltip 一行解释。
                     Tooltip(
+                      // P3-4（v3.1.3 审计）：Tooltip 的「≥ 目标」接单位真源。
                       message: habit.isQuantified
-                          ? '累计**达标**天数：当天累计量 ≥ ${habit.effectiveTarget} 才计一天'
+                          ? '累计**达标**天数：当天累计量 ≥ ${habit.quantityLabelOf(habit.effectiveTarget)} 才计一天'
                           : '累计打卡天数',
                       // U3-2（v2.9.6 审计）：解释同时以常驻小字展示（sub）——
                       // Tooltip 触屏不可主动发现，是 U3-1 同族教训。
                       child: _MiniStat(
                         value: '$total',
                         label: '累计达标',
+                        // P3-4（v3.1.3 审计）：常驻小字与 Tooltip 同源。
                         sub: habit.isQuantified
-                            ? '当日量 ≥ ${habit.effectiveTarget} 才计一天'
+                            ? '当日量 ≥ ${habit.quantityLabelOf(habit.effectiveTarget)} 才计一天'
                             : null,
                       ),
                     ),
@@ -3078,7 +3084,10 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
                     if (v != null) setState(() => _dailyTarget = v);
                   },
                   child: Text(
-                    _dailyTarget == null ? '关闭（按天打卡）' : '$_dailyTarget / 天',
+                    // P3-4（v3.1.3 审计）：编辑层与新建层同源。
+                    _dailyTarget == null
+                        ? '关闭（按天打卡）'
+                        : '${Habit.quantityLabel(_dailyTarget!, _unitCtl.text)} / 天',
                     style:
                         TextStyle(color: Theme.of(context).colorScheme.primary),
                   ),
@@ -3096,7 +3105,8 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
             Text(
               _dailyTarget == null
                   ? '开启后可「+1」累加数量，达标才算完成（如喝水、阅读页数）'
-                  : '打卡时按数量累加，达到 $_dailyTarget 才算当日达成',
+                  // P3-4（v3.1.3 审计）：说明文案与目标显示同口径带单位。
+                : '打卡时按数量累加，达到 ${Habit.quantityLabel(_dailyTarget!, _unitCtl.text)} 才算当日达成',
               style: TextStyle(fontSize: 12, color: ext.meta),
             ),
             // A3（v3.1.1 功能增强）：量化单位（仅量化习惯显示；空 = 无单位）。

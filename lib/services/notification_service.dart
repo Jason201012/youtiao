@@ -1427,6 +1427,26 @@ class NotificationService {
     }
   }
 
+  /// U-2（v3.1.3 审计）：snooze 落点计算的**单一真源**（勿扰顺延后）。
+  ///
+  /// U-5（v3.1.2）让静音命中时 snooze 返回 false，上层 main._doSnooze 却把
+  /// 所有 false 一律当「调度失败」弹「顺延失败，请打开应用查看」。这不是失败，
+  /// 是静音按设计生效。要区分二者，上层必须能用与服务层**完全相同**的落点
+  /// 判定静音；此前该计算内联在两个 snooze 方法里、还各自带一份勿扰顺延，
+  /// 复制出去必然漂移。现抽成公开方法，服务层与消费层共用。
+  tz.TZDateTime snoozeLandingTime(Duration delay) {
+    final loc = _loc ?? tz.UTC;
+    var when = tz.TZDateTime.now(loc).add(delay);
+    if (dndDefer != null) {
+      final deferred = dndDefer!(when);
+      if (deferred != null) {
+        when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
+            deferred.hour, deferred.minute);
+      }
+    }
+    return when;
+  }
+
   /// 稍后提醒（snooze）：在 [delay] 后重新弹出该任务提醒。
   ///
   /// F11：使用独立的 [_snoozeNotifyIdOf] 段位，不再复用一次性「截止提醒」的
@@ -1452,17 +1472,9 @@ class NotificationService {
       AppLog.d('[通知] 未 snooze id=${task.id}：通知总开关关闭');
       return false;
     }
-    final loc = _loc ?? tz.UTC;
-    var when = tz.TZDateTime.now(loc).add(delay);
-    // P2-6'：snooze 落点同样感知勿扰（此前只有一次性截止提醒会顺延，
-    // 勿扰内点「稍后提醒」照弹，与用户对勿扰的预期矛盾）。
-    if (dndDefer != null) {
-      final deferred = dndDefer!(when);
-      if (deferred != null) {
-        when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
-            deferred.hour, deferred.minute);
-      }
-    }
+    // P2-6' / U-2（v3.1.3 审计）：落点统一由 [snoozeLandingTime] 计算
+    // （含勿扰顺延），与上层判定静音用的是同一个函数。
+    final when = snoozeLandingTime(delay);
     // U-5（v3.1.2 审计）：snooze 落点纳入静音判定——静音窗口内点「稍后提醒」
     // 不应再响。此前主要靠「静音开始已取消 snooze」兜住，但通知竞态 / 在途
     // 残留场景下（窗口内仍可见的旧通知）点「稍后提醒」会绕过静音。
@@ -1529,16 +1541,8 @@ class NotificationService {
       AppLog.d('[通知] 未 snooze 习惯 id=${habit.id}：通知总开关关闭');
       return false;
     }
-    final loc = _loc ?? tz.UTC;
-    var when = tz.TZDateTime.now(loc).add(delay);
-    // P2-1：与任务 snooze 同款——落点过一次勿扰顺延。
-    if (dndDefer != null) {
-      final deferred = dndDefer!(when);
-      if (deferred != null) {
-        when = tz.TZDateTime(loc, deferred.year, deferred.month, deferred.day,
-            deferred.hour, deferred.minute);
-      }
-    }
+    // P2-1 / U-2（v3.1.3 审计）：同款单一真源落点（含勿扰顺延）。
+    final when = snoozeLandingTime(delay);
     // U-5（v3.1.2 审计）：与任务 snooze 同款——落点纳入静音判定（竞态 / 在途
     // 残留通知场景下，窗口内点「稍后提醒」不再绕过静音）。
     if (isReminderMuted(when)) {
@@ -2427,8 +2431,14 @@ class NotificationService {
   /// 时重复任务的未来落点仍挂在外（snooze 失败不影响既有 8 槽预挂），下个
   /// 周期照响，文案改「顺延失败」不谎报。调用方（main._doSnooze）已把
   /// done / repeatEnded / archived 预拦截，走到本回执的 false 属异常分支。
+  /// U-2（v3.1.3 审计）：新增 [muted] 分支——静音窗口内点「稍后提醒」是
+  /// **设计生效**，不是调度异常；此时回执写「静音中，本次不顺延」，不再误导
+  /// 用户去排查「顺延失败」。
   Future<void> showSnoozeUnavailableConfirm(String id,
-      {String? title, bool isHabit = false, bool rescheduleFailed = false}) async {
+      {String? title,
+      bool isHabit = false,
+      bool rescheduleFailed = false,
+      bool muted = false}) async {
     if (!enabled) return;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -2446,10 +2456,14 @@ class NotificationService {
     try {
       await _plugin.show(
         isHabit ? habitConfirmNotifyIdOf(id) : _notifyIdOf(id),
-        '提醒已结束',
-        title != null && title.isNotEmpty
-            ? '$title · ${rescheduleFailed ? '顺延失败，请打开应用查看' : '不会再响，请打开应用查看'}'
-            : '该提醒已不再有效，请打开应用查看',
+        muted ? '提醒已静音' : '提醒已结束',
+        muted
+            ? (title != null && title.isNotEmpty
+                ? '$title · 静音中，本次不顺延'
+                : '当前处于临时静音窗口，本次不顺延')
+            : (title != null && title.isNotEmpty
+                ? '$title · ${rescheduleFailed ? '顺延失败，请打开应用查看' : '不会再响，请打开应用查看'}'
+                : '该提醒已不再有效，请打开应用查看'),
         detail,
         payload: isHabit
             ? '$payloadHabitPrefix$id'

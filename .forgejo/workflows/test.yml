@@ -10,20 +10,33 @@
 #   收窄为 paths 过滤（lib/ test/ pubspec.yaml）。
 # - 前置条件：Forgejo 实例已启用 Actions，且至少有一个 runner 能拉取
 #   ghcr.io/cirruslabs/flutter 镜像（Docker container 模式）。
+#
+# v3.1.4（2026-11-07）：**关掉自动触发，只保留手动入口**。
+# 本实例至今未注册任何 Actions runner（GET /api/v1/repos/rootnas/youtiao/actions/runners
+# 返回 []）。push / schedule 触发的 job 因等不到 `docker` 标签的 runner 永远停在
+# waiting，最终被回收为 cancelled；Forgejo 会把 cancelled 记为
+# commit status = failure（context "test / analyze-and-test (push)"，
+# description "Has been cancelled"），于是**每一次提交**在提交列表里都挂红 ✗
+# ——v3.1.3 的 c81ff88 / d168056 两条即实例，与代码质量毫无关系，且会误导
+# 发版核验。runner 未就绪时创建 run 只会制造噪音，故先不自动创建。
+#
+# 恢复方法：在 NAS 注册一个带 `docker` 标签的 act_runner 后，把下面 on.push /
+# on.schedule 两段注释放开即可（job 定义无需改动）。历史失败状态是既往记录，
+# 不因本次修改而消失；新提交不再产生失败状态。
 name: test
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
-    paths:
-      - 'lib/**'
-      - 'test/**'
-      - 'pubspec.yaml'
-      - '.forgejo/workflows/test.yml'
-  schedule:
-    # 每天 03:20 UTC（Forgejo Actions 依据 cron；北京时区 11:20）。
-    - cron: '20 3 * * *'
+  # push:
+  #   branches: [master]
+  #   paths:
+  #     - 'lib/**'
+  #     - 'test/**'
+  #     - 'pubspec.yaml'
+  #     - '.forgejo/workflows/test.yml'
+  # schedule:
+  #   # 每天 03:20 UTC（Forgejo Actions 依据 cron；北京时区 11:20）。
+  #   - cron: '20 3 * * *'
 
 jobs:
   analyze-and-test:
