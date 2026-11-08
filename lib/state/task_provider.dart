@@ -581,6 +581,13 @@ class TaskProvider extends ChangeNotifier {
   /// 当日快照（拖慢启动）；加密开关切换当天还会出现「明文 + 加密」两份并存，
   /// 挤占 7 份滚动名额，与面板文案「保留最近 7 天」不符。
   static const String _kLastAutoBackup = 'last_auto_backup_date';
+  /// P3-7（v3.1.5 审计）：最近一次自动备份的**警告**也持久化。
+  ///
+  /// 旧实现只存内存：冷启动恢复 `_lastAutoBackupDate` 后，`_writeAutoBackup`
+  /// 因「当日快照已存在」早退并返回 null，`_autoBackupIfNeeded` 随即把
+  /// `_lastAutoBackupError` 置空 —— 设置页只剩「最近快照：今天」，用户完全
+  /// 不知道这份快照「不含附件 / 缺用户模板」，真正要恢复时才发现。
+  static const String _kLastAutoBackupError = 'last_auto_backup_error';
   bool _autoBackupEnabled = true;
   bool get autoBackupEnabled => _autoBackupEnabled;
   /// 最近一次自动备份成功的本地日期（YYYY-MM-DD），null 表示从未成功过。
@@ -590,8 +597,15 @@ class TaskProvider extends ChangeNotifier {
   String? _lastAutoBackupError;
   String? get lastAutoBackupError => _lastAutoBackupError;
   /// 设置页副标题：展示最近一次成功备份的本地日期；从未成功则提示「未备份」。
-  String get lastAutoBackupLabel =>
-      _lastAutoBackupDate == null ? '尚未生成快照' : '最近快照：${_dateKey(_lastAutoBackupDate!)}';
+  /// P3-7（v3.1.5 审计）：附件被剥离时把「不含附件」直接写进副标题，而不是
+  /// 只在恢复面板的文件名后缀里暗示。
+  String get lastAutoBackupLabel {
+    if (_lastAutoBackupDate == null) return '尚未生成快照';
+    final mention = (_lastAutoBackupError ?? '').contains('剥离附件')
+        ? '（不含附件）'
+        : '';
+    return '最近快照：${_dateKey(_lastAutoBackupDate!)}$mention';
+  }
   Future<void> setAutoBackupEnabled(bool v) async {
     if (v == _autoBackupEnabled) return;
     _autoBackupEnabled = v;
@@ -1231,15 +1245,31 @@ class TaskProvider extends ChangeNotifier {
       try {
         // 新P2-1（v2.9.7 审计）：_writeAutoBackup 返回剥离提示（null = 正常）。
         // 成功落盘后以返回值覆盖错误栏——有剥离时设置页显示 warning，无则清空。
-        final note = await _writeAutoBackup(now);
+        // P3-7（v3.1.5 审计）：返回值区分「本次真的写了」与「当日已有快照早退」——
+        // 后者必须保留此前持久化的警告，不能顺手清空。
+        final written = await _writeAutoBackup(now);
         _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
-        _lastAutoBackupError = note;
         // P2-17：落盘最近成功日期，避免重启重复写当日快照 / 同日双形态并存。
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(_kLastAutoBackup, todayKey);
+        if (!written.existing) {
+          _lastAutoBackupError = written.note;
+          if (written.note == null) {
+            await prefs.remove(_kLastAutoBackupError);
+          } else {
+            await prefs.setString(_kLastAutoBackupError, written.note!);
+          }
+        }
       } catch (e, s) {
         _lastAutoBackupError = '自动备份失败：$e';
         AppLog.d('$_lastAutoBackupError\n$s');
+        // P3-7（v3.1.5 审计）：失败原因同样持久化，重启后仍能看到。
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_kLastAutoBackupError, _lastAutoBackupError!);
+        } catch (_) {
+          // 持久化失败不影响主流程（内存态仍展示）。
+        }
       }
       notifyListeners();
     } finally {
@@ -1288,23 +1318,33 @@ class TaskProvider extends ChangeNotifier {
   Future<SnapshotAssembly> _buildSnapshotPayload(DateTime now) async {
     final focus = FocusProvider.instanceOrNull;
     final habit = HabitProvider.instanceOrNull;
+    // P3-4（v3.1.5 审计）：组装阶段仍在主 isolate —— Task / Habit 等模型不是
+    // 可跨 isolate 发送的类型，硬搬会退化成「序列化两次」。折中做法：把
+    // 四段重活（任务表 / 模板枚举 / 附件目录规划 / 偏好收集）之间各让出一帧，
+    // 首启白屏与恢复进度层不再是一次不可中断的长任务；真正的字节级重活
+    // （附件读取 / base64 / trim / indent JSON / AES）仍全部在后台 isolate。
+    await Future<void>.delayed(Duration.zero);
+    final base = backupData(includeTrash: true);
     // N5（v3.0.9 审计）：消费模板收集失败信号——旧实现 exportAllForBackup
     // 吞错返回空列表：快照里 user_templates 恒空且用户不知情（换机后才发觉
     // 模板没进备份）。失败记入设置页可见的错误栏（warning 性质）。
     final tplExport = await UserTemplateStore.exportAllForBackup();
+    await Future<void>.delayed(Duration.zero);
     final plan = await AttachmentService.planBlobSources(
         <Task>[..._tasks, ..._trash]);
+    await Future<void>.delayed(Duration.zero);
+    final prefsJson = await collectAppPrefs();
     final payload = <String, dynamic>{
       'version': 3,
       'app': '有条',
       'schemaVersion': 1, // 自动备份标记（区别于手动导出的纯任务备份）
       'generatedAt': now.toIso8601String(),
-      ...backupData(includeTrash: true),
+      ...base,
       'focus_sessions': focus?.sessionsJson ?? [],
       ...habit?.backupData() ?? {'habits': [], 'check_ins': []},
       // 纳入 App 级偏好（外观/锁/专注/免打扰/通用开关），换机后体验更完整。
       // 排除系统生物特征、更新检查状态、运行中的计时器（见 prefs_backup.dart）。
-      'prefs': await collectAppPrefs(),
+      'prefs': prefsJson,
       // P0-1：附件二进制在后台 isolate 内按 [SnapshotAssembly.sources]
       // 读取并内联（base64），此处只完成轻量路径规划。
       // M2（v3.0.8 审计）：用户自定义模板纳入自动快照。
@@ -1318,7 +1358,7 @@ class TaskProvider extends ChangeNotifier {
     );
   }
 
-  Future<String?> _writeAutoBackup(DateTime now) async {
+  Future<({bool existing, String? note})> _writeAutoBackup(DateTime now) async {
     // P1-2（v3.1.3 审计）：同日已有任一形态的快照就不再覆盖。`_lastAutoBackupDate`
     // 只能挡住「本次进程记得写过」的情况；冷启动 / 手工改过 prefs / 安全模式
     // 下该值为 null，旧实现会用空任务集覆盖当天滚动快照中的一份有效数据。
@@ -1329,8 +1369,14 @@ class TaskProvider extends ChangeNotifier {
       _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
       final sp = await SharedPreferences.getInstance();
       await sp.setString(_kLastAutoBackup, _dateKey(now));
-      return null;
+      // P3-7（v3.1.5 审计）：早退 = 本次没写新快照，调用方必须保留既有警告。
+      return (existing: true, note: null);
     }
+    // P3-5（v3.1.5 审计）：加密已开但口令读不出来时**先失败**，不进组装。
+    // 旧实现把「加密但缺口令」一路拖到最后：后台 isolate 抛
+    // BackupEncryptException → 回退同步 → 主线程重新读全部附件、base64、trim
+    // 后再次抛错，每次冷启动 / resumed / 跨天都要重复一次数百 MB 的重活。
+    _assertAutoBackupEncryptReady();
     final asm = await _buildSnapshotPayload(now);
     // 新P3-3：加密路径的明文预算（3/4 上限 − 1MB 信封与估算余量）。
     final budget = _autoBackupEncrypt
@@ -1340,6 +1386,8 @@ class TaskProvider extends ChangeNotifier {
     // 体积预算、indent JSON 与 AES/PBKDF2 合并在**一次**后台 isolate 里完成。
     // 「要求加密但无口令」时 buildBackupPayload 抛 BackupEncryptException，
     // 此处不捕获，交由 _autoBackupIfNeeded 记入错误提示（不静默降级为明文）。
+    // P3-5（v3.1.5 审计）：记录本次是否发生了「回退主 isolate」，如实告知用户。
+    final fallbacksBefore = buildSnapshotMainIsolateFallbacks;
     final encoded = await buildSnapshotBodyOffMainThread(
         asm.payload,
         asm.sources,
@@ -1347,6 +1395,7 @@ class TaskProvider extends ChangeNotifier {
         _autoBackupEncrypt,
         _autoBackupPass,
         budget);
+    final usedMainIsolate = buildSnapshotMainIsolateFallbacks != fallbacksBefore;
     if (encoded.oversize) {
       // 附件已剥离仍超限：元数据本身超大（理论极端）。跳过本日快照并
       // 如实记录——写出去的任何东西都会在还原时被导入端拒绝。
@@ -1354,7 +1403,7 @@ class TaskProvider extends ChangeNotifier {
           '自动备份已跳过：数据体积超过还原上限（附件已剥离仍超限）';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
-      return _lastAutoBackupError;
+      return (existing: false, note: _lastAutoBackupError);
     }
     final body = encoded.body;
     final attachmentsStripped = encoded.stripped;
@@ -1373,7 +1422,7 @@ class TaskProvider extends ChangeNotifier {
       _lastAutoBackupError = '自动备份已剥离附件（数据体积超限），任务/习惯/专注数据完整';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
-      return _lastAutoBackupError;
+      return (existing: false, note: _lastAutoBackupError);
     }
     // N5（v3.0.9 审计）：模板收集失败同样不静默（优先级低于附件剥离，
     // 故放在其后独立分支）——快照本身有效，仅缺用户模板段。
@@ -1381,27 +1430,108 @@ class TaskProvider extends ChangeNotifier {
       _lastAutoBackupError = '自动备份未包含用户模板（模板目录读取失败）';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
-      return _lastAutoBackupError;
+      return (existing: false, note: _lastAutoBackupError);
     }
-    return null;
+    // P3-5（v3.1.5 审计）：后台 isolate 不可用、本次在主线程完成组装时如实
+    // 记录一条提示（不夸大：数据完整，只是耗时）。
+    if (usedMainIsolate) {
+      _lastAutoBackupError = '本次快照在主线程完成组装（后台 isolate 不可用）';
+      AppLog.d(_lastAutoBackupError!);
+      notifyListeners();
+      return (existing: false, note: _lastAutoBackupError);
+    }
+    return (existing: false, note: null);
+  }
+
+  /// P3-5（v3.1.5 审计）：加密已开而口令读不出来时立即失败，绝不进入组装。
+  /// 与 [buildBackupPayload] 的 P0-1「不静默降级明文」同一口径，只是把失败
+  /// 时机从「跑完所有重活之后」提前到「一行判断」。
+  void _assertAutoBackupEncryptReady() {
+    if (!_autoBackupEncrypt) return;
+    final pass = _autoBackupPass;
+    if (pass == null || pass.isEmpty) {
+      throw const BackupEncryptException(
+          '自动备份已开启口令加密，但本机读不到加密口令。请到「设置 → 备份与恢复」重新设置口令，或关闭自动备份加密。');
+    }
   }
 
   /// P1-2（v3.1.3 审计）：当日滚动快照是否已存在（明文 / 加密 / 含 .noattach
   /// 四种形态任一即算）。`.stale.` 是换口令后不可解的旧信封，不算有效快照。
+  ///
+  /// P3-3（v3.1.5 审计）：只按「文件名 + 存在性」判定会把 0 字节 / 被文件
+  /// 管理器改坏 / 只写了一半的当日 `.json` 当成「今天已备份」，当天不再补备，
+  /// 设置页却显示「最近快照：今天」。现在逐个做轻量完整性校验（体积阈值 +
+  /// 能否解析 / 是否加密信封 + 是否含 `tasks` 段），不可用的改名 `.stale`
+  /// 后允许重写——既修复当天，也不再让它出现在恢复列表里。
   Future<bool> _autoBackupOfDayExists(DateTime now) async {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final base = Directory('${dir.path}/backup/auto');
       if (!await base.exists()) return false;
       final stem = _dateKey(now);
-      return base.listSync().whereType<File>().any((f) {
+      for (final f in base.listSync().whereType<File>()) {
         final n = _autoBackupName(f);
-        return n.startsWith(stem) &&
-            n.endsWith('.json') &&
-            !n.contains('.stale.');
-      });
+        if (!n.startsWith(stem) ||
+            !n.endsWith('.json') ||
+            n.contains('.stale.')) {
+          continue;
+        }
+        if (await _snapshotFileUsable(f, n)) return true;
+        AppLog.d('[TaskProvider] 当日快照不可用（0 字节 / 损坏 / 缺 tasks 段），'
+            '允许重写：${f.path}');
+        try {
+          await f.rename('${f.path}.stale');
+        } catch (e) {
+          AppLog.d('[TaskProvider] 标记废快照失败（不影响重写）：$e');
+        }
+      }
+      return false;
     } catch (e) {
       AppLog.d('[TaskProvider] 检查当日快照失败（按不存在处理）：$e');
+      return false;
+    }
+  }
+
+  /// P3-3（v3.1.5 审计）：快照文件是否**可还原**的轻量校验。
+  ///
+  /// 判据：体积 ≥ [_kMinSnapshotBytes]；加密备份看信封是否可解析；明文备份
+  /// 看能否解析出含 `tasks` 列表的 JSON。为避免在启动路径上把几十 MB 的快照
+  /// 整个读进内存并 jsonDecode（那本身又是一次冻结），>1MB 的文件只读文件头
+  /// 做「含 `tasks` 键」判定——0 字节 / 截断 / 非法文本都会在此被拦下。
+  static const int _kMinSnapshotBytes = 256;
+
+  Future<bool> _snapshotFileUsable(File f, String name) async {
+    try {
+      final len = await f.length();
+      if (len < _kMinSnapshotBytes) return false;
+      final encrypted = name.endsWith('.enc.json');
+      if (len <= 1024 * 1024) {
+        final raw = await f.readAsString();
+        if (encrypted || isEncryptedEnvelope(raw)) {
+          return isEncryptedEnvelope(raw);
+        }
+        final map = jsonDecode(raw);
+        return map is Map && map['tasks'] is List;
+      }
+      final raf = await f.open();
+      try {
+        final head = await raf.read(16 * 1024);
+        final text = utf8.decode(head, allowMalformed: true);
+        if (encrypted || text.trimLeft().startsWith('{')) {
+          // 加密信封的字段都在文件头部（format / encrypted / kdf / aead），
+          // 大文件只校验这些标记即可判断「不是被写成空壳 / 垃圾」。
+          if (encrypted) {
+            return text.contains('"encrypted"') &&
+                text.contains('"kdf"') &&
+                text.contains('"aead"');
+          }
+        }
+        return text.contains('"tasks"');
+      } finally {
+        await raf.close();
+      }
+    } catch (e) {
+      AppLog.d('[TaskProvider] 快照完整性校验失败（按不可用处理）：$e');
       return false;
     }
   }
@@ -1431,6 +1561,8 @@ class TaskProvider extends ChangeNotifier {
       // P3-2（v3.1.2 审计）：附件被剥离的回滚点必须标注（文件名 .noattach），
       // 否则用户回滚后任务仍挂着已不存在的附件引用。
       // P3-7（v3.1.4 审计）：与自动快照共用后台组装 + 编码入口。
+      // P3-5（v3.1.5 审计）：加密但缺口令时在组装前直接失败，不再空跑重活。
+      _assertAutoBackupEncryptReady();
       final asm = await _buildSnapshotPayload(now);
       final budget = _autoBackupEncrypt
           ? (DataIo.maxExportPayloadBytes * 3 ~/ 4) - (1 << 20)
@@ -1887,7 +2019,10 @@ class TaskProvider extends ChangeNotifier {
       // P2-12：不可逆分支的前置门——快照必须完整成功。
       var backupOk = false;
       try {
-        backupOk = await _writeAutoBackup(DateTime.now()) == null;
+        // P3-7（v3.1.5 审计）：返回值改为 record（existing / note）。
+        // note == null 表示本次确实有一份可用快照（含「当日已存在」早退）。
+        final written = await _writeAutoBackup(DateTime.now());
+        backupOk = written.note == null;
       } catch (_) {
         backupOk = false;
       }
@@ -2118,6 +2253,9 @@ class TaskProvider extends ChangeNotifier {
         _lastAutoBackupDate = DateTime(y, m, d);
       }
     }
+    // P3-7（v3.1.5 审计）：恢复最近一次自动备份的警告（附件已剥离 / 缺模板 /
+    // 失败原因）。否则重启后「最近快照：今天」会掩盖「这份快照不含附件」。
+    _lastAutoBackupError = prefs.getString(_kLastAutoBackupError);
     _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet();
     _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true;
     _lockScreenPrivate = prefs.getBool(_kLockScreenPrivate) ?? true;
@@ -2151,6 +2289,16 @@ class TaskProvider extends ChangeNotifier {
     _armMuteExpiryTimer();
     await _loadDailyMit(prefs);
     NotificationService.instance.enabled = _notificationsEnabled;
+    // P2-2（v3.1.5 审计）：读入设置即代表「内存与 prefs 已一致」，必须把
+    // 值签名同步刷新。旧实现不回填签名，于是「外部重写 prefs（恢复备份的
+    // applyAppPrefs）+ load()」之后，用户把某项设置改回恢复前的值 → 整组值
+    // 与旧签名完全一致 → `_persistSettings` 直接 return，界面显示已改、
+    // 重启后弹回恢复值。刷新后这个坑闭合。
+    // 所有「外部改写 prefs」的生产路径（`applyAppPrefs` 的两处恢复调用点）
+    // 都在改写后紧跟 `load()`，因此只需在此刷新，不必再单开一个作废入口。
+    _lastSettingsSignature = jsonEncode(_settingsValues());
+    // P3-2（v3.1.5 审计）：设置读取成功，清掉「本会话设置未保存」的脏标记。
+    _hasUnsavedSettingsEdits = false;
   }
 
   /// 启动时调用：从本地读取任务列表与开关设置；首次启动则保留 7 条 mock 并落盘。
@@ -2238,8 +2386,18 @@ class TaskProvider extends ChangeNotifier {
       // 避免「从零开始」后重启又被塞回。
       _tasks.addAll(builtInSamples);
       // P1-1（v3.1.3 审计）：首启预置只写任务表，偏好由 setter 显式写。
-      await _persistTasksOnly();
-      await prefs.setBool(_kSeeded, true);
+      // P3-6（v3.1.5 审计）：先看落盘结果再置 `seeded`。旧实现丢弃
+      // `_persistTasksOnly()` 的返回值，磁盘满 / DB 忙时示例只在本会话内存里，
+      // 下次启动 DB 为空而 `seeded=true` → 用户看到空列表，7 条示例永不回来，
+      // 且没有安全模式横幅提示发生了什么。落盘失败时保持未置位，
+      // 下次启动会再试一次。
+      final seededOk = await _persistTasksOnly();
+      if (seededOk) {
+        await prefs.setBool(_kSeeded, true);
+      } else {
+        AppLog.d('[TaskProvider] 首启示例预置落盘失败：本次仅存内存，'
+            '下次启动将重新预置（seeded 标志不置位）');
+      }
     } else {
       // 兜底清理：App 启动时按保留期移除过期回收站条目（原生 MidnightResetReceiver
       // 负责「App 已关闭」的每日 00:00 清理，这里覆盖 App 已开、长期未跨午夜边界的情况）。
@@ -2306,7 +2464,9 @@ class TaskProvider extends ChangeNotifier {
     // （原生 MidnightResetReceiver 会在每天 00:00 后台自动做同样的事，这里作为
     //  App 启动时的兜底，并在 App 前台时由 _startMidnightWatch 周期性刷新。）
     // P3-8（v3.1.0 审计）：await 落盘结果（签名改 Future<bool>）。
-    unawaited(_resetDailyIfNeeded());
+    // P3-1（v3.1.5 审计）：load 内改用只写任务表的通道——retryLoad 期间
+    // _loadInFlight 为 true，走 _persist 会被加载期闸拒绝。
+    unawaited(_resetDailyIfNeeded(tasksOnly: true));
     // P1-1：记录本次启动的日边界基线——启动阶段 main.dart 已显式重排过一次简报 /
     // 挽留，这里同步基线可避免紧随其后的第一次 15 分钟守护再做一次冗余重排。
     _lastResetDay = _ymd(DateTime.now());
@@ -2363,7 +2523,14 @@ class TaskProvider extends ChangeNotifier {
   /// 并在失败时记日志（无 UI 上下文可弹）；内存态与库的偏差由后续任意一次
   /// 成功写入的全量替换自愈（与任务侧「修改类写入口不内存回滚」口径一致），
   /// 安全模式下 [_persist] 恒 false 也会在此留痕。
-  Future<bool> _resetDailyIfNeeded() async {
+  ///
+  /// P3-1（v3.1.5 审计）：新增 [tasksOnly]。每日重置只改任务表，与偏好无关；
+  /// 旧实现走 [_persist]，而 [load] 尾部调用它时 [_loadInFlight] 仍为 true
+  /// （retryLoad 整段保持该标志），写入被「加载期拒写」闸挡下——用户点
+  /// 「重试加载」看到成功，本轮重置却只存内存，与「重试当轮自愈落库」的
+  /// 承诺不符。load 内调用改走 [_persistTasksOnly]，既不碰偏好也不受该闸
+  /// 影响（该闸的语义是「拒绝用户发起的写入」，内部自愈不属于此列）。
+  Future<bool> _resetDailyIfNeeded({bool tasksOnly = false}) async {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     var dailyDirty = false;
@@ -2380,7 +2547,7 @@ class TaskProvider extends ChangeNotifier {
       }
     }
     if (dailyDirty) {
-      final ok = await _persist();
+      final ok = tasksOnly ? await _persistTasksOnly() : await _persist();
       if (!ok) {
         AppLog.d('[TaskProvider] 午夜重置落盘失败（重置仅存内存，'
             '重启前将由下一次成功写入自愈）');
@@ -2554,8 +2721,12 @@ class TaskProvider extends ChangeNotifier {
     }
     // P1-1（v3.1.4 审计）：设置读取失败期间内存里混着构造器默认值，显式
     // setter 同样不能写回，否则「口令之后的设置项」会被静默重置。
+    // P3-2（v3.1.5 审计）：拒绝写回必须留痕——旧实现只是一个 return，
+    // 界面照样即时变化，用户以为保存成功、重启全部回弹，且重试加载会
+    // 静默丢弃这些修改。这里记下脏标记（横幅 / 重试确认框据实提示）。
     if (_settingsLoadFailed) {
       AppLog.d('[TaskProvider] 偏好读取失败，拒绝写回（防止重置用户设置）');
+      _hasUnsavedSettingsEdits = true;
       return;
     }
     final signature = jsonEncode(_settingsValues());
@@ -2869,7 +3040,16 @@ class TaskProvider extends ChangeNotifier {
   /// P3-6（v3.1.4 审计）：安全模式期间是否发生过用户写入（这些修改没落盘）。
   /// 重试加载会以数据库内容重建 [_tasks]，需先提示用户这些修改会丢失。
   bool _hasUnsavedSafeModeEdits = false;
-  bool get hasUnsavedSafeModeEdits => _hasUnsavedSafeModeEdits;
+
+  /// P3-2（v3.1.5 审计）：偏好读取失败期间是否发生过设置写入。这些写入被
+  /// [_persistSettings] 静默拒绝（内存已变、prefs 未变），重试加载会整体丢弃，
+  /// 必须与任务脏编辑一起进入确认提示。
+  bool _hasUnsavedSettingsEdits = false;
+  bool get hasUnsavedSettingsEdits => _hasUnsavedSettingsEdits;
+
+  /// 是否有任何「只存在于本会话」的修改（任务 + 设置）。
+  bool get hasUnsavedSafeModeEdits =>
+      _hasUnsavedSafeModeEdits || _hasUnsavedSettingsEdits;
 
   /// P1-2 / P2-1（v3.1.3 审计）：与习惯侧 / 专注侧同款的测试钩子，用于在不
   /// 真的破坏 SQLite 的前提下验证「安全模式只读」与 [retryLoad] 推出路径。
@@ -5023,7 +5203,9 @@ class TaskProvider extends ChangeNotifier {
   /// load() 内部已重排），从而避免本方法用旧 DND/时区排一次再被立刻覆盖。
   /// ⚠️ 传 false 时调用方**必须**保证最终有一次重排，否则任务提醒会全部漏挂。
   Future<RestoreBlobsStats> restoreFromJson(String raw,
-      {bool includeTrash = true, bool rescheduleReminders = true}) async {
+      {bool includeTrash = true,
+      bool rescheduleReminders = true,
+      bool applyLegacyToggles = true}) async {
     final data = jsonDecode(raw) as Map<String, dynamic>;
     // 结构预校验（P2-2）：`tasks` 必须是显式列表，无论 app 标记如何。
     // 旧逻辑 `app != '有条' && tasks is! List` 会放行「带『有条』标记但 tasks 缺失/
@@ -5089,10 +5271,19 @@ class TaskProvider extends ChangeNotifier {
       tplRestored = tpl.restored;
       tplTotal = tpl.total;
     }
-    if (data['notifications_enabled'] is bool) {
-      _notificationsEnabled = data['notifications_enabled'];
+    // P2-3（v3.1.5 审计）：顶层 `notifications_enabled` / `sound_enabled` 是
+    // 老格式里「随备份迁移的开关」。恢复确认框的「同时恢复设置」被关闭时，
+    // 用户已明确表示不要恢复设置——旧实现仍无条件应用这两个键，备份里通知
+    // 是关的就会让本机全部提醒（任务截止 / 简报 / 习惯打卡 / 回收站预告）
+    // 静默失效，结果页只字未提；反之用户本机刻意关掉也会被突然打开。
+    // [applyLegacyToggles] 由调用方按「是否同时恢复设置」传入。
+    if (applyLegacyToggles) {
+      if (data['notifications_enabled'] is bool) {
+        _notificationsEnabled = data['notifications_enabled'];
+      }
+      if (data['sound_enabled'] is bool) _soundEnabled = data['sound_enabled'];
     }
-    if (data['sound_enabled'] is bool) _soundEnabled = data['sound_enabled'];
+    // cancelAll 与开关无关：任务提醒本来就要按恢复后的任务集重排。
     NotificationService.instance.enabled = _notificationsEnabled;
     NotificationService.instance.cancelAll();
     // P3-10（v2.9.4 审计）：任务提醒的重排责任需要一个**显式**开关，不能靠
@@ -5145,6 +5336,16 @@ class TaskProvider extends ChangeNotifier {
     final tasks = <Task>[..._tasks];
     if (includeTrash) tasks.addAll(_trash);
     return AttachmentService.collectBlobs(tasks);
+  }
+
+  /// P3-4（v3.1.5 审计）：手动备份只取**附件路径清单**（不读字节），
+  /// 真正的读取 / base64 / 预算 / 编码 / 加密交给
+  /// [buildSnapshotBodyOffMainThread] 在后台 isolate 完成——与自动快照同源。
+  Future<({List<AttachmentBlobSource> sources, int skipped})>
+      planAttachmentBlobs(bool includeTrash) {
+    final tasks = <Task>[..._tasks];
+    if (includeTrash) tasks.addAll(_trash);
+    return AttachmentService.planBlobSources(tasks);
   }
 
   /// P2-6（v2.9.1 审计）：任务表（CSV / Excel）的**单一口径**列定义。
@@ -5615,11 +5816,14 @@ typedef SnapshotAssembly = ({
 
 /// P3-7（v3.1.4 审计）：后台组装结果。`oversize=true` 时 `body` 为空串，
 /// 调用方按既有语义跳过本日快照（绝不写「取得回来」无望的废文件）。
+/// P3-4（v3.1.5 审计）：附带附件收集统计（`__skipped` 的解析结果）——
+/// 手动备份把它拼进结果提示，后台化后不必再回主线程重算一遍。
 typedef SnapshotBodyResult = ({
   String body,
   bool stripped,
   int estimatedBytes,
   bool oversize,
+  CollectBlobsStats attachStats,
 });
 
 /// P3-7（v3.1.4 审计）：快照重活的**同步单一真源**，设计上只在后台
@@ -5643,6 +5847,10 @@ SnapshotBodyResult buildSnapshotBodySync(
   payload['attachments'] = AttachmentService.collectBlobsFromSourcesSync(
       sources,
       preSkipped: preSkipped);
+  // P3-4（v3.1.5 审计）：统计在剥离**之前**读出——trimForExport 会把整个
+  // attachments 段删掉，事后无从得知跳过了几个附件。
+  final attachStats = readCollectStats(
+      payload['attachments'] as Map<String, dynamic>);
   final (trimmed, stripped) = DataIo.trimForExport(payload);
   final estimatedBytes = DataIo.estimateJsonBytes(trimmed);
   if (estimatedBytes > budget) {
@@ -5651,6 +5859,7 @@ SnapshotBodyResult buildSnapshotBodySync(
       stripped: stripped,
       estimatedBytes: estimatedBytes,
       oversize: true,
+      attachStats: attachStats,
     );
   }
   return (
@@ -5658,13 +5867,21 @@ SnapshotBodyResult buildSnapshotBodySync(
     stripped: stripped,
     estimatedBytes: estimatedBytes,
     oversize: false,
+    attachStats: attachStats,
   );
 }
 
+/// P3-5（v3.1.5 审计）：统计「回退主 isolate 组装」的次数，用于设置页如实
+/// 提示「本次快照在主线程完成」。只在真的发生回退时自增（测试据其断言）。
+int buildSnapshotMainIsolateFallbacks = 0;
+
 /// P3-7（v3.1.4 审计）：把 [buildSnapshotBodySync] 移到后台 isolate。
-/// isolate 传递失败（某段携带不可传递对象）时回退同步执行：宁可这一次
-/// 动画卡，也绝不丢掉当日快照 / 回滚点（与 [encodeSnapshotOffMainThread]
-/// 同一降级口径）。
+///
+/// P3-5（v3.1.5 审计）：旧实现 `catch (e)` 兜住**所有**异常后同步重跑，
+/// 「加密已开但读不出口令」的业务异常也在其列——于是每次冷启动 / resumed /
+/// 跨天都先把全部附件读一遍、base64、trim，再在 isolate 里抛错，回主线程
+/// 重跑一遍才最终失败。现在只有「isolate 消息不可传递 / 无法启动」才回退；
+/// 业务异常（如 [BackupEncryptException]）直接上抛，不重跑任何重活。
 Future<SnapshotBodyResult> buildSnapshotBodyOffMainThread(
   Map<String, dynamic> basePayload,
   List<AttachmentBlobSource> sources,
@@ -5677,9 +5894,33 @@ Future<SnapshotBodyResult> buildSnapshotBodyOffMainThread(
     return await Isolate.run(() => buildSnapshotBodySync(
         basePayload, sources, preSkipped, encryptOn, pass, budget));
   } catch (e) {
-    AppLog.d('[TaskProvider] 后台组装快照失败，回退主 isolate：$e');
+    if (!_isIsolateTransferError(e)) rethrow;
+    buildSnapshotMainIsolateFallbacks++;
+    AppLog.d('[TaskProvider] 后台组装不可用（isolate 传递失败），回退主 isolate：$e');
     return buildSnapshotBodySync(
         basePayload, sources, preSkipped, encryptOn, pass, budget);
+  }
+}
+
+/// 仅这些异常代表「isolate 通道不可用」，只有它们允许回退同步执行。
+bool _isIsolateTransferError(Object e) =>
+    e is ArgumentError || e is RemoteError || e is IsolateSpawnException;
+
+/// P3-4（v3.1.5 审计）：手动备份路径的「明文 → 密文」也移出主 isolate。
+///
+/// 手动导出的大包（数十 MB 明文）在 PBKDF2（35 万轮）+ AES-GCM 下是纯 CPU
+/// 长任务，旧实现直接在 UI isolate 执行，进度层动画会整段停住。这里与
+/// [buildSnapshotBodyOffMainThread] 同一条降级口径：业务异常上抛，只有
+/// isolate 通道不可用时才回主线程补跑。
+Future<String> encryptPlainOffMainThread(String plain, String pass) async {
+  try {
+    return await Isolate.run(
+        () => buildBackupPayload(plain, encryptOn: true, pass: pass));
+  } catch (e) {
+    if (!_isIsolateTransferError(e)) rethrow;
+    buildSnapshotMainIsolateFallbacks++;
+    AppLog.d('[TaskProvider] 后台加密不可用（isolate 传递失败），回退主 isolate：$e');
+    return buildBackupPayload(plain, encryptOn: true, pass: pass);
   }
 }
 

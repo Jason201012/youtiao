@@ -2059,8 +2059,10 @@ class _DbSafeModeBannerState extends State<_DbSafeModeBanner> {
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('重新加载数据？'),
-          content: const Text(
-              '重试会按数据库内容重建列表，安全模式期间未保存的修改将丢失。建议先到「设置 → 备份与恢复」导出备份。'),
+          content: Text(
+              '重试会按数据库内容重建列表，安全模式期间未保存的修改将丢失。'
+              '${task.settingsLoadFailed ? '本会话修改的设置同样不会被保存。' : ''}'
+              '建议先到「设置 → 备份与恢复」导出备份（安全模式下导出需二次确认）。'),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
@@ -2111,6 +2113,11 @@ class _DbSafeModeBannerState extends State<_DbSafeModeBanner> {
         context.select<HabitProvider, bool>((h) => h.dbLoadFailed);
     final focusFailed =
         context.select<FocusProvider, bool>((f) => f.dbLoadFailed);
+    // P3-2（v3.1.5 审计）：偏好读取失败与任务库失败是两种病，旧横幅对两者
+    // 一律承诺「设置可查看与修改」，而 `_persistSettings` 实际一律 return ——
+    // 用户改完开关看着成功、重启全部回弹。这里单独分支如实告知。
+    final settingsFailed =
+        context.select<TaskProvider, bool>((t) => t.settingsLoadFailed);
     final failed = <String>[
       if (taskFailed) '任务',
       if (habitFailed) '习惯',
@@ -2138,8 +2145,14 @@ class _DbSafeModeBannerState extends State<_DbSafeModeBanner> {
                   Text(
                     // P2-1：按失败集合生成，不再笼统写「任务数据不会写入」——
                     // 任务正常、习惯故障时任务其实可以写。
+                    // P2-1 / P3-2（v3.1.5 审计）：① 不再把用户直接引向「导出」——
+                    // 安全模式下内存里是示例 / 空数据，导出的备份会覆盖真实库
+                    // （导出侧已加二次确认拦截）；② 偏好读取失败时如实说明本
+                    // 会话的设置修改不会保存。
                     '数据加载失败，已进入只读安全模式：${failed.join('、')}数据不会写入数据库，'
-                    '其余数据仍可正常使用；设置可查看与修改。请前往「设置 → 备份与恢复」导出或修复数据。',
+                    '其余数据仍可正常使用；'
+                    '${settingsFailed ? '偏好读取失败，本会话修改的设置不会保存（重启后恢复原值）。' : '设置可查看与修改。'}'
+                    '请先点「重试加载」，成功后再到「设置 → 备份与恢复」导出备份。',
                     style: textStyle,
                   ),
                   const SizedBox(height: 4),
@@ -2182,10 +2195,27 @@ class AppLockGate extends StatelessWidget {
     final ext = appColors(context);
     final onBg = scheme.onBackground;
     // P1-1（v3.1.2 审计）：出口必须消费真实可用性——仅在「设备无任何可用
-    // 凭据」的锁定死路（!biometricAvailable）时渲染。生物识别可用时本页
-    // 主按钮即唯一出路，杜绝「拿到设备两键即可绕过应用锁」的安全回归
-    // （此前按钮无条件渲染 + 确认即 setEnabled(false)，应用锁形同虚设）。
-    final bioOk = context.watch<AppLockProvider>().biometricAvailable;
+    // 凭据」的锁定死路时渲染。生物识别可用时本页主按钮即唯一出路，杜绝
+    // 「拿到设备两键即可绕过应用锁」的安全回归（此前按钮无条件渲染 + 确认
+    // 即 setEnabled(false)，应用锁形同虚设）。
+    // P1-1 / U-1（v3.1.5 审计）：`bioOk` 旧语义是「有生物识别硬件」，
+    // 在「有硬件但未录入、也没有锁屏密码」的设备上为 true → 出口不渲染，
+    // 用户被永久锁死。现在看 `canAuthenticate`（现在能验证）+ 真实调用失败
+    // 动态放行（`unlockEscapeVisible`），并把文案按「生物识别 / 锁屏密码 /
+    // 两者皆无」三态区分。
+    final lock = context.watch<AppLockProvider>();
+    final canAuth = lock.canAuthenticate;
+    final enrolled = lock.hasEnrolledBiometrics;
+    final subtitle = !canAuth
+        ? '${lock.unavailableHint}，暂时无法完成身份验证'
+        : enrolled
+            ? '已开启应用锁，可用生物识别或锁屏密码验证身份'
+            : '已开启应用锁，请用设备锁屏密码验证身份';
+    final actionLabel = !canAuth
+        ? '重新验证'
+        : enrolled
+            ? '使用生物识别解锁'
+            : '使用锁屏密码解锁';
     return Scaffold(
       backgroundColor: scheme.background,
       body: SafeArea(
@@ -2209,7 +2239,10 @@ class AppLockGate extends StatelessWidget {
                 Text(
                   // U-4（v3.1.4 审计）：authenticate 用 biometricOnly: false，
                   // 允许锁屏密码降级；旧副标题无条件写「生物识别」会误导。
-                  '已开启应用锁，${bioOk ? '可用生物识别或锁屏密码' : '请用设备锁屏密码'}验证身份',
+                  // U-1（v3.1.5 审计）：三态文案——旧分支在「无任何凭据」时
+                  // 承诺「请用设备锁屏密码」，而这台设备根本没有锁屏密码。
+                  subtitle,
+                  textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 14, color: ext.meta),
                 ),
                 const SizedBox(height: 28),
@@ -2217,21 +2250,23 @@ class AppLockGate extends StatelessWidget {
                   onPressed: () => context
                       .read<AppLockProvider>()
                       .authenticate(reason: '验证身份以进入有条'),
-                  icon: Icon(bioOk ? Symbols.fingerprint : Symbols.lock),
+                  icon: Icon(enrolled ? Symbols.fingerprint : Symbols.lock),
                   // U-4（v3.1.4 审计）：仅锁屏密码的设备上旧文案「使用生物识别
                   // 解锁」与真实可用凭据不符，用户会误判自己无法解锁。
-                  label: Text(bioOk ? '使用生物识别解锁' : '使用锁屏密码解锁'),
+                  // U-1（v3.1.5 审计）：文案统一由 credentialLabel 派生。
+                  label: Text(actionLabel),
                 ),
                 // P2-3（v3.1.0 审计）：不可解锁路径的兜底出口——备份恢复可把
                 // app_lock_enabled=true 写进「未录入指纹且无锁屏密码」的设备
-                // （恢复路径历史上绕过了 setEnabled 的硬件门槛校验），此后每次
+                // （恢复路径历史上绕过了 setEnabled 的凭据门槛校验），此后每次
                 // 回前台都锁死在本页，设置页不可达，唯一出路是清除应用数据
                 // （等于丢掉全部本地数据）。提供「二次确认 + 风险说明」的关闭
                 // 入口，保证用户不会永久失去自己的数据。
-                // P1-1（v3.1.2 审计）：该出口仅在 !biometricAvailable 的真实
-                // 死路渲染；且点击后先强制一次系统验证（含锁屏密码降级），
-                // 验证通过即正常解锁、无需关闭应用锁。
-                if (!bioOk) ...[
+                // P1-1（v3.1.2 审计）：该出口仅在真实死路渲染；且点击后先强制
+                // 一次系统验证（含锁屏密码降级），验证通过即正常解锁、无需关闭。
+                // P1-1（v3.1.5 审计）：条件改为「本机无可用凭据 或 真实验证
+                // 返回不可用」，避免探测误判把出口永久藏起来。
+                if (lock.unlockEscapeVisible) ...[
                   const SizedBox(height: 16),
                   TextButton(
                     onPressed: () => _confirmDisableLock(context),
@@ -2265,7 +2300,8 @@ class AppLockGate extends StatelessWidget {
       builder: (dctx) => AlertDialog(
         title: const Text('关闭应用锁'),
         content: const Text(
-          '本机未检测到可用的指纹 / 面容，且锁屏密码验证未通过。'
+          '本机当前没有可用的验证方式（未录入指纹 / 面容，且锁屏密码验证未通过），'
+          '继续使用会一直停在解锁页。'
           '关闭应用锁后无需验证即可进入应用，如需再次启用请到「设置 → 安全」开启。\n\n'
           '若这不是你本人的操作，请勿关闭。',
         ),

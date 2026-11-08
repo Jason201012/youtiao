@@ -59,7 +59,12 @@ void main() {
   const authCh = MethodChannel('plugins.flutter.io/local_auth');
 
   var secureThrows = false;
-  var bioAvailable = false;
+  // P1-1（v3.1.5 审计）：三个探测值必须分开 mock——真实设备上
+  // `canCheckBiometrics`（硬件）与 `isDeviceSupported`（现有凭据）会分叉，
+  // v3.1.4 的用例把两者绑成同一个变量，正好掩盖了「有硬件未录入」的自锁死路。
+  var bioHardware = false;
+  var bioEnrolled = false;
+  var deviceCredential = false;
   var caseSeq = 0;
   late String caseDocs;
   late _ThrowingStore store;
@@ -76,8 +81,11 @@ void main() {
     messenger.setMockMethodCallHandler(authCh, (call) async {
       switch (call.method) {
         case 'canCheckBiometrics':
+          return bioHardware;
         case 'isDeviceSupported':
-          return bioAvailable;
+          return bioEnrolled || deviceCredential;
+        case 'getAvailableBiometrics':
+          return bioEnrolled ? <String>['fingerprint'] : <String>[];
         case 'authenticate':
           return false;
         default:
@@ -94,7 +102,9 @@ void main() {
     NotificationService.instance.enabled = false;
     NotificationService.remindersMutedUntil = null;
     secureThrows = false;
-    bioAvailable = false;
+    bioHardware = false;
+    bioEnrolled = false;
+    deviceCredential = false;
     caseDocs = '$docs/case_${++caseSeq}';
     Directory(caseDocs).createSync(recursive: true);
     PathProviderPlatform.instance = _FakePathProvider(caseDocs);
@@ -308,16 +318,31 @@ void main() {
           return const SizedBox.shrink();
         }),
       ));
+      // U-2（v3.1.5 审计）：只有「备份段为空 **且** 本机对应段非空」才警告；
+      // 旧实现不看本机数据，只用任务的用户每次恢复都被吓一次。
       final future = confirmEmptyRestoreSections(ctx, {
         'habits': <dynamic>[],
         'focus_sessions': <dynamic>[],
-      });
+      }, currentHabitCount: 2, currentFocusCount: 3);
       await tester.pumpAndSettle();
       expect(find.text('这份备份可能不完整'), findsOneWidget);
       expect(find.textContaining('习惯'), findsOneWidget);
+      expect(find.textContaining('2 条习惯'), findsOneWidget,
+          reason: '文案要给出真实条数，而不是复述段名');
       await tester.tap(find.text('仍要恢复'));
       await tester.pumpAndSettle();
       expect(await future, isTrue);
+
+      // 本机对应段同样为空 → 不存在数据损失，不弹警告。
+      final noWarn = confirmEmptyRestoreSections(ctx, {
+        'habits': <dynamic>[],
+        'check_ins': <dynamic>[],
+        'focus_sessions': <dynamic>[],
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('这份备份可能不完整'), findsNothing,
+          reason: '空覆盖空无损失；旧实现无条件警告');
+      expect(await noWarn, isTrue);
     });
   });
 
@@ -409,9 +434,15 @@ void main() {
       expect(clipped, '😀');
       expect(clipped.length, 2, reason: '旧 substring 会留下孤立高代理项');
       final merged = QuickEntrySheet.mergeClipboardText(
-          '', const TextSelection.collapsed(offset: 0), s * 100);
+          '', const TextSelection.collapsed(offset: 0), s * 200);
       expect(merged.truncated, isTrue);
-      expect(merged.text.length, lessThanOrEqualTo(500));
+      // U-3（v3.1.5 审计）：口径改为**字素簇**——TextField 的 maxLength 就是
+      // 按字素计数，旧实现按 UTF-16 截（500 码元 = 250 个 emoji），同样
+      // 500 字额度下手输能放 500 个、粘贴只能放 250 个。
+      expect(merged.text.characters.length, QuickEntrySheet.maxInputLength,
+          reason: '与输入框同口径：500 个字素，而不是 500 个 UTF-16 码元');
+      expect(merged.text.length, greaterThan(500),
+          reason: 'emoji 按字素计数时 UTF-16 长度必然超过 500');
       expect(Uri.encodeComponent(merged.text), isNot(contains('%EF%BF%BD')),
           reason: '不得产生替换字符（非法 UTF-16）');
     });
@@ -419,7 +450,8 @@ void main() {
     test('U-3：应用锁被强制关闭时可通过 getter 如实回执', () async {
       final sp = await SharedPreferences.getInstance();
       await sp.setBool('app_lock_enabled', true);
-      bioAvailable = false;
+      bioEnrolled = false;
+      deviceCredential = false;
       final lock = AppLockProvider();
       await lock.refreshEnabled();
       expect(lock.lastRefreshForceDisabled, isTrue);
@@ -427,7 +459,7 @@ void main() {
       expect(sp.getBool('app_lock_enabled'), isFalse);
 
       await sp.setBool('app_lock_enabled', true);
-      bioAvailable = true;
+      bioEnrolled = true;
       final okLock = AppLockProvider();
       await okLock.refreshEnabled();
       expect(okLock.lastRefreshForceDisabled, isFalse);
@@ -445,20 +477,45 @@ void main() {
         await tester.pumpAndSettle();
       }
 
-      bioAvailable = false;
-      final noBio = AppLockProvider();
-      await noBio.load();
-      await pumpGate(noBio);
+      // P1-1 / U-1（v3.1.5 审计）：文案改由「现在能验证的方式」派生，三态：
+      // 仅锁屏密码 / 生物识别（可降级密码）/ 无任何凭据。
+      bioHardware = true;
+      bioEnrolled = false;
+      deviceCredential = true;
+      final pwdOnly = AppLockProvider();
+      await pwdOnly.load();
+      await pumpGate(pwdOnly);
       expect(find.text('使用锁屏密码解锁'), findsOneWidget,
           reason: '旧实现固定写「使用生物识别解锁」，仅锁屏密码设备上不实');
       expect(find.text('使用生物识别解锁'), findsNothing);
+      expect(find.textContaining('锁屏密码'), findsWidgets);
 
-      bioAvailable = true;
+      bioHardware = true;
+      bioEnrolled = true;
+      deviceCredential = true;
       final withBio = AppLockProvider();
       await withBio.load();
       await pumpGate(withBio);
       expect(find.text('使用生物识别解锁'), findsOneWidget);
       expect(find.text('使用锁屏密码解锁'), findsNothing);
+
+      // P1-1（v3.1.5 审计）：**有硬件但未录入 + 无锁屏密码**的真实死路——
+      // 旧实现 `bioOk = canCheckBiometrics = true` → 承诺「使用生物识别解锁」
+      // 且隐藏关闭出口，用户被永久锁在应用外。现在：不再承诺任何凭据，
+      // 且必须渲染「关闭应用锁」出口。
+      bioHardware = true;
+      bioEnrolled = false;
+      deviceCredential = false;
+      final deadEnd = AppLockProvider();
+      await deadEnd.load();
+      await pumpGate(deadEnd);
+      expect(deadEnd.canAuthenticate, isFalse,
+          reason: '硬件能力不等于可验证凭据（P1-1 根因）');
+      expect(find.text('使用生物识别解锁'), findsNothing);
+      expect(find.text('使用锁屏密码解锁'), findsNothing);
+      expect(find.text('重新验证'), findsOneWidget);
+      expect(find.text('无法验证？关闭应用锁'), findsOneWidget,
+          reason: '真实死路必须留出口，否则唯一出路是清数据');
     });
   });
 }

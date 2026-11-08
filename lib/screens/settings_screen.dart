@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.1.5');
+      if (mounted) setState(() => _version = '3.1.6');
     }
   }
 
@@ -1021,6 +1021,32 @@ String _formatIdle(int seconds) {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // P3-2（v3.1.5 审计）：偏好读取失败时，设置项仍可点、内存也
+                    // 会变，但 `_persistSettings` 一律拒写——旧实现没有任何提示，
+                    // 用户以为改成功、重启全部回弹。这里在设置页顶部如实告知，
+                    // 把「看起来成功」变成「明确知道本会话不保存」。
+                    if (provider.settingsLoadFailed) ...[
+                      Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).colorScheme.errorContainer,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          '偏好读取失败：本会话的设置修改不会保存，重启后恢复原值。'
+                          '请先在首页横幅点「重试加载」恢复写入能力。',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            height: 1.35,
+                            color:
+                                Theme.of(context).colorScheme.onErrorContainer,
+                          ),
+                        ),
+                      ),
+                    ],
                     _GroupTitle('通用'),
                     Consumer<ThemeProvider>(
                       builder: (context, theme, _) => Column(
@@ -1719,23 +1745,33 @@ String _formatIdle(int seconds) {
                     // 「数据与备份」（回收站/标签/备份/加密/口令/农历）与
                     // 「隐私与安全」（应用锁/锁屏/截屏/外链）。下面这组为隐私与安全。
                     _GroupTitle('隐私与安全'),
-                    // A4 应用锁：基于系统生物识别；设备不支持时禁用并提示。
+                    // A4 应用锁：基于系统生物识别 / 锁屏密码；本机无可用凭据时
+                    // 禁用并如实说明原因。
                     // v2.6.4+：验证失败/不可用时系统弹窗允许降级用手机锁屏密码。
+                    // P1-1 / U-1（v3.1.5 审计）：标题去掉「（生物识别）」——只有
+                    // 锁屏密码的设备同样可用；副标题按真实可用凭据生成，不再把
+                    // 「有硬件未录入」说成可用、也不再把「仅锁屏密码」说成不支持。
                     Consumer<AppLockProvider>(
                       builder: (context, lock, _) => SettingsRow(
                         icon: Symbols.lock,
-                        label: '应用锁（生物识别）',
-                        subtitle: lock.biometricAvailable
-                            ? '仅遮挡界面，本地数据库仍为明文（非真加密）。每次进入需验证指纹/面容，防止身边人随手翻看'
-                            : '当前设备不支持生物识别',
+                        label: '应用锁',
+                        subtitle: lock.appLockEnabled
+                            ? '已开启：每次进入需验证${lock.credentialLabel}，'
+                                '仅遮挡界面（数据库仍为明文）'
+                            : (lock.canAuthenticate
+                                ? (lock.hasEnrolledBiometrics
+                                    ? '每次进入需验证指纹 / 面容，可降级用锁屏密码；仅遮挡界面，本地数据库仍为明文'
+                                    : '本机仅可用锁屏密码验证；仅遮挡界面，本地数据库仍为明文')
+                                : '${lock.unavailableHint}，无法开启应用锁'),
                         switchValue: lock.appLockEnabled,
-                        onSwitchChanged: lock.biometricAvailable
+                        onSwitchChanged: lock.canAuthenticate
                             ? (v) async {
                                 final ok = await lock.setEnabled(v);
                                 if (!ok && mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('设备不支持生物识别，无法开启应用锁'),
+                                    SnackBar(
+                                      content: Text(
+                                          '${lock.unavailableHint}，无法开启应用锁'),
                                     ),
                                   );
                                 }
@@ -1755,7 +1791,7 @@ String _formatIdle(int seconds) {
                         icon: Symbols.timer,
                         label: '无操作自动锁定',
                         subtitle: !lock.appLockEnabled
-                            ? '需要先开启上方「应用锁（生物识别）」后才会生效'
+                            ? '需要先开启上方「应用锁」后才会生效'
                             : (provider.appLockIdleSeconds <= 0
                                 ? '关闭（仅回到前台时锁定）'
                                 : '空闲 ${_formatIdle(provider.appLockIdleSeconds)} 后自动锁定'),

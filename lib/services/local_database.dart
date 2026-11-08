@@ -67,7 +67,13 @@ class LocalDatabase {
     _memFocus.clear();
     _memHabits.clear();
     _memCheckIns.clear();
+    failNextReplaceTasks = false;
   }
+
+  /// P3-6（v3.1.5 审计）：测试用——下一次 [replaceTasks] 抛错，模拟磁盘满 /
+  /// 数据库忙等写入失败（用于验证「首启示例落盘失败不置 seeded」）。
+  /// 生产代码永不置位。
+  static bool failNextReplaceTasks = false;
 
   Database? _db;
 
@@ -221,6 +227,10 @@ class LocalDatabase {
   /// 调用方仍传入完整列表（Provider 持有全量），本方法内部按 id 做 upsert / 删除，
   /// 对外接口不变，无需改动任何上层调用点。
   Future<void> replaceTasks(List<Task> tasks, List<Task> trash) async {
+    if (failNextReplaceTasks) {
+      failNextReplaceTasks = false;
+      throw StateError('replaceTasks 写入失败（测试注入）');
+    }
     // 快照：调用方传入的是 Provider 持有的可变列表引用，事务内多个 await 之间
     // 用户操作（addTask 的 insert / _removeMany 的 removeAt）可能修改原列表，
     // 导致迭代抛出 ConcurrentModificationError 而整次持久化静默失败。

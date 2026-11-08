@@ -8,7 +8,6 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
-import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/backup_validator.dart';
 import 'package:todolist/services/backup_summary.dart';
 import 'package:todolist/services/backup_crypto.dart';
@@ -28,22 +27,47 @@ import 'package:todolist/state/onboarding_provider.dart';
 /// 面板却显示为正常快照；用户一旦从它恢复，`data['habits'] is List` 成立、
 /// 按空列表覆盖，本机习惯与专注历史被静默清空。这里至少给一次二次确认。
 /// 两条恢复路径（文件 / 本地快照）共用，避免只补一条又漏一条。
+///
+/// U-2（v3.1.5 审计）：旧实现只看「备份里的段是否为空」，同一处已算出的
+/// `currentHabitCount` / `currentFocusCount` 却没传进来 —— 只用任务的用户
+/// 每次恢复都被吓一次，文案还写「且无法撤销」（恢复前快照本来就是回滚点）。
+/// 现在只在「备份段为空 **且** 本机对应段非空」时警告，并给出真实条数与
+/// 可回滚说明。
 Future<bool> confirmEmptyRestoreSections(
-    BuildContext context, Map<String, dynamic> data) async {
+  BuildContext context,
+  Map<String, dynamic> data, {
+  int currentHabitCount = 0,
+  int currentCheckInCount = 0,
+  int currentFocusCount = 0,
+  bool preRestoreSnapshotOk = true,
+}) async {
   final empty = <String>[
-    if (data['habits'] is List && (data['habits'] as List).isEmpty) '习惯',
-    if (data['check_ins'] is List && (data['check_ins'] as List).isEmpty) '打卡记录',
+    if (data['habits'] is List &&
+        (data['habits'] as List).isEmpty &&
+        currentHabitCount > 0)
+      '习惯',
+    if (data['check_ins'] is List &&
+        (data['check_ins'] as List).isEmpty &&
+        currentCheckInCount > 0)
+      '打卡记录',
     if (data['focus_sessions'] is List &&
-        (data['focus_sessions'] as List).isEmpty)
+        (data['focus_sessions'] as List).isEmpty &&
+        currentFocusCount > 0)
       '专注记录',
   ];
   if (empty.isEmpty) return true;
+  final counts = <String>[
+    if (empty.contains('习惯')) '$currentHabitCount 条习惯',
+    if (empty.contains('打卡记录')) '$currentCheckInCount 条打卡记录',
+    if (empty.contains('专注记录')) '$currentFocusCount 条专注记录',
+  ];
   final ok = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('这份备份可能不完整'),
       content: Text(
-          '备份中的${empty.join('、')}为空。继续恢复会清空本机现有的${empty.join('、')}，且无法撤销。'
+          '备份中的${empty.join('、')}为空，继续恢复会清空本机现有的${counts.join('、')}。'
+          '${preRestoreSnapshotOk ? '恢复前会尝试生成一份可回滚的快照（若失败会另行提示）。' : '本次未能生成恢复前快照，该操作不可回滚。'}'
           '建议先导出当前数据，或换一份完整备份。'),
       actions: [
         TextButton(
@@ -56,6 +80,70 @@ Future<bool> confirmEmptyRestoreSections(
     ),
   );
   return ok == true;
+}
+
+/// P2-1（v3.1.5 审计）：**安全模式下的导出**必须付出认知成本。
+///
+/// 数据加载失败时内存里是构造器内置的 7 条示例（或加载前的旧内存态）、空习惯、
+/// 空专注；旧实现照样导出一份「结构完整、版本 3」的备份并提示「已保存」，
+/// 而安全模式横幅正把用户引向这条路径。事后从这份备份恢复会覆盖真实库，
+/// 属不可逆数据丢失。这里先要求显式确认，导出时再打 `safeMode` 标记，
+/// 恢复端（[confirmPartialRestore]）二次拦截。
+Future<bool> confirmSafeModeExport(
+    BuildContext context, List<String> unsafe) async {
+  final go = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('当前处于只读安全模式'),
+      content: Text(
+          '${unsafe.join('、')}数据尚未成功从数据库读出，内存里是示例或空数据。'
+          '此时导出的备份**不代表你的真实数据**，日后用它恢复会覆盖真实库。\n\n'
+          '建议先到首页横幅点「重试加载」，成功后再导出。\n\n'
+          '仍要继续导出，文件会被标记为「安全模式导出」，恢复时会再次提醒。'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('仍要导出（抢救当前内存）')),
+      ],
+    ),
+  );
+  return go == true;
+}
+
+/// P2-1（v3.1.5 审计）：恢复端识别安全模式导出的文件。
+/// 返回 false 表示用户放弃恢复。
+Future<bool> confirmPartialRestore(
+    BuildContext context, Map<String, dynamic> data) async {
+  if (data['safeMode'] != true) return true;
+  final partial = (data['partial'] is List)
+      ? (data['partial'] as List).whereType<String>().toList()
+      : const <String>[];
+  final what = partial.isEmpty ? '部分数据' : partial.join('、');
+  final go = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('这份备份可能不含真实数据'),
+      content: Text(
+          '它是在只读安全模式下导出的，其中的$what可能是示例或空数据。'
+          '继续恢复会用这些内容覆盖本机现有数据，且只有恢复前快照可以回滚。\n\n'
+          '除非你确认这就是你要抢救的那份内容，否则建议取消。'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消')),
+        FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('仍要恢复')),
+      ],
+    ),
+  );
+  return go == true;
 }
 
 /// 「备份与恢复」底部弹层：提供「备份到文件」「从备份恢复」，
@@ -238,119 +326,161 @@ class BackupSheet {
     String? passHint,
   }) async {
     try {
-      // 与任务数据合并番茄钟专注记录与习惯打卡记录，便于统一备份与恢复。
-      final map = provider.backupData(includeTrash: includeTrash);
-      map['focus_sessions'] = focusProvider.sessionsJson;
-      final habitMap = habitProvider.backupData();
-      map['habits'] = habitMap['habits'];
-      map['check_ins'] = habitMap['check_ins'];
-// P0-1：手动备份同步纳入附件二进制（base64 内联），与自动备份 (_writeAutoBackup)
-// 一致，保证手动导出的备份也能完整还原附件；缺失文件由 collectBlobs 自动跳过。
-      map['attachments'] = await provider.collectAttachmentBlobs(includeTrash);
-      // P2-19：手动备份与自动备份保持一致——一并打包 App 级偏好。
-      // 旧版仅自动备份含，手动导出不含，恢复后界面开关看着对、实际是默认值。
-      // 现在手动备份也带一份；写回时由 _doRestore 调用 applyAppPrefs。
-      map['prefs'] = await collectAppPrefs();
-      // P2-9：附件统计提示——若 collectBlobs 因超体积 / 缺失跳过了附件，
-      // 在 snackbar 文案中告知用户，避免「我存的附件怎么没在备份里」的迷惑。
-      final collectStats = readCollectStats(map['attachments'] as Map<String, dynamic>);
-      // M2（v3.0.8 审计）：用户自定义模板纳入备份——模板是文件存储，此前
-      // 完全不在备份覆盖范围内，恢复 / 换机即全部丢失。恢复见 restoreFromJson
-      // （N7 起下沉进本体）。
-      // N5（v3.0.9 审计）：消费收集失败信号——模板目录读取失败时备份里
-      // user_templates 恒空，旧实现用户毫不知情（换机后才发觉）。失败在
-      // 结果 snackbar 里如实告知（不阻断备份主流程）。
-      final tplExport = await UserTemplateStore.exportAllForBackup();
-      map['user_templates'] = tplExport.templates;
-      final tplCollectFailed = tplExport.failed;
-      // F13：导出前做大小预检。附件内联后整包若超过 32 MB，分享面板单文件大小
-      // 敏感、还原端也会按 [DataIo.maxImportTextBytes] 拒绝读取——「写得出去、
-      // 取不回来」。这里自动剥离 attachments 段，保住任务/习惯/偏好主体，
-      // 并在 snackbar 文案里告知用户「附件已剥离」，提示有需要可手动另存。
-      final stripped = DataIo.trimForExport(map);
-      final payloadMap = stripped.$1;
-      final attachmentsDropped = stripped.$2;
-      final plain = const JsonEncoder.withIndent('  ').convert(payloadMap);
-
-      // 新P3-3（v2.9.7 审计）：加密路径按**密文尺寸**预检——AES-GCM 信封以
-      // base64 承载密文（约 1.33× 膨胀），明文约 >24MB 时密文 `.enc.json` 会超
-      // 导入端 32MB 硬限（pickJsonFile 读取前拒绝），「备份成功落盘、需要还原
-      // 时被拒于解密之前」。此处用**精确明文字节数**（utf8）估算密文文件尺寸，
-      // 预算 = 上限 × 3/4 再减 1MB（信封字段 KB 级 + 估算安全余量）。
-      if (encryptOn) {
-        final plainBytes = utf8.encode(plain).length;
-        final cipherBudget =
-            (DataIo.maxImportTextBytes * 3 ~/ 4) - (1 << 20);
-        if (plainBytes > cipherBudget) {
+      // P2-1（v3.1.5 审计）：安全模式下手动导出必须付出认知成本。
+      // 旧实现完全没有 `dbLoadFailed` / `tasksLoadedFromDb` 判断：任务库没读
+      // 出来时内存是 7 条示例（或加载前旧态），习惯 / 专注是空列表，导出的
+      // 文件却「结构完整、版本 3」，提示还是「已保存到下载目录」——事后从
+      // 它恢复就覆盖真实库。横幅当时正引导用户走这条路，风险被放大。
+      final unsafe = <String>[
+        if (!provider.tasksLoadedFromDb || provider.dbLoadFailed) '任务',
+        if (habitProvider.dbLoadFailed) '习惯',
+        if (focusProvider.dbLoadFailed) '专注',
+      ];
+      if (unsafe.isNotEmpty && context.mounted) {
+        if (!await confirmSafeModeExport(context, unsafe)) return;
+      }
+      // P3-4（v3.1.5 审计）：手动导出此前全程在主 isolate 跑——`backupData()`
+      // 序列化、附件 `readAsBytes` + base64、`trimForExport`、indent JSON、
+      // AES/PBKDF2 全部同步，大库 / 加密时表现为「点了备份就卡住」，用户很
+      // 可能以为死机并反复点击。现在：① 组装阶段分阶段让帧；② 附件字节读取
+      // 与整包编码/加密复用自动快照的后台 isolate 入口（同一真源）；③ 最外层
+      // 套一层不可取消的进度层，让「正在做什么」可见。
+      await _withRestoreProgress(context, (stage) async {
+        stage('正在整理数据…');
+        // 与任务数据合并番茄钟专注记录与习惯打卡记录，便于统一备份与恢复。
+        final map = provider.backupData(includeTrash: includeTrash);
+        // P2-1（v3.1.5 审计）：把「这是安全模式导出」写进文件本体，恢复端据此
+        // 二次拦截（[confirmPartialRestore]），而不是靠用户记住。
+        if (unsafe.isNotEmpty) {
+          map['safeMode'] = true;
+          map['partial'] = unsafe;
+        }
+        map['focus_sessions'] = focusProvider.sessionsJson;
+        final habitMap = habitProvider.backupData();
+        map['habits'] = habitMap['habits'];
+        map['check_ins'] = habitMap['check_ins'];
+        // P2-19：手动备份与自动备份保持一致——一并打包 App 级偏好。
+        // 旧版仅自动备份含，手动导出不含，恢复后界面开关看着对、实际是默认值。
+        // 现在手动备份也带一份；写回时由 _doRestore 调用 applyAppPrefs。
+        map['prefs'] = await collectAppPrefs();
+        // M2（v3.0.8 审计）：用户自定义模板纳入备份——模板是文件存储，此前
+        // 完全不在备份覆盖范围内，恢复 / 换机即全部丢失。
+        // N5（v3.0.9 审计）：消费收集失败信号——模板目录读取失败时备份里
+        // user_templates 恒空，旧实现用户毫不知情（换机后才发觉）。失败在
+        // 结果 snackbar 里如实告知（不阻断备份主流程）。
+        final tplExport = await UserTemplateStore.exportAllForBackup();
+        map['user_templates'] = tplExport.templates;
+        final tplCollectFailed = tplExport.failed;
+        stage('正在读取附件…');
+        // P0-1 / P3-4：主 isolate 只做附件**路径规划**（逐任务目录解析），
+        // 字节读取 / base64 / 体积预算 / indent JSON 全在后台 isolate 内完成。
+        final plan = await provider.planAttachmentBlobs(includeTrash);
+        // F13：导出前做大小预检。附件内联后整包若超过 32 MB，分享面板单文件
+        // 大小敏感、还原端也会按 [DataIo.maxImportTextBytes] 拒绝读取——
+        // 「写得出去、取不回来」。超限时自动剥离 attachments 段，保住任务/
+        // 习惯/偏好主体，并在 snackbar 文案里告知用户。
+        final built = await buildSnapshotBodyOffMainThread(map, plan.sources,
+            plan.skipped, false, null, DataIo.maxImportTextBytes);
+        if (built.oversize) {
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('加密备份未执行：数据超过密文导入上限'
-                  '（附件已剥离仍超限）。请减少大附件后重试，或改用不加密备份'),
+              content: Text('备份未执行：数据超过导入上限（附件已剥离仍超限）。'
+                  '请减少大附件后重试'),
               duration: Duration(seconds: 5),
             ));
           }
           return;
         }
-      }
-
-      // 口令加密导出：明文经 AES-256-GCM 信封化，落盘 / 分享的都是密文。
-      // P0-1 守卫：encryptOn 为真而口令缺失时 buildBackupPayload 会抛
-      // BackupEncryptException，整个备份中止（不写任何文件），绝不静默降级明文。
-      final isEnc = encryptOn;
-      final payload =
-          buildBackupPayload(plain, encryptOn: encryptOn, pass: pass);
-      final name =
-          isEnc ? '有条-backup-${_ts()}.enc.json' : '有条-backup-${_ts()}.json';
-      // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
-      final file = await DataIo.saveToAppDocs(name, payload);
-      // P3-16（v2.9.9 审计）：备份已在 App 文档目录落盘 → 此刻才保存口令提示。
-      // 不等待：提示保存失败不影响备份主流程。
-      if (passHint != null) {
-        unawaited(provider.setAutoBackupPassHint(passHint));
-      }
-      // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见
-      String msg = isEnc
-          ? '已加密保存到「下载」目录（凭口令恢复）'
-          : '已保存到「下载」目录（Downloads）';
-      // F13：超额自动剥离附件后，把这件事明确告诉用户，避免「为什么附件没在里面」
-      // 的迷惑；并给出后续手动另存的提示（不在本补丁里做导入侧动作，避免范围蔓延）。
-      if (attachmentsDropped) {
-        msg = isEnc
-            ? '已加密保存到「下载」目录（附件因体积超限已剥离，凭口令恢复）'
-            : '已保存到「下载」目录（附件因体积超限已剥离）';
-      }
-      // P2-9：附件被打包阶段被跳过的提示——优先级低于 F13 的「剥离」，
-      // 后者更严重，覆盖在前者上。
-      else if (collectStats.hasSkipped) {
-        final statMsg = collectStats.summary();
-        if (statMsg != null) msg = '$msg（$statMsg）';
-      }
-      try {
-        await DataIo.saveToDownloads(
-          name,
-          payload,
-          mimeType: 'application/json',
-        );
-      } catch (e) {
-        msg = isEnc
-            ? '已生成加密备份（下载目录写入失败，请改用「分享」保存）'
-            : '已生成备份（下载目录写入失败，请改用「分享」保存）';
-      }
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            // N5（v3.0.9 审计）：模板收集失败追加在文案尾部——放在最终
-            // snackbar 一处拼接，避免被下方「下载目录写入失败」分支覆盖。
-            content: Text(tplCollectFailed
-                ? '$msg（用户模板读取失败，未包含在备份中）'
-                : msg),
-            action: SnackBarAction(
-              label: '分享',
-              onPressed: () => DataIo.shareFile(file),
+        final plain = built.body;
+        final attachmentsDropped = built.stripped;
+        // P2-9：附件统计提示——若收集阶段因超体积 / 缺失跳过了附件，
+        // 在 snackbar 文案中告知用户，避免「我存的附件怎么没在备份里」的迷惑。
+        final collectStats = built.attachStats;
+        // 新P3-3（v2.9.7 审计）：加密路径按**密文尺寸**预检——AES-GCM 信封以
+        // base64 承载密文（约 1.33× 膨胀），明文约 >24MB 时密文 `.enc.json` 会超
+        // 导入端 32MB 硬限（pickJsonFile 读取前拒绝），「备份成功落盘、需要还原
+        // 时被拒于解密之前」。此处用**精确明文字节数**（utf8）估算密文文件尺寸，
+        // 预算 = 上限 × 3/4 再减 1MB（信封字段 KB 级 + 估算安全余量）。
+        final isEnc = encryptOn;
+        String payload = plain;
+        if (isEnc) {
+          final plainBytes = utf8.encode(plain).length;
+          final cipherBudget = (DataIo.maxImportTextBytes * 3 ~/ 4) - (1 << 20);
+          if (plainBytes > cipherBudget) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('加密备份未执行：数据超过密文导入上限'
+                    '（附件已剥离仍超限）。请减少大附件后重试，或改用不加密备份'),
+                duration: Duration(seconds: 5),
+              ));
+            }
+            return;
+          }
+          stage('正在加密…');
+          // P0-1 守卫：encryptOn 为真而口令缺失时 buildBackupPayload 会抛
+          // BackupEncryptException，整个备份中止（不写任何文件），绝不静默降级明文。
+          payload = await encryptPlainOffMainThread(plain, pass ?? '');
+        }
+        stage('正在写入文件…');
+        final name = isEnc
+            ? '有条-backup-${_ts()}.enc.json'
+            : '有条-backup-${_ts()}.json';
+        // 1) App 私有目录留一份，供「分享」按钮兜底使用（Downloads 写入失败也能发出去）
+        final file = await DataIo.saveToAppDocs(name, payload);
+        // P3-16（v2.9.9 审计）：备份已在 App 文档目录落盘 → 此刻才保存口令提示。
+        // 不等待：提示保存失败不影响备份主流程。
+        if (passHint != null) {
+          unawaited(provider.setAutoBackupPassHint(passHint));
+        }
+        // 2) 同时写入系统「下载 / Downloads」目录，文件管理器可见
+        String msg = isEnc
+            ? '已加密保存到「下载」目录（凭口令恢复）'
+            : '已保存到「下载」目录（Downloads）';
+        // F13：超额自动剥离附件后，把这件事明确告诉用户，避免「为什么附件没在里面」
+        // 的迷惑。
+        if (attachmentsDropped) {
+          msg = isEnc
+              ? '已加密保存到「下载」目录（附件因体积超限已剥离，凭口令恢复）'
+              : '已保存到「下载」目录（附件因体积超限已剥离）';
+        }
+        // P2-9：附件被打包阶段被跳过的提示——优先级低于 F13 的「剥离」，
+        // 后者更严重，覆盖在前者上。
+        else if (collectStats.hasSkipped) {
+          final statMsg = collectStats.summary();
+          if (statMsg != null) msg = '$msg（$statMsg）';
+        }
+        // P2-1（v3.1.5 审计）：安全模式导出的文件必须当场说清「不含可用数据」，
+        // 不能只提示「已保存」。
+        if (unsafe.isNotEmpty) {
+          msg = '$msg（安全模式导出：${unsafe.join('、')}可能为示例或空数据）';
+        }
+        try {
+          await DataIo.saveToDownloads(
+            name,
+            payload,
+            mimeType: 'application/json',
+          );
+        } catch (e) {
+          msg = isEnc
+              ? '已生成加密备份（下载目录写入失败，请改用「分享」保存）'
+              : '已生成备份（下载目录写入失败，请改用「分享」保存）';
+        }
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              // N5（v3.0.9 审计）：模板收集失败追加在文案尾部——放在最终
+              // snackbar 一处拼接，避免被「下载目录写入失败」分支覆盖。
+              content: Text(tplCollectFailed
+                  ? '$msg（用户模板读取失败，未包含在备份中）'
+                  : msg),
+              action: SnackBarAction(
+                label: '分享',
+                onPressed: () => DataIo.shareFile(file),
+              ),
             ),
-          ),
-        );
-      }
+          );
+        }
+      });
     } on BackupEncryptException catch (e) {
       // 加密意图无法满足：直接透出原因，不包装成「备份失败：BackupEncryptException: …」。
       if (context.mounted) {
@@ -478,8 +608,21 @@ class BackupSheet {
       currentHabitCount: habitProvider.habits.length,
       currentFocusCount: focusProvider.sessions.length,
     );
+    // P2-1（v3.1.5 审计）：安全模式导出的文件（带 safeMode 标记）必须二次拦截，
+    // 否则「事后拿它恢复」就把示例 / 空数据写回真实库。
+    if (!await confirmPartialRestore(context, data)) return;
     // P2-2（v3.1.4 审计）：空 habits / check_ins / focus 段先过一道确认。
-    if (!await confirmEmptyRestoreSections(context, data)) return;
+    // U-2（v3.1.5 审计）：与本机现有数据比较后才警告——只用任务的用户、
+    // 或本机本来就没有习惯 / 专注的用户，不该每次恢复都被吓一次。
+    if (!await confirmEmptyRestoreSections(
+      context,
+      data,
+      currentHabitCount: habitProvider.habits.length,
+      currentCheckInCount: habitProvider.checkIns.length,
+      currentFocusCount: focusProvider.sessions.length,
+    )) {
+      return;
+    }
     final confirm = await _showRestoreConfirm(
       context,
       title: '从备份恢复？',
@@ -555,7 +698,10 @@ class BackupSheet {
         final blobStats = await provider.restoreFromJson(plaintext,
             includeTrash: includeTrash,
             rescheduleReminders:
-                !(restoreSettings && data['prefs'] is Map));
+                !(restoreSettings && data['prefs'] is Map),
+            // P2-3（v3.1.5 审计）：关「同时恢复设置」时，顶层 legacy 通知 /
+            // 声音开关也不得被备份覆盖（否则全部提醒静默失效且无人告知）。
+            applyLegacyToggles: restoreSettings);
         // P3-6（v3.0.8 审计）：消费任务落盘结果并入 failures——旧实现丢弃，
         // 「已恢复」可能在任务未写库时上报（重启后恢复条目全部蒸发；习惯侧已于
         // v3.0.6 消费 bool，任务侧这里是不对称的漏网口）。
@@ -1005,8 +1151,19 @@ class BackupSheet {
         currentHabitCount: habitProvider.habits.length,
         currentFocusCount: focusProvider.sessions.length,
       );
+      // P2-1（v3.1.5 审计）：与 _doRestore 同款拦截（安全模式导出的快照）。
+      if (!await confirmPartialRestore(context, data)) return;
       // P2-2（v3.1.4 审计）：与 _doRestore 同款的空段危险信号确认。
-      if (!await confirmEmptyRestoreSections(context, data)) return;
+      // U-2（v3.1.5 审计）：同款与本机现有数据比较，避免无谓惊吓。
+      if (!await confirmEmptyRestoreSections(
+        context,
+        data,
+        currentHabitCount: habitProvider.habits.length,
+        currentCheckInCount: habitProvider.checkIns.length,
+        currentFocusCount: focusProvider.sessions.length,
+      )) {
+        return;
+      }
       final confirm = await _showRestoreConfirm(
         context,
         title: '从 ${entry.label} 的快照还原？',
@@ -1057,7 +1214,10 @@ class BackupSheet {
         final blobStats = await provider.restoreFromJson(plaintext,
             includeTrash: includeTrash,
             rescheduleReminders:
-                !(restoreSettings && data['prefs'] is Map));
+                !(restoreSettings && data['prefs'] is Map),
+            // P2-3（v3.1.5 审计）：关「同时恢复设置」时，顶层 legacy 通知 /
+            // 声音开关也不得被备份覆盖（否则全部提醒静默失效且无人告知）。
+            applyLegacyToggles: restoreSettings);
         // P3-6（v3.0.8 审计）：同 _doRestore，消费任务落盘结果并入 failures。
         if (!blobStats.persisted) {
           failures.add('任务（写入未保存，重启可能丢失）');

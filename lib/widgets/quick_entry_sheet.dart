@@ -51,6 +51,10 @@ class QuickEntrySheet extends StatefulWidget {
   /// 最终 980 字，所谓上限根本没生效。现在按「保留下来的原文长度」算剩余
   /// 额度，保证**合并后总长** ≤ [maxLength]；同时把选区合法性校验收在一处
   /// （未聚焦 / 越界退化为追加到末尾），返回新文本、光标位置与是否截断。
+  ///
+  /// U-3（v3.1.5 审计）：口径统一为**字素簇**——TextField 的 `maxLength` 就是
+  /// 按字素计数（1 个 emoji / 1 个组合字算 1 字），旧实现按 UTF-16 码元截，
+  /// 同样 500 字额度下粘贴只能放 250 个 emoji，而提示统一写「500 字」。
   @visibleForTesting
   static ({String text, int cursor, bool truncated}) mergeClipboardText(
     String current,
@@ -65,19 +69,20 @@ class QuickEntrySheet extends StatefulWidget {
     final sel = valid
         ? selection
         : TextSelection.collapsed(offset: current.length);
-    final kept = current.length - (sel.end - sel.start);
-    final room = maxLength - kept;
-    var clipped = pasted;
-    var truncated = false;
-    if (clipped.length > room) {
-      clipped = room <= 0 ? '' : clipToUtf16Safe(clipped, room);
-      truncated = true;
+    // 先按选区替换出「合并后的完整文本」，再整体按字素簇裁——这样无论粘在
+    // 开头、中间还是末尾，剩余额度都是同口径。
+    final merged = current.replaceRange(sel.start, sel.end, pasted);
+    final chars = merged.characters;
+    if (chars.length <= maxLength) {
+      return (
+        text: merged,
+        cursor: sel.start + pasted.length,
+        truncated: false,
+      );
     }
-    return (
-      text: current.replaceRange(sel.start, sel.end, clipped),
-      cursor: sel.start + clipped.length,
-      truncated: truncated,
-    );
+    final clipped = chars.take(maxLength).toString();
+    // 截断后光标落在保留文本末尾：插入点之后的内容已被裁掉，没有更合理的位置。
+    return (text: clipped, cursor: clipped.length, truncated: true);
   }
 
   /// 可选预填文本（如分享入口转发过来的文字），非空时录入层预填并实时解析。
@@ -142,6 +147,8 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
   /// Navigator.pop。与 habit_screen 的 _AddHabitSheet / new_task_sheet 的 _save
   /// 同口径。
   bool _saving = false;
+  /// U-3（v3.1.5 审计）：字数上限提示只弹一次（每个弹层会话）。
+  bool _limitHintShown = false;
 
   @override
   void initState() {
@@ -174,6 +181,20 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
 
   void _onChanged(String v) {
     setState(() => _parsed = TaskParser.parse(v));
+    // U-3（v3.1.5 审计）：手输到上限给**一次**非阻塞提示。旧实现把计数器
+    // 藏起来、又用 enforced 静默截断——打到 500 字时字符不再出现，用户
+    // 完全不知道发生了什么（只有粘贴路径会弹提示）。
+    if (!_limitHintShown &&
+        v.characters.length >= QuickEntrySheet.maxInputLength) {
+      _limitHintShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('已达 500 字上限，继续输入不会再增加'),
+          duration: Duration(milliseconds: 1400),
+        ));
+      });
+    }
   }
 
   /// A4（v3.1.1 功能增强）：从剪贴板粘贴建任务——**只有用户点按本按钮才读取**
@@ -201,6 +222,8 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     }
     final r = QuickEntrySheet.mergeClipboardText(
         _controller.text, _controller.selection, text);
+    // 粘贴路径自带「超出部分已截断」提示，避免与字数上限提示叠两层。
+    if (r.truncated) _limitHintShown = true;
     _controller.value = TextEditingValue(
       text: r.text,
       selection: TextSelection.collapsed(offset: r.cursor),
@@ -400,12 +423,18 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
                   // U-2（v3.1.4 审计）：手输与粘贴同口径上限（此前只有粘贴
                   // 被截，输入框可远超 500 字，提示文案因此不实）。
                   maxLength: QuickEntrySheet.maxInputLength,
-                  maxLengthEnforcement: MaxLengthEnforcement.enforced,
+                  // U-3（v3.1.5 审计）：改用 `truncateAfterCompositionEnds`——
+                  // `enforced` 会在拼音 / 笔画这类**组合区**超限时立即截断，
+                  // 把用户正在组合的汉字打断；该策略要等组合结束才截，也是
+                  // Flutter 在 Android 上的默认行为。
+                  maxLengthEnforcement:
+                      MaxLengthEnforcement.truncateAfterCompositionEnds,
                   textInputAction: TextInputAction.done,
                   onChanged: _onChanged,
                   onSubmitted: (_) => _submit(),
                   decoration: InputDecoration(
-                    counterText: '', // 不显示计数器，避免挤高输入区
+                    // U-3（v3.1.5 审计）：不再隐藏计数器——`counterText: ''`
+                    // 配合 enforced 等于「静默截断」，用户无从判断还剩多少额度。
                     hintText: '例如：明天下午3点 交周报 !高 #工作',
                     hintStyle: TextStyle(color: ext.meta, fontSize: 15),
                     filled: true,

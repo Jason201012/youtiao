@@ -37,6 +37,39 @@ class ExportSheet {
                 const Text('导出数据',
                     style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
+                // P2-1（v3.1.5 审计）：CSV / Excel / Markdown / iCal 全部基于内存
+                // `_tasks`，安全模式下那就是 7 条示例或加载前旧态。这些是可读副本
+                // （不会被回灌），无需拦截，但**必须**在导出前说清它不代表真实数据，
+                // 否则用户会把它当归档副本，事后再也找不回真实内容。
+                Builder(builder: (ctx) {
+                  final unsafe = <String>[
+                    if (!taskProvider.tasksLoadedFromDb ||
+                        taskProvider.dbLoadFailed)
+                      '任务',
+                    if (habitProvider.dbLoadFailed) '习惯',
+                    if (focusProvider.dbLoadFailed) '专注',
+                  ];
+                  if (unsafe.isEmpty) return const SizedBox.shrink();
+                  final scheme = Theme.of(ctx).colorScheme;
+                  return Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: scheme.errorContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '只读安全模式：${unsafe.join('、')}数据可能为示例或空，'
+                      '导出的副本不代表真实数据（建议先重试加载）。',
+                      style: TextStyle(
+                          fontSize: 12.5,
+                          height: 1.35,
+                          color: scheme.onErrorContainer),
+                    ),
+                  );
+                }),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('包含回收站'),

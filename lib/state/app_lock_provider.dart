@@ -14,7 +14,8 @@ import 'package:todolist/services/app_log.dart';
 /// - [locked] 表示当前是否需要验证；每次 App 回到前台（resumed）且启用锁时置为
 ///   true，验证成功后置 false。冷启动首帧也需验证（MainScaffold 在 locked 时渲染
 ///   独立解锁页，而非主界面）。
-/// - 设备不支持生物识别时 [biometricAvailable] 为 false，设置页开关禁用并提示。
+/// - 本机无可用凭据（未录入生物识别且未设锁屏密码）时 [canAuthenticate] 为
+///   false，设置页开关禁用并如实说明原因。
 /// - 指纹/面容之外允许降级用手机锁屏密码（PIN/图案/密码）解锁；
 ///   系统验证弹窗文案统一汉化（v2.6.4 用户反馈部分文案为英文）。
 class AppLockProvider extends ChangeNotifier {
@@ -25,9 +26,51 @@ class AppLockProvider extends ChangeNotifier {
   bool _enabled = false;
   bool get appLockEnabled => _enabled;
 
-  /// 设备是否支持且已录入生物识别（启动时探测一次）。
-  bool _biometricAvailable = false;
-  bool get biometricAvailable => _biometricAvailable;
+  /// P1-1 / U-1（v3.1.5 审计）：**本机现在能否完成一次身份验证**。
+  ///
+  /// 旧实现用 `canCheckBiometrics`（生物识别**硬件**能力）当可用性，语义是
+  /// 「有指纹 / 面容硬件」，不要求已录入；在「有硬件 + 未录入 + 未设锁屏密码」
+  /// 的设备上，旧逻辑允许开启应用锁，随后 `authenticate` 必然返回
+  /// `notAvailable`，而解锁页又因 `bioOk == true` 不渲染关闭出口 —— 用户被
+  /// 永久锁在应用外，唯一出路是清数据。现在只认 `isDeviceSupported()`
+  /// （Android 原生 = `isDeviceSecure() || canAuthenticateWithBiometrics()`），
+  /// 即「有锁屏密码或已录入生物识别」二者之一，才允许开启 / 才隐藏关闭出口。
+  bool _canAuthenticate = false;
+  bool get canAuthenticate => _canAuthenticate;
+
+  /// P1-1（v3.1.5 审计）：`canCheckBiometrics` 的原始语义——**只有硬件**，
+  /// 不参与任何门槛判定，仅用于设置页文案区分「有硬件但未录入」。
+  bool _biometricHardware = false;
+  bool get hasBiometricHardware => _biometricHardware;
+
+  /// U-1（v3.1.5 审计）：本机是否已录入生物识别（`getAvailableBiometrics`
+  /// 非空）。用于区分「生物识别 / 锁屏密码 / 两者皆可」三套文案，不再把
+  /// 「有锁屏密码」的设备说成「使用生物识别解锁」。
+  bool _hasEnrolledBiometrics = false;
+  bool get hasEnrolledBiometrics => _hasEnrolledBiometrics;
+
+  /// 兼容旧字段名：语义已修正为 [canAuthenticate]（「现在能验证身份」）。
+  bool get biometricAvailable => _canAuthenticate;
+
+  /// P1-1（v3.1.5 审计）：最近一次 [authenticate] 是否因「无处可验证」失败
+  /// （`notAvailable` / `notEnrolled` / `passcodeNotSet` 等）。为 true 时解锁页
+  /// 动态渲染关闭出口——即便启动探测曾误判，用户也不会被永久锁死。
+  bool _authUnavailable = false;
+  bool get authUnavailable => _authUnavailable;
+
+  /// 解锁页是否应显示「无法验证？关闭应用锁」出口。
+  bool get unlockEscapeVisible => !_canAuthenticate || _authUnavailable;
+
+  /// 当前可用凭据的展示文案（设置页 / 解锁页共用，避免两处各写一份）。
+  String get credentialLabel {
+    if (!_canAuthenticate) return '无可用验证方式';
+    return _hasEnrolledBiometrics ? '生物识别或锁屏密码' : '锁屏密码';
+  }
+
+  /// 无可用凭据时的原因文案。
+  String get unavailableHint => _biometricHardware
+      ? '本机有生物识别硬件，但尚未录入指纹 / 面容，也没有设置锁屏密码'
+      : '本机未设置锁屏密码';
 
   /// U-3（v3.1.4 审计）：最近一次 [refreshEnabled] 是否把备份恢复来的
   /// 「应用锁已开启」强制关掉。恢复结果据此如实告知用户，不再静默降级。
@@ -48,19 +91,37 @@ class AppLockProvider extends ChangeNotifier {
   /// 竞态，若不宽限会出现「识别成功却立刻回到锁定页」。
   DateTime? _lastUnlockAt;
 
-  /// 启动期探测生物识别可用性：不抛错、安静降级（不支持则开关不可用）。
+  /// 启动期探测可用凭据：不抛错、安静降级（无可验证方式则开关不可用）。
+  ///
+  /// P1-1（v3.1.5 审计）：三个标志分工明确——
+  /// - [hasBiometricHardware]（`canCheckBiometrics`）：仅文案用，**不作门槛**；
+  /// - [canAuthenticate]（`isDeviceSupported`）：唯一门槛，等价「现在能验证」；
+  /// - [hasEnrolledBiometrics]（`getAvailableBiometrics` 非空）：区分布局文案。
+  /// 旧实现把硬件能力当门槛，是「可开启但必然验证失败」的自锁死路根因。
   Future<void> probeBiometric() async {
+    var hardware = false;
     try {
-      _biometricAvailable = await _auth.canCheckBiometrics;
-      // 部分机型 canCheckBiometrics 为 false 但 deviceSupportsBiometrics 为 true，
-      // 再补一次探测，避免「有硬件但被标记不可用」导致开关误禁用。
-      if (!_biometricAvailable) {
-        _biometricAvailable = await _auth.isDeviceSupported();
-      }
+      hardware = await _auth.canCheckBiometrics;
     } catch (e) {
-      AppLog.d('[AppLock] 探测生物识别失败，降级为不可用：$e');
-      _biometricAvailable = false;
+      AppLog.d('[AppLock] 探测生物识别硬件失败（按无硬件处理）：$e');
     }
+    var canAuth = false;
+    try {
+      canAuth = await _auth.isDeviceSupported();
+    } catch (e) {
+      AppLog.d('[AppLock] 探测设备凭据失败（按不可验证处理）：$e');
+    }
+    var enrolled = false;
+    if (canAuth) {
+      try {
+        enrolled = (await _auth.getAvailableBiometrics()).isNotEmpty;
+      } catch (e) {
+        AppLog.d('[AppLock] 探测已录入生物识别失败（按未录入处理）：$e');
+      }
+    }
+    _biometricHardware = hardware;
+    _canAuthenticate = canAuth;
+    _hasEnrolledBiometrics = enrolled;
     notifyListeners();
   }
 
@@ -68,14 +129,18 @@ class AppLockProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _enabled = prefs.getBool(_kEnabled) ?? false;
     await probeBiometric();
-    // 冷启动若已开启锁，则首帧需验证；未开启则直接解锁态。
+    // P1-1（v3.1.5 审计）：这里**不**因「探测不到可用凭据」而自动关闭应用锁。
+    // 自动降级等于静默削弱用户已开启的安全设置；真实死路由解锁页的动态出口
+    // （[unlockEscapeVisible]）兜底 —— 用户能自己看到原因、亲手关闭。
+    // 只有恢复备份这条路径（[refreshEnabled]）才强制关闭，因为那是把别人的
+    // 开关状态写进本机，必须过门槛。
     _locked = _enabled;
     notifyListeners();
   }
 
-  /// 设置开关：开→关闭时立即解锁；关→开时若设备不支持则拒绝并回 false。
+  /// 设置开关：开→关闭时立即解锁；关→开时若本机无可用凭据则拒绝并回 false。
   Future<bool> setEnabled(bool v) async {
-    if (v && !_biometricAvailable) return false; // 设备不支持，拒绝开启
+    if (v && !_canAuthenticate) return false; // 无可用凭据，拒绝开启
     _enabled = v;
     if (!v) _locked = false; // 关闭锁即视为已解锁
     final prefs = await SharedPreferences.getInstance();
@@ -91,19 +156,22 @@ class AppLockProvider extends ChangeNotifier {
   /// （`_locked = _enabled`），但还原发生在 App 前台运行期，若强行锁屏会打断用户操作，
   /// 因此这里只同步开关与生物特征可用性，真正的重新上锁交由下次生命周期回调处理。
   ///
-  /// P2-3（v3.1.0 审计）：恢复路径补上与 [setEnabled] 同等的**硬件门槛**——
-  /// 备份可携带 app_lock_enabled=true，恢复把它写进 prefs；若本机未录入生物
-  /// 识别也无锁屏凭据，下一次回前台就会锁死在解锁页（设置页不可达）。这里
-  /// 检测到「开关为开但生物识别不可用」时强制写回 false，与「启用必有门槛」
-  /// 的启用校验一致；配合解锁页新增的「无法验证？关闭应用锁」出口（main
-  /// AppLockGate，P1-1 v3.1.2 审计收窄：仅在 !biometricAvailable 死路渲染，
-  /// 且关闭前强制一次 authenticate），两道防线共同消除不可解锁路径。
+  /// P2-3（v3.1.0 审计）：恢复路径补上与 [setEnabled] 同等的**凭据门槛**——
+  /// 备份可携带 app_lock_enabled=true，恢复把它写进 prefs；若本机无可用凭据
+  /// （未录入生物识别且无锁屏密码），下一次回前台就会锁死在解锁页（设置页
+  /// 不可达）。这里检测到「开关为开但不可验证」时强制写回 false，与「启用必有
+  /// 门槛」的启用校验一致；配合解锁页新增的「无法验证？关闭应用锁」出口（
+  /// main AppLockGate，P1-1 v3.1.2 审计收窄：仅在真实死路渲染，且关闭前强制
+  /// 一次 authenticate），两道防线共同消除不可解锁路径。
+  /// P1-1（v3.1.5 审计）：门槛判定由 `canCheckBiometrics`（硬件）改为
+  /// [canAuthenticate]（现在能验证），否则「有硬件未录入」的设备会被判为可用。
   Future<void> refreshEnabled() async {
     _lastRefreshForceDisabled = false;
     final prefs = await SharedPreferences.getInstance();
     var enabled = prefs.getBool(_kEnabled) ?? false;
     await probeBiometric();
-    if (enabled && !_biometricAvailable) {
+    // P1-1（v3.1.5 审计）：门槛从「有生物识别硬件」改为「现在能验证身份」。
+    if (enabled && !_canAuthenticate) {
       enabled = false;
       _lastRefreshForceDisabled = true;
       try {
@@ -187,6 +255,8 @@ class AppLockProvider extends ChangeNotifier {
       );
       if (ok) {
         _locked = false;
+        // P1-1（v3.1.5 审计）：验证成功说明本机有可用凭据，撤销「不可验证」标记。
+        _authUnavailable = false;
         // 记录解锁时刻，供 [onResumed] 的宽限期判断（竞态豁免 2）。
         _lastUnlockAt = DateTime.now();
       }
@@ -194,12 +264,39 @@ class AppLockProvider extends ChangeNotifier {
       return ok;
     } catch (e) {
       AppLog.d('[AppLock] 验证异常：$e');
+      // P1-1（v3.1.5 审计）：识别「本机无可用凭据」类失败，动态放出解锁页的
+      // 关闭出口。旧实现只靠启动探测，探测一旦误判（有硬件但未录入）用户就
+      // 再也没有出口；现在真实调用失败也能兜底。
+      if (_isUnavailableError(e)) _authUnavailable = true;
       // 异常时不自动解锁（安全优先），返回 false 让 UI 维持锁定页。
       return false;
     } finally {
       _authenticating = false;
-      // 状态可能已变（成功解锁），通知监听方刷新。
+      // 状态可能已变（成功解锁 / 新增不可验证标记），通知监听方刷新。
       notifyListeners();
     }
+  }
+
+  /// P1-1（v3.1.5 审计）：「无处可验证」类平台错误码 / 文案的宽松判定。
+  /// local_auth 各平台 / 版本对同一语义的命名不一（`NotAvailable` /
+  /// `notEnrolled` / `noBiometrics` / `PasscodeNotSet` / `deviceCredentialsNotSet`），
+  /// 这里统一小写后做包含匹配；无法判定时保守返回 false（不放宽安全边界）。
+  static bool _isUnavailableError(Object e) {
+    final text = e.toString().toLowerCase();
+    for (final key in const [
+      'notavailable',
+      'not enrolled',
+      'notenrolled',
+      'nobiometric',
+      'no biometric',
+      'devicecredentialsnotset',
+      'passcodenotset',
+      'passcode not set',
+      'devicenotsupported',
+      'no_fragment_activity',
+    ]) {
+      if (text.contains(key)) return true;
+    }
+    return false;
   }
 }
