@@ -19,6 +19,7 @@ import 'package:todolist/widgets/task_row.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/review_card.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 import 'package:todolist/widgets/today_card.dart';
 import 'package:todolist/screens/review_screen.dart';
 import 'package:todolist/screens/period_review_screen.dart';
@@ -1158,10 +1159,13 @@ class _TodayMitCardState extends State<_TodayMitCard> {
     final chosen = provider.todayMit;
     final picked = await showDialog<Set<String>>(
       context: context,
+      // P2-2（v3.1.6 审计）：AlertDialog 是更高路由，弹内 SnackBar 会被
+      // 本 dialog 盖住；挂消息宿主让「满员」提示显示在 dialog 子树内。
       builder: (dctx) {
         var query = '';
         final selected = <String>{...chosen};
-        return StatefulBuilder(builder: (sctx, setDialogState) {
+        return SheetMessageHost(
+          child: StatefulBuilder(builder: (sctx, setDialogState) {
           final pool = provider.selectableMitTasks(query: query);
           final changed = selected.length != chosen.length ||
               !selected.containsAll(chosen);
@@ -1224,13 +1228,12 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                                   if (!checked &&
                                       selected.length >=
                                           TaskProvider.kDailyMitMax) {
-                                    ScaffoldMessenger.of(sctx)
-                                        .showSnackBar(SnackBar(
-                                      content: Text(
-                                          '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先取消一个选择'),
-                                      duration:
-                                          const Duration(milliseconds: 900),
-                                    ));
+                                    showSheetMessage(
+                                      sctx,
+                                      '今日三件最多 ${TaskProvider.kDailyMitMax} 件，请先取消一个选择',
+                                      duration: const Duration(milliseconds: 1400),
+                                      isError: true,
+                                    );
                                     return;
                                   }
                                   setDialogState(() {
@@ -1261,7 +1264,9 @@ class _TodayMitCardState extends State<_TodayMitCard> {
               ),
             ],
           );
-        });
+          // P2-2：闭合 SheetMessageHost（StatefulBuilder 之上）。
+        }),
+        );
       },
     );
     if (picked == null || !context.mounted) return;

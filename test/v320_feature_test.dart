@@ -330,26 +330,34 @@ void main() {
       expect(sp.getString('reminders_muted_until'), isNull);
     });
 
-    test('daily_mit 进 prefs 备份白名单（往返）；reminders_muted_until 改本机状态不迁移（U-6）',
+    // P3-7（v3.1.6 审计）口径修正：本用例原先断言 daily_mit **随备份迁移**
+    // （A5 v3.1.1 的行为），报告指出恢复一份昨天或更早的备份时，备份里的
+    // 旧日期映射 + provider 只保留今天键 = 今日三件被静默清空。现在与
+    // reminders_muted_until 同列「本机短期状态」，导出 / 恢复 / 差异摘要全排除。
+    test('daily_mit 与 reminders_muted_until 均为本机短期状态，不随备份迁移',
         () async {
       final sp = await SharedPreferences.getInstance();
       const localMuted = '2026-11-01T10:00:00.000';
+      const localMit = '{"2026-10-31":["local-today"]}';
       await sp.setString('reminders_muted_until', localMuted);
-      await sp.setString('daily_mit', '{"2026-10-31":["1"]}');
+      await sp.setString('daily_mit', localMit);
       final collected = await collectAppPrefs();
-      expect(collected['daily_mit'], '{"2026-10-31":["1"]}');
-      // U-6（v3.1.2 审计）：静音是本机短期状态（非用户偏好），导出侧排除。
+      expect(collected.containsKey('daily_mit'), isFalse,
+          reason: 'P3-7：今日三件不进备份，避免恢复旧备份清空当天选择');
       expect(collected.containsKey('reminders_muted_until'), isFalse);
 
-      // applyAppPrefs 往返（先清后恢复）；旧备份携带的静音键同样写不进。
+      // 模拟「恢复昨天的备份」：备份里带旧 daily_mit + 旧静音窗口，
+      // 本机当前选择必须原样保留。
       await sp.remove('reminders_muted_until');
       await sp.remove('daily_mit');
+      await sp.setString('daily_mit', localMit);
       await applyAppPrefs(<String, dynamic>{
-        ...collected,
+        'daily_mit': '{"2026-10-30":["1"]}',
         'reminders_muted_until': '2030-01-01T00:00:00.000',
       });
       final sp2 = await SharedPreferences.getInstance();
-      expect(sp2.getString('daily_mit'), '{"2026-10-31":["1"]}');
+      expect(sp2.getString('daily_mit'), localMit,
+          reason: '恢复旧备份不得覆盖 / 清空本机今日三件');
       expect(sp2.getString('reminders_muted_until'), isNull,
           reason: '恢复不再「莫名其妙又被静音」（本机状态保留）');
     });

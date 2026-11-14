@@ -190,10 +190,14 @@ void main() {
           reason: '有可用凭据时不得给出「关闭应用锁」入口（否则两键即绕过）');
     });
 
-    test('真实调用返回 notAvailable → 动态放出出口（探测误判的兜底）', () async {
+    // P2-1（v3.1.6 审计）口径修正：旧用例断言「一次 NotAvailable 异常就
+    // 粘滞置位 authUnavailable + 放出出口」，正是报告点名的绕过面来源。
+    // 现在 authenticateDetailed 会重新探测：探测仍判可验证时按「瞬时故障」
+    // 处理，不放宽出口；探测确认无凭据的死路由 v316 审计用例覆盖。
+    test('瞬时 NotAvailable 但重新探测仍可验证 → 不得放出关闭出口', () async {
       bioHardware = true;
       bioEnrolled = false;
-      deviceCredential = true;
+      deviceCredential = true; // isDeviceSupported=true：只是传感器瞬时故障
       authResult = <String, dynamic>{'notAvailable': true};
       final sp = await SharedPreferences.getInstance();
       await sp.setBool('app_lock_enabled', true);
@@ -201,11 +205,13 @@ void main() {
       await lock.load();
       expect(lock.unlockEscapeVisible, isFalse);
 
-      final ok = await lock.authenticate(reason: '测试');
-      expect(ok, isFalse);
-      expect(lock.authUnavailable, isTrue);
-      expect(lock.unlockEscapeVisible, isTrue,
-          reason: '验证真实失败也必须能退出，不能只靠启动探测');
+      final r = await lock.authenticateDetailed(reason: '测试');
+      expect(r.verified, isFalse);
+      expect(r.unavailableConfirmed, isFalse,
+          reason: '取消 / 瞬时异常不得被当成「本机无凭据」');
+      expect(lock.authUnavailable, isFalse);
+      expect(lock.unlockEscapeVisible, isFalse,
+          reason: 'P2-1：探测仍可用时出口必须隐藏，避免「取消验证」绕过');
     });
   });
 
@@ -465,17 +471,30 @@ void main() {
   // ══════════════════════════════════════════════════════════════════
 
   group('P3-7 自动备份警告持久化', () {
-    test('附件剥离警告重启后仍在，副标题标注「不含附件」', () async {
+    // P3-2（v3.1.6 审计）口径修正：旧用例只往 prefs 写一条含「剥离附件」
+    // 的错误串就断言副标题带「不含附件」，把「靠错误串猜形态」这个缺陷
+    // 编码成了正确行为。现在标注由**真实文件名**推导，且日期不被错误盖掉。
+    test('旧 .noattach 快照（无错误串）重启后仍标注「不含附件」+ 日期', () async {
       final sp = await seedPrefs();
-      await sp.setString('last_auto_backup_date', todayKey());
-      await sp.setString('last_auto_backup_error',
-          '自动备份已剥离附件（数据体积超限），任务/习惯/专注数据完整');
+      final key = todayKey();
+      await sp.setString('last_auto_backup_date', key);
+      // 刻意不写 last_auto_backup_error：模拟旧版本写的快照 / 错误键丢失。
+      final dir = Directory('$caseDocs/backup/auto')
+        ..createSync(recursive: true);
+      File('${dir.path}/$key.noattach.json').writeAsStringSync(jsonEncode({
+        'version': 3,
+        'tasks': <dynamic>[],
+        'pad': 'x' * 400, // 越过 _kMinSnapshotBytes 下限
+      }));
 
       final p = TaskProvider();
       await p.load();
-      expect(p.lastAutoBackupError, isNotNull);
+      expect(p.lastAutoBackupNoAttach, isTrue);
       expect(p.lastAutoBackupLabel, contains('不含附件'),
-          reason: 'P3-7：旧实现重启后只剩「最近快照：今天」，用户以为快照完整');
+          reason: 'P3-2：不能只靠错误串推断附件形态');
+      expect(p.lastAutoBackupLabel, contains('最近快照：'),
+          reason: 'P3-2：日期必须与状态同列，不能被错误分支盖掉');
+      expect(p.autoBackupSubtitle, contains(key));
     });
   });
 

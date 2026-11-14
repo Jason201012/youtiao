@@ -588,6 +588,10 @@ class TaskProvider extends ChangeNotifier {
   /// `_lastAutoBackupError` 置空 —— 设置页只剩「最近快照：今天」，用户完全
   /// 不知道这份快照「不含附件 / 缺用户模板」，真正要恢复时才发现。
   static const String _kLastAutoBackupError = 'last_auto_backup_error';
+  /// P3-2（v3.1.6 审计）：警告 / 失败所属的**快照日期**。
+  /// 旧实现只存错误串，当日已有新快照时「前一天的失败」依然以现行异常
+  /// 展示；关掉自动备份后也没人清理。绑定日期后展示层能区分「本次」与「上次」。
+  static const String _kLastAutoBackupErrorDate = 'last_auto_backup_error_date';
   bool _autoBackupEnabled = true;
   bool get autoBackupEnabled => _autoBackupEnabled;
   /// 最近一次自动备份成功的本地日期（YYYY-MM-DD），null 表示从未成功过。
@@ -596,28 +600,83 @@ class TaskProvider extends ChangeNotifier {
   /// 最近一次自动备份失败的提示（用于设置页展示）；null = 无错误。
   String? _lastAutoBackupError;
   String? get lastAutoBackupError => _lastAutoBackupError;
-  /// 设置页副标题：展示最近一次成功备份的本地日期；从未成功则提示「未备份」。
-  /// P3-7（v3.1.5 审计）：附件被剥离时把「不含附件」直接写进副标题，而不是
-  /// 只在恢复面板的文件名后缀里暗示。
+  String? _lastAutoBackupErrorDate;
+  /// P3-2（v3.1.6 审计）：当日快照是否「不含附件」，由**真实文件名**推导，
+  /// 不再靠错误串里有没有「剥离附件」四个字（旧版写的 .noattach 快照、
+  /// 错误键没来得及持久化、重启后都会丢失标注）。
+  bool _lastAutoBackupNoAttach = false;
+  bool get lastAutoBackupNoAttach => _lastAutoBackupNoAttach;
+
+  /// 设置页副标题：日期 + 状态两段式，日期永不被错误分支盖掉。
   String get lastAutoBackupLabel {
     if (_lastAutoBackupDate == null) return '尚未生成快照';
-    final mention = (_lastAutoBackupError ?? '').contains('剥离附件')
-        ? '（不含附件）'
-        : '';
+    final mention = _lastAutoBackupNoAttach ? ' · 不含附件' : '';
     return '最近快照：${_dateKey(_lastAutoBackupDate!)}$mention';
   }
+
+  /// 错误是否属于**上一次**（更早日期）的快照：当天已有新成功快照时不再
+  /// 当成现行异常，也不触发首页失败横幅。旧格式（无日期键）保守保留。
+  bool get lastAutoBackupErrorIsStale {
+    if (_lastAutoBackupError == null || _lastAutoBackupErrorDate == null) {
+      return false;
+    }
+    final d = _lastAutoBackupDate;
+    return d == null || _lastAutoBackupErrorDate != _dateKey(d);
+  }
+
+  /// 降级类提示（数据完整，只是不含附件 / 缺模板 / 组装位置降级），
+  /// 不算「自动备份失败」，不触发首页告警横幅。
+  static bool _isAutoBackupWarningNote(String note) =>
+      note.contains('剥离附件') ||
+      note.contains('未包含用户模板') ||
+      note.contains('在主线程完成组装');
+
+  /// 状态注记：null = 一切正常；warning 原样展示，真失败按是否过期加前缀。
+  String? get autoBackupStatusNote {
+    final err = _lastAutoBackupError;
+    if (err == null) return null;
+    if (_isAutoBackupWarningNote(err)) return err;
+    return lastAutoBackupErrorIsStale
+        ? '上次自动备份异常：$err'
+        : '自动备份异常：$err';
+  }
+
+  /// P3-2 / U-3（v3.1.6 审计）：设置页与首页横幅共用的单一真源副标题。
+  String get autoBackupSubtitle {
+    final note = autoBackupStatusNote;
+    return note == null ? lastAutoBackupLabel : '${lastAutoBackupLabel} · $note';
+  }
+
+  /// U-3（v3.1.6 审计）：是否存在**需要主动告知**的自动备份失败。
+  /// 降级提示与跨日残留的旧失败都不算，避免首页横幅反复误报。
+  bool get autoBackupHasFailure =>
+      _lastAutoBackupError != null &&
+      !_isAutoBackupWarningNote(_lastAutoBackupError!) &&
+      !lastAutoBackupErrorIsStale;
+
   Future<void> setAutoBackupEnabled(bool v) async {
     if (v == _autoBackupEnabled) return;
     _autoBackupEnabled = v;
     notifyListeners();
     await _persistSettings();
-    // 开启后立即尝试补一次（若今天还没备），关闭则不动作。
-    if (v) {
+    // P3-2（v3.1.6 审计）：关闭自动备份时清掉失败留痕。旧实现留着错误键，
+    // 用户关闭功能后设置页仍显示「自动备份异常」，且重新开启时又像旧病复发。
+    if (!v) {
+      _lastAutoBackupError = null;
+      _lastAutoBackupErrorDate = null;
       try {
-        await _autoBackupIfNeeded();
-      } catch (_) {
-        // 错误已在内部记录，不阻断 UI。
-      }
+        final p = await SharedPreferences.getInstance();
+        await p.remove(_kLastAutoBackupError);
+        await p.remove(_kLastAutoBackupErrorDate);
+      } catch (_) {}
+      notifyListeners();
+      return;
+    }
+    // 开启后立即尝试补一次（若今天还没备），关闭则不动作。
+    try {
+      await _autoBackupIfNeeded();
+    } catch (_) {
+      // 错误已在内部记录，不阻断 UI。
     }
   }
 
@@ -845,7 +904,30 @@ class TaskProvider extends ChangeNotifier {
     }
     // P2-4：旧加密快照无法再用新口令解开。改名标记后恢复面板不再展示，
     // 滚动保留按日期自然淘汰，避免用户对着「废快照」反复试错口令。
-    return _markStaleEncryptedBackups();
+    // P3-3（v3.1.6 审计）：若**当天**的快照也被标 stale，必须立即清日期
+    // 并补一份新口令快照——否则设置页仍写「最近快照：今天」，恢复面板
+    // 却是空的，用户以为换口令把备份弄坏了；杀掉进程后当天甚至没有可用快照。
+    final marked = await _markStaleEncryptedBackups();
+    if (marked.todayStaled) {
+      _lastAutoBackupDate = null;
+      _lastAutoBackupNoAttach = false;
+      _lastAutoBackupError = null;
+      _lastAutoBackupErrorDate = null;
+      try {
+        final p = await SharedPreferences.getInstance();
+        await p.remove(_kLastAutoBackup);
+        await p.remove(_kLastAutoBackupError);
+        await p.remove(_kLastAutoBackupErrorDate);
+      } catch (_) {}
+      notifyListeners();
+      try {
+        await _autoBackupIfNeeded();
+      } catch (_) {
+        // 失败原因已由 _autoBackupIfNeeded 记入 lastAutoBackupError 并在
+        // 设置页 / 首页横幅如实展示，不阻断「口令已修改」这个事实。
+      }
+    }
+    return marked.count;
   }
 
   /// P2-4：把 `backup/auto/` 与 `backup/pre-restore/` 下所有 `.enc.json`
@@ -860,19 +942,27 @@ class TaskProvider extends ChangeNotifier {
   /// P3-3（v3.1.2 审计）：恢复前快照（pre-restore）纳入同款 stale 标记——
   /// 此前只标 backup/auto，换口令后旧口令加密的回滚点仍以「已加密」正常
   /// 列出、点了必失败，用户无法判断哪个回滚点可用。
-  Future<int> _markStaleEncryptedBackups() async {
+  /// P3-3（v3.1.6 审计）：额外回传「是否把当日快照标成 stale」，供换口令
+  /// 后即时补写新口令快照（只影响历史快照时不必惊动日期与面板）。
+  Future<({int count, bool todayStaled})> _markStaleEncryptedBackups() async {
     final auto = await _markStaleEncryptedBackupsIn('backup/auto');
     final pre = await _markStaleEncryptedBackupsIn('backup/pre-restore');
-    return auto + pre;
+    return (
+      count: auto.count + pre.count,
+      todayStaled: auto.todayStaled || pre.todayStaled,
+    );
   }
 
   /// [_markStaleEncryptedBackups] 的单目录实现。
-  Future<int> _markStaleEncryptedBackupsIn(String relDir) async {
+  Future<({int count, bool todayStaled})> _markStaleEncryptedBackupsIn(
+      String relDir) async {
     var n = 0;
+    var todayStaled = false;
+    final todayStem = _dateKey(DateTime.now());
     try {
       final dir = await getApplicationDocumentsDirectory();
       final base = Directory('${dir.path}/$relDir');
-      if (!await base.exists()) return 0;
+      if (!await base.exists()) return (count: 0, todayStaled: false);
       for (final f in base.listSync().whereType<File>().toList()) {
         final name = _autoBackupName(f);
         if (!name.endsWith('.enc.json') || name.contains('.stale.')) continue;
@@ -882,23 +972,91 @@ class TaskProvider extends ChangeNotifier {
               '.stale.enc.json';
           await f.rename(newPath);
           n++;
+          if (name.startsWith(todayStem)) todayStaled = true;
         } catch (_) {}
       }
     } catch (e) {
       AppLog.d('标记旧口令快照失败（忽略，$relDir）：$e');
     }
+    return (count: n, todayStaled: todayStaled);
+  }
+
+  /// P2-3（v3.1.6 审计）：列出仍以**明文**躺在本机的快照（含恢复前回滚点）。
+  /// 开启「加密本地自动备份」只影响后续写入，旧明文此前既不加密、不删除、
+  /// 也不告知，用户以为所有本地快照都受保护，实际最多 7 份可直接读出。
+  Future<List<File>> _plaintextSnapshotFiles() async {
+    final out = <File>[];
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      for (final rel in const ['backup/auto', 'backup/pre-restore']) {
+        final base = Directory('${dir.path}/$rel');
+        if (!await base.exists()) continue;
+        for (final f in base.listSync().whereType<File>()) {
+          final n = _autoBackupName(f);
+          if (!n.endsWith('.json') ||
+              n.endsWith('.enc.json') ||
+              n.contains('.stale.')) {
+            continue;
+          }
+          out.add(f);
+        }
+      }
+    } catch (e) {
+      AppLog.d('[TaskProvider] 扫描明文快照失败（按 0 份处理）：$e');
+    }
+    return out;
+  }
+
+  /// 供设置页在开启加密前询问用户：本机已有多少份明文快照。
+  Future<int> countPlaintextSnapshots() async =>
+      (await _plaintextSnapshotFiles()).length;
+
+  /// P2-3：按用户明确选择删除历史明文快照；逐文件失败不阻断其余。
+  Future<int> _purgePlaintextSnapshots() async {
+    var n = 0;
+    for (final f in await _plaintextSnapshotFiles()) {
+      try {
+        await f.delete();
+        n++;
+      } catch (e) {
+        AppLog.d('[TaskProvider] 删除历史明文快照失败（保留原文件）：${f.path} $e');
+      }
+    }
     return n;
   }
 
   /// 开关自动备份加密。开启时若尚无口令则拒绝（返回 false），由 UI 引导先设口令。
-  Future<bool> setAutoBackupEncrypt(bool v) async {
+  ///
+  /// P2-3（v3.1.6 审计）：[purgePlaintext] 由设置页在用户确认后传入，
+  /// 开启时立即清理 `backup/auto/` 与 `backup/pre-restore/` 下的存量明文
+  /// 快照，并清掉「今天已备」的日期键以补写一份当日**加密**快照；
+  /// 用户选择保留时不删数据，但设置页已明确告知旧明文会继续存在。
+  Future<bool> setAutoBackupEncrypt(bool v,
+      {bool purgePlaintext = false}) async {
     if (v && !hasAutoBackupPassphrase) return false;
+    final changed = v != _autoBackupEncrypt;
     _autoBackupEncrypt = v;
     notifyListeners();
     await _persistSettings();
-    if (v) {
-      // 开启后立刻按新策略重试一次（今天已生成过明文快照也不会重写，
-      // 加密从下一次跨日快照开始生效，避免同一天出现两种形态）。
+    if (v && purgePlaintext) {
+      final removed = await _purgePlaintextSnapshots();
+      AppLog.d('[TaskProvider] 开启加密时清理历史明文快照 $removed 份');
+      // 旧明文已删除：当日存在性判定不再命中，必须清掉日期键让下面补写。
+      _lastAutoBackupDate = null;
+      _lastAutoBackupNoAttach = false;
+      _lastAutoBackupError = null;
+      _lastAutoBackupErrorDate = null;
+      try {
+        final p = await SharedPreferences.getInstance();
+        await p.remove(_kLastAutoBackup);
+        await p.remove(_kLastAutoBackupError);
+        await p.remove(_kLastAutoBackupErrorDate);
+      } catch (_) {}
+      notifyListeners();
+    }
+    if (v && (changed || purgePlaintext)) {
+      // 开启后立刻按新策略重试一次（若选择保留旧明文、当日已有快照则
+      // 不重写，加密从下一份跨日快照开始生效，避免同一天出现两种形态）。
       try {
         await _autoBackupIfNeeded();
       } catch (_) {}
@@ -1237,7 +1395,14 @@ class TaskProvider extends ChangeNotifier {
         // 快照被文件管理器删除 / 系统清理 / 换成 .tmp 残片后，旧实现直接
         // 早退，设置页说「最近成功」、恢复面板却「暂无本地快照」。这里
         // 校验文件真实存在（且不是 partial 废快照），不存在则清掉日期补备。
-        if (await _autoBackupOfDayExists(now)) return;
+        final day = await _autoBackupOfDayExists(now);
+        if (day.exists) {
+          // P3-2（v3.1.6 审计）：命中文件顺便同步「不含附件」事实，
+          // 不再依赖错误串里是否含「剥离附件」。
+          _lastAutoBackupNoAttach = day.stripped;
+          return;
+        }
+        _lastAutoBackupNoAttach = false;
         _lastAutoBackupDate = null;
         final stalePrefs = await SharedPreferences.getInstance();
         await stalePrefs.remove(_kLastAutoBackup);
@@ -1254,19 +1419,25 @@ class TaskProvider extends ChangeNotifier {
         await prefs.setString(_kLastAutoBackup, todayKey);
         if (!written.existing) {
           _lastAutoBackupError = written.note;
+          _lastAutoBackupErrorDate = written.note == null ? null : todayKey;
           if (written.note == null) {
             await prefs.remove(_kLastAutoBackupError);
+            await prefs.remove(_kLastAutoBackupErrorDate);
           } else {
             await prefs.setString(_kLastAutoBackupError, written.note!);
+            await prefs.setString(_kLastAutoBackupErrorDate, todayKey);
           }
         }
       } catch (e, s) {
         _lastAutoBackupError = '自动备份失败：$e';
+        // P3-2（v3.1.6 审计）：错误绑定日期，展示层才能区分「本次」与跨日残留。
+        _lastAutoBackupErrorDate = todayKey;
         AppLog.d('$_lastAutoBackupError\n$s');
         // P3-7（v3.1.5 审计）：失败原因同样持久化，重启后仍能看到。
         try {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString(_kLastAutoBackupError, _lastAutoBackupError!);
+          await prefs.setString(_kLastAutoBackupErrorDate, todayKey);
         } catch (_) {
           // 持久化失败不影响主流程（内存态仍展示）。
         }
@@ -1364,9 +1535,11 @@ class TaskProvider extends ChangeNotifier {
     // 下该值为 null，旧实现会用空任务集覆盖当天滚动快照中的一份有效数据。
     // P3-7（v3.1.4 审计）：判定提到**组装之前**——跳过路径连附件路径规划
     // 都不必做，更不必白跑一次序列化 / AES。
-    if (await _autoBackupOfDayExists(now)) {
+    final day = await _autoBackupOfDayExists(now);
+    if (day.exists) {
       AppLog.d('[TaskProvider] 当日已存在自动快照，跳过覆盖：${_dateKey(now)}');
       _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
+      _lastAutoBackupNoAttach = day.stripped;
       final sp = await SharedPreferences.getInstance();
       await sp.setString(_kLastAutoBackup, _dateKey(now));
       // P3-7（v3.1.5 审计）：早退 = 本次没写新快照，调用方必须保留既有警告。
@@ -1415,6 +1588,8 @@ class TaskProvider extends ChangeNotifier {
     final suffix = '$noAttachMark${_autoBackupEncrypt ? '.enc' : ''}.json';
     final rel = 'backup/auto/${_dateKey(now)}$suffix';
     await DataIo.saveToAppDocs(rel, body);
+    // P3-2（v3.1.6 审计）：本次真实落盘的形态才是「不含附件」标注的真源。
+    _lastAutoBackupNoAttach = attachmentsStripped;
     _rotateAutoBackups();
     if (attachmentsStripped) {
       // 新P2-1：剥离事实不静默——记入设置页可见的错误栏（warning 性质：
@@ -1463,11 +1638,17 @@ class TaskProvider extends ChangeNotifier {
   /// 设置页却显示「最近快照：今天」。现在逐个做轻量完整性校验（体积阈值 +
   /// 能否解析 / 是否加密信封 + 是否含 `tasks` 段），不可用的改名 `.stale`
   /// 后允许重写——既修复当天，也不再让它出现在恢复列表里。
-  Future<bool> _autoBackupOfDayExists(DateTime now) async {
+  /// P3-2（v3.1.6 审计）：返回命中快照的「是否不含附件」标记，供设置页
+  /// 副标题从**真实文件名**推导，不再靠错误串猜。[markStale] = false 时
+  /// 只读扫描（load 期间不做文件改名副作用）。
+  Future<({bool exists, bool stripped})> _autoBackupOfDayExists(
+    DateTime now, {
+    bool markStale = true,
+  }) async {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final base = Directory('${dir.path}/backup/auto');
-      if (!await base.exists()) return false;
+      if (!await base.exists()) return (exists: false, stripped: false);
       final stem = _dateKey(now);
       for (final f in base.listSync().whereType<File>()) {
         final n = _autoBackupName(f);
@@ -1476,8 +1657,11 @@ class TaskProvider extends ChangeNotifier {
             n.contains('.stale.')) {
           continue;
         }
-        if (await _snapshotFileUsable(f, n)) return true;
-        AppLog.d('[TaskProvider] 当日快照不可用（0 字节 / 损坏 / 缺 tasks 段），'
+        if (await _snapshotFileUsable(f, n)) {
+          return (exists: true, stripped: n.contains('.noattach'));
+        }
+        if (!markStale) continue;
+        AppLog.d('[TaskProvider] 当日快照不可用（0 字节 / 损坏 / 尾部截断），'
             '允许重写：${f.path}');
         try {
           await f.rename('${f.path}.stale');
@@ -1485,11 +1669,21 @@ class TaskProvider extends ChangeNotifier {
           AppLog.d('[TaskProvider] 标记废快照失败（不影响重写）：$e');
         }
       }
-      return false;
+      return (exists: false, stripped: false);
     } catch (e) {
       AppLog.d('[TaskProvider] 检查当日快照失败（按不存在处理）：$e');
-      return false;
+      return (exists: false, stripped: false);
     }
+  }
+
+  /// P3-2（v3.1.6 审计）：冷启动回读「最近快照日期」时，同步恢复该快照的
+  /// `.noattach` 事实。旧版写的 .noattach 快照 / 错误键丢失 / 重启后都不会
+  /// 再带「不含附件」标注，用户恢复后才发现附件不在。
+  Future<void> _refreshLastAutoBackupMeta() async {
+    final d = _lastAutoBackupDate;
+    if (d == null) return;
+    final info = await _autoBackupOfDayExists(d, markStale: false);
+    if (info.exists) _lastAutoBackupNoAttach = info.stripped;
   }
 
   /// P3-3（v3.1.5 审计）：快照文件是否**可还原**的轻量校验。
@@ -1499,6 +1693,37 @@ class TaskProvider extends ChangeNotifier {
   /// 整个读进内存并 jsonDecode（那本身又是一次冻结），>1MB 的文件只读文件头
   /// 做「含 `tasks` 键」判定——0 字节 / 截断 / 非法文本都会在此被拦下。
   static const int _kMinSnapshotBytes = 256;
+  static const int _kSnapshotProbeBytes = 16 * 1024;
+
+  /// P3-1（v3.1.6 审计）：>1MB 快照的**头 + 尾**完整性纯函数（可单测）。
+  ///
+  /// 旧实现只读前 16KB：明文看 `"tasks"`、加密看 `encrypted/kdf/aead`，
+  /// 文件被截断一半、密文 `ct` 被置空、JSON 尾部丢失都照样判「今天已备份」，
+  /// 当天不再补备，直到用户真正恢复时才失败。
+  /// 加密信封由 `JsonEncoder.withIndent` 生成，最后一个字段必为 `ct`，
+  /// 因此尾部形态可判定「ct 非空且字符串正确闭合」；明文 JSON 必须闭合。
+  @visibleForTesting
+  static bool snapshotLargeFileLooksComplete({
+    required String head,
+    required String tail,
+    required bool encrypted,
+  }) {
+    final h = head.trimLeft();
+    final t = tail.trimRight();
+    if (!h.startsWith('{')) return false;
+    if (encrypted) {
+      if (!h.contains('"encrypted"') ||
+          !h.contains('"kdf"') ||
+          !h.contains('"aead"') ||
+          !h.contains('"tag"')) {
+        return false;
+      }
+      // 尾部须为「≥16 个 base64 字符 + 引号 + (可选空白) + 右花括号」：
+      // 空 ct 是 `""}`，截断的密文没有收尾引号 / 花括号，均不匹配。
+      return RegExp(r'[A-Za-z0-9+/=]{16,}"\s*\}$').hasMatch(t);
+    }
+    return h.contains('"tasks"') && t.endsWith('}');
+  }
 
   Future<bool> _snapshotFileUsable(File f, String name) async {
     try {
@@ -1508,25 +1733,40 @@ class TaskProvider extends ChangeNotifier {
       if (len <= 1024 * 1024) {
         final raw = await f.readAsString();
         if (encrypted || isEncryptedEnvelope(raw)) {
-          return isEncryptedEnvelope(raw);
+          if (!isEncryptedEnvelope(raw)) return false;
+          // P3-1：小文件同样校验信封**内容**，不能只验「是不是 Map」。
+          // `ct: ""` / 缺 tag 的空壳信封过去会被判可用。
+          final map = jsonDecode(raw);
+          if (map is! Map) return false;
+          final ct = map['ct'];
+          final aead = map['aead'];
+          return ct is String &&
+              ct.isNotEmpty &&
+              aead is Map &&
+              aead['tag'] is String &&
+              (aead['tag'] as String).isNotEmpty;
         }
         final map = jsonDecode(raw);
         return map is Map && map['tasks'] is List;
       }
       final raf = await f.open();
       try {
-        final head = await raf.read(16 * 1024);
-        final text = utf8.decode(head, allowMalformed: true);
-        if (encrypted || text.trimLeft().startsWith('{')) {
-          // 加密信封的字段都在文件头部（format / encrypted / kdf / aead），
-          // 大文件只校验这些标记即可判断「不是被写成空壳 / 垃圾」。
-          if (encrypted) {
-            return text.contains('"encrypted"') &&
-                text.contains('"kdf"') &&
-                text.contains('"aead"');
-          }
-        }
-        return text.contains('"tasks"');
+        final head = utf8.decode(await raf.read(_kSnapshotProbeBytes),
+            allowMalformed: true);
+        final tailLen = (len - _kSnapshotProbeBytes) > _kSnapshotProbeBytes
+            ? _kSnapshotProbeBytes
+            : (len - _kSnapshotProbeBytes);
+        await raf.setPosition(len - tailLen);
+        final tail =
+            utf8.decode(await raf.read(tailLen), allowMalformed: true);
+        // 文件名不带 .enc 但正文是信封时也要按信封判据校验，
+        // 避免「改扩展名」的旧文件被明文规则放过。
+        final looksEncrypted = encrypted ||
+            head.trimLeft().startsWith('{') &&
+                head.contains('"encrypted"') &&
+                head.contains('"kdf"');
+        return snapshotLargeFileLooksComplete(
+            head: head, tail: tail, encrypted: looksEncrypted);
       } finally {
         await raf.close();
       }
@@ -2256,6 +2496,11 @@ class TaskProvider extends ChangeNotifier {
     // P3-7（v3.1.5 审计）：恢复最近一次自动备份的警告（附件已剥离 / 缺模板 /
     // 失败原因）。否则重启后「最近快照：今天」会掩盖「这份快照不含附件」。
     _lastAutoBackupError = prefs.getString(_kLastAutoBackupError);
+    // P3-2（v3.1.6 审计）：错误所属日期一起回读；缺键 = 旧版本写入的
+    // 无日期错误，保守按「不过期」处理，避免把历史警告无声抹掉。
+    _lastAutoBackupErrorDate = prefs.getString(_kLastAutoBackupErrorDate);
+    // P3-2：按真实文件名恢复「不含附件」标注（不再靠错误串推断）。
+    await _refreshLastAutoBackupMeta();
     _archivedTags = (prefs.getStringList(_kArchivedTags) ?? []).toSet();
     _calendarLunar = prefs.getBool(_kCalendarLunar) ?? true;
     _lockScreenPrivate = prefs.getBool(_kLockScreenPrivate) ?? true;

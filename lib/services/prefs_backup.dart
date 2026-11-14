@@ -71,9 +71,12 @@ const List<String> _backedUpPrefKeys = <String>[
   // 恢复侧配套：applyAppPrefs 写回后必须调 NotificationService.reloadTimezoneOverride()
   // 重解析内存时区并全量重排（见 backup_sheet 恢复流程），否则仅落盘、本轮不生效。
   'reminder_timezone_override',
-  // A5（v3.1.1 功能增强）：今日三件（MIT）选中的任务 id（JSON map，按日期键）。
-  // 纯偏好存储、零迁移；旧备份无此键时保持现有选择（不覆盖）。
-  'daily_mit',
+  // P3-7（v3.1.6 审计）：「今日三件」按日期键存本机选择，恢复一份昨天
+  // 或更早的备份会写回旧日期映射，随后 provider.load() 的 _loadDailyMit
+  // 只保留今天键 → 今天的承诺被静默清空。与静音窗口同属「本机短期状态」，
+  // 故移出白名单并列入 neverBackedUpPrefKeys（导出侧 / 恢复侧 / 差异摘要
+  // 三处共用同一份名单）。旧备份中携带的该键由二道闸丢弃。
+  // 'daily_mit' 曾在此处（A5 v3.1.1），v3.1.6 起不再随备份迁移。
 ];
 
 /// P2-2（v3.1.0 审计）：刻意**不**进白名单的键及策略说明。
@@ -91,9 +94,14 @@ const List<String> _backedUpPrefKeys = <String>[
 /// P3-6（v3.1.3 审计）：改为公开常量——恢复差异摘要（BackupSummary.fromMap）
 /// 必须与恢复执行侧共用同一份「不迁移键」名单，否则摘要会把这些键列为
 /// 「设置差异」，用户切换「同时恢复设置」后却永远不会生效。
+/// - P3-7（v3.1.6 审计）：`daily_mit`（今日三件）是**按日期键的本机选择**，
+///   不是长期偏好。恢复旧备份后 provider 只保留「今天」键，备份里的旧日期
+///   映射会把今天的三件清空且毫无提示；导出 / 恢复 / 差异摘要一律排除，
+///   用户恢复后今天的选择保持本机现状。
 const List<String> neverBackedUpPrefKeys = <String>[
   'auto_backup_encrypt',
   'reminders_muted_until',
+  'daily_mit',
 ];
 
 /// 读取白名单内的偏好键，返回可被 JSON 序列化的 `{key: value}` 映射。

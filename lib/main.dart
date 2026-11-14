@@ -1773,6 +1773,8 @@ class _MainScaffoldState extends State<MainScaffold>
               children: [
                 // S13 安全模式横幅：数据库加载失败时提示只读、不落盘，引导修复。
                 if (safeMode) const _DbSafeModeBanner(),
+                // U-3（v3.1.6 审计）：自动备份失败不能只有设置页一个入口。
+                _AutoBackupFailureBanner(onOpenSettings: () => _switchTab(4)),
                 // U2-1（v2.9.5 审计）：改用保活容器，切 Tab 不再丢状态。
                 // 此前是 `Expanded(child: pages[_index])`——同一时刻只挂载当前页，
                 // 切走即销毁 State：首页的多选集合 / 搜索态 / 标签筛选 / 滚动位置、
@@ -2037,6 +2039,85 @@ class _TabKeepAliveState extends State<_TabKeepAlive> {
 /// 无条件说「已解除」；且加载中按钮不禁用、安全模式期间的内存编辑会被
 /// `load()` 静默丢弃。现在改为 StatefulWidget：逐侧重试、按真实结果回执、
 /// 有未保存编辑时先二次确认。
+/// U-3（v3.1.6 审计）：自动备份失败的**主动**告知横幅。
+///
+/// 旧实现只在设置页「本地自动备份」副标题里展示失败原因；自动备份是
+/// `allowBackup=false` + 私有目录下的唯一数据防线，连续失败（缺口令 /
+/// 磁盘满 / 权限异常）可能持续数周无人发现，直到要恢复时才暴露。
+/// 这里与安全模式横幅同位置展示、可关闭；只有「真失败」才出现，
+/// 附件剥离 / 缺模板 / 组装降级这类 warning 与跨日残留的旧失败不误报。
+class _AutoBackupFailureBanner extends StatefulWidget {
+  const _AutoBackupFailureBanner({required this.onOpenSettings});
+  final VoidCallback onOpenSettings;
+
+  @override
+  State<_AutoBackupFailureBanner> createState() =>
+      _AutoBackupFailureBannerState();
+}
+
+class _AutoBackupFailureBannerState extends State<_AutoBackupFailureBanner> {
+  /// 关闭只针对「这一条」失败：新失败出现时再次提示。
+  String? _dismissedNote;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed =
+        context.select<TaskProvider, bool>((t) => t.autoBackupHasFailure);
+    final note =
+        context.select<TaskProvider, String?>((t) => t.autoBackupStatusNote);
+    if (!failed || note == _dismissedNote) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.backup_outlined,
+                color: scheme.onErrorContainer, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '每日自动备份失败：$note',
+                    style: TextStyle(
+                        color: scheme.onErrorContainer,
+                        fontSize: 13,
+                        height: 1.3),
+                  ),
+                  TextButton.icon(
+                    onPressed: widget.onOpenSettings,
+                    icon: const Icon(Icons.settings, size: 14),
+                    label: const Text('去设置处理',
+                        style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(
+                      foregroundColor: scheme.onErrorContainer,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: Icon(Icons.close, size: 18, color: scheme.onErrorContainer),
+              onPressed: () => setState(() => _dismissedNote = note),
+              tooltip: '本次不再提示',
+              constraints: const BoxConstraints(),
+              padding: const EdgeInsets.all(4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DbSafeModeBanner extends StatefulWidget {
   const _DbSafeModeBanner();
 
@@ -2075,6 +2156,11 @@ class _DbSafeModeBannerState extends State<_DbSafeModeBanner> {
       );
       if (proceed != true) return;
     }
+    // P3-5（v3.1.6 审计）：`await showDialog` 是异步间隙，期间横幅所在页面
+    // 可能被销毁（恢复流程 / 路由跳转 / 热重启）。旧实现之后直接 setState，
+    // 会对已卸载的 State 调用并抛「setState() called after dispose()」；
+    // 同文件其它异步路径都判了 mounted，这里补上入口守卫。
+    if (!mounted) return;
     setState(() => _retrying = true);
     try {
       // 三侧写入口互不共享，各自 Provider 内已有 _loadInFlight 互斥。
@@ -2285,25 +2371,38 @@ class AppLockGate extends StatelessWidget {
   }
 
   /// P2-3（v3.1.0 审计）：解锁页的「关闭应用锁」二次确认。
-  /// P1-1（v3.1.2 审计）：两道收窄——①入口仅在 `!biometricAvailable`（设备
-  /// 无任何可用凭据的真实死路）渲染，杜绝「两键绕过」；②关闭前先强制一次
-  /// 系统验证（允许降级用锁屏密码）：验证成功即正常解锁，无需关闭应用锁；
-  /// 验证失败（取消 / 异常 / 无凭据）才进入二次确认。文案如实描述死路场景。
+  /// P1-1（v3.1.2 审计）：两道收窄——①入口仅在真实死路渲染；②关闭前先强制
+  /// 一次系统验证，验证成功即正常解锁、无需关闭。
+  /// P2-1（v3.1.6 审计）：**取消验证不得进入本确认框**。旧实现把
+  /// `authenticate` 的 false 同时当作「用户取消」与「本机无凭据」，
+  /// 拿到设备的人点出口 → 系统验证弹窗点取消 → 确认关闭，即可绕过应用锁。
+  /// 现在只消费 [AppLockProvider.authenticateDetailed] 的
+  /// `unavailableConfirmed`（不可用异常 + 重新探测确认无凭据）。
   static Future<void> _confirmDisableLock(BuildContext context) async {
     final lock = context.read<AppLockProvider>();
-    // 第一步：强制再验证一次。成功 → authenticate 已解除锁定并切回主界面。
-    final verified = await lock.authenticate(reason: '验证身份以关闭应用锁');
-    if (verified || !context.mounted) return;
-    // 第二步：验证未通过 → 二次确认，文案与「设备无可用凭据」的实际场景一致。
+    // 第一步：强制再验证一次。成功 → 已解除锁定并切回主界面。
+    final result =
+        await lock.authenticateDetailed(reason: '验证身份以关闭应用锁');
+    if (result.verified || !context.mounted) return;
+    if (!result.unavailableConfirmed) {
+      // 用户取消 / 识别失败：应用锁保持开启，且如实告知，避免用户以为
+      // 「按钮没反应」而反复点击（解锁页是全屏 Scaffold，SnackBar 可见）。
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
+        content: Text('已取消验证，应用锁保持开启；请用本机凭据解锁'),
+        duration: Duration(seconds: 2),
+      ));
+      return;
+    }
+    // 第二步：仅「本机确实无可用凭据」才二次确认。文案说明这是数据保全出口。
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dctx) => AlertDialog(
         title: const Text('关闭应用锁'),
         content: const Text(
-          '本机当前没有可用的验证方式（未录入指纹 / 面容，且锁屏密码验证未通过），'
+          '已确认本机当前没有可用的验证方式（未录入指纹 / 面容，且锁屏密码不可用），'
           '继续使用会一直停在解锁页。'
           '关闭应用锁后无需验证即可进入应用，如需再次启用请到「设置 → 安全」开启。\n\n'
-          '若这不是你本人的操作，请勿关闭。',
+          '此操作会移除对本机数据的访问保护，若这不是你本人的操作，请勿关闭。',
         ),
         actions: [
           TextButton(
@@ -2318,6 +2417,9 @@ class AppLockGate extends StatelessWidget {
       ),
     );
     if (confirmed != true) return;
+    // 确认期间系统凭据可能已恢复：再探一次，能验证就绝不再关闭。
+    await lock.probeBiometric();
+    if (lock.canAuthenticate) return;
     // setEnabled(false)：落盘 + 解除锁定态（MainScaffold 随即切回主界面）。
     if (!context.mounted) return;
     await context.read<AppLockProvider>().setEnabled(false);

@@ -13,6 +13,7 @@ import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -45,8 +46,11 @@ class TaskSheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => TaskSheet(
-          task: task, draft: draft, inheritedAttachmentSession: inheritedAttachmentSession),
+      // P2-2（v3.1.6 审计）：弹层内消息宿主，失败回执不再被本弹层遮挡。
+      builder: (_) => SheetMessageHost(
+        child: TaskSheet(
+            task: task, draft: draft, inheritedAttachmentSession: inheritedAttachmentSession),
+      ),
     );
   }
 
@@ -587,7 +591,8 @@ class _TaskSheetState extends State<TaskSheet> {
     // 越界 / 非数字：提示后不改动，避免写入 0 分钟或天文数字。
     if (result < 0 || result > 30 * 24 * 60) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showSheetSnackBar(
+          context,
           const SnackBar(content: Text('请输入 1–43200 之间的分钟数')),
         );
       }
@@ -714,8 +719,7 @@ class _TaskSheetState extends State<TaskSheet> {
       setState(() => _attachments.add(ref));
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('添加附件失败：$e')));
+        showSheetSnackBar(context, SnackBar(content: Text('添加附件失败：$e')));
       }
     }
   }
@@ -770,8 +774,7 @@ class _TaskSheetState extends State<TaskSheet> {
       setState(() => _attachments.add(ref));
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('添加附件失败：$e')));
+        showSheetSnackBar(context, SnackBar(content: Text('添加附件失败：$e')));
       }
     }
   }
@@ -806,7 +809,8 @@ class _TaskSheetState extends State<TaskSheet> {
     // 开始前检查麦克风权限。
     if (!await _recorder.hasPermission()) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showSheetSnackBar(
+          context,
           const SnackBar(content: Text('需要麦克风权限才能录音')),
         );
       }
@@ -838,8 +842,8 @@ class _TaskSheetState extends State<TaskSheet> {
     final file = File('${dir.path}/${ref.fileName}');
     if (!await file.exists()) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('附件文件不存在')));
+        showSheetSnackBar(
+            context, const SnackBar(content: Text('附件文件不存在')));
       }
       return;
     }

@@ -14,6 +14,7 @@ import 'package:todolist/services/backup_crypto.dart';
 import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/prefs_backup.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 import 'package:todolist/services/task_templates.dart'; // M2（v3.0.8 审计）：备份/恢复纳入用户模板
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
@@ -39,7 +40,6 @@ Future<bool> confirmEmptyRestoreSections(
   int currentHabitCount = 0,
   int currentCheckInCount = 0,
   int currentFocusCount = 0,
-  bool preRestoreSnapshotOk = true,
 }) async {
   final empty = <String>[
     if (data['habits'] is List &&
@@ -67,7 +67,12 @@ Future<bool> confirmEmptyRestoreSections(
       title: const Text('这份备份可能不完整'),
       content: Text(
           '备份中的${empty.join('、')}为空，继续恢复会清空本机现有的${counts.join('、')}。'
-          '${preRestoreSnapshotOk ? '恢复前会尝试生成一份可回滚的快照（若失败会另行提示）。' : '本次未能生成恢复前快照，该操作不可回滚。'}'
+          // P3-6（v3.1.6 审计）：删除死参数 preRestoreSnapshotOk。回滚点是在
+          // 用户确认**之后**才生成的（writePreRestoreSnapshot 在 runRestoreSteps
+          // 内），确认框不可能预知结果；旧参数永远走默认 true，却留下一个看似
+          // 可配置、实际无效的 API。现在固定为「会尝试生成 + 失败在结果里告知」，
+          // 与真实时序一致。
+          '恢复前会尝试生成一份可回滚的快照；若生成失败，会在恢复结果中明确提示「本次不可回滚」。'
           '建议先导出当前数据，或换一份完整备份。'),
       actions: [
         TextButton(
@@ -167,7 +172,10 @@ class BackupSheet {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => StatefulBuilder(
+      // P2-2（v3.1.6 审计）：弹层内消息宿主——口令校验等提示不再被本
+      // bottom sheet 遮住；进度层期间的结论提示由 sheet_message 的队列延后。
+      builder: (ctx) => SheetMessageHost(
+        child: StatefulBuilder(
         builder: (ctx, setState) {
           return Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
@@ -257,19 +265,19 @@ class BackupSheet {
                     if (encrypt) {
                       final p = passCtrl.text;
                       if (p.length < 8) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        showSheetSnackBar(context, const SnackBar(
                             content: Text('口令至少 8 位，请重新输入')));
                         return;
                       }
                       // P2-6：强制口令复杂度——至少包含「大小写 / 数字」中两类字符，
                       // 杜绝纯数字等可被 GPU 数分钟爆破的弱口令（结合 P1-2 的 35 万轮迭代）。
                       if (!_isStrongPassword(p)) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        showSheetSnackBar(context, const SnackBar(
                             content: Text('口令过弱：需含大小写字母或数字中至少两类')));
                         return;
                       }
                       if (p != passConfirmCtrl.text) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        showSheetSnackBar(context, const SnackBar(
                             content: Text('两次输入的口令不一致')));
                         return;
                       }
@@ -309,6 +317,7 @@ class BackupSheet {
             ),
           );
         },
+        ),
       ),
     );
   }
@@ -383,7 +392,7 @@ class BackupSheet {
             plan.skipped, false, null, DataIo.maxImportTextBytes);
         if (built.oversize) {
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            showSheetSnackBar(context, const SnackBar(
               content: Text('备份未执行：数据超过导入上限（附件已剥离仍超限）。'
                   '请减少大附件后重试'),
               duration: Duration(seconds: 5),
@@ -408,7 +417,7 @@ class BackupSheet {
           final cipherBudget = (DataIo.maxImportTextBytes * 3 ~/ 4) - (1 << 20);
           if (plainBytes > cipherBudget) {
             if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              showSheetSnackBar(context, const SnackBar(
                 content: Text('加密备份未执行：数据超过密文导入上限'
                     '（附件已剥离仍超限）。请减少大附件后重试，或改用不加密备份'),
                 duration: Duration(seconds: 5),
@@ -466,7 +475,7 @@ class BackupSheet {
               : '已生成备份（下载目录写入失败，请改用「分享」保存）';
         }
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showSheetSnackBar(context, 
             SnackBar(
               // N5（v3.0.9 审计）：模板收集失败追加在文案尾部——放在最终
               // snackbar 一处拼接，避免被「下载目录写入失败」分支覆盖。
@@ -480,17 +489,21 @@ class BackupSheet {
             ),
           );
         }
-      });
+        // U-1（v3.1.6 审计）：备份路径用备份文案，不再复用「正在准备恢复…」。
+      },
+        initialStage: '正在准备备份…',
+        busyHint: '备份进行中，请稍候（大库加密时可能需要较长时间）',
+      );
     } on BackupEncryptException catch (e) {
       // 加密意图无法满足：直接透出原因，不包装成「备份失败：BackupEncryptException: …」。
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(e.message)));
+        showSheetSnackBar(
+            context, SnackBar(content: Text(e.message)));
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('备份失败：$e')));
+        showSheetSnackBar(
+            context, SnackBar(content: Text('备份失败：$e')));
       }
     }
   }
@@ -513,8 +526,8 @@ class BackupSheet {
     if (picked.cancelled) return;
     if (picked.error != null) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(picked.error!)));
+        showSheetSnackBar(
+            context, SnackBar(content: Text(picked.error!)));
       }
       return;
     }
@@ -529,13 +542,13 @@ class BackupSheet {
       } on BackupDecryptException catch (e) {
         if (context.mounted) {
           // T3-1（v2.9.2 功能增强）：解密失败时展示本机保存的口令提示帮助回忆。
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          showSheetSnackBar(context, SnackBar(
               content: Text(_withPassHint('恢复失败：${e.message}', provider))));
         }
         return;
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          showSheetSnackBar(context, SnackBar(
               content: Text(_withPassHint('解密失败：$e', provider))));
         }
         return;
@@ -547,7 +560,7 @@ class BackupSheet {
     final validation = BackupValidator.validate(plaintext);
     if (!validation.ok) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showSheetSnackBar(context, 
           SnackBar(content: Text('恢复被拒绝：${validation.message}')),
         );
       }
@@ -594,7 +607,7 @@ class BackupSheet {
       data = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showSheetSnackBar(context, 
           SnackBar(content: Text('恢复失败：文件格式不正确（$e）')),
         );
       }
@@ -816,7 +829,7 @@ class BackupSheet {
           const encryptHint =
               '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
           if (failures.isEmpty) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            showSheetSnackBar(context, 
               const SnackBar(
                 content: Text('已从备份恢复$encryptHint'),
                 duration: Duration(seconds: 6),
@@ -824,7 +837,7 @@ class BackupSheet {
             );
           } else {
             // 任务已成功恢复，但部分子系统失败：提示具体步骤，便于用户重试用子集。
-            ScaffoldMessenger.of(context).showSnackBar(
+            showSheetSnackBar(context, 
               SnackBar(
                 content: Text(
                     '任务已恢复，但以下步骤失败：${failures.join('、')}$encryptHint'),
@@ -835,7 +848,7 @@ class BackupSheet {
         }
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showSheetSnackBar(context, 
             SnackBar(content: Text('恢复失败：文件格式不正确或任务恢复出错（$e）')),
           );
         }
@@ -850,11 +863,19 @@ class BackupSheet {
   /// 弹层（barrierDismissible=false + PopScope canPop=false），分阶段文案经
   /// [stage] 更新；无论成功失败，弹层都在 finally 中收起后再返回，保证结果
   /// SnackBar 可见。两条恢复路径（文件 / 本地快照）共用。
+  /// U-1（v3.1.6 审计）：手动备份复用本进度层时，旧文案写死「正在准备恢复…」，
+  /// 用户点「备份到文件」第一眼却看到「恢复」，会怀疑自己点错；且 PopScope
+  /// 只给了无说明的不可取消。现在由调用方传 [initialStage] / [busyHint]。
   static Future<T> _withRestoreProgress<T>(
     BuildContext context,
-    Future<T> Function(void Function(String stage) stage) run,
-  ) async {
-    final stage = ValueNotifier<String>('正在准备恢复…');
+    Future<T> Function(void Function(String stage) stage) run, {
+    String initialStage = '正在准备恢复…',
+    String busyHint = '恢复进行中，请勿关闭应用',
+  }) async {
+    final stage = ValueNotifier<String>(initialStage);
+    // P2-2（v3.1.6 审计）：进度层期间发出的结论提示会被本 AlertDialog 遮住，
+    // 由 sheet_message 的队列暂存，收起后再统一显示。
+    pushSheetProgressLayer();
     final dialog = showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -869,6 +890,14 @@ class BackupSheet {
                 const CircularProgressIndicator(),
                 const SizedBox(height: 16),
                 Text(s, style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 6),
+                Text(busyHint,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(context)
+                            .colorScheme
+                            .onSurface
+                            .withOpacity(0.6))),
               ],
             ),
           ),
@@ -888,6 +917,13 @@ class BackupSheet {
       try {
         await dialog;
       } catch (_) {}
+      popSheetProgressLayer();
+      if (context.mounted) {
+        flushPendingSheetMessages(context);
+        SheetMessageHostState.maybeOf(context)?.flushQueued();
+      } else {
+        clearPendingSheetMessages();
+      }
       stage.dispose();
     }
   }
@@ -1049,7 +1085,7 @@ class BackupSheet {
       final size = await entry.file.length();
       if (size > DataIo.maxImportTextBytes) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showSheetSnackBar(context, 
             SnackBar(
               content: Text('快照文件异常（${(size / 1048576).toStringAsFixed(1)} MB），已拒绝还原'),
             ),
@@ -1071,7 +1107,7 @@ class BackupSheet {
         } on BackupDecryptException catch (e) {
           if (context.mounted) {
             // T3-1（v2.9.2 功能增强）：解密失败时展示本机口令提示帮助回忆。
-            ScaffoldMessenger.of(context).showSnackBar(
+            showSheetSnackBar(context, 
               SnackBar(
                   content: Text(_withPassHint('还原失败：${e.message}', provider))),
             );
@@ -1079,7 +1115,7 @@ class BackupSheet {
           return;
         } catch (e) {
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            showSheetSnackBar(context, 
               SnackBar(
                   content: Text(_withPassHint('解密失败：$e', provider))),
             );
@@ -1090,7 +1126,7 @@ class BackupSheet {
       final validation = BackupValidator.validate(plaintext);
       if (!validation.ok) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showSheetSnackBar(context, 
             SnackBar(content: Text('还原被拒绝：${validation.message}')),
           );
         }
@@ -1137,7 +1173,7 @@ class BackupSheet {
         data = jsonDecode(plaintext) as Map<String, dynamic>;
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showSheetSnackBar(context, 
             SnackBar(content: Text('还原失败：快照格式不正确（$e）')),
           );
         }
@@ -1300,7 +1336,7 @@ class BackupSheet {
           // 恢复后显式告知（不静默降级）。
           const encryptHint =
               '\n自动备份加密与口令不随备份迁移，如需加密请到「设置 → 备份与恢复」重新开启。';
-          ScaffoldMessenger.of(context).showSnackBar(
+          showSheetSnackBar(context, 
             SnackBar(
               content: failures.isEmpty
                   ? Text('已从 ${entry.label} 的自动备份还原$encryptHint')
@@ -1315,7 +1351,7 @@ class BackupSheet {
       await _withRestoreProgress(context, runRestoreSteps);
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showSheetSnackBar(context, 
           SnackBar(content: Text('还原失败：$e')),
         );
       }

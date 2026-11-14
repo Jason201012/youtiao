@@ -219,20 +219,26 @@ void main() {
           reason: '验证通过**不得**关闭应用锁（旧实现二次确认即 setEnabled(false)）');
     });
 
-    testWidgets('死路 + 验证失败 → 二次确认后才关闭', (tester) async {
+    // P2-1（v3.1.6 审计）口径修正：本用例原先断言「验证失败 → 二次确认 →
+    // 关闭」，正是报告点名的绕过面——`authenticate` 返回 false 既可能是
+    // 用户点「取消」也可能是本机无凭据，旧实现对此一律放行。现在只有
+    // 「不可用异常 + 重新探测确认无凭据」才允许出现关闭确认；用户取消
+    // 必须停在解锁页。真实死路的关闭路径由 v316 审计用例覆盖。
+    testWidgets('死路 + 用户取消验证 → 不进入二次确认，应用锁保持开启',
+        (tester) async {
       bioAvailable = false;
-      authResult = false;
+      authResult = false; // 用户取消系统验证（不是不可用异常）
       final lock = await newLock();
       await pumpGate(tester, lock);
       await tester.tap(find.text('无法验证？关闭应用锁'));
-      await tester.pumpAndSettle();
-      // authenticate 失败 → 二次确认框（旧实现无强制验证步骤）。
-      // 「关闭应用锁」同时命中确认框标题与按钮，用取消按钮的存在性判定弹层。
-      expect(find.text('取消'), findsOneWidget);
-      await tester.tap(find.widgetWithText(FilledButton, '关闭应用锁'));
-      await tester.pumpAndSettle();
-      expect(lock.appLockEnabled, isFalse, reason: '确认后关闭（真实死路唯一出路）');
-      expect(lock.locked, isFalse);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('取消'), findsNothing,
+          reason: 'P2-1：取消验证不得弹出「关闭应用锁」确认框');
+      expect(find.textContaining('已取消验证，应用锁保持开启'), findsOneWidget);
+      expect(lock.appLockEnabled, isTrue,
+          reason: 'P2-1：三下点击 + 取消不得关闭应用锁');
+      expect(lock.locked, isTrue);
     });
   });
 

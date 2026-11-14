@@ -1,9 +1,21 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:local_auth_android/local_auth_android.dart';
 import 'package:local_auth_darwin/local_auth_darwin.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/services/app_log.dart';
+
+/// P2-1（v3.1.6 审计）：一次系统验证的**三态**结果，取代过去「bool 一义两用」。
+/// - [verified]：验证通过；
+/// - [unavailableConfirmed]：本机确实没有可用凭据（不可用类异常 + 重新探测
+///   仍判 `canAuthenticate=false`）。只有这一态才允许走「关闭应用锁」出口。
+///
+/// 「用户点取消 / 识别失败」返回 `(false, false)`：解锁页必须保持锁定，
+/// 绝不进入关闭确认——旧实现把两者混成 false，导致「点出口 → 点取消 →
+/// 确认关闭」三步即可绕过应用锁。
+typedef AppLockAuthResult = ({bool verified, bool unavailableConfirmed});
 
 /// 应用锁（A4）：基于系统生物识别（指纹 / 面容）的启动 / 回前台解锁门禁。
 ///
@@ -105,11 +117,15 @@ class AppLockProvider extends ChangeNotifier {
     } catch (e) {
       AppLog.d('[AppLock] 探测生物识别硬件失败（按无硬件处理）：$e');
     }
-    var canAuth = false;
+    var canAuth = _canAuthenticate;
     try {
       canAuth = await _auth.isDeviceSupported();
     } catch (e) {
-      AppLog.d('[AppLock] 探测设备凭据失败（按不可验证处理）：$e');
+      AppLog.d('[AppLock] 探测设备凭据失败（保留上次判定，不因瞬时异常放宽出口）：$e');
+      // P2-1（v3.1.6 审计）：旧实现把探测异常一律当「无可验证方式」，
+      // 运行期一次插件抖动就会让解锁页长出关闭出口，而出口可被
+      // 「取消系统验证 + 二次确认」绕过。保守保留上一次判定（冷启动
+      // 初值为 false，不影响首次探测）；只有明确探测到 false 才放宽。
     }
     var enrolled = false;
     if (canAuth) {
@@ -122,6 +138,10 @@ class AppLockProvider extends ChangeNotifier {
     _biometricHardware = hardware;
     _canAuthenticate = canAuth;
     _hasEnrolledBiometrics = enrolled;
+    // P2-1（v3.1.6 审计）：成功探测到可用凭据时复位粘滞的「不可验证」标记。
+    // 旧实现只有一次成功 authenticate 才清零，一次瞬时错误会让整个进程
+    // 生命周期都保留关闭出口。
+    if (canAuth) _authUnavailable = false;
     notifyListeners();
   }
 
@@ -138,9 +158,17 @@ class AppLockProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 设置开关：开→关闭时立即解锁；关→开时若本机无可用凭据则拒绝并回 false。
+  /// 设置开关：开→关闭时立即解锁；关→开时重新探测凭据，无可用凭据则拒绝。
+  ///
+  /// P3-4（v3.1.6 审计）：旧实现直接读启动时的缓存 `_canAuthenticate`，
+  /// 用户按提示去系统设置补录指纹 / 锁屏密码后回到 App（未杀进程），
+  /// 仍被拒「尚未录入…」，必须重启才能开启。开关是唯一的启用入口，
+  /// 因此在这里花一次轻量探测换掉陈旧判定。
   Future<bool> setEnabled(bool v) async {
-    if (v && !_canAuthenticate) return false; // 无可用凭据，拒绝开启
+    if (v) {
+      await probeBiometric();
+      if (!_canAuthenticate) return false; // 无可用凭据，拒绝开启
+    }
     _enabled = v;
     if (!v) _locked = false; // 关闭锁即视为已解锁
     final prefs = await SharedPreferences.getInstance();
@@ -200,6 +228,11 @@ class AppLockProvider extends ChangeNotifier {
       _locked = true;
       notifyListeners();
     }
+    // P3-4（v3.1.6 审计）：系统凭据可能在 App 运行期被新增 / 移除。旧实现
+    // 只在 load() / refreshEnabled() 探测，回到前台不刷新：补录凭据后开关
+    // 仍禁用，移除凭据后解锁页仍写「使用生物识别解锁」、出口隐藏。
+    // probeBiometric 内部对状态变化 notifyListeners，设置页 / 解锁页即时更新。
+    unawaited(probeBiometric());
   }
 
   /// P1-2：无操作超时强制上锁。仅当已启用应用锁且当前处于解锁态时生效。
@@ -212,13 +245,20 @@ class AppLockProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 调起系统生物识别验证。成功返回 true 并解锁；失败/取消返回 false。
-  /// [reason] 为系统弹窗的本地化提示文案。
-  Future<bool> authenticate({String reason = '验证身份以进入有条'}) async {
+  /// P2-1（v3.1.6 审计）：三态验证结果。**解锁页的关闭出口只能消费本方法**，
+  /// 普通解锁仍可用 [authenticate] 的 bool 包装。
+  ///
+  /// 旧实现把「用户取消」「本机无可用凭据」都压成 `false`，
+  /// `_confirmDisableLock` 见到 false 就进入「关闭应用锁」二次确认，
+  /// 于是「点出口 → 系统验证弹窗点取消 → 确认关闭」三步即可解锁应用，
+  /// 不需要知道锁屏密码。现在只有「不可用类异常 + 重新探测仍判无凭据」
+  /// 才返回 `unavailableConfirmed=true`；取消一律停在解锁页。
+  Future<AppLockAuthResult> authenticateDetailed(
+      {String reason = '验证身份以进入有条'}) async {
     if (!_enabled) {
       _locked = false;
       notifyListeners();
-      return true;
+      return (verified: true, unavailableConfirmed: false);
     }
     // 标记验证中：系统验证页开关引发的生命周期抖动不得触发重新上锁。
     _authenticating = true;
@@ -261,21 +301,31 @@ class AppLockProvider extends ChangeNotifier {
         _lastUnlockAt = DateTime.now();
       }
       notifyListeners();
-      return ok;
+      return (verified: ok, unavailableConfirmed: false);
     } catch (e) {
       AppLog.d('[AppLock] 验证异常：$e');
-      // P1-1（v3.1.5 审计）：识别「本机无可用凭据」类失败，动态放出解锁页的
-      // 关闭出口。旧实现只靠启动探测，探测一旦误判（有硬件但未录入）用户就
-      // 再也没有出口；现在真实调用失败也能兜底。
-      if (_isUnavailableError(e)) _authUnavailable = true;
-      // 异常时不自动解锁（安全优先），返回 false 让 UI 维持锁定页。
-      return false;
+      // 异常时不自动解锁（安全优先）。
+      if (!_isUnavailableError(e)) {
+        return (verified: false, unavailableConfirmed: false);
+      }
+      // 报告 P2-1 方向 1：捕获到不可用类异常后**重新探测**再定性。
+      // 传感器被占用 / 平台通道瞬时抖动时 `isDeviceSupported()` 仍为 true，
+      // 这时绝不能放出关闭出口（否则出口被「取消验证」滥用）；探测本身
+      // 会在确认可用时复位粘滞的 `_authUnavailable`（方向 3）。
+      await probeBiometric();
+      final unavailable = !_canAuthenticate;
+      _authUnavailable = unavailable;
+      return (verified: false, unavailableConfirmed: unavailable);
     } finally {
       _authenticating = false;
-      // 状态可能已变（成功解锁 / 新增不可验证标记），通知监听方刷新。
+      // 状态可能已变（成功解锁 / 新增或清除不可验证标记），通知监听方刷新。
       notifyListeners();
     }
   }
+
+  /// 兼容既有调用方：只关心「是否验证通过」。
+  Future<bool> authenticate({String reason = '验证身份以进入有条'}) async =>
+      (await authenticateDetailed(reason: reason)).verified;
 
   /// P1-1（v3.1.5 审计）：「无处可验证」类平台错误码 / 文案的宽松判定。
   /// local_auth 各平台 / 版本对同一语义的命名不一（`NotAvailable` /

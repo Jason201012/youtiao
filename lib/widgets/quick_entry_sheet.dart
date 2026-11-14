@@ -13,6 +13,7 @@ import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/new_task_sheet.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
 
 /// 快速录入弹层：一行自然语言直接建任务。
@@ -55,6 +56,13 @@ class QuickEntrySheet extends StatefulWidget {
   /// U-3（v3.1.5 审计）：口径统一为**字素簇**——TextField 的 `maxLength` 就是
   /// 按字素计数（1 个 emoji / 1 个组合字算 1 字），旧实现按 UTF-16 码元截，
   /// 同样 500 字额度下粘贴只能放 250 个 emoji，而提示统一写「500 字」。
+  /// U-2（v3.1.6 审计）：只截断**粘贴内容**，光标后的原文必须完整保留。
+  /// 旧实现先 `replaceRange` 合并、再对整段 `take(maxLength)`，在文本中间
+  /// 粘贴时会把「原光标之后的原文」一并裁掉，光标还跳到保留段末尾——
+  /// 「插入到光标处」的承诺被破坏，而提示又被弹层遮挡（P2-2），用户
+  /// 根本不知道丢了什么。现在按「原文前缀 + 原文后缀」的字素簇数计算
+  /// 剩余额度，只取粘贴内容的前缀插回选区；额度为 0 时整段粘贴被拒，
+  /// 原文一字不动。
   @visibleForTesting
   static ({String text, int cursor, bool truncated}) mergeClipboardText(
     String current,
@@ -69,20 +77,22 @@ class QuickEntrySheet extends StatefulWidget {
     final sel = valid
         ? selection
         : TextSelection.collapsed(offset: current.length);
-    // 先按选区替换出「合并后的完整文本」，再整体按字素簇裁——这样无论粘在
-    // 开头、中间还是末尾，剩余额度都是同口径。
-    final merged = current.replaceRange(sel.start, sel.end, pasted);
-    final chars = merged.characters;
-    if (chars.length <= maxLength) {
-      return (
-        text: merged,
-        cursor: sel.start + pasted.length,
-        truncated: false,
-      );
+    final prefix = current.substring(0, sel.start);
+    final suffix = current.substring(sel.end);
+    // 额度按字素簇算（与 TextField.maxLength 同口径），但选区下标是 UTF-16
+    // 码元：前缀 / 后缀换算成字素簇，插入内容的长度仍按码元回写给光标。
+    final budget = maxLength - prefix.characters.length - suffix.characters.length;
+    if (budget <= 0) {
+      return (text: current, cursor: sel.start, truncated: true);
     }
-    final clipped = chars.take(maxLength).toString();
-    // 截断后光标落在保留文本末尾：插入点之后的内容已被裁掉，没有更合理的位置。
-    return (text: clipped, cursor: clipped.length, truncated: true);
+    final kept = pasted.characters.take(budget).toString();
+    final truncated = kept.characters.length < pasted.characters.length;
+    final merged = current.replaceRange(sel.start, sel.end, kept);
+    return (
+      text: merged,
+      cursor: sel.start + kept.length,
+      truncated: truncated,
+    );
   }
 
   /// 可选预填文本（如分享入口转发过来的文字），非空时录入层预填并实时解析。
@@ -114,11 +124,14 @@ class QuickEntrySheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => QuickEntrySheet(
-        initialText: initialText,
-        sourcePackage: sourcePackage,
-        initialAttachment: initialAttachment,
-        attachmentSession: attachmentSession,
+      // P2-2（v3.1.6 审计）：弹层内挂自己的消息宿主，提示不再被本弹层遮住。
+      builder: (_) => SheetMessageHost(
+        child: QuickEntrySheet(
+          initialText: initialText,
+          sourcePackage: sourcePackage,
+          initialAttachment: initialAttachment,
+          attachmentSession: attachmentSession,
+        ),
       ),
     );
     // 弹层内部只负责回传草稿，转场由调用方发起，避免 sheet 的 context 已销毁
@@ -189,10 +202,10 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
       _limitHintShown = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('已达 500 字上限，继续输入不会再增加'),
-          duration: Duration(milliseconds: 1400),
-        ));
+        // P2-2（v3.1.6 审计）：改用弹层内消息条；此前 SnackBar 挂在主
+        // Scaffold，被本 bottom sheet 完全盖住，「只提示一次」实际不可见。
+        showSheetMessage(context, '已达 500 字上限，继续输入不会再增加',
+            duration: const Duration(milliseconds: 1400));
       });
     }
   }
@@ -214,10 +227,8 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     if (!mounted) return;
     final text = (data?.text ?? '').trim();
     if (text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('剪贴板没有文本内容'),
-        duration: Duration(milliseconds: 900),
-      ));
+      showSheetMessage(context, '剪贴板没有文本内容',
+          duration: const Duration(milliseconds: 900));
       return;
     }
     final r = QuickEntrySheet.mergeClipboardText(
@@ -230,10 +241,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     );
     _onChanged(r.text);
     if (r.truncated && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('输入内容最多 500 字（含粘贴），超出部分已截断'),
-        duration: Duration(milliseconds: 1200),
-      ));
+      // P2-2（v3.1.6 审计）：在弹层内可见；U-2：文案如实说明「只截粘贴内容」。
+      showSheetMessage(
+        context,
+        '输入内容最多 500 字（含粘贴），超出部分的粘贴内容已截断',
+        duration: const Duration(milliseconds: 1200),
+      );
     }
   }
 

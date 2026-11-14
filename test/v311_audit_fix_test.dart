@@ -468,11 +468,13 @@ void main() {
           reason: '持久层一并改回（不只是内存）');
     });
 
-    testWidgets('解锁页出口仅在死路渲染；关闭前强制验证，失败经二次确认后解除',
+    // P2-1（v3.1.6 审计）口径修正：旧用例把「authenticate 返回 false（用户取消）」
+    // 当成「本机无凭据」，断言取消后仍能二次确认关闭——这正是报告点名的
+    // 绕过面。真实死路必须由**不可用类异常 + 重新探测确认无凭据**表达，
+    // 因此 mock 改为抛 NotAvailable（取消路径由 v312 / v316 用例覆盖）。
+    testWidgets('死路（真实无凭据异常）→ 二次确认后关闭；取消验证不再走此路径',
         (tester) async {
-      // P1-1（v3.1.2 审计）：出口收窄 + 关闭前强制 authenticate——本用例钉住
-      // 「死路 + 验证失败」路径；验证通过的路径见下一条。local_auth 需桩：
-      // 无 mock 时通道调用在 FakeAsync 下永不完成，二次确认框不会出现。
+      // P1-1（v3.1.2 审计）：出口收窄 + 关闭前强制 authenticate。
       const authCh = MethodChannel('plugins.flutter.io/local_auth');
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(authCh, (call) async {
@@ -481,7 +483,9 @@ void main() {
           case 'isDeviceSupported':
             return false; // 死路：设备无任何可用凭据
           case 'authenticate':
-            return false; // 锁屏密码降级验证也失败
+            throw PlatformException(
+                code: 'NotAvailable',
+                message: 'No authentication available');
           default:
             return null;
         }
@@ -503,11 +507,12 @@ void main() {
       ));
       expect(find.text('无法验证？关闭应用锁'), findsOneWidget,
           reason: '死路（!biometricAvailable）必须提供出口（P2-3 v3.1.0）');
-      // P1-1：点出口先强制一次 authenticate（桩已返回 false）→ 二次确认框。
+      // P1-1：点出口先强制一次 authenticate（桩抛 NotAvailable）→
+      // 重新探测仍判无凭据 → 才进入二次确认框。
       await tester.tap(find.text('无法验证？关闭应用锁'));
       await tester.pumpAndSettle();
       expect(find.text('取消'), findsOneWidget,
-          reason: '验证失败后进入二次确认（旧实现直接弹确认）');
+          reason: '只有「确认无凭据」才进入二次确认（P2-1 v3.1.6）');
       await tester.tap(find.widgetWithText(FilledButton, '关闭应用锁'));
       await tester.pumpAndSettle();
 

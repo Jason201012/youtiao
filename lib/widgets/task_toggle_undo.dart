@@ -21,6 +21,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 import 'package:todolist/widgets/undo_snack_bar.dart';
 
 /// U2-1（v3.0.6 审计）：任务侧 App 内写入口的落盘失败**统一提示**——与习惯侧
@@ -49,7 +50,10 @@ import 'package:todolist/widgets/undo_snack_bar.dart';
 void showTaskPersistFailedHint(BuildContext context,
     {TaskProvider? provider, bool rolledBack = false}) {
   final safeMode = provider?.dbLoadFailed ?? false;
-  ScaffoldMessenger.of(context).showSnackBar(
+  // P2-2（v3.1.6 审计）：新建 / 编辑弹层内的失败回执必须显示在弹层内，
+  // 否则挂在主 Scaffold 的 SnackBar 被弹层整块遮挡，用户只看到「弹层没关」。
+  showSheetSnackBar(
+    context,
     SnackBar(
       content: Text(safeMode
           ? '安全模式下更改不会保存：已阻止写入以保护数据库，请先修复或恢复后再试'
@@ -69,7 +73,9 @@ void showTaskPersistFailedHint(BuildContext context,
 /// main._doComplete / _doTaskUndo 既有的 byId 判空口径对齐（项目自己早已承认
 /// 这两义必须区分，只是 App 内 4 个消费点没跟上）。
 void showTaskMissingHint(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
+  // P2-2（v3.1.6 审计）：同 showTaskPersistFailedHint，弹层内可见。
+  showSheetSnackBar(
+    context,
     const SnackBar(content: Text('任务已不存在：可能刚被删除，请刷新后查看')),
   );
 }

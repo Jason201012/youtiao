@@ -15,6 +15,7 @@ import 'package:todolist/widgets/top_app_bar.dart';
 import 'package:todolist/widgets/command_palette_button.dart';
 import 'package:todolist/widgets/habit_heatmap.dart';
 import 'package:todolist/widgets/habit_share_card.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 // P3-2（v2.9.6 审计）：删除习惯的撤销横幅迁入唯一实现（showUndoSnackBar / undoContent）。
 import 'package:todolist/widgets/undo_snack_bar.dart';
 import 'package:todolist/widgets/streak_celebration.dart';
@@ -285,7 +286,8 @@ class _HabitUnitEditor extends StatelessWidget {
 /// 今日页与通知 action 对同场景都会回报，唯独列表行静默。现在三入口都可点、
 /// 统一走本提示（与 [toggleHabitWithUndo] 的守卫分支同一文案）。
 void showHabitRestDayHint(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
+  showSheetSnackBar(
+    context,
     const SnackBar(
       content: Text('今天不打卡 · 如需补记请在习惯详情里用「补卡」'),
       duration: Duration(seconds: 3),
@@ -298,7 +300,8 @@ void showHabitRestDayHint(BuildContext context) {
 /// 写入；归档行的动作区已替换为「已归档」占位（见 _HabitTile），此提示供
 /// 未来入口兜底，避免「点按无反应」。
 void showHabitArchivedHint(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
+  showSheetSnackBar(
+    context,
     const SnackBar(
       content: Text('已归档 · 恢复归档后可继续打卡'),
       duration: Duration(seconds: 3),
@@ -328,7 +331,9 @@ String _fmtMinute(int minute) {
 /// [provider] 缺省（测试 / 无 provider 上下文）时按非安全模式处理。
 void showCheckInPersistFailedHint(BuildContext context, {HabitProvider? provider}) {
   final safeMode = provider?.dbLoadFailed ?? false;
-  ScaffoldMessenger.of(context).showSnackBar(
+  // P2-2（v3.1.6 审计）：习惯编辑 / 打卡弹层内的失败回执必须可见。
+  showSheetSnackBar(
+    context,
     SnackBar(
       content: Text(safeMode
           ? '安全模式下更改不会保存：已阻止写入以保护数据，请先修复或恢复后再试'
@@ -2619,7 +2624,8 @@ class _HabitEditSheet extends StatefulWidget {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => _HabitEditSheet(habit: habit),
+      // P2-2（v3.1.6 审计）：编辑弹层内的校验 / 失败回执必须显示在弹层内。
+      builder: (_) => SheetMessageHost(child: _HabitEditSheet(habit: habit)),
     );
   }
 
@@ -2692,8 +2698,7 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
   Future<void> _save() async {
     final title = _titleCtl.text.trim();
     if (title.isEmpty) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('习惯名称不能为空')));
+      showSheetMessage(context, '习惯名称不能为空', isError: true);
       return;
     }
     setState(() => _saving = true);

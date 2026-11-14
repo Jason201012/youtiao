@@ -66,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // 读取失败则回退到编译期已知版本，保证不至于显示空白。
       // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
       // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.1.6');
+      if (mounted) setState(() => _version = '3.1.7');
     }
   }
 
@@ -365,10 +365,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await provider.setAutoBackupPassHint(ctlHint.text);
     }
     if (!ctx.mounted) return;
+    // P3-3（v3.1.6 审计）：换口令会连当天的加密快照一起标 stale，
+    // provider 现在清日期并立即补写一份新口令快照；文案如实说明「已尝试」，
+    // 补写失败的原因会显示在「本地自动备份」副标题 / 首页横幅，不谎报成功。
     final msg = changed < 0
         ? '修改失败'
         : changed > 0
-            ? '口令已更新；$changed 份旧口令加密快照已标记失效，将在 7 天内滚动清除'
+            ? '口令已更新；$changed 份旧口令快照已标记失效，已尝试补写今日新快照'
             : '口令已更新';
     ScaffoldMessenger.of(ctx).showSnackBar(
       SnackBar(content: Text(msg)),
@@ -1636,10 +1639,11 @@ String _formatIdle(int seconds) {
                       builder: (context, provider, _) => SettingsRow(
                         icon: Symbols.backup,
                         label: '本地自动备份',
-                        // 副标题优先展示异常提示，否则展示最近快照日期。
-                        subtitle: provider.lastAutoBackupError != null
-                            ? '自动备份异常：${provider.lastAutoBackupError}'
-                            : provider.lastAutoBackupLabel,
+                        // P3-2（v3.1.6 审计）：旧副标题用「有错误只显示错误」
+                        // 覆盖日期，「最近成功是哪天」与「不含附件」全被盖掉。
+                        // 现在由 provider 单一真源拼「日期 + 状态」两段式，
+                        // 跨日残留的旧失败会显式加「上次」前缀。
+                        subtitle: provider.autoBackupSubtitle,
                         switchValue: provider.autoBackupEnabled,
                         onSwitchChanged: (v) => provider.setAutoBackupEnabled(v),
                       ),
@@ -1669,11 +1673,59 @@ String _formatIdle(int seconds) {
                             // T3-1：口令提示随设置口令一并落本机。
                             await provider.setAutoBackupPassHint(passPair.$2);
                           }
-                          final ok = await provider.setAutoBackupEncrypt(v);
-                          if (!ok && mounted) {
+                          // P2-3（v3.1.6 审计）：开启加密前如实告知存量明文
+                          // 快照，并让用户明确选择「删除」或「保留」。旧实现
+                          // 只影响后续写入，用户看到「每日快照以 AES-256-GCM
+                          // 加密后落盘」会以为所有本地快照都已受保护。
+                          var purgePlaintext = false;
+                          var plainCount = 0;
+                          if (v) {
+                            plainCount = await provider.countPlaintextSnapshots();
+                            if (plainCount > 0 && mounted) {
+                              final choice = await showDialog<bool>(
+                                context: context,
+                                builder: (dctx) => AlertDialog(
+                                  title: Text('本机已有 $plainCount 份明文快照'),
+                                  content: const Text(
+                                    '开启加密只保护「此后生成」的快照。此前每日快照与恢复前回滚点仍是明文，'
+                                    '可被文件管理器或 ADB 直接读出。\n\n'
+                                    '删除：立即清理这些历史明文，并补写一份今日加密快照（不可恢复）。\n'
+                                    '保留：不删除任何数据，旧明文会在 7 份滚动保留内自然淘汰。',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(dctx, false),
+                                      child: const Text('保留旧快照'),
+                                    ),
+                                    FilledButton(
+                                      onPressed: () =>
+                                          Navigator.pop(dctx, true),
+                                      child: const Text('删除旧明文'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (choice == null) return; // 放弃本次开启
+                              purgePlaintext = choice;
+                            }
+                          }
+                          final ok = await provider.setAutoBackupEncrypt(v,
+                              purgePlaintext: purgePlaintext);
+                          if (!mounted) return;
+                          if (!ok) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
                                 content: Text('开启加密前需要先设置备份口令'),
+                              ),
+                            );
+                          } else if (v && plainCount > 0) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(purgePlaintext
+                                    ? '已清理 $plainCount 份历史明文快照，并补写今日加密快照'
+                                    : '已开启加密；$plainCount 份旧明文快照仍在本机，将在 7 份滚动保留内自然清除'),
+                                duration: const Duration(seconds: 5),
                               ),
                             );
                           }
@@ -1755,28 +1807,35 @@ String _formatIdle(int seconds) {
                       builder: (context, lock, _) => SettingsRow(
                         icon: Symbols.lock,
                         label: '应用锁',
+                        // P3-4（v3.1.6 审计）：① enabled + !canAuthenticate 时
+                        // 旧文案拼成「每次进入需验证无可用验证方式」的病句；
+                        // ② onSwitchChanged 为 null 让该状态成为关不掉的死行。
+                        // 现在按真实可用性分支，并允许随时关闭（关闭不需要凭据）。
                         subtitle: lock.appLockEnabled
-                            ? '已开启：每次进入需验证${lock.credentialLabel}，'
-                                '仅遮挡界面（数据库仍为明文）'
+                            ? (lock.canAuthenticate
+                                ? '已开启：每次进入需验证${lock.credentialLabel}，'
+                                    '仅遮挡界面（数据库仍为明文）'
+                                : '已开启：${lock.unavailableHint}，本机暂时无法完成验证；'
+                                    '回前台会自动重新探测，解锁页提供关闭出口')
                             : (lock.canAuthenticate
                                 ? (lock.hasEnrolledBiometrics
                                     ? '每次进入需验证指纹 / 面容，可降级用锁屏密码；仅遮挡界面，本地数据库仍为明文'
                                     : '本机仅可用锁屏密码验证；仅遮挡界面，本地数据库仍为明文')
                                 : '${lock.unavailableHint}，无法开启应用锁'),
                         switchValue: lock.appLockEnabled,
-                        onSwitchChanged: lock.canAuthenticate
-                            ? (v) async {
-                                final ok = await lock.setEnabled(v);
-                                if (!ok && mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                          '${lock.unavailableHint}，无法开启应用锁'),
-                                    ),
-                                  );
-                                }
-                              }
-                            : null,
+                        onSwitchChanged: (v) async {
+                          // P3-4：setEnabled(true) 内部会先重新探测凭据，
+                          // 用户刚在系统设置补录指纹 / 密码后无需重启 App。
+                          final ok = await lock.setEnabled(v);
+                          if (!ok && mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                    '${lock.unavailableHint}，无法开启应用锁'),
+                              ),
+                            );
+                          }
+                        },
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
