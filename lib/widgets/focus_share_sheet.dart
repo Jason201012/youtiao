@@ -13,6 +13,7 @@ import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/focus_share_card.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 
 /// 打开「分享专注记录」面板：实时预览长图 + 浅/深色切换 + 保存到相册 / 系统分享。
 Future<void> showFocusShareSheet(BuildContext context) {
@@ -32,7 +33,7 @@ Future<void> showFocusShareSheet(BuildContext context) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (_) => _FocusShareSheet(sessions: sessions),
+    builder: (_) => SheetMessageHost(child: _FocusShareSheet(sessions: sessions)),
   );
 }
 
@@ -76,18 +77,16 @@ class _FocusShareSheetState extends State<_FocusShareSheet> {
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      messenger.showSnackBar(
-        SnackBar(content: Text('保存失败：${e.message ?? e.code}')),
-      );
+      showSheetSnackBar(context,
+        SnackBar(content: Text('保存失败：${e.message ?? e.code}')));
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      messenger.showSnackBar(SnackBar(content: Text('生成图片失败：$e')));
+      showSheetSnackBar(context, SnackBar(content: Text('生成图片失败：$e')));
     }
   }
 
   Future<void> _share() async {
-    final messenger = ScaffoldMessenger.of(context);
     setState(() => _busy = true);
     try {
       final bytes = await _capture();
@@ -97,7 +96,7 @@ class _FocusShareSheetState extends State<_FocusShareSheet> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      messenger.showSnackBar(SnackBar(content: Text('分享失败：$e')));
+      showSheetSnackBar(context, SnackBar(content: Text('分享失败：$e')));
     }
   }
 

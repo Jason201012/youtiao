@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // U-4（v3.1.7 审计）：rootBundle 读 pubspec.yaml
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
@@ -58,15 +59,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) setState(() => _tzOverride = v);
   }
 
+  /// U-4（v3.1.7 审计）：显示版本不再依赖每次发版手工同步的常量。
+  ///
+  /// 主路径仍读 [PackageInfo]（真机 versionName）；读取失败 / 返回空值 /
+  /// 测试环境则退到打包进 asset bundle 的 `pubspec.yaml`（已在
+  /// `flutter.assets` 声明），它随 `_make_vXXX.py` 的字节级改号自动更新，
+  /// 因此不会再出现「回退值停在 3.1.7」这类漂移。只有连 asset 都读不到
+  /// 时才用编译期 `--dart-define=YOUTIAO_VERSION=` 或「未知版本」兜底。
   Future<void> _loadVersion() async {
     try {
       final info = await PackageInfo.fromPlatform();
-      if (mounted) setState(() => _version = info.version);
+      if (info.version.isNotEmpty) {
+        if (mounted) setState(() => _version = info.version);
+        return;
+      }
     } catch (_) {
-      // 读取失败则回退到编译期已知版本，保证不至于显示空白。
-      // U17：旧回退值 '2.6.9' 长期未随版本走，展示与真实严重不符；
-      // 这里与 pubspec.yaml 同步（每次发版顺手更新该常量）。
-      if (mounted) setState(() => _version = '3.1.7');
+      // 平台通道不可用（如 widget test），继续走 asset 兜底。
+    }
+    try {
+      final raw = await rootBundle.loadString('pubspec.yaml');
+      final match = RegExp(r'^version:\s*([^\s+#]+)', multiLine: true)
+          .firstMatch(raw);
+      if (match != null && mounted) {
+        setState(() => _version = match.group(1)!);
+        return;
+      }
+    } catch (_) {
+      // asset 缺失时保留最后一层兜底。
+    }
+    if (mounted) {
+      setState(() => _version = const String.fromEnvironment(
+          'YOUTIAO_VERSION', defaultValue: '未知版本'));
     }
   }
 
@@ -1677,8 +1700,13 @@ String _formatIdle(int seconds) {
                           // 快照，并让用户明确选择「删除」或「保留」。旧实现
                           // 只影响后续写入，用户看到「每日快照以 AES-256-GCM
                           // 加密后落盘」会以为所有本地快照都已受保护。
+                          // P1-1（v3.1.7 审计）：删除是「先补写并校验今日加密
+                          // 快照，成功后才删」的不可逆操作；自动备份关闭或数据
+                          // 源不健康时根本写不出新快照，此时必须禁用删除选项。
                           var purgePlaintext = false;
                           var plainCount = 0;
+                          final canPurge = provider.autoBackupEnabled &&
+                              provider.snapshotSourcesHealthy;
                           if (v) {
                             plainCount = await provider.countPlaintextSnapshots();
                             if (plainCount > 0 && mounted) {
@@ -1686,10 +1714,10 @@ String _formatIdle(int seconds) {
                                 context: context,
                                 builder: (dctx) => AlertDialog(
                                   title: Text('本机已有 $plainCount 份明文快照'),
-                                  content: const Text(
+                                  content: Text(
                                     '开启加密只保护「此后生成」的快照。此前每日快照与恢复前回滚点仍是明文，'
                                     '可被文件管理器或 ADB 直接读出。\n\n'
-                                    '删除：立即清理这些历史明文，并补写一份今日加密快照（不可恢复）。\n'
+                                    '${canPurge ? '删除：先补写并校验一份今日加密快照，成功后才清理这些历史明文（不可恢复）。' : '当前无法安全清理：本地自动备份已关闭或数据尚未加载完成，此时删除会失去唯一可恢复副本。请先开启「本地自动备份」并等待加载完成后再清理。'}\n'
                                     '保留：不删除任何数据，旧明文会在 7 份滚动保留内自然淘汰。',
                                   ),
                                   actions: [
@@ -1699,8 +1727,9 @@ String _formatIdle(int seconds) {
                                       child: const Text('保留旧快照'),
                                     ),
                                     FilledButton(
-                                      onPressed: () =>
-                                          Navigator.pop(dctx, true),
+                                      onPressed: canPurge
+                                          ? () => Navigator.pop(dctx, true)
+                                          : null,
                                       child: const Text('删除旧明文'),
                                     ),
                                   ],
@@ -1710,21 +1739,30 @@ String _formatIdle(int seconds) {
                               purgePlaintext = choice;
                             }
                           }
-                          final ok = await provider.setAutoBackupEncrypt(v,
+                          final result = await provider.setAutoBackupEncrypt(v,
                               purgePlaintext: purgePlaintext);
                           if (!mounted) return;
-                          if (!ok) {
+                          if (!result.ok) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
                                 content: Text('开启加密前需要先设置备份口令'),
                               ),
                             );
                           } else if (v && plainCount > 0) {
+                            // P1-1：回执只按 provider 回报的事实生成，不再
+                            // 无条件声称「已补写今日加密快照」。
+                            final String message;
+                            if (!purgePlaintext) {
+                              message = '已开启加密；$plainCount 份旧明文快照仍在本机，将在 7 份滚动保留内自然清除';
+                            } else if (result.snapshotWritten) {
+                              message = '已清理 ${result.removed} 份历史明文快照，并补写今日加密快照';
+                            } else {
+                              message = result.note ??
+                                  '已开启加密；未清理旧明文，旧快照仍在本机';
+                            }
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
-                                content: Text(purgePlaintext
-                                    ? '已清理 $plainCount 份历史明文快照，并补写今日加密快照'
-                                    : '已开启加密；$plainCount 份旧明文快照仍在本机，将在 7 份滚动保留内自然清除'),
+                                content: Text(message),
                                 duration: const Duration(seconds: 5),
                               ),
                             );

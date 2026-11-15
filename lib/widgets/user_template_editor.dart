@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/task_templates.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 
 /// P2-4（v2.9.4 审计）：月度重复规则的三档模式。
 ///
@@ -76,7 +77,7 @@ class UserTemplateEditorSheet {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => _EditorBody(initial: initial),
+      builder: (ctx) => SheetMessageHost(child: _EditorBody(initial: initial)),
     );
   }
 }
@@ -165,17 +166,17 @@ class _EditorBodyState extends State<_EditorBody> {
   Future<void> _save(BuildContext ctx) async {
     final name = _nameCtl.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(ctx).showSnackBar(
+      showSheetSnackBar(ctx,
           const SnackBar(content: Text('请填写模板名称')));
       return;
     }
     if (_items.isEmpty) {
-      ScaffoldMessenger.of(ctx).showSnackBar(
+      showSheetSnackBar(ctx,
           const SnackBar(content: Text('请至少添加一项任务')));
       return;
     }
     if (_items.length > UserTemplateStore.maxItems) {
-      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+      showSheetSnackBar(ctx,SnackBar(
           content: Text('模板项过多（上限 ${UserTemplateStore.maxItems}）')));
       return;
     }
@@ -237,7 +238,7 @@ class _EditorBodyState extends State<_EditorBody> {
     final ok = await UserTemplateStore.save(t);
     if (!ok) {
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx).showSnackBar(
+        showSheetSnackBar(ctx,
           const SnackBar(content: Text('模板保存失败：请检查存储空间后重试')),
         );
       }

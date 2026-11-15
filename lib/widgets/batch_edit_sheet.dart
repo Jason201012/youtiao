@@ -15,6 +15,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 
 class BatchEditSheet {
   /// 打开批量编辑面板，返回本次编辑的凭据（`batchId` + 实际更新条数）；
@@ -32,7 +33,7 @@ class BatchEditSheet {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => _BatchEditBody(ids: ids),
+      builder: (ctx) => SheetMessageHost(child: _BatchEditBody(ids: ids)),
     );
   }
 }
@@ -138,7 +139,7 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     // 跳过、用户却看到「应用成功」——> 无任何变化、也无任何提示。
     // 现显式拒绝：弹错提示并 return，不调用 batchUpdate。
     if (_due == _DueMode.plusDays && (rawDays == null || days == null)) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      showSheetSnackBar(context,
         const SnackBar(content: Text('请输入 0 - 3650 之间的天数')),
       );
       if (mounted) setState(() => _applying = false);

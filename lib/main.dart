@@ -1774,7 +1774,9 @@ class _MainScaffoldState extends State<MainScaffold>
                 // S13 安全模式横幅：数据库加载失败时提示只读、不落盘，引导修复。
                 if (safeMode) const _DbSafeModeBanner(),
                 // U-3（v3.1.6 审计）：自动备份失败不能只有设置页一个入口。
-                _AutoBackupFailureBanner(onOpenSettings: () => _switchTab(4)),
+                // P3-1（v3.1.7 审计）：页面顺序 4 = 习惯、5 = 设置；
+                // 旧实现按钮写「去设置处理」却切到习惯页。
+                _AutoBackupFailureBanner(onOpenSettings: () => _switchTab(5)),
                 // U2-1（v2.9.5 审计）：改用保活容器，切 Tab 不再丢状态。
                 // 此前是 `Expanded(child: pages[_index])`——同一时刻只挂载当前页，
                 // 切走即销毁 State：首页的多选集合 / 搜索态 / 标签筛选 / 滚动位置、
@@ -2082,8 +2084,11 @@ class _AutoBackupFailureBannerState extends State<_AutoBackupFailureBanner> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // P2-1（v3.1.7 审计）：autoBackupStatusNote 本身已含
+                  // 「自动备份异常：」前缀，旧实现再叠一层会得到
+                  // 「每日自动备份失败：自动备份异常：…」。直接展示真源。
                   Text(
-                    '每日自动备份失败：$note',
+                    note ?? '',
                     style: TextStyle(
                         color: scheme.onErrorContainer,
                         fontSize: 13,
@@ -2419,7 +2424,18 @@ class AppLockGate extends StatelessWidget {
     if (confirmed != true) return;
     // 确认期间系统凭据可能已恢复：再探一次，能验证就绝不再关闭。
     await lock.probeBiometric();
-    if (lock.canAuthenticate) return;
+    if (lock.canAuthenticate) {
+      // U-1（v3.1.7 审计）：旧实现在此静默 return，用户已经点了「关闭
+      // 应用锁」却看不出任何变化，容易误判为按钮失效。解锁页是全屏
+      // Scaffold，根 SnackBar 可见，如实说明「已取消关闭」。
+      if (context.mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
+          content: Text('已检测到可用验证方式，已取消关闭，请直接解锁'),
+          duration: Duration(seconds: 3),
+        ));
+      }
+      return;
+    }
     // setEnabled(false)：落盘 + 解除锁定态（MainScaffold 随即切回主界面）。
     if (!context.mounted) return;
     await context.read<AppLockProvider>().setEnabled(false);

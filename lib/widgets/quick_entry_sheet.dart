@@ -64,7 +64,15 @@ class QuickEntrySheet extends StatefulWidget {
   /// 剩余额度，只取粘贴内容的前缀插回选区；额度为 0 时整段粘贴被拒，
   /// 原文一字不动。
   @visibleForTesting
-  static ({String text, int cursor, bool truncated}) mergeClipboardText(
+  static ({
+    String text,
+    int cursor,
+    bool truncated,
+    // P3-3（v3.1.7 审计）：额度为 0（一个字都插不进去）与「有选区」分开回报，
+    // 调用方才能如实区分「原文一字未动」和「超出部分被截断」两种结果。
+    bool rejected,
+    bool hadSelection,
+  }) mergeClipboardText(
     String current,
     TextSelection selection,
     String pasted, {
@@ -77,13 +85,20 @@ class QuickEntrySheet extends StatefulWidget {
     final sel = valid
         ? selection
         : TextSelection.collapsed(offset: current.length);
+    final hadSelection = valid && sel.end > sel.start;
     final prefix = current.substring(0, sel.start);
     final suffix = current.substring(sel.end);
     // 额度按字素簇算（与 TextField.maxLength 同口径），但选区下标是 UTF-16
     // 码元：前缀 / 后缀换算成字素簇，插入内容的长度仍按码元回写给光标。
     final budget = maxLength - prefix.characters.length - suffix.characters.length;
     if (budget <= 0) {
-      return (text: current, cursor: sel.start, truncated: true);
+      return (
+        text: current,
+        cursor: sel.start,
+        truncated: true,
+        rejected: true,
+        hadSelection: hadSelection,
+      );
     }
     final kept = pasted.characters.take(budget).toString();
     final truncated = kept.characters.length < pasted.characters.length;
@@ -92,6 +107,8 @@ class QuickEntrySheet extends StatefulWidget {
       text: merged,
       cursor: sel.start + kept.length,
       truncated: truncated,
+      rejected: false,
+      hadSelection: hadSelection,
     );
   }
 
@@ -225,9 +242,12 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
     // `setState`，会抛「TextEditingController used after disposed /
     // setState() called after dispose()」。此处必须先确认仍挂载。
     if (!mounted) return;
-    final text = (data?.text ?? '').trim();
-    if (text.isEmpty) {
-      showSheetMessage(context, '剪贴板没有文本内容',
+    // P3-3（v3.1.7 审计）：不再对正文 trim()——从代码块 / 带缩进的文本
+    // 粘贴时首尾换行与缩进都是内容，旧实现会静默吞掉。只对「纯空白」
+    // 剪贴板做整体判定，正文原样插入。
+    final text = data?.text ?? '';
+    if (text.trim().isEmpty) {
+      showSheetMessage(context, '剪贴板没有可插入的文本内容',
           duration: const Duration(milliseconds: 900));
       return;
     }
@@ -235,6 +255,21 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
         _controller.text, _controller.selection, text);
     // 粘贴路径自带「超出部分已截断」提示，避免与字数上限提示叠两层。
     if (r.truncated) _limitHintShown = true;
+    if (r.rejected) {
+      // P3-3：额度为 0 时原文一字不动、选区也保持原样。旧实现仍把
+      // `_controller.value` 改成折叠光标并提示「超出部分已截断」，
+      // 用户既没看到粘贴内容、选区也没被替换，反馈与事实不符。
+      if (mounted) {
+        showSheetMessage(
+          context,
+          r.hadSelection
+              ? '输入已达 500 字上限，选中的文字也未被替换；请先删减内容再粘贴'
+              : '输入已达 500 字上限，粘贴内容未插入',
+          duration: const Duration(milliseconds: 1200),
+        );
+      }
+      return;
+    }
     _controller.value = TextEditingValue(
       text: r.text,
       selection: TextSelection.collapsed(offset: r.cursor),

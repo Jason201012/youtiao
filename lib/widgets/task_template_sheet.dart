@@ -9,6 +9,7 @@ import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/task_templates.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/user_template_editor.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 
 class TaskTemplateSheet {
   /// 打开模板库（内置套用 + 用户模板管理）。
@@ -19,7 +20,7 @@ class TaskTemplateSheet {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => const _TemplateLibraryBody(),
+      builder: (ctx) => const SheetMessageHost(child: _TemplateLibraryBody()),
     );
   }
 
@@ -65,7 +66,7 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
     // P3-1（v3.0.2 审计）/ U3-2：损坏模板此前从列表静默消失，用户无从知晓
     // 原因。加载失败数 > 0 时给一条可见提示（SnackBar，不打断浏览）。
     if (r.broken > 0) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      showSheetSnackBar(context, SnackBar(
         content: Text(
             '${r.broken} 个模板文件已损坏，已跳过；可删除后重新导入'),
       ));
@@ -78,8 +79,8 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
     if (picked.cancelled) return;
     if (picked.error != null) {
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx)
-            .showSnackBar(SnackBar(content: Text(picked.error!)));
+        showSheetSnackBar(ctx,
+            SnackBar(content: Text(picked.error!)));
       }
       return;
     }
@@ -90,8 +91,8 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
       final t = UserTemplate.fromImportedJson(m);
       if (t.items.isEmpty) {
         if (ctx.mounted) {
-          ScaffoldMessenger.of(ctx)
-              .showSnackBar(const SnackBar(content: Text('模板文件无有效任务项')));
+          showSheetSnackBar(ctx,
+              const SnackBar(content: Text('模板文件无有效任务项')));
         }
         return;
       }
@@ -99,7 +100,7 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
       final ok = await UserTemplateStore.save(t);
       if (!ok) {
         if (ctx.mounted) {
-          ScaffoldMessenger.of(ctx).showSnackBar(
+          showSheetSnackBar(ctx,
             const SnackBar(content: Text('模板保存失败：请检查存储空间后重试')),
           );
         }
@@ -107,13 +108,13 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
       }
       await _reload();
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx)
-            .showSnackBar(SnackBar(content: Text('已导入模板「${t.name}」')));
+        showSheetSnackBar(ctx,
+            SnackBar(content: Text('已导入模板「${t.name}」')));
       }
     } catch (e) {
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx)
-            .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+        showSheetSnackBar(ctx,
+            SnackBar(content: Text('导入失败：$e')));
       }
     }
   }
@@ -136,8 +137,8 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
       await UserTemplateStore.delete(t.id);
       await _reload();
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx)
-            .showSnackBar(SnackBar(content: Text('已删除「${t.name}」')));
+        showSheetSnackBar(ctx,
+            SnackBar(content: Text('已删除「${t.name}」')));
       }
     }
   }
@@ -148,8 +149,8 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
       if (ctx.mounted) await DataIo.shareFile(file, mimeType: 'application/json');
     } catch (e) {
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx)
-            .showSnackBar(SnackBar(content: Text('分享失败：$e')));
+        showSheetSnackBar(ctx,
+            SnackBar(content: Text('分享失败：$e')));
       }
     }
   }
@@ -235,7 +236,7 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                             );
                           }
                         } else if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
+                          showSheetSnackBar(context,
                             SnackBar(
                                 content: Text('套用失败：「${t.name}」未保存'
                                     '（已整体回滚），请检查存储空间后重试')),
@@ -305,7 +306,7 @@ class _TemplateLibraryBodyState extends State<_TemplateLibraryBody> {
                                   );
                                 }
                               } else if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                showSheetSnackBar(context,
                                   SnackBar(
                                       content: Text('套用失败：「${t.name}」未保存'
                                           '（已整体回滚），请检查存储空间后重试')),

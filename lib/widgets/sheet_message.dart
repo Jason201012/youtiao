@@ -69,6 +69,24 @@ typedef _QueuedMessage = ({
   VoidCallback? onAction,
 });
 
+/// U-3（v3.1.7 审计）：失败 / 校验类文案判定（公开，便于回归测试）。
+///
+/// 旧实现用 `snackBar.backgroundColor != null` 推断「是否失败」，而全仓
+/// SnackBar 几乎从不设置 backgroundColor —— 绝大多数失败提示仍用中性色
+/// `inverseSurface`，与 `showSheetMessage(..., isError: true)` 的显式口径
+/// 不一致。调用方仍可用 `isError:` 显式覆盖本函数的判定。
+bool sheetMessageLooksLikeError(String text) {
+  const markers = <String>[
+    '失败', '错误', '异常', '无法', '不能', '未保存', '不允许', '损坏',
+    '请检查', '请填写', '请输入', '请至少', '请重新', '超出', '已截断',
+    '过多', '超限', '上限', '没有', '为空', '已跳过', '不存在', '拒绝',
+  ];
+  for (final marker in markers) {
+    if (text.contains(marker)) return true;
+  }
+  return false;
+}
+
 /// 弹层内消息的唯一展示位。包在弹层内容外层即可，不改变 child 的布局约束。
 class SheetMessageHost extends StatefulWidget {
   const SheetMessageHost({super.key, required this.child});
@@ -128,6 +146,13 @@ class SheetMessageHostState extends State<SheetMessageHost> {
       actionLabel: actionLabel,
       onAction: onAction,
     ));
+    // P3-2（v3.1.7 审计）：入队本身不触发 rebuild，必须主动调度一次检查。
+    // 若此刻已被更高路由覆盖，build 中的 ModalRoute.isCurrent 依赖会在
+    // 覆盖退场时重建并再次 flush；两条合起来覆盖所有入队路径。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _queued.isEmpty) return;
+      if (ModalRoute.of(context)?.isCurrent ?? true) flushQueued();
+    });
   }
 
   /// 由 `_withRestoreProgress` 在进度弹层收起后调用；多条排队消息取最后一条
@@ -160,27 +185,47 @@ class SheetMessageHostState extends State<SheetMessageHost> {
 
   @override
   Widget build(BuildContext context) {
+    // P3-2（v3.1.7 审计）：普通 AlertDialog / 口令框覆盖弹层时 `_dispatch`
+    // 会把消息压进 `_queued`，而旧实现唯一的消费者是 backup_sheet 的进度层
+    // flush —— 其它路径的消息一直滞留到 host 销毁被丢弃。这里读取
+    // ModalRoute.isCurrent 建立依赖：高路由退场、本弹层重新 current 时
+    // Flutter 会 rebuild 本 State，再用 post-frame 统一 flush。
+    final routeIsCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    if (_queued.isNotEmpty && routeIsCurrent) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _queued.isEmpty) return;
+        if (ModalRoute.of(context)?.isCurrent ?? true) flushQueued();
+      });
+    }
+    final interactive = _actionLabel != null && _onAction != null;
     return SheetMessageScope(
       hostState: this,
       show: show,
       enqueue: enqueue,
       // Stack：消息条是 positioned 子项，不参与 child 的尺寸计算，
       // 因此不会给 bottom sheet 的 SingleChildScrollView 引入无界高度约束。
+      // U-2（v3.1.7 审计）：旧实现 `top: 0` 正好压住底部弹层的标题 /
+      // 拖拽手柄且拦截点击。改为贴底 + 非交互消息条点穿（自动 3 秒消失，
+      // 不留不可点的关闭按钮），既避开顶部控件，也不挡住点击。
       child: Stack(
         clipBehavior: Clip.none,
         children: [
           widget.child,
           if (_message != null)
             Positioned(
-              top: 0,
+              bottom: 0,
               left: 0,
               right: 0,
-              child: _SheetMessageBanner(
-                message: _message!,
-                isError: _isError,
-                actionLabel: _actionLabel,
-                onAction: _onAction,
-                onClose: _dismiss,
+              child: IgnorePointer(
+                ignoring: !interactive,
+                child: _SheetMessageBanner(
+                  message: _message!,
+                  isError: _isError,
+                  actionLabel: _actionLabel,
+                  onAction: _onAction,
+                  showClose: interactive,
+                  onClose: _dismiss,
+                ),
               ),
             ),
         ],
@@ -194,6 +239,7 @@ class _SheetMessageBanner extends StatelessWidget {
     required this.message,
     required this.isError,
     required this.onClose,
+    required this.showClose,
     this.actionLabel,
     this.onAction,
   });
@@ -203,6 +249,8 @@ class _SheetMessageBanner extends StatelessWidget {
   final String? actionLabel;
   final VoidCallback? onAction;
   final VoidCallback onClose;
+  /// U-2（v3.1.7 审计）：点穿态下不展示点不到的关闭按钮。
+  final bool showClose;
 
   @override
   Widget build(BuildContext context) {
@@ -213,7 +261,7 @@ class _SheetMessageBanner extends StatelessWidget {
       color: Colors.transparent,
       child: Container(
         key: const Key('sheet-message'),
-        margin: const EdgeInsets.fromLTRB(8, 6, 8, 0),
+        margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
           color: bg,
@@ -244,10 +292,11 @@ class _SheetMessageBanner extends StatelessWidget {
                 ),
                 child: Text(actionLabel!, style: const TextStyle(fontSize: 12)),
               ),
-            GestureDetector(
-              onTap: onClose,
-              child: Icon(Icons.close, size: 16, color: fg),
-            ),
+            if (showClose)
+              GestureDetector(
+                onTap: onClose,
+                child: Icon(Icons.close, size: 16, color: fg),
+              ),
           ],
         ),
       ),
@@ -334,7 +383,8 @@ void showSheetMessage(
   BuildContext context,
   String message, {
   Duration duration = const Duration(seconds: 3),
-  bool isError = false,
+  // U-3（v3.1.7 审计）：null = 按文案自动判定；显式传值优先。
+  bool? isError,
 }) {
   final scope = context.getInheritedWidgetOfExactType<SheetMessageScope>();
   final snack = SnackBar(content: Text(message), duration: duration);
@@ -347,14 +397,16 @@ void showSheetMessage(
     return;
   }
   _dispatch(context, scope, message,
-      duration: duration, isError: isError);
+      duration: duration,
+      isError: isError ?? sheetMessageLooksLikeError(message));
 }
 
 /// P2-2（v3.1.6 审计）：**替代** `ScaffoldMessenger.of(context).showSnackBar(...)`
 /// 的兼容入口。参数仍是原生 [SnackBar]，因此调用点只需换函数名；
 /// 命中 [SheetMessageHost] 时把内容渲染成弹层内的可见消息条，
 /// 否则原样交给根 ScaffoldMessenger（普通页面行为不变）。
-void showSheetSnackBar(BuildContext context, SnackBar snackBar) {
+void showSheetSnackBar(BuildContext context, SnackBar snackBar,
+    {bool? isError}) {
   final messenger = ScaffoldMessenger.maybeOf(context);
   final scope = context.getInheritedWidgetOfExactType<SheetMessageScope>();
   if (scope == null) {
@@ -381,8 +433,11 @@ void showSheetSnackBar(BuildContext context, SnackBar snackBar) {
     scope,
     text,
     duration: snackBar.duration,
-    // 失败 / 警告类文案统一按 error 色展示，便于用户第一眼区分。
-    isError: snackBar.backgroundColor != null,
+    // U-3（v3.1.7 审计）：按文案判定失败 / 校验类提示，显式 isError 优先；
+    // 保留 backgroundColor 作为兼容信号（历史调用点确有设色的场合）。
+    isError: isError ??
+        (sheetMessageLooksLikeError(text) ||
+            snackBar.backgroundColor != null),
     actionLabel: action?.label,
     onAction: action?.onPressed,
   );

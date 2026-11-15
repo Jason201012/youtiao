@@ -12,6 +12,7 @@ import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/widgets/habit_heatmap.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 
 /// 习惯分享长图的数据快照（与任务分享卡同理：截图时不再依赖 Provider）。
 class HabitShareData {
@@ -331,7 +332,7 @@ Future<void> showHabitShareSheet(BuildContext context, Habit habit) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (_) => _HabitShareSheet(data: data, title: habit.title),
+    builder: (_) => SheetMessageHost(child: _HabitShareSheet(data: data, title: habit.title)),
   );
 }
 
@@ -376,18 +377,16 @@ class _HabitShareSheetState extends State<_HabitShareSheet> {
     } on PlatformException catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      messenger.showSnackBar(
-        SnackBar(content: Text('保存失败：${e.message ?? e.code}')),
-      );
+      showSheetSnackBar(context,
+        SnackBar(content: Text('保存失败：${e.message ?? e.code}')));
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      messenger.showSnackBar(SnackBar(content: Text('生成图片失败：$e')));
+      showSheetSnackBar(context, SnackBar(content: Text('生成图片失败：$e')));
     }
   }
 
   Future<void> _share() async {
-    final messenger = ScaffoldMessenger.of(context);
     setState(() => _busy = true);
     try {
       final bytes = await _capture();
@@ -397,7 +396,7 @@ class _HabitShareSheetState extends State<_HabitShareSheet> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      messenger.showSnackBar(SnackBar(content: Text('分享失败：$e')));
+      showSheetSnackBar(context, SnackBar(content: Text('分享失败：$e')));
     }
   }
 

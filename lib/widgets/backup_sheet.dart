@@ -1374,22 +1374,34 @@ class _AutoBackupSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = taskProvider;
-    final lastOk = provider.lastAutoBackupDate;
-    final err = provider.lastAutoBackupError;
+    // P2-3（v3.1.7 审计）：与设置页共用 provider 的单一真源副标题。
+    // 旧实现直读 lastAutoBackupError 并硬加「上次失败：」：降级 warning
+    // 被写成「上次失败：…数据完整」自相矛盾、今天刚发生的失败也写成
+    // 「上次」，且完全不展示「不含附件」这一恢复前必须知道的事实。
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text('本地自动备份'),
-          subtitle: Text(err != null
-              ? '上次失败：$err'
-              : (lastOk != null
-                  ? '最近成功：${lastOk.month}月${lastOk.day}日（保留最近 7 天）'
-                  : '开启后每天自动生成本地快照')),
+          subtitle: Text(provider.autoBackupSubtitle),
           value: provider.autoBackupEnabled,
           onChanged: (v) => provider.setAutoBackupEnabled(v),
         ),
+        if (provider.lastAutoBackupNoAttach)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Chip(
+                avatar: const Icon(Icons.attachment_outlined, size: 16),
+                label: const Text('最近快照不含附件，恢复时不会还原附件',
+                    style: TextStyle(fontSize: 12)),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          ),
         FutureBuilder<List<AutoBackupEntry>>(
           future: provider.listAutoBackups(),
           builder: (ctx, snap) {

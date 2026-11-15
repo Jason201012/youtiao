@@ -495,7 +495,12 @@ void main() {
       await p.load();
       await p.setAutoBackupPassphrase('pass12345');
       expect(await p.countPlaintextSnapshots(), 2);
-      expect(await p.setAutoBackupEncrypt(true, purgePlaintext: true), isTrue);
+      // P1-1（v3.1.7 审计）：返回值三态化，不再是无条件 `true`。
+      // 本用例的前置条件（自动备份开启 + 数据源健康）允许「先写后删」，
+      // 因此仍断言明文被清理；新语义见 test/v317_audit_fix_test.dart。
+      final outcome =
+          await p.setAutoBackupEncrypt(true, purgePlaintext: true);
+      expect(outcome.ok, isTrue);
       expect(plain.existsSync(), isFalse,
           reason: 'P2-3：开启加密后旧明文不能继续留在磁盘');
       expect(rollback.existsSync(), isFalse,
