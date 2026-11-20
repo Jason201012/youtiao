@@ -119,6 +119,21 @@ String buildBackupPayload(String plainJson,
   return encrypt(plainJson, pass);
 }
 
+/// P2-2（v3.1.8 审计）：口令字符复杂度判定的**单一真源**。
+///
+/// 手动加密备份要求「至少 8 位 + 大小写/数字中至少两类」，但 v3.1.8 之前
+/// 自动备份首次设口令只校验 6 位、无复杂度、无二次确认——同一 App 两套口径，
+/// 弱口令（如 `123456`）结合 35 万轮 PBKDF2 仍可被 GPU 快速爆破。
+/// 抽取为顶层纯函数供 backup_sheet / settings_screen 共用，避免再次漂移。
+/// 长度下限由调用方单独校验（两处提示文案不同），这里只判定字符类别数。
+bool backupPassphraseHasTwoClasses(String p) {
+  var classes = 0;
+  if (p.contains(RegExp(r'[a-z]'))) classes++;
+  if (p.contains(RegExp(r'[A-Z]'))) classes++;
+  if (p.contains(RegExp(r'[0-9]'))) classes++;
+  return classes >= 2;
+}
+
 /// 判断一段原始文本是否为本 App 的加密信封（用于导入时分流处理）。
 bool isEncryptedEnvelope(String raw) {
   try {

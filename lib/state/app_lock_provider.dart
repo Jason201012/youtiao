@@ -89,6 +89,13 @@ class AppLockProvider extends ChangeNotifier {
   bool _lastRefreshForceDisabled = false;
   bool get lastRefreshForceDisabled => _lastRefreshForceDisabled;
 
+  /// P2-5（v3.1.8 审计）：启动加载是否失败（偏好读取异常）。失败时按 **fail-safe**
+  /// 处理——假定应用锁「已开启并已上锁」，而不是静默降级为未锁。旧实现 [load]
+  /// 直接读 SharedPreferences，异常被 main._safeLoad 吞掉后 `_enabled` 保持默认
+  /// false，用户以为锁仍生效，实际拿到设备的人可直接进入（fail-open）。
+  bool _loadFailed = false;
+  bool get loadFailed => _loadFailed;
+
   /// 当前是否需要验证。true=显示解锁页；false=已解锁可正常交互。
   bool _locked = false;
   bool get locked => _locked;
@@ -146,8 +153,19 @@ class AppLockProvider extends ChangeNotifier {
   }
 
   Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    _enabled = prefs.getBool(_kEnabled) ?? false;
+    // P2-5（v3.1.8 审计）：偏好读取异常时 fail-safe——旧的「异常被 _safeLoad
+    // 吞掉 → _enabled 保持 false → 直接进主界面」是 fail-open，等于应用锁在
+    // 平台通道抖动 / 存储损坏时静默失效。这里捕获后按「锁已开启且已上锁」
+    // 处理：真实探测仍会进行，若无可用凭据则 unlockEscapeVisible 给关闭出口。
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _enabled = prefs.getBool(_kEnabled) ?? false;
+      _loadFailed = false;
+    } catch (e) {
+      AppLog.d('[AppLock] 读取应用锁偏好失败（按已上锁 fail-safe 处理）：$e');
+      _loadFailed = true;
+      _enabled = true;
+    }
     await probeBiometric();
     // P1-1（v3.1.5 审计）：这里**不**因「探测不到可用凭据」而自动关闭应用锁。
     // 自动降级等于静默削弱用户已开启的安全设置；真实死路由解锁页的动态出口

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart'; // P2-4：全局指针活动监听
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -43,6 +44,7 @@ import 'package:todolist/screens/tag_manage_screen.dart';
 import 'package:todolist/widgets/command_palette.dart';
 import 'package:todolist/widgets/export_sheet.dart';
 import 'package:todolist/widgets/backup_sheet.dart';
+import 'package:todolist/widgets/sheet_message.dart'; // P2-4：进度层期间暂停空闲锁
 
 /// 全局根导航键：供通知点击回调在脱离 widget context 时仍能 push 路由。
 final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
@@ -348,15 +350,20 @@ bool _isEditingText() {
 /// 应用锁的实现是「home（MainScaffold）内部 locked 时渲染 AppLockGate」，
 /// 而通知 / 小组件 / 分享的跳转走的是 MaterialApp 的**根 Navigator**，
 /// push 上去的路由会整屏盖在解锁页之上——即完全绕过应用锁。
-/// 因此所有外部意图在消费前都必须先过这道判定；判定失败（Provider 未注入 /
-/// context 未挂载）时按「未锁定」处理，宁可放行也不吞掉正常跳转。
+/// 因此所有外部意图在消费前都必须先过这道判定。
+///
+/// P2-5（v3.1.8 审计）：判定失败（Provider 未注入 / context 未挂载 / 读取抛错）
+/// 一律按「已锁定」处理（fail-safe）。旧实现返回 false 按未锁放行，配合
+/// AppLockProvider.load() 的 fail-open，等于应用锁在异常时双重失效。保守放行的
+/// 代价仅是外部意图多暂存一轮（解锁后由 [_onAppLockChanged] 补消费），远小于
+/// 隐私门禁被绕过。
 bool get _isAppLocked {
   final ctx = _navigatorKey.currentContext;
-  if (ctx == null) return false;
+  if (ctx == null) return true;
   try {
     return ctx.read<AppLockProvider>().locked;
   } catch (_) {
-    return false;
+    return true;
   }
 }
 
@@ -1135,6 +1142,9 @@ void main() async {
   // L-06：锁屏是否隐藏通知内容（默认隐藏）。必须在首次调度通知前写入，
   // 否则本轮调度出来的通知仍会按 public 展示任务标题。
   NotificationService.lockScreenPrivate = task.lockScreenPrivate;
+  // P2-6（v3.1.8 审计）：声音开关单一真源同步（与 lockScreenPrivate 同批注入，
+  // 保证启动后首次调度的习惯 / 简报提醒也遵循用户设置）。
+  NotificationService.soundEnabled = task.soundEnabled;
   // L-07：防截屏 / 防录屏。原生 onCreate 已按持久化值应用过一次，
   // 这里再同步一次，覆盖「偏好由备份恢复」等运行时变更。
   unawaited(SecureWindow.setFlagSecure(task.screenSecurityEnabled));
@@ -1401,12 +1411,30 @@ class _MainScaffoldState extends State<MainScaffold>
     return secs <= 0 ? null : Duration(seconds: secs);
   }
 
-  /// P1-2：重置空闲定时器——任何用户交互（见 build 中的 Listener）或生命周期回到前台时调用。
-  /// 规则：已锁定时取消定时器（锁定态无需再锁）；未开启锁时取消；否则按 [_idleDuration] 重启。
+  /// P2-4（v3.1.8 审计）：全局指针活动监听。旧实现只在 MainScaffold 自己的
+  /// `Listener` 上重置计时，详情页 / 设置 / 看板 / 底部弹层是更高的 Navigator
+  /// 路由，里面持续点按、滚动不会触发它，30 秒后锁屏把正在编辑的弹层强弹。
+  /// 注册到 `pointerRouter` 全局路由后，任何路由上的指针事件都会经过这里。
+  void _onGlobalPointer(PointerEvent _) => _resetIdleTimer();
+
+  /// P2-4：键盘输入（文本变更 / 快捷键）同样算「用户活动」。
+  /// 返回 false = 不消费事件，保持原焦点 / 快捷键行为不变。
+  bool _onGlobalKey(KeyEvent _) {
+    _resetIdleTimer();
+    return false;
+  }
+
+  /// P1-2：重置空闲定时器——任何用户交互（全局指针 / 键盘，见 initState 注册）
+  /// 或生命周期回到前台时调用。
+  /// 规则：已锁定时取消定时器（锁定态无需再锁）；未开启锁时取消；否则按
+  /// [_idleDuration] 重启。P2-4：长任务进度层（备份 / 恢复）期间暂停计时。
   void _resetIdleTimer() {
     _idleTimer?.cancel();
     _idleTimer = null;
     if (_appLock.locked || !_appLock.appLockEnabled) return;
+    // P2-4：恢复 / 备份进度层没有指针操作但不能锁屏——否则进度层被弹掉、
+    // 后台恢复结果提示丢失。进度层收起后由 _onAppLockChanged / 下一次交互重启。
+    if (sheetProgressActive) return;
     final dur = _idleDuration;
     if (dur == null) return;
     _idleTimer = Timer(dur, _onIdleTimeout);
@@ -1438,9 +1466,14 @@ class _MainScaffoldState extends State<MainScaffold>
     // M-01：监听解锁事件——locked 由 true 变 false 时，把锁定期间暂存的
     // 通知跳转 / 通知 action / 分享 / 小组件意图一次性消费掉。
     _appLock = Provider.of<AppLockProvider>(context, listen: false);
+    _wasLocked = _appLock.locked; // P2-4：初始化跃迁基线
     _appLock.addListener(_onAppLockChanged);
     // 消费冷启动期间暂存的全部外部意图（此时导航器已就绪）。
     WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingIntents());
+    // P2-4：全局指针 + 键盘活动监听——覆盖详情页 / 弹层 / 输入等更高路由上的
+    // 交互，任何活动都重置空闲计时；dispose 时成对移除。
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
+    HardwareKeyboard.instance.addHandler(_onGlobalKey);
     // P1-2：启动即开始计时空闲自动锁定。
     _resetIdleTimer();
   }
@@ -1452,8 +1485,21 @@ class _MainScaffoldState extends State<MainScaffold>
       WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingIntents());
       // P1-2：刚解锁即重置空闲计时，避免解锁瞬间立即又被超时锁定。
       _resetIdleTimer();
+    } else if (!_wasLocked) {
+      // P2-4（v3.1.8 审计）：锁定瞬间的路由收口从 build 移到此处（postFrame），
+      // 避免「在 build 阶段执行导航」——build 中 popUntil 会在任意无关重建时
+      // 重复触发，也无任何未保存修改确认的机会。改由上锁状态跃迁驱动一次。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_appLock.locked) return;
+        final nav = _navigatorKey.currentState;
+        if (nav != null && nav.canPop()) nav.popUntil((r) => r.isFirst);
+      });
     }
+    _wasLocked = _appLock.locked;
   }
+
+  /// P2-4：上次观察到的锁定态，用于只在「解锁 → 锁定」跃迁时收口路由。
+  bool _wasLocked = false;
 
   /// 消费所有暂存的外部意图：通知点击 / 通知 action（稍后提醒、完成）/
   /// 分享文本 / 分享附件 / 桌面小组件。
@@ -1587,6 +1633,9 @@ class _MainScaffoldState extends State<MainScaffold>
       _idleTimer?.cancel();
     } catch (_) {}
     _idleTimer = null;
+    // P2-4：成对移除全局活动监听，避免跨页面悬浮引用。
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
+    HardwareKeyboard.instance.removeHandler(_onGlobalKey);
     // U4：卸载时清掉 Tab 跳转钩子，避免悬浮引用。
     AppNav.onJumpToTab = null;
     try {
@@ -1935,17 +1984,9 @@ class _MainScaffoldState extends State<MainScaffold>
         // 覆盖层的有无（渲染对象原地更新、无状态增删），不改变任何 widget 的
         // 类型与 key，解锁后掀开即恢复原状。
         final locked = appLock.locked;
-        if (locked) {
-          // F9：应用锁触发瞬间，把根 Navigator 上之前 push 的所有路由（任务详情 /
-          // 看板 / 设置等详情页）一次性弹回首页。否则那些详情页会停在栈顶，
-          // AppLockGate 仅覆盖 MainScaffold 内的视图，那些详情页仍然盖在解锁门
-          // 之上——侧滑手势 / 系统返回键都会先落到详情页再回到门，应用锁形同虚设。
-          // popUntil 用 isFirst 而非 immediatePop，避免 root 路由被一并 pop 掉。
-          final nav = _navigatorKey.currentState;
-          if (nav != null && nav.canPop()) {
-            nav.popUntil((r) => r.isFirst);
-          }
-        }
+        // P2-4（v3.1.8 审计）：路由收口（F9 的 popUntil）已从 build 移到
+        // [_onAppLockChanged] 的「解锁→锁定」跃迁回调里 postFrame 执行——
+        // build 阶段执行导航无未保存确认机会，且任意无关重建都会重复触发。
         return Stack(
           children: [
             // 底层子树恒定挂载；锁定期间禁指针、禁焦点（键盘不再弹出）。

@@ -169,6 +169,9 @@ class BackupSheet {
         TextEditingController(text: taskProvider.autoBackupPassHint);
     await showModalBottomSheet<void>(
       context: context,
+      // P2-7（v3.1.8 审计）：快照多时内容超过 9/16 屏高，默认不可滚动会裁
+      // 掉底部「从本地快照还原」入口——那是自动备份唯一的恢复入口。
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -177,7 +180,9 @@ class BackupSheet {
       builder: (ctx) => SheetMessageHost(
         child: StatefulBuilder(
         builder: (ctx, setState) {
-          return Padding(
+          return SingleChildScrollView(
+            // P2-7：有界滚动容器，7 份快照 + 恢复前快照时底部入口可达。
+            child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -315,7 +320,8 @@ class BackupSheet {
                     includeTrash: includeTrash),
               ],
             ),
-          );
+            ), // P2-7：Padding
+          ); // P2-7：SingleChildScrollView
         },
         ),
       ),
@@ -1037,6 +1043,9 @@ class BackupSheet {
         ],
       ),
     );
+    // U-3（v3.1.8 审计）：旧实现创建 TextEditingController 后从不 dispose，
+    // settings_screen 同类问题已修，这是备份弹层的漏网。
+    ctrl.dispose();
     return result;
   }
 
@@ -1048,13 +1057,9 @@ class BackupSheet {
 
   /// P2-6：口令强度判定——至少包含「小写字母 / 大写字母 / 数字」中的两类字符。
   /// 纯数字 / 纯小写等弱口令可被 GPU 快速爆破，故强制多类组合。
-  static bool _isStrongPassword(String p) {
-    var classes = 0;
-    if (p.contains(RegExp(r'[a-z]'))) classes++;
-    if (p.contains(RegExp(r'[A-Z]'))) classes++;
-    if (p.contains(RegExp(r'[0-9]'))) classes++;
-    return classes >= 2;
-  }
+  /// P2-2（v3.1.8 审计）：委托给 [backupPassphraseHasTwoClasses] 单一真源，
+  /// 自动备份口令设置路径共用同一口径（此前自动备份侧完全没有复杂度校验）。
+  static bool _isStrongPassword(String p) => backupPassphraseHasTwoClasses(p);
 
   /// T3-1（v2.9.2 功能增强）：解密失败文案——本机保存过口令提示时附在失败
   /// 原因后帮助回忆。提示**仅存在本机**（明文 SharedPreferences，不进备份
@@ -1360,8 +1365,10 @@ class BackupSheet {
 }
 
 /// 自动备份（滚动快照）区块：开关 + 最近成功时间 + 快照列表（一键还原）。
-/// 设计为 Consumer<TaskProvider>，开关与最近时间变化即时刷新。
-class _AutoBackupSection extends StatelessWidget {
+/// 设计为 StatefulWidget：U-3（v3.1.8 审计）修复 Stateless 下
+/// `future: provider.listAutoBackups()` 每次 build 都重新扫描目录，导致任何
+/// provider 通知（开关、状态更新）都让列表闪回加载态并重复 IO。
+class _AutoBackupSection extends StatefulWidget {
   final TaskProvider taskProvider;
   final BuildContext context;
   final bool includeTrash;
@@ -1372,7 +1379,24 @@ class _AutoBackupSection extends StatelessWidget {
   });
 
   @override
+  State<_AutoBackupSection> createState() => _AutoBackupSectionState();
+}
+
+class _AutoBackupSectionState extends State<_AutoBackupSection> {
+  /// U-3：目录扫描只在挂载时进行一次；本弹层内的操作都会 pop，重新打开即刷新。
+  late final Future<List<AutoBackupEntry>> _backupsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _backupsFuture = widget.taskProvider.listAutoBackups();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final taskProvider = widget.taskProvider;
+    final context = widget.context;
+    final includeTrash = widget.includeTrash;
     final provider = taskProvider;
     // P2-3（v3.1.7 审计）：与设置页共用 provider 的单一真源副标题。
     // 旧实现直读 lastAutoBackupError 并硬加「上次失败：」：降级 warning
@@ -1403,7 +1427,7 @@ class _AutoBackupSection extends StatelessWidget {
             ),
           ),
         FutureBuilder<List<AutoBackupEntry>>(
-          future: provider.listAutoBackups(),
+          future: _backupsFuture, // U-3：缓存的目录扫描，避免每次 build 重扫
           builder: (ctx, snap) {
             final items = snap.data;
             if (items == null) {

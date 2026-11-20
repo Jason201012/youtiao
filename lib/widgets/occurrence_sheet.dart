@@ -17,6 +17,7 @@ import 'package:todolist/models/task.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/undo_snack_bar.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
+import 'package:todolist/widgets/sheet_message.dart'; // P2-8：弹层内消息宿主
 
 class OccurrenceSheet {
   static Future<void> show(
@@ -30,7 +31,12 @@ class OccurrenceSheet {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => _OccurrenceBody(task: task, provider: provider),
+      // P2-8（v3.1.8 审计）：挂弹层消息宿主——本弹层内的落盘失败提示与
+      // 「移到下一天 / 跳过一次」的撤销此前都写到根 Scaffold，被本 bottom sheet
+      // 整块遮住。宿主让提示渲染在弹层内可见。
+      builder: (ctx) => SheetMessageHost(
+        child: _OccurrenceBody(task: task, provider: provider),
+      ),
     );
   }
 }
@@ -147,7 +153,13 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       // P3-6：给被跳过的这一天留一个会话级痕迹（行内文案会显示跳过来源）。
       // P3-2（v3.0.8 审计）：仅在跳过确已发生时标注——noop（同日）/ missing
       // （源任务不存在）时什么也没发生，不能留「已跳过」痕迹。
-      if (!r.noop && !r.missing) _deferSkipped.add(Task.ymdKey(d));
+      // P2-8（v3.1.8 审计）：copyFailed 时副本没建成，源 occurrence 虽被跳过
+      // 但**不是**「经移到下一天」——旧实现照样标 _deferSkipped，行内显示
+      // 「已跳过（经移到下一天）」会把「副本写入失败」伪装成改期成功。此处
+      // 不标注，行内只显示普通「已跳过」，真实原因由下方失败文案如实给出。
+      if (!r.noop && !r.missing && !r.copyFailed) {
+        _deferSkipped.add(Task.ymdKey(d));
+      }
       _refresh();
       if (context.mounted) {
         final dayLabel =

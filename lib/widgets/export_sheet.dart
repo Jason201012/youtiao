@@ -24,12 +24,17 @@ class ExportSheet {
     var includeAttachments = false;
     await showModalBottomSheet<void>(
       context: context,
+      // P2-7（v3.1.8 审计）：导出项 + 安全模式提示在小屏上超过 9/16 屏高，
+      // 默认 isScrollControlled=false 会裁掉 iCal / CSV 导入入口。
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setState) {
-          return Padding(
+          return SingleChildScrollView(
+            // P2-7：有界滚动容器，内容多时可滚到底部导入入口。
+            child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -154,7 +159,8 @@ class ExportSheet {
                 ),
               ],
             ),
-          );
+            ), // P2-7：Padding
+          ); // P2-7：SingleChildScrollView
         },
       ),
     );

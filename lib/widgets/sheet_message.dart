@@ -24,6 +24,10 @@ import 'package:flutter/material.dart';
 /// 这样「告知载体是否可见」由一处收口，后续新增弹层只需挂 host，
 /// 不会再把关键失败回执写进弹层背后的 SnackBar。
 
+/// U-1（v3.1.8 审计）：非交互消息条预留的布局高度（含 margin / padding），
+/// 使贴底点穿的提示不会视觉覆盖底部主操作按钮。
+const double _kBannerReservedHeight = 56;
+
 /// 弹层内消息条的控制器，由 [SheetMessageHost] 注册到 widget 树中。
 class SheetMessageScope extends InheritedWidget {
   const SheetMessageScope({
@@ -210,7 +214,17 @@ class SheetMessageHostState extends State<SheetMessageHost> {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          widget.child,
+          // U-1（v3.1.8 审计）：为**非交互**消息条预留布局高度。旧实现消息条
+          // 贴底且 IgnorePointer 点穿，视觉上盖住「保存 / 删除 / 确定」主操作，
+          // 用户看不到按钮却可能点到它。预留一段空白后消息条只覆盖该空白区，
+          // 点穿不再有误触风险；交互态（带撤销按钮）本就需要点击，不预留。
+          Padding(
+            padding: EdgeInsets.only(
+                bottom: _message != null && !interactive
+                    ? _kBannerReservedHeight
+                    : 0),
+            child: widget.child,
+          ),
           if (_message != null)
             Positioned(
               bottom: 0,
@@ -315,6 +329,11 @@ void pushSheetProgressLayer() => _progressLayers++;
 void popSheetProgressLayer() {
   if (_progressLayers > 0) _progressLayers--;
 }
+
+/// P2-4（v3.1.8 审计）：当前是否有长任务进度层（备份 / 恢复）。空闲自动锁
+/// 在此期间必须暂停——否则恢复任务仍在后台跑，30 秒后锁屏把进度层弹掉，
+/// 结果提示丢失，用户解锁后无从确认恢复是否完成。
+bool get sheetProgressActive => _progressLayers > 0;
 
 /// 在进度弹层收起后调用：显示排队期间积累的最后一条结论性提示。
 void flushPendingSheetMessages(BuildContext context) {

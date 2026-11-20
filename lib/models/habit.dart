@@ -1,6 +1,7 @@
 // A4（v3.1.1 功能增强）：拼音首字母 / 全拼字段由 [PinyinIndex] 单一真源计算
 // （与 Task 侧同源），本模型只承载派生结果。
 import 'package:todolist/services/pinyin_index.dart';
+import 'package:characters/characters.dart'; // P3-9：按字素簇截断单位
 
 /// 一个习惯：可每日/按周几打卡，记录连续与累计次数。
 ///
@@ -248,7 +249,13 @@ class Habit {
     if (v is! String) return '';
     final s = v.trim();
     if (s.isEmpty) return '';
-    return s.length > maxUnitLength ? s.substring(0, maxUnitLength) : s;
+    // P3-9（v3.1.8 审计）：按**字素簇**而非 UTF-16 码元截断。旧实现
+    // `s.substring(0, 6)` 会把 6 个 emoji（12 码元）截成 3 个，或劈开 ZWJ
+    // 组合 emoji 的代理对，导出 / 通知出现半个 emoji。与 quick_entry_sheet
+    // 的粘贴截断（characters.take）同口径，输入框 maxLength 亦按字素计数。
+    return s.characters.length > maxUnitLength
+        ? s.characters.take(maxUnitLength).toString()
+        : s;
   }
 
   /// 解析可选时间戳（L7，v3.0.8 审计：`archivedAt`）。脏数据 / 非字符串一律

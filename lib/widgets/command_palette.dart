@@ -3,6 +3,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/services/palette_command.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
+import 'package:todolist/widgets/sheet_message.dart'; // P3-8：弹层内消息宿主
 
 /// P1-9 命令面板：本地路由跳转（不涉及任何网络）。
 /// Ctrl/Cmd+P 唤起，输入关键字过滤「首页/看板/日历/专注/习惯/设置」并回车跳转。
@@ -42,11 +43,15 @@ class CommandPalette extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => CommandPalette(
-        currentIndex: currentIndex,
-        onPick: onPick,
-        onCompleteSelected: onCompleteSelected,
-        actions: actions,
+      // P3-8（v3.1.8 审计）：挂消息宿主——「未知命令 / 当前不可用」此前写
+      // 到根 Scaffold 被面板遮住，移动端敲回车零反馈。
+      builder: (_) => SheetMessageHost(
+        child: CommandPalette(
+          currentIndex: currentIndex,
+          onPick: onPick,
+          onCompleteSelected: onCompleteSelected,
+          actions: actions,
+        ),
       ),
     );
   }
@@ -249,12 +254,10 @@ class _CommandPaletteState extends State<CommandPalette> {
                       final hint = _cmd!.isKnown
                           ? '该命令当前不可用'
                           : '未知命令 /${_cmd!.name}';
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(hint),
-                          duration: const Duration(milliseconds: 900),
-                        ),
-                      );
+                      // P3-8（v3.1.8 审计）：走弹层消息宿主，替代被面板遮住的
+                      // 根 SnackBar。
+                      showSheetMessage(context, hint,
+                          duration: const Duration(milliseconds: 900));
                     }
                   },
                 ),

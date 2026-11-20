@@ -432,7 +432,14 @@ class HomeScreenState extends State<HomeScreen> {
   /// - [alwaysShow] 为 true 的分区（「今天」）即使为空也保留标题，让页面不至于全空；
   /// - [countColor] 用于给「逾期」的计数一点醒目色，标题字号/字重/颜色所有分区完全一致；
   /// - [reorderable] 为 true 时（仅默认全量视图、无标签筛选）把任务行包进
-  ///   [ReorderableListView]，左侧拖拽手柄即可手动重排，顺序写入任务的 [Task.order]。
+  ///   [SliverReorderableList]，左侧拖拽手柄即可手动重排，顺序写入任务的
+  ///   [Task.order]。P3-6（v3.1.8 审计）：旧实现用 `shrinkWrap +
+  ///   NeverScrollableScrollPhysics` 的 [ReorderableListView] 内嵌在
+  ///   [SingleChildScrollView] 里——列表自身不可滚动，拖拽到屏幕边缘时父级
+  ///   ScrollView 也不会自动滚动，长列表无法一次拖到底。改 sliver 后融入
+  ///   页面级 [CustomScrollView]，拖到边缘可自动滚动（与习惯页 P3-8 同款）。
+  ///
+  /// 返回 **sliver** 列表（而非普通 Widget），供页面级 CustomScrollView 直接铺排。
   List<Widget> _section(
     BuildContext context,
     String title,
@@ -467,30 +474,34 @@ class HomeScreenState extends State<HomeScreen> {
         .toList();
     if (reorderable) {
       return [
-        header,
-        ReorderableListView(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          buildDefaultDragHandles: false,
-          onReorder: (oldIndex, newIndex) {
+        SliverToBoxAdapter(child: header),
+        SliverReorderableList(
+          // P3-6：itemCount/itemBuilder 版式——每行的 key 由 _tile 的 Key(t.id)
+          // 提供，拖拽手柄索引用 items 中的全局下标（见上方 tiles 构造）。
+          itemCount: shown.length,
+          itemBuilder: (_, i) => tiles[i],
+          onReorderItem: (oldIndex, newIndex) {
+            // P3-6：onReorderItem 的 newIndex 已是「移除项后的最终落点」，
+            // reorderTasks 沿用旧 onReorder 口径（向下拖需 +1 校正）。
+            final legacy = newIndex > oldIndex ? newIndex + 1 : newIndex;
             // P3-6（v3.0.8 审计）：消费 reorderTasks 的落盘结果——旧实现丢弃
             // Future<bool>：手动排序落盘失败完全静默（重启后顺序回退且零反馈）。
-            provider.reorderTasks(sectionKey, oldIndex, newIndex).then((ok) {
+            provider.reorderTasks(sectionKey, oldIndex, legacy).then((ok) {
               if (ok) return;
               final ctx = context;
               if (!ctx.mounted) return;
               showTaskPersistFailedHint(ctx, provider: provider);
             });
           },
-          children: tiles,
         ),
-        const SizedBox(height: 8),
+        const SliverToBoxAdapter(child: SizedBox(height: 8)),
       ];
     }
     return [
-      header,
-      ...tiles,
-      const SizedBox(height: 8),
+      SliverToBoxAdapter(child: header),
+      SliverList(
+        delegate: SliverChildListDelegate([...tiles, const SizedBox(height: 8)]),
+      ),
     ];
   }
 
@@ -819,16 +830,21 @@ class HomeScreenState extends State<HomeScreen> {
             Expanded(
               child: _searching
                   ? _buildSearchResults(context, provider)
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.fromLTRB(
-                        AppColors.pagePadX,
-                        8,
-                        AppColors.pagePadX,
-                        20,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+                  // P3-6（v3.1.8 审计）：页面级 CustomScrollView——任务分区用
+                  // SliverReorderableList 融入页面滚动，拖到屏幕边缘可自动滚动，
+                  // 长列表一次拖到底 / 顶（旧 SingleChildScrollView + 内嵌
+                  // ReorderableListView(shrinkWrap + NeverScrollable) 做不到）。
+                  : CustomScrollView(
+                      slivers: [
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(
+                            AppColors.pagePadX,
+                            8,
+                            AppColors.pagePadX,
+                            0,
+                          ),
+                          sliver: SliverList(
+                            delegate: SliverChildListDelegate([
                           // A2（v3.1.1 功能增强）：临时静音期细横幅——让静音
                           // 状态可见 + 一键恢复，避免「忘了关、提醒静悄悄失效」。
                           if (provider.remindersMuted &&
@@ -901,36 +917,50 @@ class HomeScreenState extends State<HomeScreen> {
                             ),
                             const SizedBox(height: 12),
                           ],
-                          if (filter == TaskFilter.all) ...[
-                            // 拖拽重排仅在默认全量视图、无标签筛选时启用
-                            // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
-                            // P0-2：逾期区头部「顺延」入口——一键把全部逾期任务改到
-                            // 今天 / 明天 / +N 天，省去逐条改期。
-                            ..._section(context, '逾期', 'overdue', overdue, ext,
-                                countColor: error,
-                                reorderable: canReorder,
-                                headerAction: overdue.isEmpty
-                                    ? null
-                                    : _PostponeButton(
-                                        ids: overdue.map((t) => t.id).toList(),
-                                      )),
-                            // 今天：今天到期（唯一常驻分区，为空也保留标题）
-                            ..._section(context, '今天', 'today', today, ext,
-                                alwaysShow: canReorder, reorderable: canReorder),
-                            // 未来：今天之后到期 + 无截止日期
-                            ..._section(context, '未来', 'future', future, ext,
-                                reorderable: canReorder),
-                            // 重复：重复任务（所有规则）
-                            ..._section(context, '重复', 'repeat', repeat, ext,
-                                reorderable: canReorder),
-                            // 已完成
-                            ..._section(context, '已完成', 'done', done, ext,
-                                reorderable: canReorder),
-                          ] else ...[
-                            ...filtered.map((t) => _tile(context, t, key: Key(t.id))),
-                          ],
-                        ],
-                      ),
+                            ]), // P3-6：SliverChildListDelegate（卡片区）
+                          ),
+                        ), // P3-6：SliverPadding（卡片区）
+                        // P3-6：任务分区为 sliver，直接铺在页面级 CustomScrollView
+                        // 中，SliverReorderableList 才能在拖拽时自动滚动页面。
+                        if (filter == TaskFilter.all) ...[
+                          // 拖拽重排仅在默认全量视图、无标签筛选时启用
+                          // 逾期：已过截止日期（计数用醒目色，字号与其他分区一致）
+                          // P0-2：逾期区头部「顺延」入口——一键把全部逾期任务改到
+                          // 今天 / 明天 / +N 天，省去逐条改期。
+                          ..._section(context, '逾期', 'overdue', overdue, ext,
+                              countColor: error,
+                              reorderable: canReorder,
+                              headerAction: overdue.isEmpty
+                                  ? null
+                                  : _PostponeButton(
+                                      ids: overdue.map((t) => t.id).toList(),
+                                    )),
+                          // 今天：今天到期（唯一常驻分区，为空也保留标题）
+                          ..._section(context, '今天', 'today', today, ext,
+                              alwaysShow: canReorder, reorderable: canReorder),
+                          // 未来：今天之后到期 + 无截止日期
+                          ..._section(context, '未来', 'future', future, ext,
+                              reorderable: canReorder),
+                          // 重复：重复任务（所有规则）
+                          ..._section(context, '重复', 'repeat', repeat, ext,
+                              reorderable: canReorder),
+                          // 已完成
+                          ..._section(context, '已完成', 'done', done, ext,
+                              reorderable: canReorder),
+                        ] else
+                          SliverPadding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: AppColors.pagePadX),
+                            sliver: SliverList(
+                              delegate: SliverChildListDelegate(
+                                filtered
+                                    .map((t) => _tile(context, t, key: Key(t.id)))
+                                    .toList(),
+                              ),
+                            ),
+                          ),
+                        const SliverToBoxAdapter(child: SizedBox(height: 20)),
+                      ], // P3-6：CustomScrollView.slivers
                     ),
             ),
           ],
@@ -1166,7 +1196,10 @@ class _TodayMitCardState extends State<_TodayMitCard> {
         final selected = <String>{...chosen};
         return SheetMessageHost(
           child: StatefulBuilder(builder: (sctx, setDialogState) {
-          final pool = provider.selectableMitTasks(query: query);
+          // P3-7（v3.1.8 审计）：把完整已选集合传入候选池——已完成的已选项
+          // 也要出现在列表里才能取消 / 替换（否则满员提示指向一个不可见的项）。
+          final pool = provider.selectableMitTasks(
+              query: query, includeIds: chosen.toSet());
           final changed = selected.length != chosen.length ||
               !selected.containsAll(chosen);
           return AlertDialog(
@@ -1193,7 +1226,7 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 6),
                       child: Text(
-                        '已满 ${TaskProvider.kDailyMitMax} 件：先取消一个已选项再换',
+                        '已满 ${TaskProvider.kDailyMitMax} 件：先取消一个已选项再换（含已完成的已选项，均在下方列表）',
                         style: TextStyle(
                             fontSize: 12,
                             color: Theme.of(sctx).colorScheme.primary),
@@ -1201,7 +1234,7 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                     ),
                   Expanded(
                     child: pool.isEmpty
-                        ? const Center(child: Text('没有匹配的未完成任务'))
+                        ? const Center(child: Text('没有匹配的任务'))
                         : ListView.builder(
                             itemCount: pool.length,
                             itemBuilder: (_, i) {
@@ -1215,7 +1248,12 @@ class _TodayMitCardState extends State<_TodayMitCard> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                subtitle: Text(t.category.label,
+                                subtitle: Text(
+                                    // P3-7：已完成的已选项显式标注，避免用户疑惑
+                                    // 为何「未完成任务」列表里出现已完成项。
+                                    t.done
+                                        ? '${t.category.label} · 已完成（点按可取消选择）'
+                                        : t.category.label,
                                     style: const TextStyle(fontSize: 11)),
                                 trailing: Icon(
                                   checked

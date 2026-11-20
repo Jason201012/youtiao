@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
@@ -24,13 +25,22 @@ class DataIo {
   /// 采用原子写：先写 [fileName].tmp，再 rename 覆盖目标，避免写入中途被打断
   /// （被杀后台 / 断电）导致整文件 JSON 损坏、备份报废。rename 在同一文件系统内
   /// 为原子操作；Windows 下 rename 不能覆盖已存在目标，故先删旧文件再 rename。
+  ///
+  /// P3-5（v3.1.8 审计）：临时文件带随机后缀。旧实现固定 `<目标>.tmp`，
+  /// 「首次开启加密补写」与后台自动备份并发写同名 `.enc.json` 时会共用同一
+  /// tmp 路径，互相覆盖/ rename 竞争。随机后缀让并发写入者各写各的临时文件。
+  static String _tmpPath(String targetPath) {
+    final suffix = Random.secure().nextInt(1 << 32).toRadixString(16);
+    return '$targetPath.tmp.$suffix';
+  }
+
   static Future<File> saveToAppDocs(String fileName, String content) async {
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$fileName');
     // 兼容子目录写入：如 backup/auto/YYYY-MM-DD.json 需先创建父目录，
     // 否则 tmp.writeAsString() 会抛 PathNotFoundException。
     await file.parent.create(recursive: true);
-    final tmp = File('${file.path}.tmp');
+    final tmp = File(_tmpPath(file.path));
     await tmp.writeAsString(content);
     // S9 修复：原子落盘按平台区分，降低「删完旧文件、改名前崩溃/断电」导致
     // 旧备份已失、新备份未成、整文件 JSON 损坏的概率。
@@ -68,7 +78,7 @@ class DataIo {
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$fileName');
     await file.parent.create(recursive: true);
-    final tmp = File('${file.path}.tmp');
+    final tmp = File(_tmpPath(file.path)); // P3-5：随机后缀，避免并发写同名 tmp
     await tmp.writeAsBytes(bytes, flush: true);
     if (Platform.isWindows) {
       if (await file.exists()) {

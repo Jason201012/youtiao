@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:todolist/services/data_health_service.dart';
+import 'package:todolist/services/backup_crypto.dart'; // P2-2：口令强度单一真源
 import 'package:todolist/widgets/kanban_board.dart'; // P3-6：WIP 弹窗与偏好键
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/theme_provider.dart';
@@ -81,7 +82,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final match = RegExp(r'^version:\s*([^\s+#]+)', multiLine: true)
           .firstMatch(raw);
       if (match != null && mounted) {
-        setState(() => _version = match.group(1)!);
+        // U-2（v3.1.8 审计）：pubspec 的 `3.1.8+139` 是「版本+构建号」，而
+        // PackageInfo.version 只给 `3.1.8`。asset 兜底必须同样的口径，否则
+        // 平台通道异常 / 单测里设置页显示 `3.1.8+139`，两条路径格式漂移。
+        setState(() => _version = match.group(1)!.split('+').first);
         return;
       }
     } catch (_) {
@@ -142,10 +146,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 如实告知能力边界：防的是「快照文件被单独拷出后可读」，不防 root / 物理接触。
   Future<(String, String)?> _requestAutoBackupPassphrase(BuildContext ctx) async {
     final controller = TextEditingController();
+    final confirmCtrl = TextEditingController();
     final hintCtrl = TextEditingController();
     // L23（v3.0.8 审计）：对话框关闭后 dispose——旧实现创建后从不释放
     // （本方法 + _changeAutoBackupPassphrase 共 5 个控制器同病）。
     String? errorText;
+    // P2-2（v3.1.8 审计）：首次设口令与「修改口令」路径对齐——8 位 +
+    // 大小写/数字至少两类 + 二次输入一致。旧实现只有单输入框 + 6 位下限、
+    // 无复杂度无确认：一次笔误（多/少一个字符）会让此后所有加密快照都用
+    // 错误口令加密，App 内保存的也是错口令，用户无从察觉直到恢复失败。
+    void validateAndSubmit(
+        void Function(void Function()) setLocal, BuildContext dialogCtx) {
+      final v = controller.text;
+      if (v.length < 8) {
+        setLocal(() => errorText = '口令至少 8 位');
+        return;
+      }
+      if (!backupPassphraseHasTwoClasses(v)) {
+        setLocal(() => errorText = '口令过弱：需含大小写字母或数字中至少两类');
+        return;
+      }
+      if (v != confirmCtrl.text) {
+        setLocal(() => errorText = '两次输入不一致');
+        return;
+      }
+      Navigator.of(dialogCtx).pop((v, hintCtrl.text.trim()));
+    }
+
     final result = await showDialog<(String, String)>(
       context: ctx,
       builder: (dctx) => StatefulBuilder(
@@ -160,20 +187,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 '口令保存在系统密钥库（Android 密钥库 / iOS Keychain），不再以明文写入磁盘；'
                 '也不会随备份文件导出——换机恢复后需重新设置。',
               ),
+              const SizedBox(height: 8),
+              const Text(
+                '口令一旦丢失或输错，历史加密快照将永久无法恢复，请务必二次核对。',
+                style: TextStyle(fontSize: 12),
+              ),
               const SizedBox(height: 12),
               TextField(
                 controller: controller,
                 obscureText: true,
                 autofocus: true,
                 decoration: InputDecoration(
-                  labelText: '口令（至少 6 位）',
+                  labelText: '口令（至少 8 位，含两类字符）',
                   errorText: errorText,
                 ),
-                onSubmitted: (v) {
-                  if (v.length >= 6) {
-                    Navigator.of(dctx).pop((v, hintCtrl.text.trim()));
-                  }
-                },
+                onSubmitted: (_) => validateAndSubmit(setLocal, dctx),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: confirmCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: '再次输入口令'),
+                onSubmitted: (_) => validateAndSubmit(setLocal, dctx),
               ),
               const SizedBox(height: 8),
               // T3-1（v2.9.2 功能增强）：口令提示（可选）。解密失败时展示帮助回忆；
@@ -196,14 +231,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: const Text('取消'),
             ),
             FilledButton(
-              onPressed: () {
-                final v = controller.text;
-                if (v.length < 6) {
-                  setLocal(() => errorText = '口令至少 6 位');
-                  return;
-                }
-                Navigator.of(dctx).pop((v, hintCtrl.text.trim()));
-              },
+              onPressed: () => validateAndSubmit(setLocal, dctx),
               child: const Text('确定'),
             ),
           ],
@@ -211,6 +239,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     controller.dispose();
+    confirmCtrl.dispose();
     hintCtrl.dispose();
     return result;
   }
@@ -324,7 +353,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 controller: ctlNew,
                 obscureText: true,
                 decoration: InputDecoration(
-                  labelText: '新口令（至少 6 位）',
+                  labelText: '新口令（至少 8 位，含两类字符）',
                   errorText: errNew,
                 ),
               ),
@@ -356,8 +385,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             FilledButton(
               onPressed: () {
                 final v = ctlNew.text;
-                if (v.length < 6) {
-                  setLocal(() => errNew = '新口令至少 6 位');
+                // P2-2（v3.1.8 审计）：修改口令与首次设置 / 手动备份同口径——
+                // 8 位 + 大小写/数字至少两类，避免「修改」反而放宽成 6 位。
+                if (v.length < 8) {
+                  setLocal(() => errNew = '新口令至少 8 位');
+                  return;
+                }
+                if (!backupPassphraseHasTwoClasses(v)) {
+                  setLocal(() => errNew = '口令过弱：需含大小写字母或数字中至少两类');
                   return;
                 }
                 if (v != ctlConfirm.text) {
@@ -377,25 +412,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ctlConfirm.dispose();
     ctlHint.dispose();
     if (newPass == null || newPass.isEmpty) return;
-    // P2-4：返回 -1 = 失败；否则为被标记失效的旧口令快照数。
-    final changed = await provider.changeAutoBackupPassphrase(
+    // P3-1b（v3.1.8 审计）：改用结构化回执，区分「标记了几份旧快照」与
+    // 「是否真的尝试补写今日快照」。旧实现只要 changed > 0 就说「已尝试
+    // 补写」，但 provider 只有今天快照被标 stale 才会补写——历史快照 stale
+    // 时文案与事实不符。
+    final change = await provider.changeAutoBackupPassphraseDetailed(
       newPass,
       oldPass: oldPass,
       force: oldPass == null && hasOld,
     );
+    final changed = change.count;
     if (changed >= 0) {
       // T3-1：口令变更成功后才同步提示（失败不动提示，避免与密钥库实况错位）。
       await provider.setAutoBackupPassHint(ctlHint.text);
     }
     if (!ctx.mounted) return;
     // P3-3（v3.1.6 审计）：换口令会连当天的加密快照一起标 stale，
-    // provider 现在清日期并立即补写一份新口令快照；文案如实说明「已尝试」，
-    // 补写失败的原因会显示在「本地自动备份」副标题 / 首页横幅，不谎报成功。
+    // provider 现在清日期并立即补写一份新口令快照；补写失败的原因会显示在
+    // 「本地自动备份」副标题 / 首页横幅，不谎报成功。
     final msg = changed < 0
         ? '修改失败'
-        : changed > 0
-            ? '口令已更新；$changed 份旧口令快照已标记失效，已尝试补写今日新快照'
-            : '口令已更新';
+        : change.backupAttempted
+            ? '口令已更新；${change.count} 份旧口令快照已标记失效，已尝试补写今日新快照'
+            : changed > 0
+                ? '口令已更新；$changed 份旧口令快照已标记失效'
+                : '口令已更新';
     ScaffoldMessenger.of(ctx).showSnackBar(
       SnackBar(content: Text(msg)),
     );

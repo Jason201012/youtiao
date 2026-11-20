@@ -155,7 +155,15 @@ class TaskProvider extends ChangeNotifier {
     // P3-3：落点内容缓存里冻结了按旧勿扰窗口顺延的结果，必须一并清掉，
     // 否则缓存命中会让「新勿扰窗口」在当日剩余时间里不被消费。
     NotificationService.instance.clearOccurrenceMemo();
-    if (_notificationsEnabled) _rescheduleAllActive();
+    if (_notificationsEnabled) {
+      _rescheduleAllActive();
+      // P3-4（v3.1.8 审计）：勿扰变更须立即重排固定时刻提醒。旧实现只重排
+      // _tasks，简报 ×2 / 习惯挽留 / 回收站预告在调度时消费一次 dndDefer，
+      // 之后 DND 变化不会自动重排——下午开 22:00–23:00 勿扰，今晚已排好的
+      // 22:00 简报照响。与「临时静音开始」(setRemindersMutedUntil) 同口径。
+      onGuardTick?.call();
+      onFixedTimeRemindersReschedule?.call();
+    }
   }
 
   /// 判断给定小时（0-23）是否处于勿扰区间内。区间可跨午夜（start>end 表示
@@ -439,10 +447,15 @@ class TaskProvider extends ChangeNotifier {
   /// `suggestMitCandidates()` 的「逾期 / 今天 / 高优先级」三池。候选池不足 3
   /// 条、或用户想选明天到期 / 无截止日的任务时，卡片此前没有任何补足入口。
   /// [query] 为空时不过滤；命中标题 / 标签 / 分类，大小写不敏感。
-  List<Task> selectableMitTasks({String query = ''}) {
+  List<Task> selectableMitTasks({String query = '', Set<String> includeIds = const {}}) {
     final q = query.trim().toLowerCase();
     return _tasks.where((t) {
-      if (t.status != TaskStatus.todo) return false;
+      // P3-7（v3.1.8 审计）：已选中的任务即使已完成也要留在候选池——今日三件
+      // 保留已完成任务用于划线展示，但旧实现只返回 todo，于是「3 件里有 1 件
+      // 已完成」时弹层只显示另 2 件，满员提示让人先取消一个已选项，而那个
+      // 已选项根本不在列表里，用户无法替换。includeIds 由选择器传入完整
+      // 已选集合，绕过 status 过滤（仍受 query 约束）。
+      if (t.status != TaskStatus.todo && !includeIds.contains(t.id)) return false;
       if (q.isEmpty) return true;
       return t.title.toLowerCase().contains(q) ||
           t.tags.any((tag) => tag.toLowerCase().contains(q)) ||
@@ -910,14 +923,33 @@ class TaskProvider extends ChangeNotifier {
   /// P2-4（v2.8.6 审计）：换口令成功后，把 `backup/auto/` 里旧口令加密的快照
   /// 统一改名标记为 stale（见 [_markStaleEncryptedBackups]）。
   /// 返回值：-1 = 修改失败；否则 = 被标记的旧加密快照数（0 = 没有旧快照）。
+  /// P3-1b（v3.1.8 审计）：仅保留旧契约供既有调用方 / 测试使用；设置页需要
+  /// 知道「是否真的尝试补写今日快照」，请改用 [changeAutoBackupPassphraseDetailed]。
   Future<int> changeAutoBackupPassphrase(
     String newPass, {
     String? oldPass,
     bool force = false,
   }) async {
-    if (newPass.isEmpty) return -1;
+    final r = await changeAutoBackupPassphraseDetailed(
+      newPass, oldPass: oldPass, force: force);
+    return r.count;
+  }
+
+  /// P3-1b（v3.1.8 审计）：换口令的结构化回执。
+  /// `count` = 被标 stale 的旧快照数；`backupAttempted` = 是否真的尝试补写今日
+  /// 快照。旧实现只有 `todayStaled` 分支才补写，而设置页只要 `count > 0`
+  /// 就显示「已尝试补写今日新快照」——历史快照被标 stale 时根本没补写，文案
+  /// 与事实不符。设置页据本回执生成如实文案。
+  Future<({int count, bool backupAttempted})> changeAutoBackupPassphraseDetailed(
+    String newPass, {
+    String? oldPass,
+    bool force = false,
+  }) async {
+    if (newPass.isEmpty) return (count: -1, backupAttempted: false);
     if (!force) {
-      if (oldPass == null || !verifyAutoBackupPassphrase(oldPass)) return -1;
+      if (oldPass == null || !verifyAutoBackupPassphrase(oldPass)) {
+        return (count: -1, backupAttempted: false);
+      }
     }
     await setAutoBackupPassphrase(newPass);
     try {
@@ -932,6 +964,7 @@ class TaskProvider extends ChangeNotifier {
     // 并补一份新口令快照——否则设置页仍写「最近快照：今天」，恢复面板
     // 却是空的，用户以为换口令把备份弄坏了；杀掉进程后当天甚至没有可用快照。
     final marked = await _markStaleEncryptedBackups();
+    var backupAttempted = false;
     if (marked.todayStaled) {
       _lastAutoBackupDate = null;
       _lastAutoBackupNoAttach = false;
@@ -944,6 +977,7 @@ class TaskProvider extends ChangeNotifier {
         await p.remove(_kLastAutoBackupErrorDate);
       } catch (_) {}
       notifyListeners();
+      backupAttempted = true;
       try {
         await _autoBackupIfNeeded();
       } catch (_) {
@@ -951,7 +985,7 @@ class TaskProvider extends ChangeNotifier {
         // 设置页 / 首页横幅如实展示，不阻断「口令已修改」这个事实。
       }
     }
-    return marked.count;
+    return (count: marked.count, backupAttempted: backupAttempted);
   }
 
   /// P2-4：把 `backup/auto/` 与 `backup/pre-restore/` 下所有 `.enc.json`
@@ -1093,26 +1127,42 @@ class TaskProvider extends ChangeNotifier {
       } else if (_autoBackupInFlight) {
         note = '未清理：自动备份正在进行，请稍后重试；旧快照仍在本机';
       } else {
+        // P3-5（v3.1.8 审计）：补写与后台自动备份共用 `_autoBackupInFlight`
+        // 互斥锁。旧实现只检查不置位，与 resumed / 跨天触发的 `_autoBackupIfNeeded`
+        // 可能并发写同名 `.enc.json` 与固定 `.tmp`，互相 rename 覆盖。
+        _autoBackupInFlight = true;
         try {
           // force：当日已有明文快照时存在性检查会命中早退，那样永远写不出
           // `.enc.json`。两种形态文件名不同，可先并存再删旧明文。
-          await _writeAutoBackup(now, force: true);
-          if (await _verifyEncryptedAutoBackup(now)) {
+          final written = await _writeAutoBackup(now, force: true);
+          // P2-1（v3.1.8 审计）：覆盖降级 / 超大跳过时不满足「新快照覆盖旧
+          // 快照全部数据」的前提——即使任务段能解开，也绝不删旧明文，并按
+          // _writeAutoBackup 返回的真实原因回执。
+          // P3-1c（v3.1.8 审计）：超限/剥离是体积问题，与口令/解密无关，不能
+          // 统一报成「读回校验未通过（无法解密）」。
+          if (written.note != null) {
+            note = '未清理：${written.note}；旧快照仍在本机';
+          } else if (await _verifyEncryptedAutoBackup(now)) {
             snapshotWritten = true;
             // 新快照已读回校验通过，才推进「今天已备」并删除历史明文。
             _lastAutoBackupDate = DateTime(now.year, now.month, now.day);
             final sp = await SharedPreferences.getInstance();
             await sp.setString(_kLastAutoBackup, _dateKey(now));
+            // P3-1a（v3.1.8 审计）：确认今日快照可用后清掉任何残留错误，
+            // 包括升级自旧版、没有日期键而永远不会过期的旧格式错误。
+            await _clearAutoBackupError();
             removed = await _purgePlaintextSnapshots();
             AppLog.d('[TaskProvider] 先写后删：加密快照校验通过，清理明文 $removed 份');
           } else {
-            note = '未清理：今日加密快照读回校验未通过（无法解密或缺少任务数据），旧快照仍在本机';
+            note = '未清理：今日加密快照读回校验未通过（无法解密或缺少任务/附件/模板数据），旧快照仍在本机';
             await _recordAutoBackupFailure('自动备份失败：今日加密快照读回校验未通过', now);
           }
         } catch (e) {
           note = '未清理：今日加密快照写入失败，旧快照仍在本机';
           AppLog.d('[TaskProvider] P1-1 补写加密快照失败：$e');
           await _recordAutoBackupFailure('自动备份失败：$e', now);
+        } finally {
+          _autoBackupInFlight = false;
         }
       }
     } else if (v && changed) {
@@ -1136,6 +1186,14 @@ class TaskProvider extends ChangeNotifier {
   /// P1-1（v3.1.7 审计）：当日 `.enc.json` 必须能用**当前口令**解开且明文
   /// 含 `tasks` 段，才算「新防线已就位」。只看文件存在 / 只看信封结构都不够：
   /// 口令变更后写出的空壳或错口令密文同样会通过 `_snapshotFileUsable`。
+  ///
+  /// P2-1（v3.1.8 审计）：覆盖面也必须校验——旧实现只认 `tasks` 段，于是
+  /// 附件被 `trimForExport` 剥离（文件名带 `.noattach`）或用户模板收集失败
+  /// 的降级快照同样「校验通过」，随后旧明文被删光，附件/模板不再有任何
+  /// 本地副本。现在这两种都视为**不满足覆盖条件**，不删旧明文。
+  ///
+  /// P3-2（v3.1.8 审计）：解密 + PBKDF2（35 万轮）移到后台 isolate，设置页
+  /// 打开加密并选择删除旧明文时不再冻结数秒。
   Future<bool> _verifyEncryptedAutoBackup(DateTime now) async {
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -1151,11 +1209,19 @@ class TaskProvider extends ChangeNotifier {
             n.contains('.stale.')) {
           continue;
         }
+        // P2-1：附件被剥离的快照不覆盖旧明文中的附件，不能作为「新防线已就位」。
+        if (n.contains('.noattach')) continue;
         if (!await _snapshotFileUsable(f, n)) continue;
         final raw = await f.readAsString();
         if (!isEncryptedEnvelope(raw)) continue;
-        final decoded = jsonDecode(decryptEnvelope(raw, pass));
-        if (decoded is Map && decoded['tasks'] is List) return true;
+        final decoded = await decodeEncryptedSnapshotOffMainThread(raw, pass);
+        // P2-1：任务 + 用户模板两段都必须存在（附件已由文件名后缀保证未被
+        // 剥离），缺一即「覆盖降级」，不删旧明文。
+        if (decoded != null &&
+            decoded['tasks'] is List &&
+            decoded['user_templates'] is List) {
+          return true;
+        }
       }
     } catch (e) {
       AppLog.d('[TaskProvider] 加密快照读回校验失败：$e');
@@ -1499,6 +1565,12 @@ class TaskProvider extends ChangeNotifier {
           // P3-2（v3.1.6 审计）：命中文件顺便同步「不含附件」事实，
           // 不再依赖错误串里是否含「剥离附件」。
           _lastAutoBackupNoAttach = day.stripped;
+          // P3-1a（v3.1.8 审计）：旧格式错误（无日期键）永远不会过期；
+          // 既然今日快照确实存在，就清掉这条残留，避免首页横幅长期挂旧错误。
+          if (_lastAutoBackupError != null &&
+              _lastAutoBackupErrorDate == null) {
+            await _clearAutoBackupError();
+          }
           return;
         }
         _lastAutoBackupNoAttach = false;
@@ -1552,6 +1624,21 @@ class TaskProvider extends ChangeNotifier {
     } catch (_) {
       // 持久化失败不影响主流程（内存态仍展示）。
     }
+  }
+
+  /// P3-1a（v3.1.8 审计）：确认当日快照已就位后清掉残留错误留痕（内存 +
+  /// prefs 的 error / 日期两键）。旧格式错误只有 error 没有日期键，
+  /// [lastAutoBackupErrorIsStale] 恒 false，升级用户可能长期看到假横幅；
+  /// 补写成功、日常快照确认存在两条路径都调用本方法收口。
+  Future<void> _clearAutoBackupError() async {
+    _lastAutoBackupError = null;
+    _lastAutoBackupErrorDate = null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kLastAutoBackupError);
+      await prefs.remove(_kLastAutoBackupErrorDate);
+    } catch (_) {}
+    notifyListeners();
   }
 
   /// 供 [main] 在所有 Provider（FocusProvider / HabitProvider）加载完成后显式触发一次
@@ -2544,9 +2631,16 @@ class TaskProvider extends ChangeNotifier {
   String? _lastResetDay;
   Future<void> setSoundEnabled(bool v) async {
     _soundEnabled = v;
+    // P2-6（v3.1.8 审计）：注入通知服务单一真源——习惯 / 简报 / 挽留 / 回收站 /
+    // snooze 全部读它，不再硬编码有声。必须在重排**之前**写入，否则本轮挂出的
+    // 习惯 / 简报仍用旧声音渠道（签名已纳入 sound，重排会真正下发）。
+    NotificationService.soundEnabled = v;
     // 重新调度所有提醒（截止 + 每日），应用新的声音设置
     if (_notificationsEnabled) {
       _rescheduleAllActive();
+      // 习惯提醒 / 习惯挽留 / 简报 / 回收站预告也在声音开关范围内（P2-6）。
+      onGuardTick?.call();
+      onFixedTimeRemindersReschedule?.call();
     }
     notifyListeners();
     await _persistSettings();
@@ -2583,6 +2677,8 @@ class TaskProvider extends ChangeNotifier {
   Future<void> _loadSettings(SharedPreferences prefs) async {
     _notificationsEnabled = prefs.getBool(_kNotify) ?? true;
     _soundEnabled = prefs.getBool(_kSound) ?? true;
+    // P2-6（v3.1.8 审计）：与 setSoundEnabled / restore 同源注入通知服务。
+    NotificationService.soundEnabled = _soundEnabled;
     _backgroundGuard = prefs.getBool(_kGuard) ?? true;
     _snoozeMinutes = prefs.getInt(_kSnooze) ?? 10;
     _dndEnabled = prefs.getBool(_kDndEnabled) ?? false;
@@ -4989,7 +5085,12 @@ class TaskProvider extends ChangeNotifier {
         // isDoneOn 过滤（notification_service），doneDates 与 skipDates 同在
         // 「一切会影响提醒触发时刻/是否触发」的字段族，补入同口径比对。常规
         // 编辑路径 copyWith 不触碰 doneDates（恒等），本判定不会引入额外重排。
-        !_listEq(old.doneDates, anchored.doneDates);
+        !_listEq(old.doneDates, anchored.doneDates) ||
+        // P3-3（v3.1.8 审计）：标题变化也要重排提醒。旧判定不含 title，改名后
+        // 已排的一次性 / 重复提醒仍烘焙旧标题到点弹出（重复任务签名的 title
+        // 段也要靠这次重排才会重算），用户按通知里的旧标题找不到任务，且标题
+        // 含敏感信息时改名后仍会在锁屏显示旧内容。
+        old.title != anchored.title;
     if (remindersChanged) {
       _cancelRemindersFor(updated.id);
       _scheduleRemindersFor(_tasks[i]);
@@ -5638,6 +5739,8 @@ class TaskProvider extends ChangeNotifier {
         _notificationsEnabled = data['notifications_enabled'];
       }
       if (data['sound_enabled'] is bool) _soundEnabled = data['sound_enabled'];
+      // P2-6（v3.1.8 审计）：恢复设置时同步声音单一真源。
+      NotificationService.soundEnabled = _soundEnabled;
     }
     // cancelAll 与开关无关：任务提醒本来就要按恢复后的任务集重排。
     NotificationService.instance.enabled = _notificationsEnabled;
@@ -6277,6 +6380,43 @@ Future<String> encryptPlainOffMainThread(String plain, String pass) async {
     buildSnapshotMainIsolateFallbacks++;
     AppLog.d('[TaskProvider] 后台加密不可用（isolate 传递失败），回退主 isolate：$e');
     return buildBackupPayload(plain, encryptOn: true, pass: pass);
+  }
+}
+
+/// P3-2（v3.1.8 审计）：加密快照读回校验的解密 + JSON 解析移出主 isolate。
+/// PBKDF2-HMAC-SHA256 35 万轮 + base64 解码 + AES-GCM 在数 MB 快照上是纯 CPU
+/// 长任务，放在设置页 `onSwitchChanged` 的 await 链上会让界面冻结数秒。
+///
+/// 与 [encryptPlainOffMainThread] 不同，这里把「口令错 / 文件损坏」等业务失败
+/// 在 isolate 内翻译成结构化结果返回（而非抛错），避免 Isolate.run 把它们包成
+/// RemoteError 后被误判为「通道不可用」而在主 isolate 重跑一次 PBKDF2。
+/// 只有 isolate 真的启动/传递失败时才回退到主线程补跑。
+Future<Map<String, dynamic>?> decodeEncryptedSnapshotOffMainThread(
+    String raw, String pass) async {
+  try {
+    final r = await Isolate.run(() => _decodeEncryptedSnapshotSync(raw, pass));
+    return r.decoded;
+  } catch (e) {
+    if (!_isIsolateTransferError(e)) return null;
+    buildSnapshotMainIsolateFallbacks++;
+    AppLog.d('[TaskProvider] 后台校验解密不可用（isolate 传递失败），回退主 isolate：$e');
+    return _decodeEncryptedSnapshotSync(raw, pass).decoded;
+  }
+}
+
+/// [decodeEncryptedSnapshotOffMainThread] 在 isolate 内执行的纯函数。
+/// 返回 `(ok, decoded)`：业务失败（口令错 / 文件损坏 / 结构非法）统一吞掉，
+/// 只由 `decoded == null` 表达，不跨越 isolate 边界抛异常。
+({bool ok, Map<String, dynamic>? decoded}) _decodeEncryptedSnapshotSync(
+    String raw, String pass) {
+  try {
+    final decoded = jsonDecode(decryptEnvelope(raw, pass));
+    return (
+      ok: true,
+      decoded: decoded is Map<String, dynamic> ? decoded : null,
+    );
+  } catch (_) {
+    return (ok: false, decoded: null);
   }
 }
 

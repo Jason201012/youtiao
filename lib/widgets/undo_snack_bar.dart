@@ -40,6 +40,7 @@ library;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:todolist/theme/ui_durations.dart';
+import 'package:todolist/widgets/sheet_message.dart';
 
 /// 撤销动作契约：返回 true = 撤销已生效；false = 缓冲已失效 / 无可恢复之物。
 ///
@@ -90,7 +91,7 @@ int _bumpActiveUndoSnacks(ScaffoldMessengerState m, int delta) {
   return _activeUndoSnacks[m]!;
 }
 
-ScaffoldFeatureController<SnackBar, SnackBarClosedReason> showUndoSnackBar(
+ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? showUndoSnackBar(
   BuildContext context, {
   required String content,
   UndoAction? onUndo,
@@ -98,6 +99,52 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason> showUndoSnackBar(
   String? failureHint,
   UndoFailureAction? failureAction,
 }) {
+  // P2-8（v3.1.8 审计）：弹层内调用时改走 SheetMessageHost——旧实现恒定
+  // `ScaffoldMessenger.of(context)`，提示挂在被 bottom sheet 盖住的根 Scaffold
+  // 上，occurrence_sheet 等弹层里的「已跳过 / 移到下一天」撤销入口完全不可见。
+  // 宿主存在即把撤销条渲染进弹层，复用同一套 failure/expired 口径。
+  final sheetScope =
+      context.getInheritedWidgetOfExactType<SheetMessageScope>();
+  if (sheetScope != null) {
+    var sheetUndoPressed = false;
+    void showFailure() {
+      final msg = failureHint ?? '撤销已失效：该操作已不可恢复';
+      showSheetMessage(context, msg,
+          duration: failureAction == null
+              ? const Duration(seconds: 2)
+              : Duration(seconds: kUndoWindowSeconds));
+    }
+
+    sheetScope.show(
+      content,
+      duration: kUndoWindow,
+      actionLabel: onUndo == null ? null : '撤销',
+      onAction: onUndo == null
+          ? null
+          : () async {
+              sheetUndoPressed = true;
+              bool ok;
+              try {
+                ok = await onUndo();
+              } catch (_) {
+                ok = false;
+              }
+              if (!ok) showFailure();
+            },
+    );
+    // 超时提示：宿主消息条没有 controller.closed，用同窗 Timer 补一条；
+    // 点过撤销或本弹层已销毁则不补（与根 Scaffold 路径同口径）。
+    if (onUndo != null) {
+      Future<void>.delayed(kUndoWindow, () {
+        if (sheetUndoPressed || !context.mounted) return;
+        showSheetMessage(
+            context, expiredHint ?? expiredHintFromContent(content),
+            duration: const Duration(seconds: 2));
+      });
+    }
+    return null;
+  }
+
   final messenger = ScaffoldMessenger.of(context);
   var undoPressed = false;
   // 新P3-1（v2.9.7 审计）：计数不变式 = 「在途的撤销横幅数」。无 action 的

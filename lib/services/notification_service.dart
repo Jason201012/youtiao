@@ -27,6 +27,14 @@ class NotificationService {
   /// 总开关（设置页控制）。关闭时不再调度，且清空已调度项。
   bool enabled = true;
 
+  /// P2-6（v3.1.8 审计）：「声音」开关的单一真源，由 TaskProvider 在
+  /// setSoundEnabled / load / restore 三处注入（与 [lockScreenPrivate] 同模式，
+  /// 避免 service 反向依赖 UI）。旧实现只把 `_soundEnabled` 传给任务的一次性
+  /// / 重复提醒，习惯打卡 / 习惯 snooze / 早晚简报 / 漏卡挽留 / 回收站预告
+  /// 与任务 snooze 全部硬编码 `playSound: true`——用户关「声音」后这些仍响。
+  /// 所有调度入口统一读取本标志选择有声/静音渠道与 playSound。
+  static bool soundEnabled = true;
+
   /// L-06：锁屏上是否隐藏通知正文（默认 **隐藏**）。
   ///
   /// Android 默认 `PUBLIC`，锁屏会完整展示通知正文，而本 App 的正文就是任务
@@ -66,6 +74,10 @@ class NotificationService {
   /// **另开一个渠道 id**（不能改名复用）。保持与任务渠道相同的 Importance /
   /// playSound，让用户观感不变，只是多一个可分别管理的开关。
   static const String _chHabit = 'habit_reminder';
+  /// P2-6（v3.1.8 审计）：习惯类静音渠道。Android 渠道声音属性建好即不可改，
+  /// 「声音」开关要真正覆盖习惯提醒必须另建一个 silent 渠道，与任务侧
+  /// `_chSound`/`_chSilent` 同思路（不是只改 playSound 参数）。
+  static const String _chHabitSilent = 'habit_reminder_silent';
 
   /// 专注进行中常驻通知渠道（锁屏可见、无声、无角标）。
   static const String _chFocusProgress = 'focus_progress';
@@ -103,6 +115,9 @@ class NotificationService {
   ///
   /// 【通知 id 段分配表（固化，新增 id 必须避开以下区间；S10 已改为互不重叠的大区段）】
   /// - 任务一次性截止提醒：_notifyIdOf(id)            ≈ [0, ~2.1e9]（纯数字任务 id）
+  /// - 任务完成/撤销/重试确认条：taskConfirmNotifyIdOf(id) ≈ [2.0e9, ~2.0001e9]
+  ///   （P2-3，v3.1.8 审计：与提醒段隔离，临时静音 cancel(id) 不再连带撤掉
+  ///    「已完成 ✓ / 撤销」「完成未保存 / 重试」回执；与习惯 9 号槽同思路）
   /// - 任务重复提醒：      repeatNotifyIdOf(id, d)   ≈ [1.6e9, ~1.84e9]（独立大连段，每任务 8 槽）
   /// - 专注完成通知：      777777（固定）
   /// - 专注进行中常驻：    777778（固定）
@@ -294,6 +309,29 @@ class NotificationService {
   /// id 都是纯数字字符串），兜底用 hashCode。schedule / cancel 必须走同一函数，
   /// 否则编辑/删除时取消会错位。
   static int _notifyIdOf(String id) => int.tryParse(id) ?? id.hashCode;
+
+  /// P2-3（v3.1.8 审计）：任务「完成 ✓ / 撤销」「已撤销完成」「撤销未保存 /
+  /// 重试」「完成未保存 / 重试」「提醒已结束」等**进行态回执**的独立通知 id。
+  ///
+  /// 旧实现确认条复用 [_notifyIdOf]（与一次性截止提醒同槽），于是
+  /// `_cancelScheduledReminderNotifications` 在临时静音开始时对每任务调用
+  /// `cancel(id)`，把通知栏里刚产生的完成确认条、10 秒撤销入口和未保存重试
+  /// 一并撤掉——失败回执比提醒本身更不该被静音吞掉。习惯侧 v3.1.2 P3-6
+  /// 已用 9 号槽保护本类回执，这里是任务侧的漏网，按同一思路做段隔离。
+  ///
+  /// 段位 `[2.0e9, 2.0001e9)`：避开截止提醒 [0,~2.1e9] 中实际 id（本 App
+  /// 自增任务 id 远小于 2e9）、重复段 [1.6e9,1.84e9]、snooze 段 [1.9e9,1.91e9]
+  /// 与习惯段 [1.0e9,1.001e9]；用确定性哈希（不用 String.hashCode）。
+  static int taskConfirmNotifyIdOf(String id) {
+    var h = 0x811c9dc5;
+    for (final c in id.codeUnits) {
+      h ^= c & 0xff;
+      h = (h * 0x01000193) & 0xffffffff;
+      h ^= (c >> 8) & 0xff;
+      h = (h * 0x01000193) & 0xffffffff;
+    }
+    return 2000000000 + (h % 100000);
+  }
 
   /// S4 修复：「幽灵提醒」根因是旧方案用会被重新调度清空的全局集合做取消标志，
   /// 导致改期到远期的旧兜底定时器在错误时间仍弹出。改为**单调代号（generation）**：
@@ -625,6 +663,15 @@ class NotificationService {
       description: '每日习惯打卡提醒与漏卡挽留',
       importance: Importance.high,
       playSound: true,
+    ));
+    // P2-6（v3.1.8 审计）：习惯类静音渠道，关闭「声音」时习惯提醒 / snooze /
+    // 挽留改投本渠道，使开关对习惯侧同样生效。
+    await plugin.createNotificationChannel(const AndroidNotificationChannel(
+      _chHabitSilent,
+      '习惯提醒（静音）',
+      description: '每日习惯打卡提醒（无声音）',
+      importance: Importance.high,
+      playSound: false,
     ));
   }
 
@@ -973,9 +1020,13 @@ class NotificationService {
         return false;
       }
       // 落点未变 → 系统里已挂的闹钟仍然正确，跳过重复的平台往返。
-      final signature = occurrences
+      // P2-6 / P3-3（v3.1.8 审计）：签名此前只有落点时刻，故「关声音」（playSound
+      // 变 false）与「只改标题」都命中早退、旧闹钟继续按旧声音 / 旧标题响（最多
+      // 8 次 occurrence 后才自愈）。把声音与标题一并纳入签名，内容一变即真正重挂。
+      final signature = '${occurrences
           .map((e) => '${e.year}-${e.month}-${e.day}T${e.hour}:${e.minute}')
-          .join('|');
+          .join('|')}'
+          '#s${playSound ? 1 : 0}#${task.title}';
       if (_armedSignatures[task.id] == signature) return true;
 
       final playChId = playSound ? _chSound : _chSilent;
@@ -1250,19 +1301,22 @@ class NotificationService {
       final signature = '${occurrences
           .map((e) => '${e.year}-${e.month}-${e.day}T${e.hour}:${e.minute}')
           .join('|')}'
-          '#${habit.emoji}#${habit.title}';
+          '#${habit.emoji}#${habit.title}'
+          // P2-6（v3.1.8 审计）：声音变更也纳入签名——setSoundEnabled 重排时
+          // 落点与标题都没变，旧签名命中会跳过，习惯提醒仍留在有声渠道。
+          '#s${soundEnabled ? 1 : 0}';
       if (_armedSignatures['habit:${habit.id}'] == signature) return true;
 
       final mode = await _scheduleMode;
       final body = '${habit.emoji} ${habit.title} · 该打卡啦';
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
-          _chHabit, // P3-13：习惯类独立渠道，用户可在系统设置里单独关闭
+          soundEnabled ? _chHabit : _chHabitSilent, // P2-6：声音开关覆盖习惯提醒
           '习惯提醒',
           channelDescription: '每日习惯打卡提醒',
           importance: Importance.high,
           priority: Priority.high,
-          playSound: true,
+          playSound: soundEnabled,
           // P2-1（v2.9.4 审计）：与 snooze 落点共用同一组 action（单一真源）。
           // U2-4（v2.9.6 审计）：量化习惯标签改「记 1 个」。
           actions: habitActionsFor(habit),
@@ -1454,7 +1508,11 @@ class NotificationService {
   /// P2-6'：落点过一次勿扰顺延，并补回「稍后提醒 / 完成」两个 action 按钮，
   /// 使 snooze 后的通知仍可二次 snooze、仍可在通知栏直接完成。
   Future<bool> snoozeTaskReminder(Task task,
-      {Duration delay = const Duration(minutes: 10), bool playSound = true}) async {
+      {Duration delay = const Duration(minutes: 10),
+      // P2-6（v3.1.8 审计）：默认跟随全局声音开关。旧实现字面量 true，main
+      // 点「稍后提醒」未传 playSound → 用户关声音后 snooze 仍响。
+      bool? playSound}) async {
+    final sound = playSound ?? soundEnabled;
     // P2-2（v3.0.3 审计）：完成态守卫——已完成 / 重复已结束的任务不再排
     // 「稍后提醒」。对照（全部已有清理）：非重复任务完成 `cancel(id)` 顺带撤
     // snooze 段（F11）；重复任务完成族自 v3.0.3 起经
@@ -1484,7 +1542,7 @@ class NotificationService {
     }
     // S4 修复：作废在途兜底定时器（若有），使本次 snooze 的提醒能正常弹出。
     _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
-    final chId = playSound ? _chSound : _chSilent;
+    final chId = sound ? _chSound : _chSilent;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
         chId,
@@ -1492,7 +1550,7 @@ class NotificationService {
         channelDescription: '任务截止时间提醒',
         importance: Importance.high,
         priority: Priority.high,
-        playSound: playSound,
+        playSound: sound,
         // P2-6'：补回 action 按钮，让 snooze 后的通知也能继续 snooze / 直接完成。
         actions: _taskActions,
         // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
@@ -1551,12 +1609,12 @@ class NotificationService {
     }
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
-        _chHabit, // P3-13：与正式打卡落点同渠道（snooze 后仍归「习惯提醒」名下）
+        soundEnabled ? _chHabit : _chHabitSilent, // P2-6：习惯 snooze 同样随声音开关
         '习惯提醒',
         channelDescription: '每日习惯打卡提醒',
         importance: Importance.high,
         priority: Priority.high,
-        playSound: true,
+        playSound: soundEnabled,
         // P2-1：snooze 后的通知补回两个 action，使它仍可二次顺延 / 直接打卡。
         // U2-4（v2.9.6 审计）：量化习惯标签改「记 1 个」。
         actions: habitActionsFor(habit),
@@ -1661,12 +1719,12 @@ class NotificationService {
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
-          _chSound,
+          soundEnabled ? _chSound : _chSilent, // P2-6：简报随声音开关
           '任务提醒',
           channelDescription: '任务截止时间提醒',
           importance: Importance.high,
           priority: Priority.high,
-          playSound: true,
+          playSound: soundEnabled,
           // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
           visibility: visibility,
         ),
@@ -1773,12 +1831,12 @@ class NotificationService {
       final mode = await _scheduleMode;
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
-          _chHabit, // P3-13：漏卡挽留同属习惯，独立渠道
+          soundEnabled ? _chHabit : _chHabitSilent, // P2-6：挽留随声音开关
           '习惯提醒',
           channelDescription: '每日习惯打卡提醒',
           importance: Importance.defaultImportance,
           priority: Priority.defaultPriority,
-          playSound: true,
+          playSound: soundEnabled,
           // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
           visibility: visibility,
         ),
@@ -1854,12 +1912,12 @@ class NotificationService {
           : '${titles.join('、')} 将于明天被永久删除';
       final detail = NotificationDetails(
         android: AndroidNotificationDetails(
-          _chSound,
+          soundEnabled ? _chSound : _chSilent, // P2-6：回收站预告随声音开关
           '任务提醒',
           channelDescription: '任务截止时间提醒',
           importance: Importance.high,
           priority: Priority.high,
-          playSound: true,
+          playSound: soundEnabled,
           autoCancel: true,
           // L-06：锁屏隐藏通知正文（任务标题属敏感内容）。
           visibility: visibility,
@@ -1921,7 +1979,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        _notifyIdOf(taskId),
+        taskConfirmNotifyIdOf(taskId), // P2-3：独立确认槽，不被静音 cancel 撤掉
         '已完成 ✓',
         title.isNotEmpty ? title : '无标题任务',
         detail,
@@ -1951,7 +2009,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        _notifyIdOf(taskId),
+        taskConfirmNotifyIdOf(taskId), // P2-3：独立确认槽
         '已撤销完成',
         title.isNotEmpty ? title : '无标题任务',
         detail,
@@ -1981,7 +2039,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        _notifyIdOf(taskId),
+        taskConfirmNotifyIdOf(taskId), // P2-3：独立确认槽
         '撤销已失效',
         '应用重启后撤销窗口已过期，请打开应用查看任务状态',
         detail,
@@ -2024,7 +2082,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        _notifyIdOf(taskId),
+        taskConfirmNotifyIdOf(taskId), // P2-3：独立确认槽
         '撤销未保存',
         '${title.isNotEmpty ? title : '无标题任务'} · 已在应用内撤销，但保存失败，请重试',
         detail,
@@ -2069,7 +2127,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        _notifyIdOf(taskId),
+        taskConfirmNotifyIdOf(taskId), // P2-3：独立确认槽
         '完成未保存',
         '${title.isNotEmpty ? title : '无标题任务'} · 已完成，但保存失败：请点「重试」',
         detail,
@@ -2422,8 +2480,9 @@ class NotificationService {
   /// 无法弹 SnackBar，覆盖式确认条是通知场景唯一可用的反馈形态（本仓 U 系
   /// 多轮确立的口径）。
   ///
-  /// [id] 为原始实体 id：任务侧挂任务段（[_notifyIdOf]），习惯侧挂 9 号槽
-  /// （[habitConfirmNotifyIdOf]）——两段位互不重叠，已删实体也不冲突。
+  /// [id] 为原始实体 id：任务侧挂任务确认槽（[taskConfirmNotifyIdOf]，P2-3
+  /// v3.1.8 起与提醒段隔离），习惯侧挂 9 号槽（[habitConfirmNotifyIdOf]）——
+  /// 两段位互不重叠，已删 / 静音实体也不冲突。
   /// [title] 可选（实体仍在时带标题）；已删实体缺省通用文案。
   ///
   /// U3-2（v3.0.5 审计）：[rescheduleFailed] 区分失败原因——「不会再响」只在
@@ -2455,7 +2514,7 @@ class NotificationService {
     );
     try {
       await _plugin.show(
-        isHabit ? habitConfirmNotifyIdOf(id) : _notifyIdOf(id),
+        isHabit ? habitConfirmNotifyIdOf(id) : taskConfirmNotifyIdOf(id),
         muted ? '提醒已静音' : '提醒已结束',
         muted
             ? (title != null && title.isNotEmpty

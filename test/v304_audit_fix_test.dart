@@ -478,8 +478,11 @@ void main() {
         .showSnoozeUnavailableConfirm('9001', title: '买菜');
     var shows = notifCalls.where((c) => c.method == 'show').toList();
     expect(shows, hasLength(1), reason: '旧实现静默 return，点「稍后提醒」毫无反应');
-    expect(argsIdOf(shows.single), 9001,
-        reason: '任务侧挂一次性段（_notifyIdOf），在原提醒位覆盖');
+    // P2-3（v3.1.8 审计）：确认/回执条改挂独立槽，临时静音 cancel(id) 不再
+    // 连带撤掉它——旧断言「落一次性段 9001」编码的正是被审计判为缺陷的行为。
+    expect(argsIdOf(shows.single),
+        NotificationService.taskConfirmNotifyIdOf('9001'),
+        reason: '任务侧回执挂独立确认段，与提醒段隔离');
     final args1 = Map<String, dynamic>.from(shows.single.arguments as Map);
     expect(args1['title'], '提醒已结束');
     expect(args1['body'] as String, contains('买菜'));
