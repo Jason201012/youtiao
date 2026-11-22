@@ -16,7 +16,8 @@
 /// 交付（见最终回复），其依赖的 provider/service 层信号在本文件能钉的都已钉。
 import 'dart:convert';
 
-import 'package:characters/characters.dart';
+// U-1（v3.1.9 审计）：`characters` 由 package:flutter/material.dart re-export，
+// 直接 import 会被判定为 unnecessary_import（项目内引用方式已统一走 Flutter 导出）。
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

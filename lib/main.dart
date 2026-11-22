@@ -939,7 +939,8 @@ void _doComplete(NavigatorState nav, String? taskId) {
       NotificationService.instance.showCompleteNotSaved(taskId, task.title);
       return;
     }
-    // 覆盖式确认通知：用任务通知 id，用户一眼可见「已完成」，且不会叠加新通知。
+    // 覆盖式确认通知：走**任务确认段**（P2-3，v3.1.8 审计起不再复用任务
+    // 通知 id），用户一眼可见「已完成」，且临时静音 cancel(id) 不会把它撤掉。
     NotificationService.instance.showCompletedConfirm(taskId, task.title);
   });
 }
@@ -1404,6 +1405,13 @@ class _MainScaffoldState extends State<MainScaffold>
   /// 仅在应用锁开启且当前未锁定时启动；锁定态/未开启锁时不持有定时器。
   Timer? _idleTimer;
 
+  /// P2-1（v3.1.9 审计）：软键盘 / 文本输入活动探针（见 [_startTextActivityProbe]）。
+  /// 只在有 `EditableText` 获得焦点时存在；离开焦点即销毁。
+  Timer? _textActivityTimer;
+
+  /// 上一次观察到的文本编辑值，用于判断「这次轮询期间是否真的输入了」。
+  TextEditingValue? _lastTextValue;
+
   /// P1-2：当前设置的空闲时长；<=0 表示「永不」。
   Duration? get _idleDuration {
     final secs =
@@ -1419,30 +1427,115 @@ class _MainScaffoldState extends State<MainScaffold>
 
   /// P2-4：键盘输入（文本变更 / 快捷键）同样算「用户活动」。
   /// 返回 false = 不消费事件，保持原焦点 / 快捷键行为不变。
+  ///
+  /// P2-1（v3.1.9 审计）：本回调只覆盖**硬件键盘**。Android 软键盘的按键位于
+  /// IME 窗口，点击不会作为指针事件进入 App，字符输入走文本输入通道而不是
+  /// `KeyEvent`——详情页用软键盘连续输入备注超过空闲时长仍会被突然锁屏。
+  /// 软键盘活动由 [_startTextActivityProbe] 补齐（见该方法的说明）。
   bool _onGlobalKey(KeyEvent _) {
     _resetIdleTimer();
     return false;
   }
 
-  /// P1-2：重置空闲定时器——任何用户交互（全局指针 / 键盘，见 initState 注册）
-  /// 或生命周期回到前台时调用。
+  /// P2-1（v3.1.9 审计）：软键盘 / 文本输入活动探针。
+  ///
+  /// Flutter 没有「任何 EditableText 的文本发生变化」的全局回调（IME 输入
+  /// 不经 `HardwareKeyboard`，也不进 `pointerRouter`）。这里用两个公开机制
+  /// 组合补齐，且**只在有文本输入焦点时才启用轮询**：
+  /// 1. `FocusManager.addListener`：焦点变化时判断当前主焦点是否落在
+  ///    `EditableText` 上（`primaryFocus.context` 向上找 `EditableTextState`）；
+  /// 2. 聚焦期间每 800ms 比对该控件的 `textEditingValue`，一旦变化即视为
+  ///    用户活动并重置空闲计时。
+  /// 轮询代价是一次属性读取 + 一次字符串比较，且无焦点时定时器立即停止。
+  EditableTextState? _focusedEditable() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return null;
+    try {
+      return ctx.findAncestorStateOfType<EditableTextState>();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _onFocusChangedForIdle() {
+    final editable = _focusedEditable();
+    if (editable == null) {
+      _stopTextActivityProbe();
+      _resetIdleTimer();
+      return;
+    }
+    _lastTextValue = editable.textEditingValue;
+    _startTextActivityProbe();
+  }
+
+  void _startTextActivityProbe() {
+    if (!_appLock.appLockEnabled || _appLock.locked) return;
+    _textActivityTimer ??=
+        Timer.periodic(const Duration(milliseconds: 800), (_) {
+      final editable = _focusedEditable();
+      if (editable == null) {
+        _stopTextActivityProbe();
+        return;
+      }
+      final value = editable.textEditingValue;
+      final last = _lastTextValue;
+      _lastTextValue = value;
+      if (last == null) return;
+      if (last.text != value.text ||
+          last.selection != value.selection ||
+          last.composing != value.composing) {
+        _resetIdleTimer();
+      }
+    });
+  }
+
+  void _stopTextActivityProbe() {
+    _textActivityTimer?.cancel();
+    _textActivityTimer = null;
+    _lastTextValue = null;
+  }
+
+  /// P1-2：重置空闲定时器——任何用户交互（全局指针 / 键盘 / 文本输入，见
+  /// initState 注册）或生命周期回到前台时调用。
   /// 规则：已锁定时取消定时器（锁定态无需再锁）；未开启锁时取消；否则按
-  /// [_idleDuration] 重启。P2-4：长任务进度层（备份 / 恢复）期间暂停计时。
+  /// [_idleDuration] 重启。P2-4：长任务进度层（备份 / 恢复）期间不重新计时。
   void _resetIdleTimer() {
     _idleTimer?.cancel();
     _idleTimer = null;
     if (_appLock.locked || !_appLock.appLockEnabled) return;
     // P2-4：恢复 / 备份进度层没有指针操作但不能锁屏——否则进度层被弹掉、
-    // 后台恢复结果提示丢失。进度层收起后由 _onAppLockChanged / 下一次交互重启。
+    // 后台恢复结果提示丢失。
+    // P2-1（v3.1.9 审计）：这里只是「不重新计时」，进入进度层**之前**已挂好的
+    // 定时器仍会到点触发；真正的暂停由 [_onSheetProgressChanged] 负责。
     if (sheetProgressActive) return;
     final dur = _idleDuration;
     if (dur == null) return;
     _idleTimer = Timer(dur, _onIdleTimeout);
   }
 
+  /// P2-1（v3.1.9 审计）：进度层进出时的暂停 / 恢复。
+  ///
+  /// 旧实现只在 [_resetIdleTimer] 内部跳过重新计时，两个方向都不成立：
+  /// - 进入进度层前已挂的定时器不会被撤销，恢复 / 备份超过空闲时长仍被锁屏，
+  ///   锁定跃迁的 `popUntil` 把进度层一并弹掉、结果提示随之丢失；
+  /// - 用户在进度层上点一下会让定时器被取消且不再重挂，进度层收起后自动锁
+  ///   停摆到下一次输入。
+  /// 现在由 `sheet_message` 的进度层计数在 push / pop 时回调本方法：push 立即
+  /// 撤销计时，pop 重新按完整空闲时长计时。
+  void _onSheetProgressChanged() {
+    if (sheetProgressActive) {
+      _idleTimer?.cancel();
+      _idleTimer = null;
+    } else {
+      _resetIdleTimer();
+    }
+  }
+
   /// P1-2：空闲超时回调——强制上锁。定时器已触发，置空引用。
   void _onIdleTimeout() {
     _idleTimer = null;
+    // P2-1（v3.1.9 审计）：兜底——进度层存续期间绝不因空闲上锁。
+    if (sheetProgressActive) return;
     if (_appLock.appLockEnabled && !_appLock.locked) {
       _appLock.lock();
     }
@@ -1474,6 +1567,10 @@ class _MainScaffoldState extends State<MainScaffold>
     // 交互，任何活动都重置空闲计时；dispose 时成对移除。
     GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
     HardwareKeyboard.instance.addHandler(_onGlobalKey);
+    // P2-1（v3.1.9 审计）：软键盘输入不产生指针 / KeyEvent，单独用焦点 + 文本
+    // 值探针补齐；进度层进出时真正暂停 / 恢复空闲计时。
+    FocusManager.instance.addListener(_onFocusChangedForIdle);
+    addSheetProgressLayerListener(_onSheetProgressChanged);
     // P1-2：启动即开始计时空闲自动锁定。
     _resetIdleTimer();
   }
@@ -1636,6 +1733,10 @@ class _MainScaffoldState extends State<MainScaffold>
     // P2-4：成对移除全局活动监听，避免跨页面悬浮引用。
     GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
     HardwareKeyboard.instance.removeHandler(_onGlobalKey);
+    // P2-1（v3.1.9 审计）：成对移除焦点监听 / 进度层监听 / 文本活动探针。
+    FocusManager.instance.removeListener(_onFocusChangedForIdle);
+    removeSheetProgressLayerListener(_onSheetProgressChanged);
+    _stopTextActivityProbe();
     // U4：卸载时清掉 Tab 跳转钩子，避免悬浮引用。
     AppNav.onJumpToTab = null;
     try {
@@ -2377,6 +2478,17 @@ class AppLockGate extends StatelessWidget {
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 14, color: ext.meta),
                 ),
+                // P3-3（v3.1.9 审计）：偏好读取失败时说明「为什么被要求解锁」。
+                // 旧实现 `_loadFailed` 只赋值、全仓零消费：用户在一台从未开过
+                // 应用锁的设备上莫名被拦，且没有任何解释或出路说明。
+                if (lock.loadFailed) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    lock.loadFailedHint,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: ext.meta),
+                  ),
+                ],
                 const SizedBox(height: 28),
                 FilledButton.icon(
                   onPressed: () => context

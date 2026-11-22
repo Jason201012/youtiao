@@ -114,10 +114,20 @@ class NotificationService {
   /// 定时测试用固定 id（不与任务 id 冲突）。
   ///
   /// 【通知 id 段分配表（固化，新增 id 必须避开以下区间；S10 已改为互不重叠的大区段）】
-  /// - 任务一次性截止提醒：_notifyIdOf(id)            ≈ [0, ~2.1e9]（纯数字任务 id）
-  /// - 任务完成/撤销/重试确认条：taskConfirmNotifyIdOf(id) ≈ [2.0e9, ~2.0001e9]
+  ///
+  /// U-4（v3.1.9 审计）：本表此前把一次性提醒写成「≈ [0, ~2.1e9]」，字面上与
+  /// 确认段 `[2.0e9, 2.0001e9)` 重叠，会让下一位维护者误以为必须避开整段。
+  /// 现按「实际取值范围 + 生成函数」两列重写：任务 id 是 SQLite 自增数字
+  /// （个位数到千级），非数字 id 才回退 `hashCode`，两种都不会落到 1e9 以上。
+  /// - 任务一次性截止提醒：`_notifyIdOf(id)` = 任务数字 id 本身
+  ///   （自增，实际 `[1, 千级]`；非数字 id 回退 `id.hashCode`，32 位 int 范围内）
+  /// - 任务完成/撤销/重试确认条：`taskConfirmNotifyIdOf(id)`
+  ///   = `2000000000 + FNV(id) % 100000` → `[2000000000, 2000099999]`
   ///   （P2-3，v3.1.8 审计：与提醒段隔离，临时静音 cancel(id) 不再连带撤掉
   ///    「已完成 ✓ / 撤销」「完成未保存 / 重试」回执；与习惯 9 号槽同思路）
+  /// - 任务「稍后提醒」：`_snoozeNotifyIdOf(id)`
+  ///   = `1900000000 + id % 10000000` → `[1900000000, 1909999999]`
+  ///   （F11：独立段，snooze 不再顶掉该任务未来的截止闹钟）
   /// - 任务重复提醒：      repeatNotifyIdOf(id, d)   ≈ [1.6e9, ~1.84e9]（独立大连段，每任务 8 槽）
   /// - 专注完成通知：      777777（固定）
   /// - 专注进行中常驻：    777778（固定）
@@ -319,9 +329,10 @@ class NotificationService {
   /// 一并撤掉——失败回执比提醒本身更不该被静音吞掉。习惯侧 v3.1.2 P3-6
   /// 已用 9 号槽保护本类回执，这里是任务侧的漏网，按同一思路做段隔离。
   ///
-  /// 段位 `[2.0e9, 2.0001e9)`：避开截止提醒 [0,~2.1e9] 中实际 id（本 App
-  /// 自增任务 id 远小于 2e9）、重复段 [1.6e9,1.84e9]、snooze 段 [1.9e9,1.91e9]
-  /// 与习惯段 [1.0e9,1.001e9]；用确定性哈希（不用 String.hashCode）。
+  /// 段位见文件头「通知 id 段分配表」：`taskConfirmNotifyIdOf(id)` 落在
+  /// `[2000000000, 2000099999]`，与截止提醒（任务数字 id，千级）、重复段、
+  /// snooze 段、习惯段都互不重叠；用确定性哈希（不用 String.hashCode，
+  /// 后者跨进程不稳定，取消时会对不上）。
   static int taskConfirmNotifyIdOf(String id) {
     var h = 0x811c9dc5;
     for (final c in id.codeUnits) {
@@ -338,6 +349,14 @@ class NotificationService {
   /// 每次 [scheduleForTask] / [cancel] / [snoozeTaskReminder] 都让该任务的代号 +1，
   /// 兜底定时器触发时校验「自己是否仍是当前最新一代」，不是则静默作废。
   final Map<String, int> _deadlineGen = {};
+
+  /// P2-2（v3.1.9 审计）：已排「稍后提醒」的落点（按任务 id）。
+  ///
+  /// 只存内存：snooze 窗口最长 10 分钟，进程被杀后系统里那条通知仍会照常
+  /// 触发（不会被撤销），这里丢记录只是失去「改名后同步标题」的能力。反之
+  /// 若把记录持久化再重建，一旦记录与系统实际排程不一致就会多排一条重复通知。
+  /// 清理点：[cancel]（默认 keepSnooze=false）、[cancelSnooze]、落点过期。
+  final Map<String, tz.TZDateTime> _pendingSnoozeAt = {};
 
   /// F-2：每个重复任务 / 习惯预挂的「未来 occurrence」个数。
   ///
@@ -960,15 +979,27 @@ class NotificationService {
   /// 同时作废在途的「应用内兜底定时器」（代号 +1，使其触发时判定为过期一代），
   /// 让提前完成/改期的任务不再弹出陈旧提醒（S4）。
   /// F11：snooze 已改用独立段位，这里一并取消，避免「任务已删除但 snooze 仍会弹」。
-  Future<void> cancel(String id) {
+  ///
+  /// P2-2（v3.1.9 审计）：新增 [keepSnooze]。标题变化与提醒时刻无关，旧实现
+  /// 无条件撤 snooze 而 `_scheduleRemindersFor` 只重挂截止 / 重复提醒、没有
+  /// snooze 重建入口 —— 用户在 10 分钟 snooze 窗口内改一次标题，这条用户明确
+  /// 要求的提醒就静默消失且零反馈。仅标题变化时传 true：保留 snooze 段与落点
+  /// 记录，随后由 [rebuildPendingSnooze] 用新标题在同一落点重排。
+  Future<void> cancel(String id, {bool keepSnooze = false}) {
     // S4 修复：作废该任务在途的兜底定时器（代号 +1 使其判定为过期一代）。
     _deadlineGen[id] = (_deadlineGen[id] ?? 0) + 1;
-    unawaited(_plugin.cancel(_snoozeNotifyIdOf(id)));
+    if (!keepSnooze) {
+      _pendingSnoozeAt.remove(id);
+      unawaited(_plugin.cancel(_snoozeNotifyIdOf(id)));
+    }
     return _plugin.cancel(_notifyIdOf(id));
   }
 
   /// F11：单独取消某任务的「稍后提醒」通知（snooze 后任务被完成时调用）。
-  Future<void> cancelSnooze(String id) => _plugin.cancel(_snoozeNotifyIdOf(id));
+  Future<void> cancelSnooze(String id) {
+    _pendingSnoozeAt.remove(id);
+    return _plugin.cancel(_snoozeNotifyIdOf(id));
+  }
 
   /// 为「重复任务」调度本地提醒（setAlarmClock 模式，不被 ColorOS 等国产 ROM 拦截）。
   /// 返回 true 表示已提交。
@@ -1542,6 +1573,20 @@ class NotificationService {
     }
     // S4 修复：作废在途兜底定时器（若有），使本次 snooze 的提醒能正常弹出。
     _deadlineGen[task.id] = (_deadlineGen[task.id] ?? 0) + 1;
+    final ok = await _scheduleTaskSnooze(task, when, sound: sound);
+    if (ok) {
+      AppLog.d(
+          '[通知] snooze id=${task.id} -> $when (${delay.inMinutes}min)');
+    }
+    return ok;
+  }
+
+  /// P2-2（v3.1.9 审计）：排一条任务「稍后提醒」通知（snooze 唯一落盘口）。
+  ///
+  /// 抽成独立方法是为了让「标题变化后按原落点重建」与首次 snooze 走**完全
+  /// 相同**的渠道 / action / payload / 可见性配置，避免两处慢慢漂移。
+  Future<bool> _scheduleTaskSnooze(Task task, tz.TZDateTime when,
+      {required bool sound}) async {
     final chId = sound ? _chSound : _chSilent;
     final detail = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -1569,13 +1614,34 @@ class NotificationService {
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
-      AppLog.d('[通知] snooze id=${task.id} -> $when (${delay.inMinutes}min)');
+      _pendingSnoozeAt[task.id] = when;
       return true;
     } catch (e, s) {
       AppLog.d('[通知] snooze 失败 id=${task.id}: $e');
       AppLog.d('$s');
       return false;
     }
+  }
+
+  /// P2-2（v3.1.9 审计）：按记忆的落点用**新标题**重建该任务的「稍后提醒」。
+  ///
+  /// 调用时机：[cancel] 传 `keepSnooze: true`（仅标题变化）之后。此时 snooze
+  /// 段没有被撤销，但通知里烘焙的仍是旧标题；这里在同一落点重排一次以同步
+  /// 文案。落点已过或本进程没有记录（冷启动 / 进程被杀后内存丢失）时返回
+  /// false 并静默跳过——原 snooze 通知仍在系统里，不会被撤销，只是标题保持
+  /// 旧文案（可接受，且绝不比「提醒直接消失」更差）。
+  Future<bool> rebuildPendingSnooze(Task task) async {
+    final when = _pendingSnoozeAt[task.id];
+    if (when == null) return false;
+    if (!when.isAfter(tz.TZDateTime.now(_loc ?? tz.UTC))) {
+      _pendingSnoozeAt.remove(task.id);
+      return false;
+    }
+    final ok = await _scheduleTaskSnooze(task, when, sound: soundEnabled);
+    if (ok) {
+      AppLog.d('[通知] snooze 已按新标题重建 id=${task.id} -> $when');
+    }
+    return ok;
   }
 
   /// 习惯提醒的稍后提醒：在 [delay] 后重新弹出该习惯的打卡提醒。

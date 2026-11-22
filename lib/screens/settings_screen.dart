@@ -163,7 +163,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return;
       }
       if (!backupPassphraseHasTwoClasses(v)) {
-        setLocal(() => errorText = '口令过弱：需含大小写字母或数字中至少两类');
+        setLocal(() => errorText = '口令过弱：请混合使用大小写字母、数字、符号或汉字（至少两类）');
         return;
       }
       if (v != confirmCtrl.text) {
@@ -392,7 +392,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   return;
                 }
                 if (!backupPassphraseHasTwoClasses(v)) {
-                  setLocal(() => errNew = '口令过弱：需含大小写字母或数字中至少两类');
+                  setLocal(() => errNew = '口令过弱：请混合使用大小写字母、数字、符号或汉字（至少两类）');
                   return;
                 }
                 if (v != ctlConfirm.text) {
@@ -1796,7 +1796,14 @@ String _formatIdle(int seconds) {
                             if (!purgePlaintext) {
                               message = '已开启加密；$plainCount 份旧明文快照仍在本机，将在 7 份滚动保留内自然清除';
                             } else if (result.snapshotWritten) {
-                              message = '已清理 ${result.removed} 份历史明文快照，并补写今日加密快照';
+                              // P3-2（v3.1.9 审计）：成功回执可带一条非降级提示
+                              // （如「本次快照在主线程组装，耗时较长」）——它是
+                              // 提示不是失败，附在结论之后，不改变「已清理」的事实。
+                              final base =
+                                  '已清理 ${result.removed} 份历史明文快照，并补写今日加密快照';
+                              message = result.note == null
+                                  ? base
+                                  : '$base（${result.note}）';
                             } else {
                               message = result.note ??
                                   '已开启加密；未清理旧明文，旧快照仍在本机';
@@ -1890,27 +1897,45 @@ String _formatIdle(int seconds) {
                         // 旧文案拼成「每次进入需验证无可用验证方式」的病句；
                         // ② onSwitchChanged 为 null 让该状态成为关不掉的死行。
                         // 现在按真实可用性分支，并允许随时关闭（关闭不需要凭据）。
-                        subtitle: lock.appLockEnabled
-                            ? (lock.canAuthenticate
-                                ? '已开启：每次进入需验证${lock.credentialLabel}，'
-                                    '仅遮挡界面（数据库仍为明文）'
-                                : '已开启：${lock.unavailableHint}，本机暂时无法完成验证；'
-                                    '回前台会自动重新探测，解锁页提供关闭出口')
-                            : (lock.canAuthenticate
-                                ? (lock.hasEnrolledBiometrics
-                                    ? '每次进入需验证指纹 / 面容，可降级用锁屏密码；仅遮挡界面，本地数据库仍为明文'
-                                    : '本机仅可用锁屏密码验证；仅遮挡界面，本地数据库仍为明文')
-                                : '${lock.unavailableHint}，无法开启应用锁'),
+                        // P3-3（v3.1.9 审计）：加载失败（偏好不可读）时如实说明
+                        // 当前是按 fail-safe 保守锁定，而不是用户自己开过锁——
+                        // 旧实现只看 `appLockEnabled`，用户会看到「已开启」却
+                        // 完全不记得开过，也没有任何解释。
+                        subtitle: lock.loadFailed
+                            ? '${lock.loadFailedHint}（当前${lock.appLockEnabled ? '按已开启锁定处理' : '按关闭处理'}）'
+                            : lock.appLockEnabled
+                                ? (lock.canAuthenticate
+                                    ? '已开启：每次进入需验证${lock.credentialLabel}，'
+                                        '仅遮挡界面（数据库仍为明文）'
+                                    : '已开启：${lock.unavailableHint}，本机暂时无法完成验证；'
+                                        '回前台会自动重新探测，解锁页提供关闭出口')
+                                : (lock.canAuthenticate
+                                    ? (lock.hasEnrolledBiometrics
+                                        ? '每次进入需验证指纹 / 面容，可降级用锁屏密码；仅遮挡界面，本地数据库仍为明文'
+                                        : '本机仅可用锁屏密码验证；仅遮挡界面，本地数据库仍为明文')
+                                    : '${lock.unavailableHint}，无法开启应用锁'),
                         switchValue: lock.appLockEnabled,
                         onSwitchChanged: (v) async {
                           // P3-4：setEnabled(true) 内部会先重新探测凭据，
                           // 用户刚在系统设置补录指纹 / 密码后无需重启 App。
                           final ok = await lock.setEnabled(v);
-                          if (!ok && mounted) {
+                          // 用 Consumer 传入的 context 判 mounted（与 State 的
+                          // mounted 不是同一对象，混用会被 lint 判为无关守卫）。
+                          if (!context.mounted) return;
+                          if (!ok) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
                                 content: Text(
                                     '${lock.unavailableHint}，无法开启应用锁'),
+                              ),
+                            );
+                          } else if (lock.lastSwitchPersistFailed) {
+                            // P3-3（v3.1.9 审计）：内存已生效但没落盘，不能静默。
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('已在本会话生效，但未能保存到本机存储；'
+                                    '下次启动可能恢复为旧设置'),
+                                duration: Duration(seconds: 4),
                               ),
                             );
                           }

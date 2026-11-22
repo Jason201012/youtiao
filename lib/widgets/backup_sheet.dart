@@ -278,7 +278,7 @@ class BackupSheet {
                       // 杜绝纯数字等可被 GPU 数分钟爆破的弱口令（结合 P1-2 的 35 万轮迭代）。
                       if (!_isStrongPassword(p)) {
                         showSheetSnackBar(context, const SnackBar(
-                            content: Text('口令过弱：需含大小写字母或数字中至少两类')));
+                            content: Text('口令过弱：请混合使用大小写字母、数字、符号或汉字（至少两类）')));
                         return;
                       }
                       if (p != passConfirmCtrl.text) {

@@ -42,6 +42,10 @@ dependencies:
   just_audio: ^0.9.0
   add_2_calendar: ^3.1.1
   lpinyin: ^2.0.3
+  # U-1（v3.1.9 审计）：`Habit.clampUnit` 按字素簇（grapheme cluster）截断，
+  # 直接 import 了 package:characters。此前只靠 Flutter SDK 的传递依赖可用，
+  # analyzer 报 `depend_on_referenced_packages`，且传递依赖一旦调整即编译失败。
+  characters: ^1.4.0
   local_auth: ^2.1.8
   # 显式声明平台包：应用锁需 import AndroidAuthMessages/IOSAuthMessages 定制中文文案
   local_auth_android: ^1.0.48

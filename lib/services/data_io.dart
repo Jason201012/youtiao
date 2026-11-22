@@ -34,39 +34,82 @@ class DataIo {
     return '$targetPath.tmp.$suffix';
   }
 
+  /// P3-5（v3.1.9 审计）：原子写残片（`<目标>.tmp.<hex>`）的识别式。
+  static final RegExp _tmpFragment = RegExp(r'\.tmp(\.[0-9a-f]+)?$');
+
+  /// P3-5（v3.1.9 审计）：清理目录内的原子写残片。
+  ///
+  /// 随机后缀避免了并发共用同一 tmp，但副作用是「每次失败新增一份、不再互相
+  /// 覆盖」——写盘失败 / 磁盘满 / 进程被杀留下的 `.tmp.<hex>` 可能包含完整
+  /// 明文快照（含附件 base64，数十 MB），此前只由 `backup/auto` 的滚动清理
+  /// 顺手删掉，`backup/pre-restore` 与导出目录（App 文档根）无人清理。
+  /// 现在每次写入前清扫**目标所在目录**：只认 `.tmp` / `.tmp.<hex>`，且跳过
+  /// 最近 1 分钟内修改的文件（可能是另一个写入者正在用的在途临时文件）。
+  static Future<void> _sweepTmpFragments(Directory dir) async {
+    try {
+      if (!await dir.exists()) return;
+      final cutoff = DateTime.now().subtract(const Duration(minutes: 1));
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = entity.uri.pathSegments.last;
+        if (!_tmpFragment.hasMatch(name)) continue;
+        try {
+          final stat = await entity.stat();
+          if (stat.modified.isAfter(cutoff)) continue;
+          await entity.delete();
+        } catch (_) {
+          // 单文件删除失败（被占用等）不影响其余；也绝不输出文件内容。
+        }
+      }
+    } catch (_) {
+      // 清扫失败不阻断写入主流程。
+    }
+  }
+
   static Future<File> saveToAppDocs(String fileName, String content) async {
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$fileName');
     // 兼容子目录写入：如 backup/auto/YYYY-MM-DD.json 需先创建父目录，
     // 否则 tmp.writeAsString() 会抛 PathNotFoundException。
     await file.parent.create(recursive: true);
+    // P3-5（v3.1.9 审计）：先清理本目录历史残片（含本次失败前的旧残片）。
+    await _sweepTmpFragments(file.parent);
     final tmp = File(_tmpPath(file.path));
-    await tmp.writeAsString(content);
-    // S9 修复：原子落盘按平台区分，降低「删完旧文件、改名前崩溃/断电」导致
-    // 旧备份已失、新备份未成、整文件 JSON 损坏的概率。
-    if (Platform.isWindows) {
-      // Windows 的 rename 不能覆盖已存在目标，且须防「先删后改名」窗口丢备份。
-      // 策略：把旧文件改名 .bak，再 rename 新临时文件到位；任一环节失败则回滚。
-      if (await file.exists()) {
-        final bak = File('${file.path}.bak');
-        if (await bak.exists()) await bak.delete();
-        await file.rename(bak.path); // 旧 → .bak
-        try {
-          await tmp.rename(file.path); // 新 → 目标（原子覆盖）
-        } catch (e) {
-          await bak.rename(file.path); // 回滚：恢复旧文件
-          rethrow;
+    // P3-5（v3.1.9 审计）：`try/finally` 保证任何失败路径都不留残片。旧实现
+    // 写入或 rename 抛错时 tmp 原样留在磁盘上，长期累积占用私有目录。
+    // 成功 rename 后 tmp 已不存在，下面的删除是幂等收尾。
+    try {
+      await tmp.writeAsString(content);
+      // S9 修复：原子落盘按平台区分，降低「删完旧文件、改名前崩溃/断电」导致
+      // 旧备份已失、新备份未成、整文件 JSON 损坏的概率。
+      if (Platform.isWindows) {
+        // Windows 的 rename 不能覆盖已存在目标，且须防「先删后改名」窗口丢备份。
+        // 策略：把旧文件改名 .bak，再 rename 新临时文件到位；任一环节失败则回滚。
+        if (await file.exists()) {
+          final bak = File('${file.path}.bak');
+          if (await bak.exists()) await bak.delete();
+          await file.rename(bak.path); // 旧 → .bak
+          try {
+            await tmp.rename(file.path); // 新 → 目标（原子覆盖）
+          } catch (e) {
+            await bak.rename(file.path); // 回滚：恢复旧文件
+            rethrow;
+          }
+          await bak.delete(); // 成功：清掉 .bak
+        } else {
+          await tmp.rename(file.path);
         }
-        await bak.delete(); // 成功：清掉 .bak
       } else {
+        // POSIX（Android / Linux / macOS）：rename 覆盖目标为原子操作，
+        // 直接 rename 即可，无需先删旧文件，崩溃窗口内旧文件始终可用。
         await tmp.rename(file.path);
       }
-    } else {
-      // POSIX（Android / Linux / macOS）：rename 覆盖目标为原子操作，
-      // 直接 rename 即可，无需先删旧文件，崩溃窗口内旧文件始终可用。
-      await tmp.rename(file.path);
+      return file;
+    } finally {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
     }
-    return file;
   }
 
   /// 把二进制内容（如 .xlsx / .pdf）写入 App 私有文档目录，返回生成的文件。
@@ -78,27 +121,35 @@ class DataIo {
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/$fileName');
     await file.parent.create(recursive: true);
+    // P3-5（v3.1.9 审计）：与文本写同款——先清扫本目录残片，失败必删 tmp。
+    await _sweepTmpFragments(file.parent);
     final tmp = File(_tmpPath(file.path)); // P3-5：随机后缀，避免并发写同名 tmp
-    await tmp.writeAsBytes(bytes, flush: true);
-    if (Platform.isWindows) {
-      if (await file.exists()) {
-        final bak = File('${file.path}.bak');
-        if (await bak.exists()) await bak.delete();
-        await file.rename(bak.path);
-        try {
+    try {
+      await tmp.writeAsBytes(bytes, flush: true);
+      if (Platform.isWindows) {
+        if (await file.exists()) {
+          final bak = File('${file.path}.bak');
+          if (await bak.exists()) await bak.delete();
+          await file.rename(bak.path);
+          try {
+            await tmp.rename(file.path);
+          } catch (e) {
+            await bak.rename(file.path);
+            rethrow;
+          }
+          await bak.delete();
+        } else {
           await tmp.rename(file.path);
-        } catch (e) {
-          await bak.rename(file.path);
-          rethrow;
         }
-        await bak.delete();
       } else {
         await tmp.rename(file.path);
       }
-    } else {
-      await tmp.rename(file.path);
+      return file;
+    } finally {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
     }
-    return file;
   }
 
   /// 通过系统分享面板分享一个本地文件。

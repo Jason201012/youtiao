@@ -42,12 +42,17 @@ class SheetMessageScope extends InheritedWidget {
   final SheetMessageHostState hostState;
 
   /// 立即显示（当前没有更高路由覆盖时）。
+  ///
+  /// [onTimeout]：仅当这条消息**真的展示到自然超时**（用户没点动作、没手动
+  /// 关闭）时回调。P3-4（v3.1.9 审计）新增——撤销条此前用裸 `Future.delayed`
+  /// 补「窗口已结束」，排队中的条目不提前提示这件事只能由宿主裁决。
   final void Function(
     String message, {
     Duration duration,
     bool isError,
     String? actionLabel,
     VoidCallback? onAction,
+    VoidCallback? onTimeout,
   }) show;
 
   /// P2-2：进度弹层（更高路由）仍在前台时把消息排队，待它退场后由
@@ -58,6 +63,7 @@ class SheetMessageScope extends InheritedWidget {
     bool isError,
     String? actionLabel,
     VoidCallback? onAction,
+    VoidCallback? onTimeout,
   }) enqueue;
 
   @override
@@ -71,6 +77,7 @@ typedef _QueuedMessage = ({
   bool isError,
   String? actionLabel,
   VoidCallback? onAction,
+  VoidCallback? onTimeout,
 });
 
 /// U-3（v3.1.7 审计）：失败 / 校验类文案判定（公开，便于回归测试）。
@@ -106,8 +113,25 @@ class SheetMessageHostState extends State<SheetMessageHost> {
   bool _isError = false;
   String? _actionLabel;
   VoidCallback? _onAction;
+  VoidCallback? _onTimeout;
   Timer? _timer;
-  final List<_QueuedMessage> _queued = <_QueuedMessage>[];
+
+  /// P3-4（v3.1.9 审计）：展示中消息的**显示序号**。消息条同一时刻只显示一条，
+  /// 但「显示 A → A 超时 → 显示 B」之间旧定时器可能还没被回收；序号让陈旧
+  /// 定时器认领不到自己那一代，避免误关后一条。
+  int _displaySeq = 0;
+
+  /// 被更高路由（进度弹层 / AlertDialog 覆盖）挡住时排队：退场后只显示最后一条
+  /// （结果页语义上的「最终结论」）。
+  final List<_QueuedMessage> _pending = <_QueuedMessage>[];
+
+  /// P3-4（v3.1.9 审计）：展示中消息的 **FIFO 队列**。
+  ///
+  /// 旧实现只有单个 `_message` 槽，弹层内连续两次 `showUndoSnackBar` 时后一条
+  /// 直接覆盖前一条——前一次的「撤销」入口被静默吞掉（根 Scaffold 路径是队列，
+  /// 会保留两条）。现在与框架 `ScaffoldMessenger` 同口径：一条展示完（超时 /
+  /// 点动作 / 手动关闭）后再显示下一条。
+  final List<_QueuedMessage> _queue = <_QueuedMessage>[];
 
   /// 查找当前 context 所属弹层的消息宿主（供进度层收起后 flush 用）。
   static SheetMessageHostState? maybeOf(BuildContext context) => context
@@ -121,19 +145,81 @@ class SheetMessageHostState extends State<SheetMessageHost> {
     bool isError = false,
     String? actionLabel,
     VoidCallback? onAction,
+    VoidCallback? onTimeout,
   }) {
+    _present((
+      text: message,
+      duration: duration,
+      isError: isError,
+      actionLabel: actionLabel,
+      onAction: onAction,
+      onTimeout: onTimeout,
+    ));
+  }
+
+  /// 展示一条消息：正在展示别的消息时按 FIFO 排队（P3-4）。
+  void _present(_QueuedMessage m) {
     if (!mounted) return;
+    if (_message != null) {
+      _queue.add(m);
+      return;
+    }
+    _display(m);
+  }
+
+  void _display(_QueuedMessage m) {
+    if (!mounted) return;
+    final seq = ++_displaySeq;
     setState(() {
-      _message = message;
-      _isError = isError;
-      _actionLabel = actionLabel;
-      _onAction = onAction;
+      _message = m.text;
+      _isError = m.isError;
+      _actionLabel = m.actionLabel;
+      _onAction = m.onAction;
+      _onTimeout = m.onTimeout;
     });
     _timer?.cancel();
-    _timer = Timer(duration, () {
-      if (mounted) setState(() => _message = null);
+    _timer = Timer(m.duration, () {
+      if (!mounted || seq != _displaySeq) return;
+      // P3-4：超时才回调「窗口已结束」类补白——被动作或手动关闭收起的条目
+      // 不补（与根 Scaffold 的 `closed.reason == timeout` 口径一致）。
+      final cb = _onTimeout;
+      _advance();
+      cb?.call();
     });
   }
+
+  /// 收起当前消息并推进队列；队列空则只清空槽位。
+  void _advance() {
+    _timer?.cancel();
+    _timer = null;
+    if (!mounted) return;
+    if (_queue.isEmpty) {
+      if (_message != null) {
+        setState(() {
+          _message = null;
+          _actionLabel = null;
+          _onAction = null;
+          _onTimeout = null;
+        });
+      }
+      return;
+    }
+    final next = _queue.removeAt(0);
+    _display(next);
+  }
+
+  /// P3-4：动作按钮的消费口——**先收起横幅再执行动作**。
+  ///
+  /// 旧实现按下后不清理槽位，横幅连同「撤销」按钮一直挂到 10 秒定时器结束，
+  /// 用户可重复点按撤销闭包（幂等场景无碍，语义上不该可点），也会误以为
+  /// 「点了没生效」。失败提示由动作内部另行 `show`（此时槽位已空，直接展示）。
+  void _runAction() {
+    final act = _onAction;
+    _advance();
+    act?.call();
+  }
+
+  void _dismiss() => _advance();
 
   /// 进度层（showDialog 等更高路由）仍在前台时先排队，避免消息条被它盖住。
   void enqueue(
@@ -142,19 +228,21 @@ class SheetMessageHostState extends State<SheetMessageHost> {
     bool isError = false,
     String? actionLabel,
     VoidCallback? onAction,
+    VoidCallback? onTimeout,
   }) {
-    _queued.add((
+    _pending.add((
       text: message,
       duration: duration,
       isError: isError,
       actionLabel: actionLabel,
       onAction: onAction,
+      onTimeout: onTimeout,
     ));
     // P3-2（v3.1.7 审计）：入队本身不触发 rebuild，必须主动调度一次检查。
     // 若此刻已被更高路由覆盖，build 中的 ModalRoute.isCurrent 依赖会在
     // 覆盖退场时重建并再次 flush；两条合起来覆盖所有入队路径。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _queued.isEmpty) return;
+      if (!mounted || _pending.isEmpty) return;
       if (ModalRoute.of(context)?.isCurrent ?? true) flushQueued();
     });
   }
@@ -162,23 +250,11 @@ class SheetMessageHostState extends State<SheetMessageHost> {
   /// 由 `_withRestoreProgress` 在进度弹层收起后调用；多条排队消息取最后一条
   /// （结果页语义上就是「最终结论」，避免连续闪烁覆盖）。
   void flushQueued() {
-    if (_queued.isEmpty) return;
-    final last = _queued.removeLast();
-    _queued.clear();
+    if (_pending.isEmpty) return;
+    final last = _pending.removeLast();
+    _pending.clear();
     if (!mounted) return;
-    show(
-      last.text,
-      duration: last.duration,
-      isError: last.isError,
-      actionLabel: last.actionLabel,
-      onAction: last.onAction,
-    );
-  }
-
-  void _dismiss() {
-    _timer?.cancel();
-    if (!mounted) return;
-    setState(() => _message = null);
+    _present(last);
   }
 
   @override
@@ -195,9 +271,9 @@ class SheetMessageHostState extends State<SheetMessageHost> {
     // ModalRoute.isCurrent 建立依赖：高路由退场、本弹层重新 current 时
     // Flutter 会 rebuild 本 State，再用 post-frame 统一 flush。
     final routeIsCurrent = ModalRoute.of(context)?.isCurrent ?? true;
-    if (_queued.isNotEmpty && routeIsCurrent) {
+    if (_pending.isNotEmpty && routeIsCurrent) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _queued.isEmpty) return;
+        if (!mounted || _pending.isEmpty) return;
         if (ModalRoute.of(context)?.isCurrent ?? true) flushQueued();
       });
     }
@@ -236,7 +312,8 @@ class SheetMessageHostState extends State<SheetMessageHost> {
                   message: _message!,
                   isError: _isError,
                   actionLabel: _actionLabel,
-                  onAction: _onAction,
+                  // P3-4（v3.1.9 审计）：动作按钮改走「先收起再执行」。
+                  onAction: interactive ? _runAction : null,
                   showClose: interactive,
                   onClose: _dismiss,
                 ),
@@ -324,10 +401,43 @@ class _SheetMessageBanner extends StatelessWidget {
 int _progressLayers = 0;
 final List<SnackBar> _pendingSnackBars = <SnackBar>[];
 
+/// P2-1（v3.1.9 审计）：进度层进出事件订阅表。
+///
+/// 「进度层期间暂停自动锁」旧实现只在 `_resetIdleTimer()` 里跳过重新计时，
+/// 进入进度层**之前**已经挂好的空闲定时器仍然会到点触发锁定。真正的「暂停」
+/// 必须由进度层自己通知外界：push 时撤销计时、pop 时重启计时。这里用一份
+/// 极简监听表承载该事件，避免 `main.dart` 去轮询 [sheetProgressActive]。
+final List<VoidCallback> _progressLayerListeners = <VoidCallback>[];
+
+void addSheetProgressLayerListener(VoidCallback listener) {
+  if (!_progressLayerListeners.contains(listener)) {
+    _progressLayerListeners.add(listener);
+  }
+}
+
+void removeSheetProgressLayerListener(VoidCallback listener) {
+  _progressLayerListeners.remove(listener);
+}
+
+void _notifyProgressLayerListeners() {
+  for (final listener in List<VoidCallback>.of(_progressLayerListeners)) {
+    try {
+      listener();
+    } catch (_) {
+      // 单个监听方异常不影响其余（进度层主流程绝不能被订阅方拖垮）。
+    }
+  }
+}
+
 /// 进度层计数（由 `_withRestoreProgress` 在 push / pop 时维护）。
-void pushSheetProgressLayer() => _progressLayers++;
+void pushSheetProgressLayer() {
+  _progressLayers++;
+  _notifyProgressLayerListeners();
+}
+
 void popSheetProgressLayer() {
   if (_progressLayers > 0) _progressLayers--;
+  _notifyProgressLayerListeners();
 }
 
 /// P2-4（v3.1.8 审计）：当前是否有长任务进度层（备份 / 恢复）。空闲自动锁
@@ -366,10 +476,13 @@ void _dispatch(
   required bool isError,
   String? actionLabel,
   VoidCallback? onAction,
+  VoidCallback? onTimeout,
 }) {
   if (_coveredByHigherRoute(context)) {
     if (_progressLayers > 0) {
       // 统一走进度层队列，收起后由主 Scaffold 显示（比弹层内 banner 更显眼）。
+      // 原生 SnackBar 没有「自然超时」回调，[onTimeout] 在此分支不生效——
+      // 进度层期间排队的撤销条本来也不应补「窗口已结束」（用户什么都看不到）。
       _pendingSnackBars.add(SnackBar(
         content: Text(message),
         duration: duration,
@@ -385,6 +498,7 @@ void _dispatch(
       isError: isError,
       actionLabel: actionLabel,
       onAction: onAction,
+      onTimeout: onTimeout,
     );
     return;
   }
@@ -394,19 +508,34 @@ void _dispatch(
     isError: isError,
     actionLabel: actionLabel,
     onAction: onAction,
+    onTimeout: onTimeout,
   );
 }
 
 /// 弹层内直接显示一段文字（不需要构造 SnackBar 时的简写）。
+///
+/// P3-4（v3.1.9 审计）：补 [actionLabel] / [onAction] / [onTimeout]——撤销失效
+/// 的「再试一次」在弹层分支此前被丢弃（`showUndoSnackBar` 的 `failureAction`
+/// 无载体），失败提示只能挂一句「请重试」而没有可点的按钮。
 void showSheetMessage(
   BuildContext context,
   String message, {
   Duration duration = const Duration(seconds: 3),
   // U-3（v3.1.7 审计）：null = 按文案自动判定；显式传值优先。
   bool? isError,
+  String? actionLabel,
+  VoidCallback? onAction,
+  VoidCallback? onTimeout,
 }) {
   final scope = context.getInheritedWidgetOfExactType<SheetMessageScope>();
-  final snack = SnackBar(content: Text(message), duration: duration);
+  final hasAction = actionLabel != null && onAction != null;
+  final snack = SnackBar(
+    content: Text(message),
+    duration: duration,
+    action: hasAction
+        ? SnackBarAction(label: actionLabel, onPressed: onAction)
+        : null,
+  );
   if (scope == null) {
     if (_shouldQueueForProgress(context)) {
       _pendingSnackBars.add(snack);
@@ -417,7 +546,10 @@ void showSheetMessage(
   }
   _dispatch(context, scope, message,
       duration: duration,
-      isError: isError ?? sheetMessageLooksLikeError(message));
+      isError: isError ?? sheetMessageLooksLikeError(message),
+      actionLabel: actionLabel,
+      onAction: onAction,
+      onTimeout: onTimeout);
 }
 
 /// P2-2（v3.1.6 审计）：**替代** `ScaffoldMessenger.of(context).showSnackBar(...)`

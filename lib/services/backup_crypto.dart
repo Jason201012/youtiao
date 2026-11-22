@@ -126,12 +126,37 @@ String buildBackupPayload(String plainJson,
 /// 弱口令（如 `123456`）结合 35 万轮 PBKDF2 仍可被 GPU 快速爆破。
 /// 抽取为顶层纯函数供 backup_sheet / settings_screen 共用，避免再次漂移。
 /// 长度下限由调用方单独校验（两处提示文案不同），这里只判定字符类别数。
+///
+/// U-3（v3.1.9 审计）：旧实现只统计 `[a-z]` / `[A-Z]` / `[0-9]` 三类。一个
+/// 16 位纯符号口令或 12 个汉字的口令熵足够高，却因「0 类」被判「口令过弱」，
+/// 用户无法开启加密备份。现在：
+/// 1. 类别扩到五类：小写字母 / 大写字母 / 数字 / 符号（ASCII 标点）/ 非 ASCII
+///    字符（汉字、假名、带音标的拉丁字母等）；两类即通过；
+/// 2. 单一类别但长度与字符多样性足够时同样通过——16 位以上且至少 8 个互异
+///    字符（覆盖「16 位纯符号」），或 8 个以上非 ASCII 字符且至少 6 个互异
+///    （覆盖「12 字汉字口令」）。`aaa…a` 这类低多样性长串仍判弱。
 bool backupPassphraseHasTwoClasses(String p) {
+  if (p.isEmpty) return false;
+  final runes = p.runes.toList();
   var classes = 0;
   if (p.contains(RegExp(r'[a-z]'))) classes++;
   if (p.contains(RegExp(r'[A-Z]'))) classes++;
   if (p.contains(RegExp(r'[0-9]'))) classes++;
-  return classes >= 2;
+  // ASCII 可见标点：!"#$%&'()*+,-./ :;<=>?@ [\]^_` {|}~
+  if (p.contains(RegExp(r'''[!-/:-@\[-`{-~]'''))) classes++;
+  final nonAscii = runes.where((r) => r > 0x7F).length;
+  if (nonAscii > 0) classes++;
+  if (classes >= 2) return true;
+  // 单类高熵兜底：只对「符号」「非 ASCII」放宽。纯数字 / 纯拉丁字母仍按原
+  // 「至少两类」口径判弱——16 位纯数字（如日期串）熵并不高，历史上也一直被拒。
+  final onlyDigits = RegExp(r'^[0-9]+$').hasMatch(p);
+  final onlyLatinLetters = RegExp(r'^[A-Za-z]+$').hasMatch(p);
+  final distinct = runes.toSet().length;
+  if (!onlyDigits && !onlyLatinLetters && runes.length >= 16 && distinct >= 8) {
+    return true;
+  }
+  if (nonAscii >= 8 && distinct >= 6) return true;
+  return false;
 }
 
 /// 判断一段原始文本是否为本 App 的加密信封（用于导入时分流处理）。

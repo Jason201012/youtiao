@@ -454,8 +454,13 @@ class TaskProvider extends ChangeNotifier {
       // 保留已完成任务用于划线展示，但旧实现只返回 todo，于是「3 件里有 1 件
       // 已完成」时弹层只显示另 2 件，满员提示让人先取消一个已选项，而那个
       // 已选项根本不在列表里，用户无法替换。includeIds 由选择器传入完整
-      // 已选集合，绕过 status 过滤（仍受 query 约束）。
-      if (t.status != TaskStatus.todo && !includeIds.contains(t.id)) return false;
+      // 已选集合，绕过 status 过滤。
+      // P3-6（v3.1.9 审计）：已选项还要绕过 **query** 过滤。旧实现只放过 status，
+      // 用户输入一个不匹配已选项的搜索词后，已选项再次从列表里消失，而满员
+      // 提示仍承诺「均在下方列表」——与 P3-7 修复前同一类「提示指向不可见项」。
+      final isIncluded = includeIds.contains(t.id);
+      if (t.status != TaskStatus.todo && !isIncluded) return false;
+      if (isIncluded) return true;
       if (q.isEmpty) return true;
       return t.title.toLowerCase().contains(q) ||
           t.tags.any((tag) => tag.toLowerCase().contains(q)) ||
@@ -1140,7 +1145,11 @@ class TaskProvider extends ChangeNotifier {
           // _writeAutoBackup 返回的真实原因回执。
           // P3-1c（v3.1.8 审计）：超限/剥离是体积问题，与口令/解密无关，不能
           // 统一报成「读回校验未通过（无法解密）」。
-          if (written.note != null) {
+          // P3-2（v3.1.9 审计）：只有**覆盖降级**才阻止删除旧明文。「本次快照
+          // 在主线程完成组装」数据完整、仅耗时，旧实现按 `note != null` 一刀切
+          // → 发生过 isolate 回退的设备上「开启加密 → 删除旧明文」永久失败，
+          // 回执还反过来暗示数据不完整。现在照常校验、清理，并把提示附在成功回执后。
+          if (written.degraded) {
             note = '未清理：${written.note}；旧快照仍在本机';
           } else if (await _verifyEncryptedAutoBackup(now)) {
             snapshotWritten = true;
@@ -1153,6 +1162,8 @@ class TaskProvider extends ChangeNotifier {
             await _clearAutoBackupError();
             removed = await _purgePlaintextSnapshots();
             AppLog.d('[TaskProvider] 先写后删：加密快照校验通过，清理明文 $removed 份');
+            // 非降级提示（如主线程组装耗时）如实附在成功回执后，不改变结论。
+            note = written.note;
           } else {
             note = '未清理：今日加密快照读回校验未通过（无法解密或缺少任务/附件/模板数据），旧快照仍在本机';
             await _recordAutoBackupFailure('自动备份失败：今日加密快照读回校验未通过', now);
@@ -1589,13 +1600,20 @@ class TaskProvider extends ChangeNotifier {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(_kLastAutoBackup, todayKey);
         if (!written.existing) {
-          _lastAutoBackupError = written.note;
-          _lastAutoBackupErrorDate = written.note == null ? null : todayKey;
-          if (written.note == null) {
+          // P3-2（v3.1.9 审计）：这里仍把 note 记入 `_lastAutoBackupError`——
+          // 「在主线程完成组装」已被 [_isAutoBackupWarningNote] 判为 warning，
+          // `autoBackupHasFailure` 因此为 false，**不会**进首页横幅；它只作为
+          // 设置页副标题的一条如实提示（保留可观测性）。
+          // 本条目真正需要修的是 purge 判据：`setAutoBackupEncrypt` 曾把这条
+          // warning 当成覆盖降级，永久阻止「删除旧明文」。
+          final problem = written.note;
+          _lastAutoBackupError = problem;
+          _lastAutoBackupErrorDate = problem == null ? null : todayKey;
+          if (problem == null) {
             await prefs.remove(_kLastAutoBackupError);
             await prefs.remove(_kLastAutoBackupErrorDate);
           } else {
-            await prefs.setString(_kLastAutoBackupError, written.note!);
+            await prefs.setString(_kLastAutoBackupError, problem);
             await prefs.setString(_kLastAutoBackupErrorDate, todayKey);
           }
         }
@@ -1724,7 +1742,18 @@ class TaskProvider extends ChangeNotifier {
 
   /// [force] = true 时跳过「当日已有快照」早退，供 P1-1「先写后删」在
   /// 当日明文快照还在时就先产出一份 `.enc.json`（两者文件名不同，不冲突）。
-  Future<({bool existing, String? note})> _writeAutoBackup(
+  ///
+  /// P3-2（v3.1.9 审计）：返回值把「降级」与「提示」拆成两个字段。
+  /// 旧实现只用 `note != null` 表达三种语义不同的情况——「附件被剥离 /
+  /// 模板缺失 / 超限」是**数据覆盖降级**（绝不能删旧明文），而「本次在主线程
+  /// 完成组装」数据完整、只是耗时。调用方统一按 `note != null` 处理，于是在
+  /// 发生过 isolate 回退的设备上，「开启加密 → 删除旧明文」被永久无谓阻止，
+  /// 回执还反过来暗示数据不完整。
+  /// - [degraded] = true：快照未覆盖全部数据，禁止据此删除旧明文 / 推进「今天已备」；
+  /// - `note != null && !degraded`：仅提示（耗时较长），不影响任何后续动作。
+  ///   注意这条提示仍会记入 `_lastAutoBackupError` 以便设置页副标题如实展示，
+  ///   但它被 `_isAutoBackupWarningNote` 判为 warning，不会进首页失败横幅。
+  Future<({bool existing, String? note, bool degraded})> _writeAutoBackup(
       DateTime now, {bool force = false}) async {
     // P1-2（v3.1.3 审计）：同日已有任一形态的快照就不再覆盖。`_lastAutoBackupDate`
     // 只能挡住「本次进程记得写过」的情况；冷启动 / 手工改过 prefs / 安全模式
@@ -1740,7 +1769,7 @@ class TaskProvider extends ChangeNotifier {
         final sp = await SharedPreferences.getInstance();
         await sp.setString(_kLastAutoBackup, _dateKey(now));
         // P3-7（v3.1.5 审计）：早退 = 本次没写新快照，调用方必须保留既有警告。
-        return (existing: true, note: null);
+        return (existing: true, note: null, degraded: false);
       }
     }
     // P3-5（v3.1.5 审计）：加密已开但口令读不出来时**先失败**，不进组装。
@@ -1774,7 +1803,7 @@ class TaskProvider extends ChangeNotifier {
           '自动备份已跳过：数据体积超过还原上限（附件已剥离仍超限）';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
-      return (existing: false, note: _lastAutoBackupError);
+      return (existing: false, note: _lastAutoBackupError, degraded: true);
     }
     final body = encoded.body;
     final attachmentsStripped = encoded.stripped;
@@ -1795,7 +1824,7 @@ class TaskProvider extends ChangeNotifier {
       _lastAutoBackupError = '自动备份已剥离附件（数据体积超限），任务/习惯/专注数据完整';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
-      return (existing: false, note: _lastAutoBackupError);
+      return (existing: false, note: _lastAutoBackupError, degraded: true);
     }
     // N5（v3.0.9 审计）：模板收集失败同样不静默（优先级低于附件剥离，
     // 故放在其后独立分支）——快照本身有效，仅缺用户模板段。
@@ -1803,17 +1832,18 @@ class TaskProvider extends ChangeNotifier {
       _lastAutoBackupError = '自动备份未包含用户模板（模板目录读取失败）';
       AppLog.d(_lastAutoBackupError!);
       notifyListeners();
-      return (existing: false, note: _lastAutoBackupError);
+      return (existing: false, note: _lastAutoBackupError, degraded: true);
     }
     // P3-5（v3.1.5 审计）：后台 isolate 不可用、本次在主线程完成组装时如实
     // 记录一条提示（不夸大：数据完整，只是耗时）。
+    // P3-2（v3.1.9 审计）：这是**提示**不是降级——数据完整，不能据此阻止
+    // 「删除旧明文」，也不该进「自动备份失败」横幅。
     if (usedMainIsolate) {
-      _lastAutoBackupError = '本次快照在主线程完成组装（后台 isolate 不可用）';
-      AppLog.d(_lastAutoBackupError!);
-      notifyListeners();
-      return (existing: false, note: _lastAutoBackupError);
+      final warning = '本次快照在主线程完成组装（后台 isolate 不可用），数据完整但耗时较长';
+      AppLog.d(warning);
+      return (existing: false, note: warning, degraded: false);
     }
-    return (existing: false, note: null);
+    return (existing: false, note: null, degraded: false);
   }
 
   /// P3-5（v3.1.5 审计）：加密已开而口令读不出来时立即失败，绝不进入组装。
@@ -2042,11 +2072,20 @@ class TaskProvider extends ChangeNotifier {
       final dir = await getApplicationDocumentsDirectory();
       final base = Directory('${dir.path}/backup/pre-restore');
       if (!await base.exists()) return;
-      final files = base
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.endsWith('.json'))
-          .toList();
+      final all = base.listSync().whereType<File>().toList();
+      // P3-5（v3.1.9 审计）：原子写残片（`.tmp.<hex>`）此前只在 auto 目录被
+      // 清理，pre-restore 只过滤 `.json`，失败写盘留下的残片（可能含完整明文
+      // 快照与附件 base64）永久堆积且用户不可见。与 `_rotateAutoBackups` 同口径：
+      // 非 `.json` 一律视为废片删除。
+      for (final f in all) {
+        if (!f.path.endsWith('.json')) {
+          try {
+            await f.delete();
+          } catch (_) {}
+        }
+      }
+      final files =
+          all.where((f) => f.path.endsWith('.json')).toList();
       files.sort((a, b) => _autoBackupName(a).compareTo(_autoBackupName(b)));
       final excess = files.length - 3;
       for (var i = 0; i < excess; i++) {
@@ -2457,10 +2496,11 @@ class TaskProvider extends ChangeNotifier {
       // P2-12：不可逆分支的前置门——快照必须完整成功。
       var backupOk = false;
       try {
-        // P3-7（v3.1.5 审计）：返回值改为 record（existing / note）。
-        // note == null 表示本次确实有一份可用快照（含「当日已存在」早退）。
+        // P3-7（v3.1.5 审计）：返回值改为 record（existing / note / degraded）。
+        // P3-2（v3.1.9 审计）：判据从「note == null」改为「未降级」——「在主线程
+        // 组装」的提示不影响快照完整性，不该阻止不可逆删除。
         final written = await _writeAutoBackup(DateTime.now());
-        backupOk = written.note == null;
+        backupOk = !written.degraded;
       } catch (_) {
         backupOk = false;
       }
@@ -5066,7 +5106,13 @@ class TaskProvider extends ChangeNotifier {
     //   之后仍可能弹、已设置的跳过日不生效）。
     // 旧判定只比 dueDate/repeat/repeatMinute/repeatInterval/repeatWeekdays/repeatAnchor，
     // 「只改提前量 / 只改每月几号 / 只设结束日期」时 remindersChanged=false，旧提醒继续响。
-    final remindersChanged = old.dueDate != anchored.dueDate ||
+    // P2-2（v3.1.9 审计）：把 title 从「重排提醒的字段族」里拆出来单独判定——
+    // 复用上方已算好的 `titleChanged`（updated.title != old.title；anchored 由
+    // updated 派生且不改 title，两者等价）。标题只影响通知**文案**，不影响触发
+    // 时刻；而 `_cancelRemindersFor` 会连带撤销已排的「稍后提醒」（snooze 段），
+    // `_scheduleRemindersFor` 又不重建它。拆开后可以只在 title 变化时保留
+    // snooze 并按新标题重排（见下方）。
+    final scheduleChanged = old.dueDate != anchored.dueDate ||
         old.repeat != anchored.repeat ||
         old.repeatMinute != anchored.repeatMinute ||
         old.repeatInterval != anchored.repeatInterval ||
@@ -5085,15 +5131,23 @@ class TaskProvider extends ChangeNotifier {
         // isDoneOn 过滤（notification_service），doneDates 与 skipDates 同在
         // 「一切会影响提醒触发时刻/是否触发」的字段族，补入同口径比对。常规
         // 编辑路径 copyWith 不触碰 doneDates（恒等），本判定不会引入额外重排。
-        !_listEq(old.doneDates, anchored.doneDates) ||
-        // P3-3（v3.1.8 审计）：标题变化也要重排提醒。旧判定不含 title，改名后
-        // 已排的一次性 / 重复提醒仍烘焙旧标题到点弹出（重复任务签名的 title
-        // 段也要靠这次重排才会重算），用户按通知里的旧标题找不到任务，且标题
-        // 含敏感信息时改名后仍会在锁屏显示旧内容。
-        old.title != anchored.title;
+        !_listEq(old.doneDates, anchored.doneDates);
+    // P3-3（v3.1.8 审计）：标题变化也要重排提醒。旧判定不含 title，改名后
+    // 已排的一次性 / 重复提醒仍烘焙旧标题到点弹出（重复任务签名的 title
+    // 段也要靠这次重排才会重算），用户按通知里的旧标题找不到任务，且标题
+    // 含敏感信息时改名后仍会在锁屏显示旧内容。
+    final remindersChanged = scheduleChanged || titleChanged;
     if (remindersChanged) {
-      _cancelRemindersFor(updated.id);
+      // P2-2（v3.1.9 审计）：只有「仅标题变化」才保留 snooze；改期 / 改重复
+      // 规则时用户已重新定义提醒，撤销 snooze 是预期行为。
+      final keepSnooze = titleChanged && !scheduleChanged;
+      _cancelRemindersFor(updated.id, keepSnooze: keepSnooze);
       _scheduleRemindersFor(_tasks[i]);
+      if (keepSnooze) {
+        // 保留的 snooze 通知里烘焙的仍是旧标题，按原落点用新标题重排一次。
+        unawaited(
+            NotificationService.instance.rebuildPendingSnooze(_tasks[i]));
+      }
     }
     // P3-1（v3.0.4 审计）：**导入覆盖翻转完成态时对账提醒**（完成族的第 6 个
     // 写入者）。importDedup 覆盖分支（allowStatusChange: true）可以改写已有任务
@@ -6073,8 +6127,13 @@ class TaskProvider extends ChangeNotifier {
       t.dueDate != null && !t.isRepeating;
 
   /// 取消单个任务的全部本地提醒（截止提醒 + 重复提醒）。
-  void _cancelRemindersFor(String id) {
-    NotificationService.instance.cancel(id);
+  ///
+  /// [keepSnooze]：是否保留已排的「稍后提醒」（P2-2，v3.1.9 审计）。仅**标题
+  /// 变化**时传 true —— 改名与提醒时刻无关，旧实现一并 `cancel` 掉 snooze 段
+  /// 且没有重建入口，用户会被静默取消掉自己刚点的「稍后提醒」。取消后仍由
+  /// 调用方用 [NotificationService.rebuildPendingSnooze] 按新标题重排。
+  void _cancelRemindersFor(String id, {bool keepSnooze = false}) {
+    NotificationService.instance.cancel(id, keepSnooze: keepSnooze);
     NotificationService.instance.cancelRepeatReminder(id);
   }
 

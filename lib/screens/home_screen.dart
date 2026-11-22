@@ -440,6 +440,12 @@ class HomeScreenState extends State<HomeScreen> {
   ///   页面级 [CustomScrollView]，拖到边缘可自动滚动（与习惯页 P3-8 同款）。
   ///
   /// 返回 **sliver** 列表（而非普通 Widget），供页面级 CustomScrollView 直接铺排。
+  ///
+  /// P3-1（v3.1.9 审计）：分区内所有 sliver 都自套 `SliverPadding(horizontal:
+  /// pagePadX)`。P3-6 把首页迁到页面级 CustomScrollView 时只给顶部卡片区加了
+  /// 水平内边距，任务分区（标题 + 任务行）落在 padding 之外——标题贴屏幕左缘、
+  /// 任务卡铺满屏宽、26px 拖拽手柄压住 Android 左缘返回手势区，与上方卡片缩进
+  /// 明显不一致。此处按习惯页 v3.1.2 P3-8 的同一做法补齐，调用方不再各自处理。
   List<Widget> _section(
     BuildContext context,
     String title,
@@ -472,35 +478,49 @@ class HomeScreenState extends State<HomeScreen> {
               dragIndex: reorderable ? items.indexOf(t) : null,
             ))
         .toList();
+    const sectionPad = EdgeInsets.symmetric(horizontal: AppColors.pagePadX);
     if (reorderable) {
       return [
-        SliverToBoxAdapter(child: header),
-        SliverReorderableList(
-          // P3-6：itemCount/itemBuilder 版式——每行的 key 由 _tile 的 Key(t.id)
-          // 提供，拖拽手柄索引用 items 中的全局下标（见上方 tiles 构造）。
-          itemCount: shown.length,
-          itemBuilder: (_, i) => tiles[i],
-          onReorderItem: (oldIndex, newIndex) {
-            // P3-6：onReorderItem 的 newIndex 已是「移除项后的最终落点」，
-            // reorderTasks 沿用旧 onReorder 口径（向下拖需 +1 校正）。
-            final legacy = newIndex > oldIndex ? newIndex + 1 : newIndex;
-            // P3-6（v3.0.8 审计）：消费 reorderTasks 的落盘结果——旧实现丢弃
-            // Future<bool>：手动排序落盘失败完全静默（重启后顺序回退且零反馈）。
-            provider.reorderTasks(sectionKey, oldIndex, legacy).then((ok) {
-              if (ok) return;
-              final ctx = context;
-              if (!ctx.mounted) return;
-              showTaskPersistFailedHint(ctx, provider: provider);
-            });
-          },
+        SliverPadding(
+          padding: sectionPad,
+          sliver: SliverToBoxAdapter(child: header),
+        ),
+        SliverPadding(
+          padding: sectionPad,
+          sliver: SliverReorderableList(
+            // P3-6：itemCount/itemBuilder 版式——每行的 key 由 _tile 的 Key(t.id)
+            // 提供，拖拽手柄索引用 items 中的全局下标（见上方 tiles 构造）。
+            itemCount: shown.length,
+            itemBuilder: (_, i) => tiles[i],
+            onReorderItem: (oldIndex, newIndex) {
+              // P3-6：onReorderItem 的 newIndex 已是「移除项后的最终落点」，
+              // reorderTasks 沿用旧 onReorder 口径（向下拖需 +1 校正）。
+              final legacy = newIndex > oldIndex ? newIndex + 1 : newIndex;
+              // P3-6（v3.0.8 审计）：消费 reorderTasks 的落盘结果——旧实现丢弃
+              // Future<bool>：手动排序落盘失败完全静默（重启后顺序回退且零反馈）。
+              provider.reorderTasks(sectionKey, oldIndex, legacy).then((ok) {
+                if (ok) return;
+                final ctx = context;
+                if (!ctx.mounted) return;
+                showTaskPersistFailedHint(ctx, provider: provider);
+              });
+            },
+          ),
         ),
         const SliverToBoxAdapter(child: SizedBox(height: 8)),
       ];
     }
     return [
-      SliverToBoxAdapter(child: header),
-      SliverList(
-        delegate: SliverChildListDelegate([...tiles, const SizedBox(height: 8)]),
+      SliverPadding(
+        padding: sectionPad,
+        sliver: SliverToBoxAdapter(child: header),
+      ),
+      SliverPadding(
+        padding: sectionPad,
+        sliver: SliverList(
+          delegate:
+              SliverChildListDelegate([...tiles, const SizedBox(height: 8)]),
+        ),
       ),
     ];
   }

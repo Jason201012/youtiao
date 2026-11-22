@@ -96,6 +96,15 @@ class AppLockProvider extends ChangeNotifier {
   bool _loadFailed = false;
   bool get loadFailed => _loadFailed;
 
+  /// P3-3（v3.1.9 审计）：fail-safe 的**可见说明**（解锁页 / 设置页共用）。
+  ///
+  /// 旧实现 `_loadFailed` 只赋值、全仓零消费——用户莫名其妙被要求解锁一台
+  /// 「从未开过应用锁」的设备，而设置页还显示「已开启」。文案由本 getter
+  /// 单一产出，避免两处各写一份后漂移。
+  String get loadFailedHint =>
+      '本次启动无法读取应用锁设置，已按最保守方式临时锁定；'
+      '若在此关闭，可能在下一次启动再次出现';
+
   /// 当前是否需要验证。true=显示解锁页；false=已解锁可正常交互。
   bool _locked = false;
   bool get locked => _locked;
@@ -182,6 +191,15 @@ class AppLockProvider extends ChangeNotifier {
   /// 用户按提示去系统设置补录指纹 / 锁屏密码后回到 App（未杀进程），
   /// 仍被拒「尚未录入…」，必须重启才能开启。开关是唯一的启用入口，
   /// 因此在这里花一次轻量探测换掉陈旧判定。
+  ///
+  /// P3-3（v3.1.9 审计）：持久化写入不再让异常冒泡。
+  /// 旧实现 `await prefs.setBool(...)` 失败时既不 catch 也不 `notifyListeners`：
+  /// 解锁页的「关闭应用锁」出口在偏好持续不可读时会抛异常，内存虽已置
+  /// `_locked=false`，但没有任何通知让界面刷新，且持久化仍是旧值（下次冷启动
+  /// 重复出现）。现在失败也走通知，并用 [lastSwitchPersistFailed] 如实告知
+  /// 「已在本会话生效，但未能保存」。
+  ///
+  /// 返回值语义不变：false 仅表示**拒绝开启**（无可用凭据）。
   Future<bool> setEnabled(bool v) async {
     if (v) {
       await probeBiometric();
@@ -189,11 +207,25 @@ class AppLockProvider extends ChangeNotifier {
     }
     _enabled = v;
     if (!v) _locked = false; // 关闭锁即视为已解锁
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_kEnabled, _enabled);
-    notifyListeners();
+    _lastSwitchPersistFailed = false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kEnabled, _enabled);
+      // 写入成功说明偏好可读可写：启动期的 fail-safe 判定已不成立。
+      _loadFailed = false;
+    } catch (e) {
+      _lastSwitchPersistFailed = true;
+      AppLog.d('[AppLock] 应用锁开关未能持久化（仅本会话生效）：$e');
+    } finally {
+      notifyListeners();
+    }
     return true;
   }
+
+  /// P3-3（v3.1.9 审计）：最近一次 [setEnabled] 是否「内存已生效但未落盘」。
+  /// UI 据此提示「本次启动有效，下次启动可能重复出现」，而不是静默失败。
+  bool _lastSwitchPersistFailed = false;
+  bool get lastSwitchPersistFailed => _lastSwitchPersistFailed;
 
   /// 还原备份后刷新应用锁开关，使其与持久化值一致；**不修改 [_locked]**，
   /// 避免「还原过程中把正在使用的 App 立即锁屏」。

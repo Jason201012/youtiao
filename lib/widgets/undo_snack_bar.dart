@@ -106,13 +106,19 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? showUndoSnackBar(
   final sheetScope =
       context.getInheritedWidgetOfExactType<SheetMessageScope>();
   if (sheetScope != null) {
-    var sheetUndoPressed = false;
     void showFailure() {
       final msg = failureHint ?? '撤销已失效：该操作已不可恢复';
-      showSheetMessage(context, msg,
-          duration: failureAction == null
-              ? const Duration(seconds: 2)
-              : Duration(seconds: kUndoWindowSeconds));
+      showSheetMessage(
+        context,
+        msg,
+        duration: failureAction == null
+            ? const Duration(seconds: 2)
+            : Duration(seconds: kUndoWindowSeconds),
+        // P3-4（v3.1.9 审计）：旧实现丢弃 failureAction——弹层内撤销失效时
+        // 「请重试」四个字没有载体（横幅一关，快照与重试入口一同销毁）。
+        actionLabel: failureAction?.label,
+        onAction: failureAction?.onPressed,
+      );
     }
 
     sheetScope.show(
@@ -122,7 +128,6 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? showUndoSnackBar(
       onAction: onUndo == null
           ? null
           : () async {
-              sheetUndoPressed = true;
               bool ok;
               try {
                 ok = await onUndo();
@@ -131,17 +136,20 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? showUndoSnackBar(
               }
               if (!ok) showFailure();
             },
+      // P3-4（v3.1.9 审计）：超时补白改由宿主回调，不再用裸 `Future.delayed`。
+      // 旧实现按「入队时刻 + 10 秒」定时，条目前面还排着别的消息时会提前
+      // 弹出「窗口已结束」，用户看到提示时屏幕上是另一条横幅（与 P2-1
+      // v2.9.6 修根 Scaffold 路径的指代错位同构）。宿主只在**本条真正展示
+      // 到自然超时**时回调，语义与 `closed.reason == timeout` 一致。
+      onTimeout: onUndo == null
+          ? null
+          : () {
+              if (!context.mounted) return;
+              showSheetMessage(
+                  context, expiredHint ?? expiredHintFromContent(content),
+                  duration: const Duration(seconds: 2));
+            },
     );
-    // 超时提示：宿主消息条没有 controller.closed，用同窗 Timer 补一条；
-    // 点过撤销或本弹层已销毁则不补（与根 Scaffold 路径同口径）。
-    if (onUndo != null) {
-      Future<void>.delayed(kUndoWindow, () {
-        if (sheetUndoPressed || !context.mounted) return;
-        showSheetMessage(
-            context, expiredHint ?? expiredHintFromContent(content),
-            duration: const Duration(seconds: 2));
-      });
-    }
     return null;
   }
 
