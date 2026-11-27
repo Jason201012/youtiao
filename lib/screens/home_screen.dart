@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/models/task_event.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/review.dart';
 import 'package:todolist/models/today.dart';
@@ -234,7 +235,9 @@ class HomeScreenState extends State<HomeScreen> {
     }
     showUndoSnackBar(
       context,
-      content: undoContent('已更新 $n.count 条任务'),
+      // P2-3（v3.2.0 审计）：重复任务被跳过的条数如实带出，不再只报「已更新 N 条」。
+      content: undoContent('已更新 $n.count 条任务'
+          '${n.skippedRepeating > 0 ? '；已跳过 ${n.skippedRepeating} 条重复任务（请在详情页使用「仅此一次改期」）' : ''}'),
       expiredHint: '这 $n.count 条任务的撤销窗口已结束',
       // P2-2（v2.9.6 审计）：undoBatchEdit 返回是否真正生效，失效时由
       // showUndoSnackBar 统一提示「撤销已失效」。
@@ -687,6 +690,16 @@ class HomeScreenState extends State<HomeScreen> {
           // 与「逾期」板块口径保持一致：按「天」判断，今天到点未做不算逾期。
           TaskFilter.overdue =>
             tasks.where((t) => Task.isOverdue(t, DateTime.now())).toList(),
+          // P2-5（v3.2.0 审计）：看板「当日事件总数 / 当日已完成」卡片此前跳到
+          // TaskFilter.all / done（全量任务），与卡片标题范围不符。新增两个
+          // 「仅当日事件」过滤态，判据复用 [isTaskEventOn] 单一真源。
+          TaskFilter.todayEvents => tasks
+              .where((t) => isTaskEventOn(t, DateTime.now()))
+              .toList(),
+          TaskFilter.todayDone => tasks
+              .where((t) =>
+                  t.done && isTaskEventOn(t, DateTime.now()))
+              .toList(),
           TaskFilter.all => const <Task>[],
         };
         // H5（v3.0.8 审计）：visible 必须与**屏幕上可见**的任务一致。旧实现在
@@ -1478,7 +1491,7 @@ class _TagFilterChips extends StatelessWidget {
   }
 }
 
-/// 首页筛选芯片行：全部 / 待办 / 已完成 / 逾期。
+/// 首页筛选芯片行：全部 / 待办 / 已完成 / 逾期 / 今日事件 / 今日完成。
 class _FilterChips extends StatelessWidget {
   final TaskProvider provider;
   const _FilterChips({required this.provider});
@@ -1488,6 +1501,9 @@ class _FilterChips extends StatelessWidget {
     (TaskFilter.todo, '待办'),
     (TaskFilter.done, '已完成'),
     (TaskFilter.overdue, '逾期'),
+    // P2-5（v3.2.0 审计）：看板统计卡跳转用的「仅当日」范围，也给用户一个可见出口。
+    (TaskFilter.todayEvents, '今日事件'),
+    (TaskFilter.todayDone, '今日完成'),
   ];
 
   @override
@@ -1628,6 +1644,13 @@ class _PostponeButton extends StatelessWidget {
       );
       if (!go || !context.mounted) return;
     }
+    // P2-3（v3.2.0 审计）：重复任务循环落点不看 dueDate、无截止任务不会被改动，
+    // 两类都从「已顺延 N 条」中剔除并如实告知，避免肯定文案掩盖静默 no-op。
+    final skippedCount = ids
+        .map(provider.byId)
+        .whereType<Task>()
+        .where((t) => t.isRepeating || t.dueDate == null)
+        .length;
     // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次顺延）。
     // P2-2（v3.0.7 审计）：postponeToAs 异步化并返回 `(batchId, 条数, saved)`——
     // saved=false 时先弹写入失败提示（内存顺延已生效、全量写自愈），横幅照常。
@@ -1651,7 +1674,8 @@ class _PostponeButton extends StatelessWidget {
       context,
       content: undoContent('已顺延 $n 条任务到 '
           '${day.month}月${day.day}日'
-          '${origText.isEmpty ? '' : ' · $origText'}'),
+          '${origText.isEmpty ? '' : ' · $origText'}'
+          '${skippedCount > 0 ? '；已跳过 $skippedCount 条（重复任务请在详情页「仅此一次改期」）' : ''}'),
       expiredHint: '这 $n 条顺延的撤销窗口已结束',
       onUndo: () async {
         final u = await provider.undoBatchEdit(r.$1);

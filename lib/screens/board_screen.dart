@@ -128,8 +128,10 @@ class BoardScreen extends StatelessWidget {
                             value: '${provider.todayEventTotal}',
                             label: '当日事件总数',
                             valueColor: onBg,
-                            onTap: () =>
-                                provider.requestHomeWithFilter(TaskFilter.all),
+                            // P2-5（v3.2.0 审计）：卡片统计的是「当日事件」，
+                            // 点击应跳到同范围的过滤视图，而非全部任务。
+                            onTap: () => provider.requestHomeWithFilter(
+                                TaskFilter.todayEvents),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -138,8 +140,9 @@ class BoardScreen extends StatelessWidget {
                             value: '${provider.todayCompleted}',
                             label: '当日已完成',
                             valueColor: progressColor,
-                            onTap: () =>
-                                provider.requestHomeWithFilter(TaskFilter.done),
+                            // P2-5（v3.2.0 审计）：同上，跳「仅当日已完成」。
+                            onTap: () => provider.requestHomeWithFilter(
+                                TaskFilter.todayDone),
                           ),
                         ),
                         const SizedBox(width: 12),

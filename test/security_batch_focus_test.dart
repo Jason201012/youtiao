@@ -196,9 +196,10 @@ void main() {
       expect(p.byId('1')!.pinned, isTrue);
       expect(p.byId('2')!.pinned, isTrue);
 
-      // 未命中的 id 静默跳过，不影响返回值
+      // P2-3（v3.2.0 审计）：未命中的 id 与「变换未产生任何字段变化」的任务
+      // 都不再计入「已更新 N 条」，避免肯定文案掩盖静默 no-op。
       final m = await p.batchUpdate(['1', '不存在的id'], (t) => t);
-      expect(m, 1);
+      expect(m, 0);
     });
 
     test('batchUpdate 空列表安全返回 0', () async {
@@ -224,7 +225,8 @@ void main() {
       final t = mk('1', title: '无截止');
       final p = await buildWith([t]);
       // P2-2（v3.0.7 审计）：postponeTo 异步化并透传落盘结果。
-      expect(await p.postponeTo(['1'], DateTime(2026, 8, 30)), 1); // 仍计入"已处理"
+      // P2-3（v3.2.0 审计）：无截止任务原样返回，已顺延条数不计它。
+      expect(await p.postponeTo(['1'], DateTime(2026, 8, 30)), 0);
       expect(p.byId('1')!.dueDate, isNull, reason: '不应给无截止任务硬塞日期');
     });
 

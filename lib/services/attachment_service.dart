@@ -314,6 +314,69 @@ class AttachmentService {
     }
   }
 
+  /// P2-2（v3.2.0 审计）：把一组附件实体从 [fromTaskId] 目录复制到 [toTaskId]。
+  ///
+  /// 「仅此一次改期」副本换了 id 后，附件引用仍指向旧目录——若只复制元数据，
+  /// 副本上的附件必然打不开，且会带着悬空引用进入备份。这里按**原文件名**
+  /// 流式复制实体（与 [importFile] 同款 .tmp → rename 原子策略），返回成功
+  /// 复制的元数据；任何一个文件缺失 / 复制失败都抛错，由调用方决定降级策略。
+  static Future<List<AttachmentRef>> copyTaskAttachments(
+    String fromTaskId,
+    String toTaskId,
+    List<AttachmentRef> refs,
+  ) async {
+    if (fromTaskId == toTaskId) return List.unmodifiable(refs);
+    if (!_isSafeSegment(fromTaskId) || !_isSafeSegment(toTaskId)) {
+      throw ArgumentError('非法任务 id：$fromTaskId → $toTaskId');
+    }
+    final srcDir = await dirFor(fromTaskId);
+    final dstDir = await dirFor(toTaskId);
+    final copied = <AttachmentRef>[];
+    for (final ref in refs) {
+      final src = _safeFileFor(srcDir, ref.fileName);
+      if (!await src.exists()) {
+        throw StateError('附件文件不存在：${ref.fileName}');
+      }
+      final target = _safeFileFor(dstDir, ref.fileName);
+      final tmp = File('${target.path}.tmp');
+      IOSink? sink;
+      try {
+        sink = tmp.openWrite();
+        await for (final chunk in src.openRead()) {
+          sink.add(chunk);
+        }
+        await sink.flush();
+        await sink.close();
+        sink = null;
+        await tmp.rename(target.path);
+      } catch (_) {
+        try {
+          await sink?.close();
+        } catch (_) {}
+        await _deleteQuietly(tmp);
+        rethrow;
+      }
+      copied.add(ref);
+    }
+    return copied;
+  }
+
+  /// P3-6（v3.2.0 审计）：筛出**实体文件确实存在**的附件引用。
+  /// 暂存提升失败时用它剔除元数据里的悬空引用，避免任务显示有附件却打不开。
+  static Future<List<AttachmentRef>> existingRefs(
+      String taskId, Iterable<AttachmentRef> refs) async {
+    final dir = await dirFor(taskId);
+    final out = <AttachmentRef>[];
+    for (final ref in refs) {
+      try {
+        if (await _safeFileFor(dir, ref.fileName).exists()) out.add(ref);
+      } catch (_) {
+        // 非法文件名按缺失处理。
+      }
+    }
+    return out;
+  }
+
   /// 附件实体文件（运行时由 taskId + fileName 拼出，不存绝对路径）。
   /// fileName 来自 DB（可信，由 [importFile] 生成），仍走白名单 + 前缀断言双重防护。
   static Future<File> fileFor(String taskId, AttachmentRef ref) async {

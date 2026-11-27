@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -883,7 +884,7 @@ String _dueLabel(DateTime? due) {
   // TaskProvider._dueDayDiff 同一管道）；展示时刻仍用原 due 的时分。
   final k = dueCompareKey(due);
   final d = DateTime(k.year, k.month, k.day);
-  final diff = d.difference(today).inDays;
+  final diff = calendarDaysBetween(today, d);
   // L22（v3.0.8 审计）：纯日期形态省略时刻（同 task_row 口径）。
   final time = dueIsPureDateForm(due)
       ? ''

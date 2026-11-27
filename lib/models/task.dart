@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 // lpinyin 的直接依赖已下沉到 PinyinIndex（A4 单一真源），此处不再直接引用。
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/pinyin_index.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/models/attachment.dart';
@@ -486,6 +487,28 @@ class Task {
         updatedAt: updatedAt == _kKeep ? this.updatedAt : updatedAt as DateTime?,
         attachments: attachments ?? this.attachments,
       );
+
+  /// P2-1（v3.2.0 审计）：把任务整体平移到 [newDay]（保留原时分）。
+  ///
+  /// 日历拖拽旧实现只改 dueDate，同日时间段任务会被撕成跨天区间；本方法按
+  /// **日历日差**（UTC 零点求差，DST 安全）同步平移 startDate，供拖拽与回归
+  /// 测试共用同一口径。无截止日期时整体不生效。
+  Task shiftedToDay(DateTime newDay) {
+    final old = dueDate;
+    if (old == null) return this;
+    final days = calendarDaysBetween(old, newDay);
+    final shiftedStart =
+        startDate == null ? null : addCalendarDays(startDate!, days);
+    return copyWith(
+      dueDate: DateTime(newDay.year, newDay.month, newDay.day, old.hour, old.minute),
+      startDate: shiftedStart,
+    );
+  }
+
+  /// P3-7（v3.2.0 审计）：非法时间区间（开始晚于截止）的单一判据。
+  /// 录入弹层保存前与数据体检共用，避免只在一个入口挡住脏数据。
+  bool get hasInvalidTimeRange =>
+      startDate != null && dueDate != null && startDate!.isAfter(dueDate!);
 
   /// 序列化为 JSON（用于 shared_preferences 持久化）
   Map<String, dynamic> toJson() => {

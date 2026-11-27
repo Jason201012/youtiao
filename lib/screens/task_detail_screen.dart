@@ -9,7 +9,9 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -156,6 +158,8 @@ class _NoteTextState extends State<_NoteText> {
       return;
     }
     try {
+      // U-1：外链属于当前操作的延伸，返回时豁免一次 resumed 上锁。
+      AppLockProvider.markExternalActivity();
       if (await canLaunchUrl(uri)) {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       } else {
@@ -780,9 +784,13 @@ class TaskDetailScreen extends StatelessWidget {
                                           : r.coveredByLoop
                                               ? '已跳过今天这一次：$dayLabel 本身是循环日，由原循环覆盖，未新建副本'
                                               : '已改期至 $dayLabel（已新建一次性副本）';
+                              // P2-2（v3.2.0 审计）：附件复制失败时如实告知副本不含附件。
+                              final shownContent = r.attachmentsDropped
+                                  ? '$content（附件未能随副本复制，副本不含附件）'
+                                  : content;
                               showUndoSnackBar(
                                 context,
-                                content: undoContent(content),
+                                content: undoContent(shownContent),
                                 onUndo: () async {
                                   // 新P3-8（v2.9.7 审计）：源任务在窗口内被删时
                                   // 副本清理与「取消跳过」都无从谈起，如实返回失败
@@ -1259,7 +1267,7 @@ String _dueLabel(DateTime? due) {
   // 与排程 / 首页 / 看板同口径。
   final key = dueCompareKey(due);
   final d = DateTime(key.year, key.month, key.day);
-  final diff = d.difference(today).inDays;
+  final diff = calendarDaysBetween(today, d);
   // L22（v3.0.8 审计）：纯日期形态省略时刻（同 task_row 口径）。
   final time = dueIsPureDateForm(due)
       ? ''

@@ -858,8 +858,12 @@ class NotificationService {
     result += '另安排了「应用内延迟」5 秒通知（App 未退到后台即可见）。\n';
 
     if (!exactOk) {
-      result += '⚠️ 未获精确闹钟权限：ColorOS 很可能会拦截上面的 AlarmManager 定时。'
-          '请去系统设置开启本应用「精确闹钟 / 允许闹钟」与「电池→不受限制 / 自启动」后重试。';
+      // P3-10（v3.2.0 审计）：调度用的是 setAlarmClock，不依赖 SCHEDULE_EXACT_ALARM。
+      // 旧文案把「未获权限」直接等同「定时必被拦截」，会误导用户去开一个
+      // 当前实现并未使用的高敏感权限（真机差异仍需用户自行确认）。
+      result += '精确闹钟权限未授予：当前使用 setAlarmClock，多数 ROM 不需要该权限。'
+          '若下面「AlarmManager」那条未按时弹出，可在系统设置开启「精确闹钟」'
+          '并检查电池 / 自启动设置后重试。';
     } else {
       result += '若 5 秒后只有「应用内延迟」弹出而「AlarmManager」那条没有，'
           '说明系统仍未放行定时闹钟，需检查 ColorOS 电池/自启动设置。';

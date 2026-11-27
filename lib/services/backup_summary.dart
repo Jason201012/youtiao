@@ -14,6 +14,7 @@
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'calendar_date.dart';
 
 import 'prefs_backup.dart'; // P3-6（v3.1.3 审计）：与恢复执行侧共用不迁移键名单
 
@@ -253,7 +254,7 @@ class BackupSummary {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final day = DateTime(g.year, g.month, g.day);
-    return today.difference(day).inDays;
+    return calendarDaysBetween(day, today);
   }
 
   /// 确认框正文（多行）。紧凑、黑白口径，不显示敏感值。

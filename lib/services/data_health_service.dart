@@ -1,5 +1,6 @@
 import 'package:todolist/models/attachment.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 
 /// T3-4（v2.9.2 功能增强）：数据体检——常态数据的健康扫描与修复辅助。
 ///
@@ -157,7 +158,7 @@ class DataHealthService {
         final d = t.deletedAt;
         if (d == null || !d.isBefore(cutoff)) continue;
         final deletedDate = DateTime(d.year, d.month, d.day);
-        final days = todayDate.difference(deletedDate).inDays;
+        final days = calendarDaysBetween(deletedDate, todayDate);
         issues.add(DataHealthIssue(
           type: DataHealthIssueType.staleTrash,
           taskId: t.id,

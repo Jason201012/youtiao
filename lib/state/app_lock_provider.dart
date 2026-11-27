@@ -262,16 +262,46 @@ class AppLockProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// U-1（v3.2.0 审计）：外部活动短暂豁免窗口。
+  ///
+  /// 系统相册 / 文件选择器 / 分享面板 / 外链都是当前任务的延伸，用户主观上
+  /// 没有「离开有条」，旧实现每次 `resumed` 都重新上锁，添加附件和分享备份
+  /// 的主流程被强制再次验证。启动这些外部活动前调用 [markExternalActivity]，
+  /// 回到 App 的**第一次** `resumed` 消费一次豁免；窗口 90 秒后自动失效，
+  /// 真正切到其它 App 后返回不会被长期豁免。
+  static const Duration externalActivityGrace = Duration(seconds: 90);
+  static DateTime? _externalActivityUntil;
+
+  static void markExternalActivity() {
+    _externalActivityUntil = DateTime.now().add(externalActivityGrace);
+  }
+
+  /// 测试 / 极端路径可显式清空豁免标记。
+  static void clearExternalActivityForTest() => _externalActivityUntil = null;
+
+  static bool _consumeExternalActivityResume() {
+    final until = _externalActivityUntil;
+    if (until == null) return false;
+    _externalActivityUntil = null; // 一次性：只豁免紧随其后的那次返回
+    return DateTime.now().isBefore(until);
+  }
+
   /// App 回到前台时调用：若启用锁则重新上锁（下次交互前需验证）。
   ///
-  /// 两个豁免（均为真机实测出的竞态，缺一即出现「识别成功仍停留在锁定页」）：
+  /// 三个豁免：
   /// 1. 生物识别验证进行中（[onResumed] 由系统验证页关闭触发）——忽略；
   /// 2. 解锁后 3 秒宽限期内的那次 resumed（与 authenticate Future 完成存在竞态）——忽略。
+  /// 3. U-1：紧随外部活动（相册 / 文件 / 分享 / 外链）返回的那次 resumed——忽略，
+  ///    但仍照常刷新系统凭据状态（见下方 probeBiometric）。
   void onResumed() {
     if (_authenticating) return;
     final last = _lastUnlockAt;
     if (last != null &&
         DateTime.now().difference(last) < const Duration(seconds: 3)) {
+      return;
+    }
+    if (_consumeExternalActivityResume()) {
+      unawaited(probeBiometric());
       return;
     }
     if (_enabled && !_locked) {

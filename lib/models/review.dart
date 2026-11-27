@@ -1,4 +1,5 @@
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -188,9 +189,9 @@ class WeeklyReview {
           : end;
       int expected = 0;
       if (!from.isAfter(to)) {
-        final days = to.difference(from).inDays + 1;
+        final days = calendarDaysBetween(from, to) + 1;
         for (int i = 0; i < days; i++) {
-          if (h.shouldCheckInOn(from.add(Duration(days: i)))) expected++;
+          if (h.shouldCheckInOn(addCalendarDays(from, i))) expected++;
         }
       }
       // T1-2：口径用「达标日」（量化习惯需当日累计量达目标），与周报 / 月报
@@ -260,7 +261,7 @@ class WeeklyReview {
   /// [x] 相对 [start]（周一）的周内下标 0..6，不在范围内返回 -1。
   static int _dayIndex(DateTime x, DateTime start) {
     final d = DateTime(x.year, x.month, x.day);
-    final diff = d.difference(start).inDays;
+    final diff = calendarDaysBetween(start, d);
     return (diff >= 0 && diff < 7) ? diff : -1;
   }
 }

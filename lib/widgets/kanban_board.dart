@@ -3,6 +3,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -1071,7 +1072,7 @@ class _KanbanCard extends StatelessWidget {
     // 收口到 schedule_advisor 的同一真源，避免口径逐处漂移（P2-10 已是实证）。
     final key = dueCompareKey(t.dueDate!);
     final d = DateTime(key.year, key.month, key.day);
-    final diff = d.difference(today).inDays;
+    final diff = calendarDaysBetween(today, d);
     if (diff > 0) return '$diff天后';
     if (diff == 0) return '今天';
     if (diff == -1) return '昨天';

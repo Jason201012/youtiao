@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -235,7 +236,7 @@ String _dueLabel(DateTime? due) {
   // 比较键单一真源），与排程 / 首页 / 看板 / 详情同口径。
   final key = dueCompareKey(due);
   final d = DateTime(key.year, key.month, key.day);
-  final diff = d.difference(today).inDays;
+  final diff = calendarDaysBetween(today, d);
   // L22（v3.0.8 审计）：纯日期形态（23:59 = 当天截止，[dueIsPureDateForm]）
   // 省略时刻——同一事实日历早已不显示时刻，任务行 / 详情 / 今日 / 分享四处却仍
   // 显示 "23:59"，两套呈现让用户以为设过具体时刻。

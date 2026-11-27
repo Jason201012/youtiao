@@ -48,11 +48,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // 持久化在 NotificationService 侧（SharedPreferences）。
   String _tzOverride = '';
 
+  /// P3-4（v3.2.0 审计）：自动检查更新开关（默认开启）。
+  bool _autoUpdateEnabled = true;
+
   @override
   void initState() {
     super.initState();
     _loadVersion();
     _loadTimezone();
+    _loadAutoUpdate();
+  }
+
+  Future<void> _loadAutoUpdate() async {
+    final v = await UpdateChecker.autoCheckEnabled();
+    if (mounted) setState(() => _autoUpdateEnabled = v);
   }
 
   Future<void> _loadTimezone() async {
@@ -137,6 +146,81 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // L24：无论成败都复位忙态（失败也要让用户能重试）。
       if (mounted) setState(() => _checkingUpdate = false);
     }
+  }
+
+  /// U-3（v3.2.0 审计）：目标预设 + 自定义输入。
+  ///
+  /// 每日专注目标与每周任务目标此前只有粗粒度预设（30/60…、10/20…），
+  /// 想设 45 分钟 / 每周 5 个都无法表达。这里与「稍后提醒时长」的弹窗模式
+  /// 对齐：先选预设或「自定义」，自定义值夹取到 [max] 范围内才回传。
+  /// 返回 null = 取消；-1 不再外泄（内部消费）。
+  Future<int?> _pickGoalWithCustom(
+    BuildContext context, {
+    required String title,
+    required int current,
+    required List<int> options,
+    required int max,
+    required String unit,
+  }) async {
+    final preset = await showDialog<int>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ...options.map((v) => RadioListTile<int>(
+                  title: Text(v <= 0 ? '关闭' : '$v $unit'),
+                  value: v,
+                  groupValue: current,
+                  onChanged: (v) => Navigator.pop(d, v),
+                )),
+            ListTile(
+              title: const Text('自定义…'),
+              onTap: () => Navigator.pop(d, -1),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (preset == null || preset != -1) return preset;
+
+    final ctl = TextEditingController();
+    String? error;
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('自定义$title'),
+          content: TextField(
+            controller: ctl,
+            keyboardType: TextInputType.number,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: '$unit数（1 - $max）',
+              errorText: error,
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(d),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () {
+                final v = int.tryParse(ctl.text.trim());
+                if (v == null || v < 1 || v > max) {
+                  setDialogState(() => error = '请输入 1 - $max 之间的整数');
+                  return;
+                }
+                Navigator.pop(d, v);
+              },
+              child: const Text('确定')),
+          ],
+        ),
+      ),
+    );
+    ctl.dispose();
+    return picked;
   }
 
   /// L-08：请求设置「自动备份口令」。返回 null 表示用户取消；
@@ -1263,62 +1347,46 @@ String _formatIdle(int seconds) {
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
-                    // 每日专注目标：点按在 关闭/30/60/90/120/180 分钟间切换；0=关闭（今日卡不展示进度环）。
+                    // 每日专注目标：预设 + 自定义（U-3，v3.2.0 审计）。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(
                         icon: Symbols.flag,
                         label: '每日专注目标',
                         value: provider.focusGoalLabel,
                         onTap: () async {
-                          final options = [0, 30, 60, 90, 120, 180];
-                          final picked = await showDialog<int>(
-                            context: context,
-                            builder: (d) => AlertDialog(
-                              title: const Text('每日专注目标'),
-                              content: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: options
-                                    .map((m) => RadioListTile<int>(
-                                          title: Text(m <= 0 ? '关闭' : '$m 分钟'),
-                                          value: m,
-                                          groupValue: provider.focusGoalMinutes,
-                                          onChanged: (v) => Navigator.pop(d, v),
-                                        ))
-                                    .toList(),
-                              ),
-                            ),
+                          final picked = await _pickGoalWithCustom(
+                            context,
+                            title: '每日专注目标',
+                            current: provider.focusGoalMinutes,
+                            options: const [0, 30, 60, 90, 120, 180],
+                            max: 1440,
+                            unit: '分钟',
                           );
-                          if (picked != null) provider.setFocusGoalMinutes(picked);
+                          if (picked != null) {
+                            await provider.setFocusGoalMinutes(picked);
+                          }
                         },
                       ),
                     ),
                     const SizedBox(height: AppColors.contentGap),
-                    // B1 周目标（本周完成数）：点按在 关闭/10/20/30/50 个间切换；0=关闭（周报卡不展示进度）。
+                    // B1 周目标（本周完成数）：预设 + 自定义（U-3）。
                     Consumer<TaskProvider>(
                       builder: (context, provider, _) => SettingsRow(
                         icon: Symbols.event_repeat,
                         label: '每周任务目标',
                         value: provider.weeklyGoalLabel,
                         onTap: () async {
-                          final options = [0, 10, 20, 30, 50];
-                          final picked = await showDialog<int>(
-                            context: context,
-                            builder: (d) => AlertDialog(
-                              title: const Text('每周任务目标'),
-                              content: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: options
-                                    .map((n) => RadioListTile<int>(
-                                          title: Text(n <= 0 ? '关闭' : '$n 个'),
-                                          value: n,
-                                          groupValue: provider.weeklyGoalCount,
-                                          onChanged: (v) => Navigator.pop(d, v),
-                                        ))
-                                    .toList(),
-                              ),
-                            ),
+                          final picked = await _pickGoalWithCustom(
+                            context,
+                            title: '每周任务目标',
+                            current: provider.weeklyGoalCount,
+                            options: const [0, 10, 20, 30, 50],
+                            max: 200,
+                            unit: '个',
                           );
-                          if (picked != null) provider.setWeeklyGoalCount(picked);
+                          if (picked != null) {
+                            await provider.setWeeklyGoalCount(picked);
+                          }
                         },
                       ),
                     ),
@@ -2045,6 +2113,19 @@ String _formatIdle(int seconds) {
                       onTap: _checkingUpdate
                           ? null
                           : () => _checkUpdateManually(context),
+                    ),
+                    const SizedBox(height: AppColors.contentGap),
+                    // P3-4（v3.2.0 审计）：关掉后首页不再每日被动联网，
+                    // 「检查更新」手动入口始终保留。
+                    SettingsRow(
+                      icon: Symbols.system_update_alt,
+                      label: '自动检查更新',
+                      subtitle: '关闭后仅手动检查，不会联网',
+                      switchValue: _autoUpdateEnabled,
+                      onSwitchChanged: (v) async {
+                        await UpdateChecker.setAutoCheckEnabled(v);
+                        if (mounted) setState(() => _autoUpdateEnabled = v);
+                      },
                     ),
                     const SizedBox(height: AppColors.contentGap),
                     SettingsRow(

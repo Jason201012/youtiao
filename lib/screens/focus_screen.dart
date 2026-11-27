@@ -333,6 +333,26 @@ class _FocusScreenState extends State<FocusScreen> {
   /// 停止（手动结束当前番茄钟，按已逝时间补录）。
   Future<void> _onStop(FocusProvider focus) async {
     if (!focus.hasActive) return;
+    // U-2（v3.2.0 审计）：停止按钮紧邻主按钮且此前无二次确认，误触即补录
+    // 「未完成」并清空当前番茄与循环进度，且没有撤销。与删除任务 / 删除专注
+    // 记录的保护力度对齐，先显式确认再结束。
+    final elapsedMin = ((focus.activeTotalSec - focus.remainingSec) / 60).round();
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('结束本次专注？'),
+        content: Text('将记录约 $elapsedMin 分钟，当前番茄回合与循环进度会清零。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(d, false),
+              child: const Text('继续专注')),
+          FilledButton(
+              onPressed: () => Navigator.pop(d, true),
+              child: const Text('结束并记录')),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
     // P3-2（v3.1.0 审计）：stopTimer 透传补录落盘结果——失败时不再谎报
     // 「已记录本次专注」（记录仅存内存、重启即丢）。
     final ok = await focus.stopTimer();
@@ -623,7 +643,8 @@ class _FocusScreenState extends State<FocusScreen> {
                         child: const Icon(Symbols.stop, size: 28),
                       ),
                     ),
-                    const SizedBox(width: 32),
+                    // U-2：拉开与主按钮的距离，降低误触概率（原有 32px）。
+                    const SizedBox(width: 56),
                     // 开始/暂停/恢复
                     SizedBox(
                       width: 64,

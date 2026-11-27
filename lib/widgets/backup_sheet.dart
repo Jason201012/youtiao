@@ -1049,11 +1049,9 @@ class BackupSheet {
     return result;
   }
 
-  static String _ts() {
-    final d = DateTime.now();
-    final p = (int n) => n.toString().padLeft(2, '0');
-    return '${d.year}${p(d.month)}${p(d.day)}-${p(d.hour)}${p(d.minute)}';
-  }
+  /// P3-5（v3.2.0 审计）：唯一文件名时间戳收口到 [DataIo.uniqueFileStamp]
+  /// （秒 + 毫秒 + 随机后缀），同一分钟两次备份不再互相覆盖。
+  static String _ts() => DataIo.uniqueFileStamp();
 
   /// P2-6：口令强度判定——至少包含「小写字母 / 大写字母 / 数字」中的两类字符。
   /// 纯数字 / 纯小写等弱口令可被 GPU 快速爆破，故强制多类组合。

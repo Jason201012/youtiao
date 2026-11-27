@@ -9,6 +9,7 @@ import 'package:todolist/services/apk_installer.dart';
 import 'package:todolist/services/update_checker.dart';
 import 'package:todolist/services/update_downloader.dart';
 import 'package:todolist/services/update_policy.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 
 /// 应用内下载并安装更新包：流式下载 APK 到外部缓存目录（updates/），
 /// 实时显示进度，下载完成后流式计算 sha256 校验完整性，再经系统安装器安装。
@@ -184,6 +185,8 @@ class _DownloadBodyState extends State<_DownloadBody> {
       return;
     }
     final uri = Uri.parse(url);
+    // U-1：外链返回时豁免一次应用锁重新上锁。
+    AppLockProvider.markExternalActivity();
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }

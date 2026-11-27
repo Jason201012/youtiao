@@ -10,6 +10,7 @@
 library;
 
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:lunar/lunar.dart';
 
 /// 被识别出来的片段类型（供 UI 渲染 chip / 高亮）。
@@ -829,7 +830,7 @@ class TaskParser {
 
   static String _dateLabel(DateTime d, DateTime base) {
     final today = DateTime(base.year, base.month, base.day);
-    final diff = d.difference(today).inDays;
+    final diff = calendarDaysBetween(today, d);
     if (diff == 0) return '今天';
     if (diff == 1) return '明天';
     if (diff == 2) return '后天';

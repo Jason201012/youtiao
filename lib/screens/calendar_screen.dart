@@ -140,7 +140,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
     // 先撤在途提醒再按快照重排），dueDate 变化应触发的提醒重排由 provider
     // 写路径负责，调用方不必自己记得重排（漏一次就是静默丢提醒）。
     final provider = Provider.of<TaskProvider>(context, listen: false);
-    final updated = task.copyWith(dueDate: newDue);
+    // P2-1（v3.2.0 审计）：时间段任务必须**整体平移**——旧实现只改 dueDate，
+    // 同日 14:00–15:00 的任务拖到次日会变成「14:00 昨天 → 15:00 今天」的跨天
+    // 区间。统一走 [Task.shiftedToDay]（日历日差，DST 安全，起止时分原样保留）。
+    final updated = task.shiftedToDay(newDue);
     // P2-2（v3.0.7 审计）：updateTask 透传落盘结果——失败弹提示（内存改期
     // 已生效、全量写自愈），撤销横幅照常给。
     final ok = await provider.updateTask(updated);

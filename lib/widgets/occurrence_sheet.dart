@@ -173,6 +173,11 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
                     : r.coveredByLoop
                         ? '已移到 $dayLabel（该日本就是循环日，由原循环覆盖，无需另建副本）'
                         : '已移到 $dayLabel（已新建一次性副本）';
+        // P2-2（v3.2.0 审计）：附件实体复制失败时如实说明副本不含附件，
+        // 不再让用户以为附件随副本一起搬走了。
+        final shownContent = r.attachmentsDropped
+            ? '$content（附件未能随副本复制，副本不含附件）'
+            : content;
         // P3-2（v2.9.6 审计）：迁入 `widgets/undo_snack_bar.dart` 唯一实现——
         // 本分支此前是内联 SnackBar（`kUndoWindow` 时长但**无超时提示**、
         // 文案未插秒数），同族「撤销」第 3 套实现。注释曾称「复合撤销语义上
@@ -181,7 +186,7 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
         // P3-5（v2.9.5 审计）：本分支的撤销是**复合**的（删副本 + 取消跳过）。
         showUndoSnackBar(
           context,
-          content: undoContent(content),
+          content: undoContent(shownContent),
           onUndo: () async {
             // P2-1（v2.8.8）：撤销必须**双向**还原——① 按 service 返回的副本 id
             // 精确移除那座一次性副本（原实现按「标题 + 日期」反查，同名任务

@@ -5,7 +5,8 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- 应用内下载并安装 APK：Android 8+ 安装未知来源应用必须声明，否则系统安装器直接拒绝 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
-    <!-- 精确闹钟权限：ColorOS 等国产 ROM 对 setAlarmClock 也限制，必须用精确模式才能准点提醒 -->
+    <!-- P3-10（v3.2.0 审计）：实际调度用 setAlarmClock，本权限非其必要条件；
+         部分国产 ROM 开启后可提升准点率，保留声明并在引导中标注为「建议项」。 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <!-- 开机重排闹钟：守护服务进程重启后，把之前的定时提醒重新挂上 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>

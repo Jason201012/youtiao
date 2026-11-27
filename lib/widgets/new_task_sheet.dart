@@ -12,6 +12,7 @@ import 'package:todolist/services/attachment_service.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 import 'package:todolist/widgets/past_due_guard.dart';
 import 'package:todolist/widgets/sheet_message.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
@@ -729,6 +730,8 @@ class _TaskSheetState extends State<TaskSheet> {
   /// 不再依赖 READ_MEDIA_IMAGES 权限（移除该权限后可降低隐私合规审计面）。
   /// 注：相机路径本就不读媒体库，同样显式关闭 full metadata 以求一致。
   Future<void> _addImage() async {
+    // U-1：相册是当前任务的延伸，返回时豁免一次应用锁的 resumed 上锁。
+    AppLockProvider.markExternalActivity();
     final picked = await ImagePicker().pickImage(
       source: ImageSource.gallery,
       requestFullMetadata: false,
@@ -738,6 +741,7 @@ class _TaskSheetState extends State<TaskSheet> {
 
   /// 拍照（相机）。
   Future<void> _takePhoto() async {
+    AppLockProvider.markExternalActivity();
     final picked = await ImagePicker().pickImage(
       source: ImageSource.camera,
       requestFullMetadata: false,
@@ -747,6 +751,7 @@ class _TaskSheetState extends State<TaskSheet> {
 
   /// 从本地文件系统选任意文件（文档 / 图片 / 音频等），按扩展名粗判类型。
   Future<void> _addFile() async {
+    AppLockProvider.markExternalActivity();
     final result = await FilePicker.pickFiles();
     if (result == null || result.isEmpty) return;
     final f = result.single;
@@ -902,6 +907,13 @@ class _TaskSheetState extends State<TaskSheet> {
   Future<void> _save() async {
     final title = _titleController.text.trim();
     if (title.isEmpty) return;
+    // P3-7（v3.2.0 审计）：开始 ≤ 截止是任务区间的基本不变量。旧实现两个
+    // 选择器互相独立、保存前不校验，可落库「开始 28 日 14:00、截止 27 日
+    // 15:00」的异常区间：日历不当跨天处理、任务行显示「起 14:00 · 昨天」。
+    if (_startDate != null && _dueDate != null && _startDate!.isAfter(_dueDate!)) {
+      showSheetMessage(context, '开始时间不能晚于截止时间', isError: true);
+      return;
+    }
     // P2-1（v3.0.8 审计）：防重入（见 [_saving] 注释）。 PastDueGuard 确认框
     // 也在窗口内，按钮置灰 + 此处兜底（键盘 / 快捷键等非按钮路径）。
     if (_saving) return;
@@ -1042,11 +1054,25 @@ class _TaskSheetState extends State<TaskSheet> {
       }
       // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
       // P1-11：同时提升从快速录入层继承的分享附件暂存会话。
-      await AttachmentService.promoteStaging(_attachmentSession, created.id);
-      if (widget.inheritedAttachmentSession != null) {
-        await AttachmentService.promoteStaging(
-            widget.inheritedAttachmentSession!, created.id);
+      // P3-6（v3.2.0 审计）：提升失败旧实现无任何回执，任务显示有附件却打不开。
+      // 失败时只保留实体确实存在的引用，其余从元数据剔除，并给用户明确提示。
+      Future<void> promote(String? session) async {
+        if (session == null) return;
+        try {
+          await AttachmentService.promoteStaging(session, created.id);
+        } catch (_) {
+          final kept = await AttachmentService.existingRefs(
+              created.id, created.attachments);
+          await provider.updateTask(created.copyWith(attachments: kept));
+          if (context.mounted) {
+            showSheetMessage(context, '附件未能保存，任务已创建（可重新添加附件）',
+                isError: true);
+          }
+        }
       }
+
+      await promote(_attachmentSession);
+      await promote(widget.inheritedAttachmentSession);
     }
     _saved = true;
     if (!mounted) return;

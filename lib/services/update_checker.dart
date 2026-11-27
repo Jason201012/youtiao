@@ -241,8 +241,23 @@ class UpdateChecker {
     return true;
   }
 
-  /// 是否应自动弹窗：每天最多一次（跨进程也生效）。
+  /// P3-4（v3.2.0 审计）：自动检查更新开关（默认开启，关闭后只保留手动检查）。
+  /// 离线 / 隐私敏感用户此前无法阻止每天首次打开首页时的外部请求。
+  static const String _kAutoCheck = 'update_auto_check_enabled';
+
+  static Future<bool> autoCheckEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_kAutoCheck) ?? true;
+  }
+
+  static Future<void> setAutoCheckEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kAutoCheck, enabled);
+  }
+
+  /// 是否应自动弹窗：开关开启且每天最多一次（跨进程也生效）。
   static Future<bool> shouldAutoPrompt() async {
+    if (!await autoCheckEnabled()) return false;
     final prefs = await SharedPreferences.getInstance();
     final today = DateTime.now().toIso8601String().substring(0, 10);
     final last = prefs.getString('update_last_auto_check');

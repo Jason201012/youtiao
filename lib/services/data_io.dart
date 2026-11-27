@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:todolist/state/app_lock_provider.dart';
 
 import 'gbk_codec.dart';
 
@@ -32,6 +33,20 @@ class DataIo {
   static String _tmpPath(String targetPath) {
     final suffix = Random.secure().nextInt(1 << 32).toRadixString(16);
     return '$targetPath.tmp.$suffix';
+  }
+
+  /// P3-5（v3.2.0 审计）：手动备份 / 导出的唯一文件名时间戳。
+  ///
+  /// 旧实现只到分钟：同一分钟做两次备份（典型「先备份 → 改数据 → 再备份」），
+  /// 后一份直接覆盖前一份，用户以为留了两个回滚点。这里加入秒 / 毫秒与
+  /// 随机后缀，使同一时刻的连续操作也各自独立。可注入 [at] 便于单测。
+  static String uniqueFileStamp([DateTime? at]) {
+    final d = at ?? DateTime.now();
+    final p = (int n) => n.toString().padLeft(2, '0');
+    final rand = Random.secure().nextInt(1 << 20).toRadixString(16).padLeft(5, '0');
+    return '${d.year}${p(d.month)}${p(d.day)}-'
+        '${p(d.hour)}${p(d.minute)}${p(d.second)}-'
+        '${d.millisecond.toString().padLeft(3, '0')}$rand';
   }
 
   /// P3-5（v3.1.9 审计）：原子写残片（`<目标>.tmp.<hex>`）的识别式。
@@ -154,6 +169,8 @@ class DataIo {
 
   /// 通过系统分享面板分享一个本地文件。
   static Future<void> shareFile(File file, {String mimeType = 'application/json'}) async {
+    // U-1：分享面板属于当前操作，返回时豁免一次应用锁重新上锁。
+    AppLockProvider.markExternalActivity();
     await SharePlus.instance.share(
       ShareParams(files: [XFile(file.path, mimeType: mimeType)]),
     );
@@ -169,6 +186,7 @@ class DataIo {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/$fileName');
     await file.writeAsBytes(bytes, flush: true);
+    AppLockProvider.markExternalActivity();
     await SharePlus.instance.share(
       ShareParams(
         files: [XFile(file.path, mimeType: 'image/png')],
@@ -355,6 +373,7 @@ class DataIo {
   static Future<PickedText> _pickTextFile(
       List<String> extensions, String label) async {
     List<PlatformFile> picked;
+    AppLockProvider.markExternalActivity();
     try {
       picked = await FilePicker.pickFiles(
         type: FileType.custom,

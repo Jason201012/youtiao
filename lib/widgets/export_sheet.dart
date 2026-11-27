@@ -682,9 +682,6 @@ class ExportSheet {
     }
   }
 
-  static String _ts() {
-    final d = DateTime.now();
-    final p = (int n) => n.toString().padLeft(2, '0');
-    return '${d.year}${p(d.month)}${p(d.day)}-${p(d.hour)}${p(d.minute)}';
-  }
+  /// P3-5（v3.2.0 审计）：与手动备份共用唯一时间戳，同分钟导出不覆盖旧文件。
+  static String _ts() => DataIo.uniqueFileStamp();
 }

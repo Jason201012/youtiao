@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/app_log.dart'; // L11（v3.0.8 审计）：保存失败日志
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
 import 'package:todolist/state/task_provider.dart';
 
@@ -141,7 +142,7 @@ class TemplateItem {
       // provider 的日差管道同源）。语义不变：相对天数始终按 date-only 差计。
       final k = dueCompareKey(t.dueDate!);
       final due = DateTime(k.year, k.month, k.day);
-      rel = due.difference(base).inDays;
+      rel = calendarDaysBetween(base, due);
     } else {
       rel = null;
     }

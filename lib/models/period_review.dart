@@ -1,4 +1,5 @@
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -331,7 +332,7 @@ class PeriodReview {
     if (focusTop.length > 3) focusTop.removeRange(3, focusTop.length);
 
     // —— 习惯 ——
-    final totalDays = end.difference(start).inDays + 1;
+    final totalDays = calendarDaysBetween(start, end) + 1;
     int habitExpected = 0;
     int habitDone = 0;
     final habits = <HabitPeriodStat>[];
@@ -348,9 +349,9 @@ class PeriodReview {
           : end;
       int expected = 0;
       if (!from.isAfter(to)) {
-        final days = to.difference(from).inDays + 1;
+        final days = calendarDaysBetween(from, to) + 1;
         for (int i = 0; i < days; i++) {
-          if (h.shouldCheckInOn(from.add(Duration(days: i)))) expected++;
+          if (h.shouldCheckInOn(addCalendarDays(from, i))) expected++;
         }
       }
       // T1-2：习惯口径升级为「达标日」——量化习惯（每天 8 杯水）只喝 1 杯不再

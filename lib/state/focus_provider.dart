@@ -871,24 +871,38 @@ class FocusProvider extends ChangeNotifier {
     return removed;
   }
 
-  /// 某天（date-only）专注总秒数（含休息阶段，历史口径）。
-  int totalSecOn(DateTime day) {
+  /// P3-2（v3.2.0 审计）：一次会话落在 [day] 的秒数。
+  ///
+  /// 旧实现整段按 `endedAt` 归日：23:50–00:10 的 20 分钟全算到次日，
+  /// 23:50 打开今日页显示 0 分钟，次日凭空多 20 分钟。这里按会话时间在
+  /// 本地午夜的 overlaps 比例切分（与 durationSec 成比例，暂停时间不会凭空
+  /// 多算），同日会话逐位等同旧行为。
+  static int _secOnDay(FocusSession s, DateTime day) {
     final d = DateTime(day.year, day.month, day.day);
-    return _sessions
-        .where((s) =>
-            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d)
-        .fold(0, (sum, s) => sum + s.durationSec);
+    final next = DateTime(d.year, d.month, d.day + 1);
+    final start = s.startedAt;
+    final end = s.endedAt;
+    final span = end.difference(start).inMilliseconds;
+    if (span <= 0) {
+      // 历史异常数据（结束早于开始）：维持旧的「按结束日整段」兜底。
+      return DateTime(end.year, end.month, end.day) == d ? s.durationSec : 0;
+    }
+    final a = start.isAfter(d) ? start : d;
+    final b = end.isBefore(next) ? end : next;
+    if (!b.isAfter(a)) return 0;
+    return (s.durationSec * b.difference(a).inMilliseconds / span).round();
   }
 
+  /// 某天（date-only）专注总秒数（含休息阶段，历史口径）。
+  /// P3-2：跨午夜会话按实际落在当天的时长切分。
+  int totalSecOn(DateTime day) => _sessions.fold(
+      0, (sum, s) => sum + _secOnDay(s, day));
+
   /// 某天（date-only）**专注阶段**总秒数（不含休息，番茄统计口径）。
-  int focusSecOn(DateTime day) {
-    final d = DateTime(day.year, day.month, day.day);
-    return _sessions
-        .where((s) =>
-            s.phase == FocusPhase.focus &&
-            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d)
-        .fold(0, (sum, s) => sum + s.durationSec);
-  }
+  int focusSecOn(DateTime day) => _sessions.fold(
+      0,
+      (sum, s) =>
+          sum + (s.phase == FocusPhase.focus ? _secOnDay(s, day) : 0));
 
   /// 近 7 日（含今天，由旧到新）每日**专注阶段**总秒数，供可视化使用。
   List<int> last7FocusSecs() {
@@ -939,20 +953,32 @@ class FocusProvider extends ChangeNotifier {
   int completedOn(DateTime day) {
     final d = DateTime(day.year, day.month, day.day);
     return _sessions.where((s) {
-      return s.completed &&
-          s.phase == FocusPhase.focus &&
-          DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d;
+      if (!s.completed || s.phase != FocusPhase.focus) return false;
+      // P3-2（v3.2.0 审计）：番茄数是离散事件，跨午夜时归入**开始日**
+      // （与 hourDistribution 的「开始时刻」口径一致），不再整段算到次日。
+      final anchor =
+          _sessionCrossesMidnight(s) ? s.startedAt : s.endedAt;
+      return DateTime(anchor.year, anchor.month, anchor.day) == d;
     }).length;
+  }
+
+  /// 会话是否跨本地午夜（用于离散事件的归日锚点选择）。
+  static bool _sessionCrossesMidnight(FocusSession s) {
+    final startDay = DateTime(s.startedAt.year, s.startedAt.month, s.startedAt.day);
+    final endDay = DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day);
+    return startDay.isBefore(endDay);
   }
 
   /// 指定日专注被打断的总次数（F2：仅统计**专注**阶段会话的 interruptCount）。
   int interruptCountOn(DateTime day) {
     final d = DateTime(day.year, day.month, day.day);
-    return _sessions
-        .where((s) =>
-            s.phase == FocusPhase.focus &&
-            DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day) == d)
-        .fold(0, (sum, s) => sum + s.interruptCount);
+    return _sessions.fold(0, (sum, s) {
+      if (s.phase != FocusPhase.focus) return sum;
+      // P3-2：与 completedOn 同口径——跨午夜会话的离散事件归开始日。
+      final anchor = _sessionCrossesMidnight(s) ? s.startedAt : s.endedAt;
+      if (DateTime(anchor.year, anchor.month, anchor.day) != d) return sum;
+      return sum + s.interruptCount;
+    });
   }
 
   /// 今日专注被打断次数（F2 展示闭环的今日入口）。
@@ -1012,10 +1038,12 @@ class FocusProvider extends ChangeNotifier {
   /// 某天（date-only）结束的专注会话列表（供日历显示）。
   List<FocusSession> sessionsOn(DateTime day) {
     final d = DateTime(day.year, day.month, day.day);
-    return _sessions.where((s) {
-      final sd = DateTime(s.endedAt.year, s.endedAt.month, s.endedAt.day);
-      return sd == d;
-    }).toList();
+    final next = DateTime(d.year, d.month, d.day + 1);
+    // P3-2：跨午夜会话与当天有任何时间重叠即展示（同日会话逐位等同旧
+    // 「按 endedAt 归日」口径），不再让开始日在列表里凭空消失。
+    return _sessions
+        .where((s) => s.endedAt.isAfter(d) && s.startedAt.isBefore(next))
+        .toList();
   }
 
   /// 设置「专注结束自动记入系统日历」开关并持久化。

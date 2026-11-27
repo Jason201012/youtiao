@@ -334,8 +334,20 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
       return;
     }
     if (_attachmentSession != null) {
-      AttachmentService.promoteStaging(_attachmentSession!, created.id)
-          .catchError((_) {});
+      // P3-6（v3.2.0 审计）：旧实现 `.catchError((_) {})` 静默吞掉提升失败，
+      // 任务元数据里仍挂着附件引用，点开必然「文件不存在」，24 小时后暂存
+      // 被清则永久丢失。现剔除悬空引用并如实提示（任务本身已创建成功）。
+      try {
+        await AttachmentService.promoteStaging(_attachmentSession!, created.id);
+      } catch (_) {
+        final kept =
+            await AttachmentService.existingRefs(created.id, created.attachments);
+        await provider.updateTask(created.copyWith(attachments: kept));
+        if (context.mounted) {
+          showSheetMessage(context, '附件未能保存，任务已创建（可重新添加附件）',
+              isError: true);
+        }
+      }
     }
     _consumed = true;
     // P2-1（v3.0.8 审计）：成功分支补 mounted 守卫——await 期间弹层可能已被

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:todolist/services/app_log.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/checkin.dart';
 import 'package:todolist/services/habit_migration.dart';
@@ -596,8 +597,18 @@ class HabitProvider extends ChangeNotifier {
   ///
   /// 与 [isCheckedOn] 的分工：后者回答「今天有没有记录」（提醒抑制、补卡幂等用），
   /// 本方法回答「今天算不算完成」（连续天数、周目标、周报月报、成就用）。
-  bool isTargetMetOn(Habit habit, DateTime day) =>
-      habit.targetMetBy(checkInValueOn(habit, day));
+  ///
+  /// P2-4（v3.2.0 审计）：历史日按打卡时落下的目标快照判定，避免改目标后
+  /// 昨天的达标被追溯改写；无快照的旧记录走当前目标（零迁移）。
+  bool isTargetMetOn(Habit habit, DateTime day) {
+    final k = CheckIn.dateKey(day);
+    for (final c in _checkIns) {
+      if (c.habitId == habit.id && CheckIn.dateKey(c.date) == k) {
+        return c.metBy(_targetFor(c, habit));
+      }
+    }
+    return false;
+  }
 
   /// T1-2：今日累计量。
   int todayValue(Habit habit) => checkInValueOn(habit, DateTime.now());
@@ -606,8 +617,18 @@ class HabitProvider extends ChangeNotifier {
   bool isTargetMetToday(Habit habit) => isTargetMetOn(habit, DateTime.now());
 
   /// T1-2：某日进度 0..1（量化按 value/target；布尔按有无记录）。
-  double progressRatioOn(Habit habit, DateTime day) =>
-      habit.progressRatioOf(checkInValueOn(habit, day));
+  /// P2-4：分母同样取打卡时的目标快照，与 [isTargetMetOn] 口径一致。
+  double progressRatioOn(Habit habit, DateTime day) {
+    final k = CheckIn.dateKey(day);
+    for (final c in _checkIns) {
+      if (c.habitId == habit.id && CheckIn.dateKey(c.date) == k) {
+        return (c.value / _targetFor(c, habit))
+            .clamp(0.0, 1.0)
+            .toDouble();
+      }
+    }
+    return 0.0;
+  }
 
   /// 某日热力图强度档位 0..4（0 = 无记录 / 未达标）。
   ///
@@ -623,11 +644,36 @@ class HabitProvider extends ChangeNotifier {
     final v = checkInValueOn(habit, day);
     if (v <= 0) return 0;
     if (!habit.isQuantified) return 1;
-    final r = habit.progressRatioOf(v);
+    // P2-4：历史日按当时的目标分档，改目标后热力图不追溯变色。
+    final c = _checkInForDay(habit, day);
+    final target = c == null ? habit.effectiveTarget : _targetFor(c, habit);
+    final r = (v / target).clamp(0.0, 1.0).toDouble();
     if (r < 0.5) return 1;
     if (r < 0.75) return 2;
     if (r < 1.0) return 3;
     return 4; // 达标档
+  }
+
+  /// 判定某条打卡用「当时目标」还是「当前目标」。
+  ///
+  /// P2-4 补充口径（v3.2.0）：快照只保护**历史日**；今天还在进行中，调高目标
+  /// 应立即反映为 8/12 并让今天的提醒恢复（v294 既有契约），因此今天及以后
+  /// 恒用当前目标。旧记录无快照时一律回退当前目标（零迁移）。
+  static int _targetFor(CheckIn c, Habit habit) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(c.date.year, c.date.month, c.date.day);
+    if (day.isBefore(today) && c.targetAtWrite != null) return c.targetAtWrite!;
+    return habit.effectiveTarget;
+  }
+
+  /// 指定日的打卡记录（按 habitId + dateKey），无记录返回 null。
+  CheckIn? _checkInForDay(Habit habit, DateTime day) {
+    final k = CheckIn.dateKey(day);
+    for (final c in _checkIns) {
+      if (c.habitId == habit.id && CheckIn.dateKey(c.date) == k) return c;
+    }
+    return null;
   }
 
   /// P2-2：「习惯/打卡发生变动」时的重排回调，由 `main.dart` 注入。
@@ -656,7 +702,7 @@ class HabitProvider extends ChangeNotifier {
   /// 「今天只喝了 1 杯水」就计入周目标的 1 次——否则周目标会被灌水失真。
   int weeklyCheckIns(Habit habit) {
     final monday = _mondayOf(DateTime.now());
-    final sunday = monday.add(const Duration(days: 6));
+    final sunday = addCalendarDays(monday, 6);
     return _metDaysOf(habit).where((d) => !d.isBefore(monday) && !d.isAfter(sunday)).length;
   }
 
@@ -666,7 +712,7 @@ class HabitProvider extends ChangeNotifier {
   /// 「本周 x / y（目标）」。此前定义后零消费，维护者易误判为已实现。
   int weeklyValue(Habit habit) {
     final monday = _mondayOf(DateTime.now());
-    final sunday = monday.add(const Duration(days: 6));
+    final sunday = addCalendarDays(monday, 6);
     if (!habit.isQuantified) return weeklyCheckIns(habit);
     var sum = 0;
     for (final c in _checkIns) {
@@ -682,9 +728,9 @@ class HabitProvider extends ChangeNotifier {
   int weeklyValueTarget(Habit habit) {
     if (!habit.isQuantified) return 0;
     final monday = _mondayOf(DateTime.now());
-    final sunday = monday.add(const Duration(days: 6));
+    final sunday = addCalendarDays(monday, 6);
     var planned = 0;
-    for (var d = monday; !d.isAfter(sunday); d = d.add(const Duration(days: 1))) {
+    for (var d = monday; !d.isAfter(sunday); d = addCalendarDays(d, 1)) {
       if (habit.shouldCheckInOn(d)) planned++;
     }
     return planned * habit.effectiveTarget;
@@ -713,9 +759,8 @@ class HabitProvider extends ChangeNotifier {
     // 也计入链条）。w=1 即上一个已结束的自然周；本周达成由 goalMetThisWeek
     // 单独表达，不混入「连续」语义。
     for (int w = 1; w <= weeks; w++) {
-      final monday = _mondayOf(DateTime(today.year, today.month, today.day)
-          .subtract(Duration(days: 7 * w)));
-      final sunday = monday.add(const Duration(days: 6));
+      final monday = _mondayOf(addCalendarDays(today, -7 * w));
+      final sunday = addCalendarDays(monday, 6);
       final count =
           metDays.where((d) => !d.isBefore(monday) && !d.isAfter(sunday)).length;
       if (count >= goal) {
@@ -730,7 +775,7 @@ class HabitProvider extends ChangeNotifier {
   /// 返回某日期所在周的周一（每周首日）。
   static DateTime _mondayOf(DateTime d) {
     final base = DateTime(d.year, d.month, d.day);
-    return base.subtract(Duration(days: base.weekday - 1));
+    return addCalendarDays(base, -(base.weekday - 1));
   }
 
   /// 切换今天的打卡状态：已打卡则取消，否则打卡。
@@ -797,10 +842,16 @@ class HabitProvider extends ChangeNotifier {
       if (idx == -1) return true; // 本就无记录 → 无操作，不触发无谓的落盘与重排
       _checkIns.removeAt(idx);
     } else if (added) {
-      _checkIns.add(CheckIn.forDay(live.id, day, value: v));
+      // P2-4（v3.2.0 审计）：每次落值都钉下当时的目标快照，历史日期不会被
+      // 日后修改的目标 / 星期追溯重判（布尔习惯快照恒为 1，行为逐位不变）。
+      _checkIns.add(
+          CheckIn.forDay(live.id, day, value: v, target: live.effectiveTarget));
     } else {
-      if (_checkIns[idx].value == v) return true; // 值未变 → 无操作
-      _checkIns[idx] = _checkIns[idx].withValue(v);
+      if (_checkIns[idx].value == v &&
+          _checkIns[idx].targetAtWrite == live.effectiveTarget) {
+        return true; // 值与目标快照都未变 → 无操作
+      }
+      _checkIns[idx] = _checkIns[idx].withValue(v, target: live.effectiveTarget);
     }
     final ok = await _persistCheckIns(); // P2-1（v3.0.4 审计）：透传落盘结果
     if (!ok) {
@@ -1096,7 +1147,7 @@ class HabitProvider extends ChangeNotifier {
   Set<DateTime> checkedDays(Habit habit, int days) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final start = today.subtract(Duration(days: days - 1));
+    final start = addCalendarDays(today, -(days - 1));
     final set = <DateTime>{};
     for (final c in _checkIns) {
       if (c.habitId != habit.id) continue;
@@ -1110,7 +1161,7 @@ class HabitProvider extends ChangeNotifier {
   Set<DateTime> metDays(Habit habit, int days) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final start = today.subtract(Duration(days: days - 1));
+    final start = addCalendarDays(today, -(days - 1));
     return _metDaysOf(habit).where((d) => !d.isBefore(start)).toSet();
   }
 
@@ -1199,6 +1250,11 @@ class HabitProvider extends ChangeNotifier {
   /// 「累计打卡**记录**数」（有记录即计，含未达标日）。仅用于导出 / 诊断等
   /// 确实需要「写盘条数」语义的场景，UI 一律用 [totalCheckIns]。
   int get totalCheckInRecords => _checkIns.length;
+
+  /// 单个习惯的打卡记录条数（P2-4：编辑计划星期 / 宽限日时判断是否有历史
+  /// 需要提示「按新规则重新计算」）。
+  int checkInRecordCount(Habit habit) =>
+      _checkIns.where((c) => c.habitId == habit.id).length;
   int get habitCount => _habits.length;
   int get overallCurrentStreak =>
       _streakFor(_metDatesAll, allowTodayGap: true);
@@ -1217,7 +1273,9 @@ class HabitProvider extends ChangeNotifier {
     final set = <DateTime>{};
     for (final c in _checkIns) {
       if (c.habitId != habit.id) continue;
-      if (!habit.targetMetBy(c.value)) continue;
+      // P2-4（v3.2.0 审计）：历史达标按打卡时的目标快照判定，
+      // 当前目标只作旧记录（无快照）的兜底——改目标不再追溯重置连续天数。
+      if (!c.metBy(_targetFor(c, habit))) continue;
       set.add(DateTime(c.date.year, c.date.month, c.date.day));
     }
     return set;
@@ -1229,7 +1287,7 @@ class HabitProvider extends ChangeNotifier {
     for (final c in _checkIns) {
       final h = byId(c.habitId);
       // 习惯已被删除（不该发生，防御性）时退回「有记录即达标」，避免静默丢历史。
-      if (h != null && !h.targetMetBy(c.value)) continue;
+      if (h != null && !c.metBy(_targetFor(c, h))) continue;
       set.add(DateTime(c.date.year, c.date.month, c.date.day));
     }
     return set;
@@ -1271,7 +1329,7 @@ class HabitProvider extends ChangeNotifier {
       final budget = <DateTime, int>{};
       for (var d = earliest;
           !d.isAfter(today);
-          d = d.add(const Duration(days: 1))) {
+          d = addCalendarDays(d, 1)) {
         if (!isPlanned(d)) continue;
         if (dates.contains(d)) {
           run++;
@@ -1291,7 +1349,7 @@ class HabitProvider extends ChangeNotifier {
 
     var cursor = today;
     if (isPlanned(cursor) && !dates.contains(cursor) && allowTodayGap) {
-      cursor = cursor.subtract(const Duration(days: 1));
+      cursor = addCalendarDays(cursor, -1);
     }
     final budget = <DateTime, int>{};
     var streak = 0;
@@ -1310,7 +1368,7 @@ class HabitProvider extends ChangeNotifier {
           }
         }
       }
-      cursor = cursor.subtract(const Duration(days: 1));
+      cursor = addCalendarDays(cursor, -1);
     }
     return streak;
   }
@@ -1334,7 +1392,7 @@ class HabitProvider extends ChangeNotifier {
   Map<DateTime, int> metCountsByDay(int days) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final start = today.subtract(Duration(days: days - 1));
+    final start = addCalendarDays(today, -(days - 1));
     final map = <DateTime, int>{};
     for (final c in _checkIns) {
       final h = byId(c.habitId);

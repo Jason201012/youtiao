@@ -1,4 +1,5 @@
 import 'package:todolist/services/app_log.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/habit_nudge.dart';
 import 'package:todolist/services/notification_service.dart';
@@ -157,15 +158,16 @@ DailyBrief buildMorningBriefFromState(
       return da.compareTo(db);
     });
   final overdueTop3 = overdue.take(3).map((t) => t.title).toList();
-  // 昨日未完成任务：未完成的非重复任务，其截止日期在昨天（含）之前。
-  final yesterday = today.subtract(const Duration(days: 1));
+  // P3-8（v3.2.0 审计）：旧判据 `dueDate.isBefore(today)` 已覆盖昨天及所有
+  // 更早日期，后面的 `_sameDay(yesterday)` 是冗余项——文案写「昨日未完成」，
+  // 数字却是「全部历史逾期」，逾期越多越夸张。现严格按截止日 == 昨天统计。
+  final yesterday = addCalendarDays(today, -1);
   final unfinishedYesterday = task.tasks
       .where((t) =>
           !t.done &&
           !t.isRepeating &&
           t.dueDate != null &&
-          !_sameDay(t.dueDate!, today) &&
-          (t.dueDate!.isBefore(today) || _sameDay(t.dueDate!, yesterday)))
+          _sameDay(t.dueDate!, yesterday))
       .length;
   return buildMorningBrief(
     dueToday: dueToday,

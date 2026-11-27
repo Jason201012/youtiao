@@ -345,7 +345,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           _exactAlarmRow(colors, primary),
           const SizedBox(height: 10),
           Text(
-            '任务、习惯到点提醒；ColorOS 需精确闹钟权限才准点',
+            // P3-10（v3.2.0 审计）：实际调度用 setAlarmClock，不依赖该高敏感权限；
+            // 个别 ROM 开启后可提升兼容性，故保留为建议项而非必需项。
+            '任务、习惯到点提醒；部分 ROM 建议开启精确闹钟以提升准点率',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 11, color: _faint),
           ),
@@ -433,7 +435,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text('精确闹钟', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                  Text('ColorOS 需开启才准点', style: TextStyle(fontSize: 11, color: _muted)),
+                  // P3-10：setAlarmClock 本身不需要此权限，文案改为「部分 ROM 建议」。
+                  Text('部分 ROM 建议开启（非必需）',
+                      style: TextStyle(fontSize: 11, color: _muted)),
                 ],
               ),
             ),

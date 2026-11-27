@@ -44,11 +44,14 @@ class BatchEditSheet {
 /// [batchId] 供 [TaskProvider.undoBatchEdit] 定向撤销；[count] 为实际更新条数；
 /// [saved] 为本次批量落盘是否成功（P2-2，v3.0.7 审计——旧实现丢弃 `_persist()`
 /// 结果，DB 异常时横幅照弹、重启回退且零反馈；无实际变更时恒 true）。
+/// [skippedRepeating] 为因「重复任务不支持批量改期」被跳过的条数（P2-3，v3.2.0）。
 class BatchEditResult {
   final int batchId;
   final int count;
   final bool saved;
-  const BatchEditResult(this.batchId, this.count, {this.saved = true});
+  final int skippedRepeating;
+  const BatchEditResult(this.batchId, this.count,
+      {this.saved = true, this.skippedRepeating = 0});
 }
 
 /// 截止日期改动模式。
@@ -102,6 +105,18 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     final provider = context.read<TaskProvider>();
     // F1：二次确认 + 影响前瞻——批量编辑一次性改写 N 条且无快照，先让用户确认。
     final count = widget.ids.length;
+    // P2-3（v3.2.0 审计）：重复任务的循环落点由 repeatMinute / repeatsOn 决定，
+    // 改 dueDate 完全不生效——与日历拖拽「重复任务不支持改期」的既有口径必须一致。
+    // 仅在选择了日期改动维度时排除，优先级 / 分类 / 标签 / 置顶仍可批量修改。
+    final dateChanging = _due != _DueMode.keep;
+    final repeatingIds = dateChanging
+        ? widget.ids
+            .map(provider.byId)
+            .whereType<Task>()
+            .where((t) => t.isRepeating)
+            .map((t) => t.id)
+            .toSet()
+        : <String>{};
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
@@ -109,6 +124,7 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
         content: Text(
           '将更新 $count 项任务'
           '${_due == _DueMode.plusDays ? '（按「+N 天」顺延截止日期）' : ''}。'
+          '${repeatingIds.isEmpty ? '' : '\n将跳过 ${repeatingIds.length} 条重复任务（请在详情页使用「仅此一次改期」）。'}'
           '此操作可被撤销。',
         ),
         actions: [
@@ -209,9 +225,11 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次编辑）。
     // P2-2（v3.0.7 审计）：batchUpdateAs 异步化并透传落盘结果（saved 随
     // BatchEditResult 回传给调用方消费）。
-    final r = await provider.batchUpdateAs(widget.ids, transform);
+    final r = await provider.batchUpdateAs(widget.ids, transform,
+        excludeIds: repeatingIds);
     if (!mounted) return;
-    Navigator.pop(context, BatchEditResult(r.$1, r.$2, saved: r.$3));
+    Navigator.pop(context, BatchEditResult(r.$1, r.$2,
+        saved: r.$3, skippedRepeating: repeatingIds.length));
   }
 
   @override

@@ -2701,8 +2701,41 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
       showSheetMessage(context, '习惯名称不能为空', isError: true);
       return;
     }
-    setState(() => _saving = true);
     final hp = context.read<HabitProvider>();
+    // P2-4（v3.2.0 审计）：每日目标已有打卡快照保真，但「计划星期 / 宽限日」
+    // 仍参与历史连续天数的规划日与宽限计算，改这两项会追溯重算历史。
+    // 有打卡历史时先显式确认，不静默改写用户的连续天数与成就。
+    final current = hp.byId(widget.habit.id) ?? widget.habit;
+    final planChanged =
+        _weekdays.toSet().length != current.weekdays.toSet().length ||
+            !_weekdays.every(current.weekdays.contains);
+    final graceChanged = _graceDays != current.graceDays;
+    if ((planChanged || graceChanged) &&
+        hp.checkInRecordCount(current) > 0 &&
+        context.mounted) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (d) => AlertDialog(
+          title: const Text('确认修改打卡规则？'),
+          content: const Text(
+            '该习惯已有打卡历史。修改计划星期或宽限日后，历史达标与连续天数'
+            '将按新规则重新计算，可能改变已解锁的成就。\n\n每日目标已有历史快照，'
+            '新目标只影响之后的打卡。仍要保存吗？',
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(d, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(d, true),
+                child: const Text('仍要保存')),
+          ],
+        ),
+      );
+      if (go != true) return;
+      if (!context.mounted) return;
+    }
+    setState(() => _saving = true);
     // P3-2（v3.0.5 审计）：按落盘结果反馈——失败时编辑层停留、如实提示
     //（provider 已回滚内存），不再 pop 后谎报「已保存」。
     final ok = await hp.updateHabit(

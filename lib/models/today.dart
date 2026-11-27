@@ -1,4 +1,5 @@
 import 'package:todolist/models/task.dart';
+import 'package:todolist/models/task_event.dart';
 import 'package:todolist/models/habit.dart';
 import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -146,29 +147,10 @@ class TodayAggregate {
     );
   }
 
-  /// 复刻 TaskProvider._isEventToday：判断任务是否为「今天的事务」。
-  /// 未删除，且（无截止日期 / 截止日期为今天 / 今天为循环日）；非循环且无截止视为当天。
-  static bool _isEventToday(Task t, DateTime today) {
-    if (t.deletedAt != null) return false;
-    final d = DateTime(today.year, today.month, today.day);
-    if (t.dueDate != null) {
-      // 新P3-9（v2.9.7 审计）：截止归一走 [dueCompareKey]（比较键真源）再落
-      // date-only 与今天比较——此前自行内联 `DateTime(y,m,d)`，与任务侧
-      // 逾期 / 排序的取键管道并行，判据调整时会漂移。
-      final k = dueCompareKey(t.dueDate!);
-      if (DateTime(k.year, k.month, k.day) == d) {
-        // P3-5（v2.9.9 审计）：暂停中 / 已跳过今天的重复任务不属于「今天的事务」
-        // ——带 dueDate 的重复任务此前在截止日恒命中，暂停 / 跳过当天仍出现在
-        // 今日聚合与分享卡，与「当天不出现」语义矛盾。repeatsOn 含 skipDates
-        // 判定；非重复任务不受影响。
-        if (t.isRepeating && !t.repeatsOn(d)) return false;
-        return true;
-      }
-    } else if (!t.isRepeating) {
-      return true;
-    }
-    return t.repeatsOn(d);
-  }
+  /// 单一真源：与 TaskProvider 的同名统计口径共用 [isTaskEventOn]。
+  /// P2-5（v3.2.0 审计）：此前两处各自复刻，无截止已完成任务的处理长期分叉。
+  static bool _isEventToday(Task t, DateTime today) =>
+      isTaskEventOn(t, today);
 }
 
 /// 单个活动习惯在今日的状态。

@@ -381,15 +381,25 @@ void main() {
     });
 
     test('todayCompleted 统计当日事件（含无截止）中已完成', () async {
+      // P2-5（v3.2.0 审计）：旧断言把「无截止且 completedAt 为空的历史完成」
+      // 永久计入当日事件；新口径下无截止已完成任务仅在完成当天计入，
+      // 与晚简报的 completedAt 口径一致。
       final today = DateTime.now();
       final p = await buildWith([
         mk('1', due: today, status: TaskStatus.done, title: '今天已完成'),
         mk('2', due: today, title: '今天未完成'),
         mk('3', repeating: true, status: TaskStatus.done, title: '每天已完成'),
-        mk('4', status: TaskStatus.done, title: '无截止已完成'),
+        mk('4',
+            status: TaskStatus.done,
+            completedAt: today,
+            title: '无截止今天完成'),
+        mk('5',
+            status: TaskStatus.done,
+            completedAt: today.subtract(const Duration(days: 4)),
+            title: '无截止历史完成'),
       ]);
-      expect(p.todayEventTotal, 4); // 今天截止(2) + 每天循环(1) + 无截止(1)
-      expect(p.todayCompleted, 3); // 今天已完成 + 每天已完成 + 无截止已完成
+      expect(p.todayEventTotal, 4); // 今天截止(2) + 每天循环(1) + 无截止今天完成(1)
+      expect(p.todayCompleted, 3); // 今天已完成 + 每天已完成 + 无截止今天完成
       expect(p.todayCompletionRate, closeTo(3 / 4, 1e-9));
     });
 
@@ -459,13 +469,18 @@ void main() {
     });
 
     test('无截止日期任务视为当天，且跨天始终顺延（恒为今天）', () async {
-      // 无截止日期的非循环任务，无论哪一天都计入「今日事件」，
-      // 因此跨天时会自然顺延到第二天（无需任何重置，dueDate==null 恒等于「今天」）。
+      // P2-5（v3.2.0 审计）：无截止的**未完成**任务每天跟随；已完成任务只在
+      // 完成当天计入，不再像旧实现那样永久占据当日事件名额。
+      final now = DateTime.now();
       final p = await buildWith([
         mk('1', due: null, title: '无截止待办'),
-        mk('2', due: null, status: TaskStatus.done, title: '无截止已完成'),
+        mk('2',
+            due: null,
+            status: TaskStatus.done,
+            completedAt: now,
+            title: '无截止今天完成'),
       ]);
-      // 看板当日统计：两条无截止都算今天（含已完成）
+      // 看板当日统计：两条无截止（未完成 + 今天完成）都算今天。
       expect(p.todayEventTotal, 2);
       expect(p.todayCompleted, 1);
       // 首页分组：无截止的未完成任务进「今天」段；已完成的归「已完成」段，不进「未来」
