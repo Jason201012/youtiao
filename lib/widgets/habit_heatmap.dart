@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:todolist/services/calendar_date.dart';
 
 DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
@@ -42,9 +43,9 @@ class HabitHeatmap extends StatelessWidget {
 
     final today = _dateOnly(DateTime.now());
     final dow = (today.weekday - 1) % 7; // 周一=0
-    final lastWeekStart = today.subtract(Duration(days: dow));
-    final firstWeekStart =
-        lastWeekStart.subtract(Duration(days: (weeks - 1) * 7));
+    // P3-2（v3.2.1 审计）：网格起点 / 逐格日期一律日历日加法（DST 安全）。
+    final lastWeekStart = addCalendarDays(today, -dow);
+    final firstWeekStart = addCalendarDays(lastWeekStart, -(weeks - 1) * 7);
 
     int levelOfDay(DateTime d) {
       if (d.isAfter(today)) return 0;
@@ -66,7 +67,7 @@ class HabitHeatmap extends StatelessWidget {
       final labels = <Widget>[];
       int? prevMonth;
       for (int c = 0; c < weeks; c++) {
-        final ws = firstWeekStart.add(Duration(days: c * 7));
+        final ws = addCalendarDays(firstWeekStart, c * 7);
         final m = ws.month;
         final show = m != prevMonth;
         prevMonth = m;
@@ -91,10 +92,10 @@ class HabitHeatmap extends StatelessWidget {
 
     final weekColumns = <Widget>[];
     for (int c = 0; c < weeks; c++) {
-      final ws = firstWeekStart.add(Duration(days: c * 7));
+      final ws = addCalendarDays(firstWeekStart, c * 7);
       final col = <Widget>[];
       for (int r = 0; r < 7; r++) {
-        final day = ws.add(Duration(days: r));
+        final day = addCalendarDays(ws, r);
         final level = levelOfDay(day);
         col.add(Container(
           width: cellSize,

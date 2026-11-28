@@ -84,7 +84,8 @@ class WeeklyReview {
     HabitProvider habit,
   ) {
     final start = _mondayOf(DateTime.now());
-    final end = start.add(const Duration(days: 6));
+    // P3-2（v3.2.1 审计）：日历日加法，DST 地区不会把周区间算错一天。
+    final end = addCalendarDays(start, 6);
 
     // —— 任务完成 ——
     int completedCount = 0;
@@ -97,7 +98,7 @@ class WeeklyReview {
     final trend = <int>[];
     final weekDates = <DateTime>[];
     for (int i = 0; i < 7; i++) {
-      final day = start.add(Duration(days: i));
+      final day = addCalendarDays(start, i);
       weekDates.add(day);
       trend.add(0);
     }
@@ -116,10 +117,10 @@ class WeeklyReview {
       }
     }
     final lastTrend = List.filled(7, 0);
-    final prevStart = start.subtract(const Duration(days: 7));
+    final prevStart = addCalendarDays(start, -7);
     for (final t in task.tasks) {
       for (final d in t.completionEventDays) {
-        if (!_inWeek(d, prevStart, start.subtract(const Duration(days: 1)))) {
+        if (!_inWeek(d, prevStart, addCalendarDays(start, -1))) {
           continue;
         }
         final idx = _dayIndex(d, prevStart);
@@ -243,7 +244,7 @@ class WeeklyReview {
     final today = DateTime(d.year, d.month, d.day);
     // DateTime.weekday：1=周一 … 7=周日
     final diff = today.weekday - DateTime.monday;
-    return today.subtract(Duration(days: diff));
+    return addCalendarDays(today, -diff);
   }
 
   /// [x] 的 date-only 是否落在 [start, end]（均含）。

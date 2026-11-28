@@ -10,6 +10,7 @@ import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/services/search_history.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 // U3-5：撤销窗口时长的单一真源（任务 / 批量删除 / 跳过循环日共用）。
@@ -220,7 +221,20 @@ class HomeScreenState extends State<HomeScreen> {
     final ids = _selected.toList();
     if (ids.isEmpty) return;
     final n = await BatchEditSheet.show(context, ids);
-    if (n == null || n.count == 0 || !context.mounted) return;
+    if (!context.mounted) return;
+    if (n == null) return;
+    // N-P3-4（v3.2.1 审计）：count == 0 时旧实现直接 return——弹层关闭、列表毫无
+    // 变化、选择态还在，用户只能怀疑「点了没反应」。现在照样退出多选并说明原因。
+    if (n.count == 0) {
+      _exitSelect();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(n.skippedRepeating > 0
+            ? '本次没有可更新的任务：${n.skippedRepeating} 条为重复任务，'
+                '请在详情页使用「仅此一次改期」'
+            : '本次没有可更新的任务（所选项已是目标状态）'),
+      ));
+      return;
+    }
     _exitSelect();
     // F1：批量编辑后提供一键撤销（改前快照已由 TaskProvider 保存）。
     // P3-4（v2.9.5 审计）：此前**未设 `duration`**，落到 SnackBar 框架默认的 4 秒，
@@ -696,9 +710,11 @@ class HomeScreenState extends State<HomeScreen> {
           TaskFilter.todayEvents => tasks
               .where((t) => isTaskEventOn(t, DateTime.now()))
               .toList(),
+          // N-P3-1（v3.2.1 审计）：「今日完成」改按**完成日**筛选
+          // （[isTaskCompletedOn]），与看板「今日完成」、晚简报同源。旧实现是
+          // 「当日事件 ∩ 已完成」，会把「今天到期但一周前就勾掉」的任务列进来。
           TaskFilter.todayDone => tasks
-              .where((t) =>
-                  t.done && isTaskEventOn(t, DateTime.now()))
+              .where((t) => isTaskCompletedOn(t, DateTime.now()))
               .toList(),
           TaskFilter.all => const <Task>[],
         };
@@ -1623,16 +1639,11 @@ class _PostponeButton extends StatelessWidget {
     }
     // P3-5：预演改期结果——「顺延到今天」而原时刻已过时，一次性任务的截止提醒
     // 会被排到过去时刻、**永远不会触发**。此前只有新建 / 编辑弹层有这条警告，
-    // 这里补齐口径一致（预演用的变换与 postponeTo 内部严格相同，保留原时分）。
+    // 这里补齐口径一致（预演与 postponeToAs 共用同一个 [Task.shiftedToDay]，
+    // 时间段任务的开始时间同步平移，N-P2-1 v3.2.1）。
     final dead = PastDueGuard.countDeadAfter(
       ids.map(provider.byId).whereType<Task>().toList(),
-      (t) {
-        final d = t.dueDate;
-        if (d == null) return t;
-        return t.copyWith(
-          dueDate: DateTime(day.year, day.month, day.day, d.hour, d.minute),
-        );
-      },
+      (t) => t.shiftedToDay(day),
       DateTime.now(),
     );
     if (dead > 0) {
@@ -1646,6 +1657,9 @@ class _PostponeButton extends StatelessWidget {
     }
     // P2-3（v3.2.0 审计）：重复任务循环落点不看 dueDate、无截止任务不会被改动，
     // 两类都从「已顺延 N 条」中剔除并如实告知，避免肯定文案掩盖静默 no-op。
+    // N-P3-4（v3.2.1 审计）：本按钮的 id 来自「逾期」分区，天然满足「非重复 +
+    // 有截止」，所以下面这个计数结构上恒为 0，文案分支实际不可达（保留是因为
+    // postponeToAs 本身对任意 id 集都成立，将来入口扩大后这条断言仍然正确）。
     final skippedCount = ids
         .map(provider.byId)
         .whereType<Task>()
@@ -1657,7 +1671,17 @@ class _PostponeButton extends StatelessWidget {
     final r = await provider.postponeToAs(ids, day);
     if (!context.mounted) return;
     final n = r.$2;
-    if (n <= 0) return;
+    if (n <= 0) {
+      // N-P3-4（v3.2.1 审计）：静默 return 会让「顺延」看起来毫无反应（弹层已关）。
+      // 逾期区的 id 天然是「非重复 + 有截止」，正常不会走到这里；命中说明任务在
+      // 处理期间被删除，或本就已在目标日（no-op 不计入条数）。
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('本次没有需要顺延的任务')),
+        );
+      }
+      return;
+    }
     if (!r.$3) {
       showTaskPersistFailedHint(context, provider: provider);
     }
@@ -1726,8 +1750,8 @@ class _PostponeButton extends StatelessWidget {
     }
     if (!context.mounted) return;
     final now = DateTime.now();
-    await _postpone(
-        context, DateTime(now.year, now.month, now.day).add(Duration(days: days)));
+    // P3-2（v3.2.1 审计）：日历日加法。
+    await _postpone(context, addCalendarDays(DateTime(now.year, now.month, now.day), days));
   }
 
   @override
@@ -1764,7 +1788,8 @@ class _PostponeButton extends StatelessWidget {
             await _postpone(context, today);
             break;
           case 'tomorrow':
-            await _postpone(context, today.add(const Duration(days: 1)));
+            // P3-2（v3.2.1 审计）：日历日加法（旧实现在 DST 地区「明天」会落到今天）。
+            await _postpone(context, addCalendarDays(today, 1));
             break;
           case 'custom':
             await _custom(context);
@@ -1772,7 +1797,7 @@ class _PostponeButton extends StatelessWidget {
           default:
             final d = int.tryParse(v);
             if (d != null) {
-              await _postpone(context, today.add(Duration(days: d)));
+              await _postpone(context, addCalendarDays(today, d));
             }
         }
       },
@@ -2005,6 +2030,13 @@ void _showUndoSnackBar(
       if (!r.saved && context.mounted) {
         showTaskPersistFailedHint(context, provider: provider);
       }
+      // N-P3-10（v3.2.1 审计）：恢复的任务若占用了今日三件名额，被挤出的那条
+      // 如实告知（此前是读取层静默截断，用户只看到「刚选的任务不见了」）。
+      final mitNote = provider.takeMitEvictionNote();
+      if (mitNote != null && context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(mitNote)));
+      }
       return true;
     },
   );
@@ -2024,6 +2056,13 @@ void _showBatchUndoSnackBar(
       if (!r.applied) return false;
       if (!r.saved && context.mounted) {
         showTaskPersistFailedHint(context, provider: provider);
+      }
+      // N-P3-10（v3.2.1 审计）：恢复的任务若占用了今日三件名额，被挤出的那条
+      // 如实告知（此前是读取层静默截断，用户只看到「刚选的任务不见了」）。
+      final mitNote = provider.takeMitEvictionNote();
+      if (mitNote != null && context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(mitNote)));
       }
       return true;
     },

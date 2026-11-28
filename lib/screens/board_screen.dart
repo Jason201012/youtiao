@@ -94,13 +94,17 @@ class BoardScreen extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Text('当日已完成',
+                                // N-P3-1（v3.2.1 审计）：本卡片的分子分母必须同域
+                                // （当日事件完成数 / 当日事件总数），否则「今日完成」
+                                // 改成完成日口径后会出现 >100% 的完成率。用户可见的
+                                // 「今日完成」统一走下方统计网格的「今日完成」卡。
+                                Text('当日事件完成',
                                     style: TextStyle(
                                         fontSize: 13,
                                         fontWeight: FontWeight.w500,
                                         color: ext.meta)),
                                 Text(
-                                    '${provider.todayCompleted} / ${provider.todayEventTotal}',
+                                    '${provider.todayEventsCompleted} / ${provider.todayEventTotal}',
                                     style: TextStyle(
                                         fontSize: 30,
                                         fontWeight: FontWeight.bold,
@@ -138,7 +142,9 @@ class BoardScreen extends StatelessWidget {
                         Expanded(
                           child: StatCard(
                             value: '${provider.todayCompleted}',
-                            label: '当日已完成',
+                            // N-P3-1（v3.2.1 审计）：口径改名「今日完成」——按完成日
+                            // 统计，与首页「今日完成」筛选、晚简报同一句话。
+                            label: '今日完成',
                             valueColor: progressColor,
                             // P2-5（v3.2.0 审计）：同上，跳「仅当日已完成」。
                             onTap: () => provider.requestHomeWithFilter(

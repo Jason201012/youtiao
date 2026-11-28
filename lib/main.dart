@@ -12,6 +12,7 @@ import 'package:dynamic_color/dynamic_color.dart';
 import 'package:todolist/services/notification_service.dart';
 import 'package:todolist/services/daily_briefing.dart';
 import 'package:todolist/services/background_service.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/app_log.dart';
 import 'package:todolist/services/app_nav.dart';
 import 'package:todolist/services/secure_window.dart';
@@ -1240,7 +1241,8 @@ void main() async {
     var end = DateTime(
         scheduled.year, scheduled.month, scheduled.day, task.dndEndHour, 5);
     if (!end.isAfter(scheduled)) {
-      end = end.add(const Duration(days: 1));
+      // P3-2（v3.2.1 审计）：日历日加法（DST 日「次日同时刻」不会偏一小时）。
+      end = addCalendarDays(end, 1);
     }
     return end;
   };

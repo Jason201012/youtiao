@@ -276,8 +276,39 @@ class AppLockProvider extends ChangeNotifier {
     _externalActivityUntil = DateTime.now().add(externalActivityGrace);
   }
 
-  /// 测试 / 极端路径可显式清空豁免标记。
-  static void clearExternalActivityForTest() => _externalActivityUntil = null;
+  /// N-P3-8（v3.2.1 审计）：立即清除豁免标记（生产路径用）。
+  ///
+  /// 旧实现只有 [clearExternalActivityForTest]，生产代码在「外部活动没真正启动」
+  /// 时没有清标记的手段：链接非法 / 没有可打开的应用 / 选择器抛异常后，标记仍
+  /// 存活整个窗口，此时用户真正切出 App 再回来，[onResumed] 会消费这个残留标记，
+  /// **不要求生物识别或锁屏密码**——应用锁是安全边界，必须按失败即清除处理。
+  static void clearExternalActivity() => _externalActivityUntil = null;
+
+  /// 测试 / 极端路径可显式清空豁免标记（等价于 [clearExternalActivity]）。
+  static void clearExternalActivityForTest() => clearExternalActivity();
+
+  /// N-P3-8（v3.2.1 审计）：是否存在尚未消费的豁免标记（回归测试用）。
+  @visibleForTesting
+  static bool get hasExternalActivityExemption =>
+      _externalActivityUntil != null;
+
+  /// N-P3-8（v3.2.1 审计）：带豁免的「启动外部活动」包装。
+  ///
+  /// 只有 [launch] 明确返回 true（外部活动确实被拉起）才保留豁免；返回 false
+  /// （`canLaunchUrl` 为假等）或抛异常时立即清除。旧用法是「先 mark、再自己
+  /// 启动」，失败路径全靠调用方记得清，实际上没人清。
+  static Future<bool> launchWithExemption(
+      Future<bool> Function() launch) async {
+    markExternalActivity();
+    var started = false;
+    try {
+      started = await launch();
+    } finally {
+      // 异常同样走这里：没起来就没有豁免可言。
+      if (!started) clearExternalActivity();
+    }
+    return started;
+  }
 
   static bool _consumeExternalActivityResume() {
     final until = _externalActivityUntil;

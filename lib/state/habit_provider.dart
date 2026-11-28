@@ -173,6 +173,8 @@ class HabitProvider extends ChangeNotifier {
       _checkIns
         ..clear()
         ..addAll(await db.loadCheckIns());
+      // N-P2-3（v3.2.1 审计）：存量打卡的目标快照回填（幂等，见方法注释）。
+      await _backfillTargetSnapshots();
       _dbLoadFailed = false; // 加载成功即脱离安全模式
     } catch (e, stack) {
       AppLog.d('HabitProvider 加载失败（习惯/打卡暂不可用）：$e\n$stack');
@@ -187,6 +189,49 @@ class HabitProvider extends ChangeNotifier {
     // 恢复路径缺口）。
     _confirmShownMarks.clear();
     notifyListeners();
+  }
+
+  /// N-P2-3（v3.2.1 审计）：存量打卡的目标快照回填（幂等）。
+  ///
+  /// v3.2.1 引入的 `CheckIn.targetAtWrite` 只保护**升级之后**写入的打卡；升级前的
+  /// 旧记录反序列化后为 null，[_targetFor] 回退当前目标——于是升级用户把每日目标
+  /// 从 8 改成 12，历史达标数仍整体归零（审计探针 D：8 杯记录达标数 1 → 0）。
+  ///
+  /// 口径：把「升级那一刻的目标」钉成历史快照（`targetAtWrite ??= effectiveTarget`）。
+  /// 真正的历史目标已无从还原，但这样至少保证用户此后改目标不会追溯改写历史，
+  /// 与「升级之后写入的打卡」行为一致。
+  ///
+  /// 回填结果**必须落库**：只改内存的话，下次冷启动会按当时的最新目标重新回填，
+  /// 等于没填（用户先改目标、再重启，历史照样归零）。
+  Future<void> _backfillTargetSnapshots() async {
+    final filled = _withBackfilledSnapshots(_checkIns, _habits);
+    if (identical(filled, _checkIns)) return; // 无缺失快照，零写入
+    _checkIns
+      ..clear()
+      ..addAll(filled);
+    await _persistCheckIns();
+  }
+
+  /// 为缺目标快照的打卡按 [habits] 的当前目标补齐（纯函数，回填与恢复共用）。
+  /// 找不到对应习惯的记录（历史脏数据）保持 null——没有可比对的目标。
+  static List<CheckIn> _withBackfilledSnapshots(
+      List<CheckIn> checkIns, List<Habit> habits) {
+    var missing = false;
+    for (final c in checkIns) {
+      if (c.targetAtWrite == null && habits.any((h) => h.id == c.habitId)) {
+        missing = true;
+        break;
+      }
+    }
+    if (!missing) return checkIns;
+    final targets = {for (final h in habits) h.id: h.effectiveTarget};
+    return [
+      for (final c in checkIns)
+        if (c.targetAtWrite == null && targets.containsKey(c.habitId))
+          c.withTargetSnapshot(targets[c.habitId]!)
+        else
+          c,
+    ];
   }
 
   /// 新建习惯（自动生成 id 与时间戳）。
@@ -1396,7 +1441,11 @@ class HabitProvider extends ChangeNotifier {
     final map = <DateTime, int>{};
     for (final c in _checkIns) {
       final h = byId(c.habitId);
-      if (h == null || !h.targetMetBy(c.value)) continue; // 只计达标
+      // N-P2-3（v3.2.1 审计）：达标判定必须与连续天数 / 详情热力图共用
+      // [_targetFor]（历史日取快照、今天取当前目标）。旧实现直读
+      // `h.targetMetBy(c.value)`（当前目标），于是同一天总览热力图说「未达标」、
+      // 详情热力图说「达标」——同一个习惯页两套口径（审计探针 E）。
+      if (h == null || !c.metBy(_targetFor(c, h))) continue; // 只计达标
       final d = DateTime(c.date.year, c.date.month, c.date.day);
       if (d.isBefore(start)) continue;
       map[d] = (map[d] ?? 0) + 1;
@@ -1494,6 +1543,9 @@ class HabitProvider extends ChangeNotifier {
     // 方向一「今晚该响的提醒不响」、方向二「已达标却仍弹该打卡啦」（正是 v2.9.3
     // 修掉的「达标仍提醒」在恢复路径复发），持续到下次打卡写入或重启。
     if (newCheckIns != null) {
+      // N-P2-3（v3.2.1 审计）：恢复进来的旧备份同样没有目标快照，按备份里携带的
+      // 目标补齐（与 load() 同口径）；落盘由本方法末尾的统一写入完成。
+      newCheckIns = _withBackfilledSnapshots(newCheckIns, newHabits ?? _habits);
       _checkIns
         ..clear()
         ..addAll(newCheckIns);

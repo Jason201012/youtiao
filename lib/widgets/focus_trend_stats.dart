@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/state/focus_provider.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
@@ -29,7 +30,8 @@ class _FocusTrendStatsState extends State<FocusTrendStats> {
 
   List<DateTime> _lastNDays(int n) {
     final today = _d(DateTime.now());
-    return List.generate(n, (i) => today.subtract(Duration(days: n - 1 - i)));
+    // P3-2（v3.2.1 审计）：日历日回退（同 trend_stats）。
+    return List.generate(n, (i) => addCalendarDays(today, -(n - 1 - i)));
   }
 
   List<int> _dailyMin(List<DateTime> days) =>
@@ -83,7 +85,7 @@ class _FocusTrendStatsState extends State<FocusTrendStats> {
       case TrendPeriod.week:
         final days = _lastNDays(7);
         values = _dailyMin(days);
-        final prev = days.map((d) => d.subtract(const Duration(days: 7))).toList();
+        final prev = days.map((d) => addCalendarDays(d, -7)).toList();
         compare = _dailyMin(prev);
         labels = days.map((d) => _wk[d.weekday - 1]).toList();
         highlight = values.length - 1;

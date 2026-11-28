@@ -11,6 +11,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/theme/tokens.dart';
@@ -88,14 +89,13 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     super.dispose();
   }
 
-  /// 把截止日期平移到 [day]（保留原时刻）；无截止日期的任务原样跳过。
-  Task _shiftTo(Task t, DateTime day) {
-    final d = t.dueDate;
-    if (d == null) return t;
-    return t.copyWith(
-      dueDate: DateTime(day.year, day.month, day.day, d.hour, d.minute),
-    );
-  }
+  /// 把截止日期（连同时间段任务的开始时间）整体平移到 [day]；无截止日期的任务
+  /// 原样跳过。
+  ///
+  /// N-P2-1（v3.2.1 审计）：改期统一委托 [Task.shiftedToDay]——旧实现只改
+  /// dueDate，14:00–15:00 的任务被批量改到次日后成了「昨天 14:00 → 明天 15:00」
+  /// 的跨天区间，与日历拖拽（已改用 shiftedToDay）自相矛盾。
+  Task _shiftTo(Task t, DateTime day) => t.shiftedToDay(day);
 
   Future<void> _apply() async {
     // P2-1（v3.0.8 审计）：防重入（见 [_applying]）——覆盖「确认对话框显示
@@ -117,14 +117,35 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
             .map((t) => t.id)
             .toSet()
         : <String>{};
+    // 追加标签：支持逗号 / 空格分隔，去重、去空，不覆盖已有标签。
+    final tags = _tagCtl.text
+        .split(RegExp(r'[,，\s]+'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    final otherDims =
+        _priority != null || _category != null || _pinned != null || tags.isNotEmpty;
+    // N-P3-4（v3.2.1 审计）：确认文案的计数口径。旧实现只写「将更新 N 项」+
+    // 「将跳过 M 条」，而 N 是**已选总数**（含被跳过的 M），用户读成 N+M 条。
+    // 现在显式给出「已选 X 项：将更新 Y 项，跳过 Z 项」。
+    final skippedCount = repeatingIds.length;
+    final willUpdate =
+        (dateChanging || otherDims) ? (count - skippedCount) : 0;
+    if (willUpdate == 0) {
+      // 全部任务都改不动（选了日期但全是重复任务 / 一个维度都没选）：不弹确认、
+      // 不落库，直接把结果交回调用方提示并退出多选。
+      Navigator.pop(
+          context, BatchEditResult(0, 0, skippedRepeating: skippedCount));
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('确认批量编辑？'),
         content: Text(
-          '将更新 $count 项任务'
-          '${_due == _DueMode.plusDays ? '（按「+N 天」顺延截止日期）' : ''}。'
-          '${repeatingIds.isEmpty ? '' : '\n将跳过 ${repeatingIds.length} 条重复任务（请在详情页使用「仅此一次改期」）。'}'
+          '已选 $count 项：将更新 $willUpdate 项'
+          '${_due == _DueMode.plusDays ? '（按「+N 天」顺延截止日期）' : ''}'
+          '${skippedCount == 0 ? '' : '，跳过 $skippedCount 条重复任务（日期改动对重复任务无效，请在详情页使用「仅此一次改期」）'}。'
           '此操作可被撤销。',
         ),
         actions: [
@@ -161,39 +182,41 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
       if (mounted) setState(() => _applying = false);
       return;
     }
-    // 追加标签：支持逗号 / 空格分隔，去重、去空，不覆盖已有标签。
-    final tags = _tagCtl.text
-        .split(RegExp(r'[,，\s]+'))
-        .map((s) => s.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-
     // 把「改期 + 字段覆盖」收敛成单一 transform：预演与实际落库共用同一份口径，
     // 不会出现「提示了但其实没事 / 没事但提示了」。
     Task transform(Task t) {
       var nt = t;
-      switch (_due) {
-        case _DueMode.today:
-          nt = _shiftTo(nt, today);
-          break;
-        case _DueMode.tomorrow:
-          nt = _shiftTo(nt, today.add(const Duration(days: 1)));
-          break;
-        case _DueMode.plusDays:
-          // P2-1：改为「各自 dueDate + N 天」——旧实现把每条任务统一平移到
-          // 「今天 + N」，对未来截止的任务实际是**提前**（截止被拉近），与弹窗
-          // 「按 +N 天顺延」的直觉语义不符。现保留原时分，各自在原截止日上加 N 天；
-          // 无截止日期的任务原样跳过（与 today/tomorrow 模式口径一致）。
-          final d = nt.dueDate;
-          if (days != null && d != null) {
-            nt = nt.copyWith(dueDate: d.add(Duration(days: days)));
-          }
-          break;
-        case _DueMode.clear:
-          nt = nt.copyWith(dueDate: null);
-          break;
-        case _DueMode.keep:
-          break;
+      // N-P3-4（v3.2.1 审计）：重复任务只跳过**日期维度**。旧实现把整条重复任务
+      // 从批量里剔除（excludeIds），于是「顺便把优先级也改了」对它们静默失效。
+      if (!dateChanging || !t.isRepeating) {
+        switch (_due) {
+          case _DueMode.today:
+            nt = _shiftTo(nt, today);
+            break;
+          case _DueMode.tomorrow:
+            // P3-2（v3.2.1 审计）：日历日加法，避免 DST 地区「明天」落到今天。
+            nt = _shiftTo(nt, addCalendarDays(today, 1));
+            break;
+          case _DueMode.plusDays:
+            // P2-1：改为「各自 dueDate + N 天」——旧实现把每条任务统一平移到
+            // 「今天 + N」，对未来截止的任务实际是**提前**（截止被拉近），与弹窗
+            // 「按 +N 天顺延」的直觉语义不符。现保留原时分，各自在原截止日上加 N 天；
+            // 无截止日期的任务原样跳过（与 today/tomorrow 模式口径一致）。
+            // N-P2-1（v3.2.1 审计）：整段平移（startDate 同步），日历日加法。
+            final d = nt.dueDate;
+            if (days != null && d != null) {
+              nt = _shiftTo(nt, addCalendarDays(d, days));
+            }
+            break;
+          case _DueMode.clear:
+            // N-P3-3（v3.2.1 审计）：清空截止日期必须同时清掉开始时间——只留
+            // startDate 的任务既不会出现在日历（日历要求 dueDate != null），
+            // 也没有截止提醒，等于「批量制造被遗忘的任务」。
+            nt = nt.copyWith(dueDate: null, startDate: null);
+            break;
+          case _DueMode.keep:
+            break;
+        }
       }
       if (_priority != null) nt = nt.copyWith(priority: _priority);
       if (_category != null) nt = nt.copyWith(category: _category);
@@ -225,11 +248,12 @@ class _BatchEditBodyState extends State<_BatchEditBody> {
     // U1-2：用定向版本拿到 batchId（撤销横幅按 id 定位本次编辑）。
     // P2-2（v3.0.7 审计）：batchUpdateAs 异步化并透传落盘结果（saved 随
     // BatchEditResult 回传给调用方消费）。
-    final r = await provider.batchUpdateAs(widget.ids, transform,
-        excludeIds: repeatingIds);
+    // N-P3-4（v3.2.1 审计）：不再传 excludeIds——日期维度已在 transform 内按
+    // 任务粒度跳过，其余维度（优先级 / 分类 / 标签 / 置顶）对重复任务照常生效。
+    final r = await provider.batchUpdateAs(widget.ids, transform);
     if (!mounted) return;
     Navigator.pop(context, BatchEditResult(r.$1, r.$2,
-        saved: r.$3, skippedRepeating: repeatingIds.length));
+        saved: r.$3, skippedRepeating: skippedCount));
   }
 
   @override

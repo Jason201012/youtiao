@@ -158,7 +158,10 @@ class _CoreGrid extends StatelessWidget {
         ? '0'
         : '${today.habitDone}/${today.habitExpected}';
     final items = [
-      _Item(value: '${today.todoCount - today.completedToday}', label: '今日待办'),
+      // N-P3-1（v3.2.1 审计）：待办数直接取列表长度。旧写法 `todoCount −
+      // completedToday` 在「今日完成」改为完成日口径后会把「提前完成未来任务」
+      // 也算成今日已办的减项，数字偏小。
+      _Item(value: '${today.pendingTasks.length}', label: '今日待办'),
       _Item(value: '${today.completedToday}', label: '今日已完成'),
       _Item(value: '${today.focusMinutes}', label: '今日专注(分)'),
       _Item(value: habitValue, label: '习惯打卡'),

@@ -299,7 +299,9 @@ class _CoreMetrics extends StatelessWidget {
         ? '0'
         : '${today.habitDone}/${today.habitExpected}';
     final items = [
-      _Cell(value: '${today.todoCount - today.completedToday}', label: '今日待办', color: accent),
+      // N-P3-1（v3.2.1 审计）：同 today_screen——待办数取列表长度，避免
+      // 「今日完成」改完成日口径后出现「待办 = 总数 − 完成数」的错位。
+      _Cell(value: '${today.pendingTasks.length}', label: '今日待办', color: accent),
       _Cell(value: '${today.completedToday}', label: '今日已完成', color: accent),
       _Cell(value: '${today.focusMinutes}', label: '今日专注(分)', color: accent),
       _Cell(value: habitValue, label: '习惯打卡', color: accent),

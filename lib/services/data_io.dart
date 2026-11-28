@@ -170,10 +170,16 @@ class DataIo {
   /// 通过系统分享面板分享一个本地文件。
   static Future<void> shareFile(File file, {String mimeType = 'application/json'}) async {
     // U-1：分享面板属于当前操作，返回时豁免一次应用锁重新上锁。
+    // N-P3-8（v3.2.1 审计）：分享面板没起来（抛异常）时立即清标记。
     AppLockProvider.markExternalActivity();
-    await SharePlus.instance.share(
-      ShareParams(files: [XFile(file.path, mimeType: mimeType)]),
-    );
+    try {
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(file.path, mimeType: mimeType)]),
+      );
+    } catch (_) {
+      AppLockProvider.clearExternalActivity();
+      rethrow;
+    }
   }
 
   /// 把图片字节写入临时目录并唤起系统分享面板（微信/QQ/相册等）。
@@ -187,12 +193,18 @@ class DataIo {
     final file = File('${dir.path}/$fileName');
     await file.writeAsBytes(bytes, flush: true);
     AppLockProvider.markExternalActivity();
-    await SharePlus.instance.share(
-      ShareParams(
-        files: [XFile(file.path, mimeType: 'image/png')],
-        text: text,
-      ),
-    );
+    try {
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'image/png')],
+          text: text,
+        ),
+      );
+    } catch (_) {
+      // N-P3-8（v3.2.1 审计）：同 shareFile，失败即清除豁免。
+      AppLockProvider.clearExternalActivity();
+      rethrow;
+    }
   }
 
   /// 把 PNG 字节保存到系统相册（Pictures/有条），Android 10+ 走 MediaStore 免权限。
@@ -380,6 +392,8 @@ class DataIo {
         allowedExtensions: extensions,
       );
     } catch (e) {
+      // N-P3-8（v3.2.1 审计）：选择器没起来时立即清豁免标记（失败即清除）。
+      AppLockProvider.clearExternalActivity();
       return PickedText.error('无法打开文件选择器：$e');
     }
     // file_picker v12 起 pickFiles() 直接返回 List<PlatformFile>，

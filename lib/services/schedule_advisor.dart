@@ -9,6 +9,7 @@
 library;
 
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 
 // P3-1 / P3-13（v2.9.6 审计）：[dueCompareKey] / [dueIsPureDateForm] 的定义
 // 已**下沉到 `models/task.dart`**——`Task.isOverdue`（models 层）也要消费
@@ -221,7 +222,9 @@ ScheduleAdvice buildScheduleAdvice(
 }) {
   final base = now ?? DateTime.now();
   final from = DateTime(base.year, base.month, base.day, base.hour, base.minute);
-  final dayEnd = DateTime(base.year, base.month, base.day).add(const Duration(days: 1));
+  // P3-2（v3.2.1 审计）：日历日加法——DST 切换日只有 23 小时，+24h 会越过午夜。
+  final dayEnd =
+      addCalendarDays(DateTime(base.year, base.month, base.day), 1);
   final def = defaultMinutes <= 0 ? kDefaultEstimateMinutes : defaultMinutes;
 
   final sorted = pending.toList()..sort((a, b) => compareForSchedule(a, b, def));

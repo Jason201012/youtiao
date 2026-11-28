@@ -998,7 +998,8 @@ class Task {
   }) {
     if (dates.isEmpty) return null;
     final today = DateTime(now.year, now.month, now.day);
-    final cutoff = _ymd(today.subtract(Duration(days: keepDays)));
+    // P3-2（v3.2.1 审计）：日历日回退（DST 地区保留窗口不会多留 / 少留一天）。
+    final cutoff = _ymd(addCalendarDays(today, -keepDays));
     final kept = <String>{};
     var changed = false;
     for (final s in dates) {

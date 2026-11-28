@@ -380,15 +380,27 @@ void main() {
       expect(p.todayEventTotal, 3); // 今天截止 + 每天循环 + 无截止(视为当天)
     });
 
-    test('todayCompleted 统计当日事件（含无截止）中已完成', () async {
+    test('todayEventsCompleted / todayCompleted 拆分（事件口径 vs 完成日口径）', () async {
       // P2-5（v3.2.0 审计）：旧断言把「无截止且 completedAt 为空的历史完成」
-      // 永久计入当日事件；新口径下无截止已完成任务仅在完成当天计入，
-      // 与晚简报的 completedAt 口径一致。
+      // 永久计入当日事件；新口径下无截止已完成任务仅在完成当天计入。
+      // N-P3-1（v3.2.1 审计）：**本用例的 todayCompleted 断言改口径**——它此前
+      // 编码的是「当日事件 ∩ 已完成」，于是「今天到期、3 天前就勾掉」也算今日完成，
+      // 与晚简报按 completedAt 统计的口径打架。现在拆成两个数：
+      //   · todayEventsCompleted = 今天该做的事里已勾掉的（分母同域 → 完成率）；
+      //   · todayCompleted = 完成日落在今天的（与简报 / 首页「今日完成」筛选同源）。
       final today = DateTime.now();
       final p = await buildWith([
-        mk('1', due: today, status: TaskStatus.done, title: '今天已完成'),
+        mk('1',
+            due: today,
+            status: TaskStatus.done,
+            completedAt: today,
+            title: '今天已完成'),
         mk('2', due: today, title: '今天未完成'),
-        mk('3', repeating: true, status: TaskStatus.done, title: '每天已完成'),
+        mk('3',
+            repeating: true,
+            status: TaskStatus.done,
+            completedAt: today,
+            title: '每天已完成'),
         mk('4',
             status: TaskStatus.done,
             completedAt: today,
@@ -399,7 +411,8 @@ void main() {
             title: '无截止历史完成'),
       ]);
       expect(p.todayEventTotal, 4); // 今天截止(2) + 每天循环(1) + 无截止今天完成(1)
-      expect(p.todayCompleted, 3); // 今天已完成 + 每天已完成 + 无截止今天完成
+      expect(p.todayEventsCompleted, 3);
+      expect(p.todayCompleted, 3, reason: '三条的完成日都是今天');
       expect(p.todayCompletionRate, closeTo(3 / 4, 1e-9));
     });
 

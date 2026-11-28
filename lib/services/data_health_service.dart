@@ -27,6 +27,13 @@ enum DataHealthIssueType {
 
   /// 超期未清理的回收站条目。
   staleTrash,
+
+  /// 起止时间非法（开始晚于截止）。
+  ///
+  /// N-P3-3（v3.2.1 审计）：`Task.hasInvalidTimeRange` 自 v3.2.0 就存在，注释
+  /// 写「录入弹层保存前与数据体检共用」，实际全仓零消费——批量改期 / 备份恢复 /
+  /// CSV 导入造出的 start > due 脏数据无人扫描。此处把它接进体检。
+  invalidTimeRange,
 }
 
 /// 单条体检问题。重复任务类问题以组内**首条**任务为锚点，
@@ -144,6 +151,18 @@ class DataHealthService {
               '（${missing.map((a) => a.fileName).join('、')}），将剔除失效引用',
         ));
       }
+      // 5) 起止时间非法（N-P3-3，v3.2.1 审计）：开始晚于截止的区间会让排程 /
+      //    占时 / 日历区间带全部按异常数据计算，且任务行会显示自相矛盾的
+      //    「起 14:00 · 07:00」。批量改期与导入是主要入口，历史脏数据同样在此暴露。
+      if (t.hasInvalidTimeRange) {
+        issues.add(DataHealthIssue(
+          type: DataHealthIssueType.invalidTimeRange,
+          taskId: t.id,
+          title: t.title,
+          detail: '「${t.title}」的开始时间晚于截止时间，'
+              '将保留截止时间并清空开始时间',
+        ));
+      }
     }
 
     // 4) 超期回收站条目：与 TaskProvider._cleanupTrashIfNeeded 同口径
@@ -191,6 +210,12 @@ class DataHealthService {
               existingAttachmentKeys.contains('$taskId/${a.fileName}') ||
               uncertainKeys.contains('$taskId/${a.fileName}'))
           .toList();
+
+  /// 修复「起止时间非法」：保留截止时间、清空开始时间（N-P3-3，v3.2.1 审计）。
+  ///
+  /// 选「去掉开始时间」而不是「把截止推到开始之后」：截止时间才是用户的承诺，
+  /// 静默改截止会让任务在错误的时刻变逾期；去掉开始时间只丢一个无法成立的区间。
+  static Task dropInvalidStart(Task t) => t.copyWith(startDate: null);
 
   /// 重复任务组内应**保留**的首条 id 集合（供修复后核对）。
   static Set<String> keepIdsOfDuplicates(List<DataHealthIssue> issues) =>

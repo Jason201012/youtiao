@@ -342,9 +342,16 @@ class _QuickEntrySheetState extends State<QuickEntrySheet> {
       } catch (_) {
         final kept =
             await AttachmentService.existingRefs(created.id, created.attachments);
-        await provider.updateTask(created.copyWith(attachments: kept));
+        // N-P3-5（v3.2.1 审计）：消费落库结果——旧实现丢弃 updateTask 的返回值，
+        // 剔除只写在内存里，DB 仍留着悬空引用，重启后「有引用、无文件」会复活。
+        final repairSaved =
+            await provider.updateTask(created.copyWith(attachments: kept));
         if (context.mounted) {
-          showSheetMessage(context, '附件未能保存，任务已创建（可重新添加附件）',
+          showSheetMessage(
+              context,
+              repairSaved
+                  ? '附件未能保存，任务已创建（可重新添加附件）'
+                  : '附件未能保存，且修复结果未写入；重启后可能需要重新添加附件',
               isError: true);
         }
       }

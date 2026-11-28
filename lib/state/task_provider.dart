@@ -507,6 +507,58 @@ class TaskProvider extends ChangeNotifier {
     _dailyMit.removeWhere((k, _) => k != keepKey);
   }
 
+  /// N-P3-10（v3.2.1 审计）：最近一次「恢复删除把某条挤出今日三件」的提示。
+  String? _lastMitEvictionNote;
+
+  /// 取出并清空上面那条提示（UI 在撤销 / 恢复后追加告知，一次性消费）。
+  String? takeMitEvictionNote() {
+    final note = _lastMitEvictionNote;
+    _lastMitEvictionNote = null;
+    return note;
+  }
+
+  /// N-P3-10（v3.2.1 审计）：恢复已删除的任务后，把今日三件的名额结算清楚。
+  ///
+  /// 场景：删除 B → 补选 D（原始列表里 B 作为悬空 id 留在最前）→ 撤销删除 B。
+  /// 读取层 [todayMit] 过滤后取前 3 个，D 会被**静默**挤出去——用户刚选的任务
+  /// 消失且没有任何提示。这里先在原始列表上显式挤掉「最后一个有效 id」（即最近
+  /// 补选的那一条），把结果记成提示交给 UI，再落盘；读取层不再需要靠截断兜底。
+  void _settleMitAfterRestore(Iterable<String> restoredIds) {
+    final key = _ymd(DateTime.now());
+    final raw = _dailyMit[key];
+    if (raw == null || raw.isEmpty) return;
+    if (!restoredIds.any(raw.contains)) return; // 恢复的任务本就不在今日三件里
+    final valid = raw.where((id) => _tasks.any((t) => t.id == id)).toList();
+    if (valid.length <= kDailyMitMax) return;
+    final evicted = valid.last;
+    _dailyMit[key] = raw.where((id) => id != evicted).toList();
+    final title = _tasks.firstWhere((t) => t.id == evicted).title;
+    _lastMitEvictionNote = '「$title」已移出今日三件（恢复的任务占用了名额）';
+    unawaited(_persistDailyMit());
+  }
+
+  /// N-P3-10（v3.2.1 审计）：剪掉「既不在活动列表、也不在回收站」的 MIT id。
+  ///
+  /// 这类 id 永远不可能再被恢复（彻底删除是不可逆的），留着只会占住今日三件的
+  /// 原始列表位置，并在 id 被复用时产生「新任务莫名其妙已在今日三件」的错觉。
+  /// 由 [load] 在读库成功后调用，覆盖 Dart 与原生两条回收站清理路径。
+  void _pruneUnknownMitIds() {
+    if (_dailyMit.isEmpty) return;
+    final known = <String>{
+      for (final t in _tasks) t.id,
+      for (final t in _trash) t.id,
+    };
+    var changed = false;
+    for (final entry in _dailyMit.entries.toList()) {
+      final kept = entry.value.where(known.contains).toList();
+      if (kept.length != entry.value.length) {
+        _dailyMit[entry.key] = kept;
+        changed = true;
+      }
+    }
+    if (changed) unawaited(_persistDailyMit());
+  }
+
   Future<bool> _persistDailyMit() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -607,7 +659,8 @@ class TaskProvider extends ChangeNotifier {
   /// 完成 3 次即计 3 次，而不是被午夜重置抹成 1 次。
   int get weeklyCompletedCount {
     final start = _mondayOf(DateTime.now());
-    final end = start.add(const Duration(days: 6, hours: 23, minutes: 59, seconds: 59));
+    // P3-2（v3.2.1 审计）：周日 23:59:59 = 下周一减 1 秒，全程日历日运算。
+    final end = addCalendarDays(start, 7).subtract(const Duration(seconds: 1));
     int n = 0;
     for (final entry in completionDayCounts.entries) {
       if (!entry.key.isBefore(start) && !entry.key.isAfter(end)) n += entry.value;
@@ -619,7 +672,7 @@ class TaskProvider extends ChangeNotifier {
   static DateTime _mondayOf(DateTime d) {
     final today = DateTime(d.year, d.month, d.day);
     final diff = today.weekday - DateTime.monday;
-    return today.subtract(Duration(days: diff));
+    return addCalendarDays(today, -diff);
   }
 
   // ===== 本地自动备份（滚动快照，S1）=====
@@ -2361,6 +2414,9 @@ class TaskProvider extends ChangeNotifier {
         for (final t in expired) {
           AttachmentService.removeDir(t.id);
         }
+        // N-P3-10（v3.2.1 审计）：到期清理同样是不可逆删除，必须剪掉 MIT 里的
+        // 对应 id——旧实现只覆盖 permanentDelete / clearTrash，这条路径漏了。
+        _pruneMitIds(expired.map((t) => t.id));
       } else {
         // N10（v3.0.9 审计）：落盘失败**回滚内存**——旧实现 removeWhere 已
         // 生效、通知已撤、文件保留，但条目重启复活且全程无提示（与同文件
@@ -2568,7 +2624,9 @@ class TaskProvider extends ChangeNotifier {
     for (final issue in report.issues) {
       final isSub = issue.type == DataHealthIssueType.emptySubtask;
       final isAtt = issue.type == DataHealthIssueType.missingAttachment;
-      if (!isSub && !isAtt) continue;
+      // N-P3-3（v3.2.1 审计）：起止时间非法同样按任务就地修复。
+      final isRange = issue.type == DataHealthIssueType.invalidTimeRange;
+      if (!isSub && !isAtt && !isRange) continue;
       Task? t;
       final i = _tasks.indexWhere((x) => x.id == issue.taskId);
       var inTrash = false;
@@ -2599,6 +2657,10 @@ class TaskProvider extends ChangeNotifier {
           next = next.copyWith(attachments: cleaned);
           changed = true;
         }
+      }
+      if (isRange && next.hasInvalidTimeRange) {
+        next = DataHealthService.dropInvalidStart(next);
+        changed = true;
       }
       if (changed) {
         if (inTrash) {
@@ -2877,6 +2939,15 @@ class TaskProvider extends ChangeNotifier {
       // 的自愈全部拒掉（内存改了、库没写，回执却说已解除）。
       _dbLoadFailed = false;
       _tasksLoadedFromDb = true;
+      // N-P3-10（v3.2.1 审计）：今日三件悬空 id 的统一收口。
+      //
+      // v3.2.1 只在 permanentDelete / clearTrash 两条路径清了 MIT；而「回收站
+      // 到期清理」有两条路径都不清——Dart 侧 _cleanupTrashIfNeeded 与原生
+      // MidnightResetReceiver.cleanupTrashSqlite（Kotlin 只碰 sqlite）。悬空 id
+      // 于是可长期驻留，并可能在某次 id 复用后「继承」今日三件位置。
+      // 这里在读库成功后按「既不在活动列表、也不在回收站」剪一次：回收站条目
+      // 仍可恢复，必须保留其 id（撤销删除后原选择要能自动回来）。
+      _pruneUnknownMitIds();
     } catch (e, s) {
       // S13 修复：数据库加载/读取失败 → 进入只读安全模式，禁止后续 [_persist]
       // 用内存态（可能为空）覆盖尚可抢救的坏库。标记后 rethrow，由 main._safeLoad
@@ -3470,30 +3541,30 @@ class TaskProvider extends ChangeNotifier {
       title: '回复客户邮件',
       priority: Priority.medium,
       category: Category.work,
-      dueDate: DateTime.now().add(const Duration(days: 1)),
+      dueDate: addCalendarDays(DateTime.now(), 1),
     ),
     Task(
       id: '3',
       title: '买周末食材',
       priority: Priority.low,
       category: Category.life,
-      dueDate: DateTime.now().add(const Duration(days: 2)),
+      dueDate: addCalendarDays(DateTime.now(), 2),
     ),
     Task(
       id: '4',
       title: '阅读《设计心理学》',
       priority: Priority.medium,
       category: Category.study,
-      dueDate: DateTime.now().add(const Duration(days: 3)),
+      dueDate: addCalendarDays(DateTime.now(), 3),
     ),
     Task(
       id: '5',
       title: '提交季度报表',
       priority: Priority.high,
       category: Category.work,
-      dueDate: DateTime.now().add(const Duration(days: -1)),
+      dueDate: addCalendarDays(DateTime.now(), -1),
       status: TaskStatus.done,
-      completedAt: DateTime.now().add(const Duration(days: -2)),
+      completedAt: addCalendarDays(DateTime.now(), -2),
     ),
     Task(
       id: '6',
@@ -3501,7 +3572,7 @@ class TaskProvider extends ChangeNotifier {
       priority: Priority.low,
       category: Category.life,
       status: TaskStatus.done,
-      completedAt: DateTime.now().add(const Duration(days: -4)),
+      completedAt: addCalendarDays(DateTime.now(), -4),
     ),
     Task(
       id: '7',
@@ -3509,7 +3580,7 @@ class TaskProvider extends ChangeNotifier {
       priority: Priority.high,
       category: Category.study,
       status: TaskStatus.done,
-      completedAt: DateTime.now().add(const Duration(days: -6)),
+      completedAt: addCalendarDays(DateTime.now(), -6),
     ),
   ];
 
@@ -3589,15 +3660,31 @@ class TaskProvider extends ChangeNotifier {
     return _tasks.where((t) => _isEventToday(t, now)).length;
   }
 
-  /// 当日已完成：当日事件中已完成的任务数。
-  int get todayCompleted {
+  /// 当日事件中已勾选的任务数（**事件口径**）。
+  ///
+  /// N-P3-1（v3.2.1 审计）：这个值只用于「当日任务完成率」的分子——分母是
+  /// [todayEventTotal]，两者必须同域，否则完成率会算出 >100%。用户可见的
+  /// 「今日完成」一律走 [todayCompleted]。
+  int get todayEventsCompleted {
     final now = DateTime.now();
     return _tasks.where((t) => _isEventToday(t, now) && t.done).length;
   }
 
-  /// 当日任务完成率：当日已完成 / 当日事件总数。
+  /// 今日完成的任务数（**完成日口径**）。
+  ///
+  /// N-P3-1（v3.2.1 审计）：旧实现是「当日事件 ∩ 已完成」，于是「今天到期、
+  /// 3 天前就勾掉」的任务被算进今天的「已完成」，而晚简报按 `completedAt`
+  /// 统计为 0（同一屏两套口径）。现统一为完成日：
+  /// [isTaskCompletedOn] → [Task.isDoneOn]（重复任务读 doneDates，
+  /// 一次性任务读 completedAt），与简报 / 首页「今日完成」筛选同源。
+  int get todayCompleted {
+    final now = DateTime.now();
+    return _tasks.where((t) => isTaskCompletedOn(t, now)).length;
+  }
+
+  /// 当日任务完成率：当日事件中已完成 / 当日事件总数（同域，恒 ≤ 1）。
   double get todayCompletionRate =>
-      todayEventTotal == 0 ? 0 : todayCompleted / todayEventTotal;
+      todayEventTotal == 0 ? 0 : todayEventsCompleted / todayEventTotal;
 
   /// 各分类完成比例
   Map<Category, double> categoryProgress() {
@@ -4520,7 +4607,9 @@ class TaskProvider extends ChangeNotifier {
   Future<bool> endRepeat(String taskId, {bool markDone = false}) async {
     final i = _tasks.indexWhere((t) => t.id == taskId);
     if (i == -1) return false;
-    final yesterday = DateTime.now().subtract(const Duration(days: 1));
+    // P3-2（v3.2.1 审计）：日历日回退——DST 地区「昨天」会错位到今天，
+    // 导致「结束重复」后今天仍出现该循环。
+    final yesterday = addCalendarDays(DateTime.now(), -1);
     final now = DateTime.now();
     _tasks[i] = _tasks[i].copyWith(
       repeatUntil: _ymd(yesterday),
@@ -4601,6 +4690,9 @@ class TaskProvider extends ChangeNotifier {
     // 1) 防撞（F-2）：目标日是循环日 → 仅 skip 本次，交由原循环覆盖。
     final coveredByLoop = src.repeatsOn(target);
     // 2) 把原 occurrence 当天加入 skipDates，避免原任务当天仍出现/提醒。
+    // N-P3-9（v3.2.1 审计）：先记住「这一天此前是否已被跳过」——下面副本落盘
+    // 失败时要回滚本次跳过，但用户早前手动跳过的这一天不该被顺手取消。
+    final wasSkipped = src.skipDates.contains(Task.ymdKey(origDay0));
     await skipOccurrence(taskId, day: origDay0);
     if (coveredByLoop) {
       // P3-2（v3.0.8 审计）：coveredByLoop 必须如实带出（此前误回 none 常量、
@@ -4612,6 +4704,42 @@ class TaskProvider extends ChangeNotifier {
     // 回退才用 dueDate。此前只取 `src.dueDate`，而重复任务的 dueDate 被录入侧钉成
     // 「创建当天 23:59」→「把今天 7 点这件事挪到明天」实际得到「明天 23:59 提醒」。
     final hhmm = src.repeatMinute;
+    // N-P2-2（v3.2.1 审计）：副本的起止时间不能再按「occurrence 日 → 目标日」
+    // 的日差平移 startDate。旧实现锚在 origDay0（默认今天），而 startDate 是
+    // **任务创建时**写入的，两者只有「创建日 == 今天」时才对齐：
+    //   · 11/20 建的「每天 14:00–15:00」在 11/28 改到 11/29 → 副本 start 仍是
+    //     11/21 14:00，一生下来就是跨天区间（探针 A）；
+    //   · repeatMinute 默认 07:00 早于开始时刻 14:00 → 副本 start 14:00 > due 07:00，
+    //     `hasInvalidTimeRange` 为真，任务行出现「起 14:00 · 07:00」（探针 B）。
+    // 现在的锚点是**原截止日**：保持原任务「开始日 − 截止日」的日差（同日任务 = 0，
+    // 跨天区间为负），把开始时刻落到目标日（或目标日前若干日）的同一时分；随后若
+    // 提醒时刻（repeatMinute）不晚于开始时刻，用原区间时长把截止对齐到区间末端。
+    final srcStart = src.startDate;
+    final srcDue = src.dueDate;
+    final srcDueDay = srcDue == null ? origDay0 : dateOnlyOf(srcDue);
+    DateTime? newStart;
+    if (srcStart != null) {
+      final startOffset = calendarDaysBetween(srcDueDay, dateOnlyOf(srcStart));
+      final startDay = addCalendarDays(target, startOffset);
+      newStart = DateTime(startDay.year, startDay.month, startDay.day,
+          srcStart.hour, srcStart.minute);
+    }
+    var newDue = DateTime(
+      target.year,
+      target.month,
+      target.day,
+      hhmm != null ? hhmm ~/ 60 : (srcDue?.hour ?? 9),
+      hhmm != null ? hhmm % 60 : (srcDue?.minute ?? 0),
+    );
+    if (newStart != null && !newDue.isAfter(newStart)) {
+      // 截止早于（或等于）开始时刻：把截止拉到区间末端，块长度取原「开始 → 截止」
+      // 的时长（无有效原区间时退回 1 小时），保证副本不携带非法区间。
+      final startRef = srcStart ?? newStart;
+      final span = (srcDue != null && srcDue.isAfter(startRef))
+          ? srcDue.difference(startRef)
+          : const Duration(hours: 1);
+      newDue = newStart.add(span);
+    }
     final copy = src.copyWith(
       id: '', // addTask 会分配新 id
       repeat: RepeatType.none,
@@ -4628,13 +4756,7 @@ class TaskProvider extends ChangeNotifier {
       monthlyWeekday: null,
       monthlyWeekIndex: null,
       monthlyFromEnd: 0,
-      dueDate: DateTime(
-        newDay.year,
-        newDay.month,
-        newDay.day,
-        hhmm != null ? hhmm ~/ 60 : (src.dueDate?.hour ?? 9),
-        hhmm != null ? hhmm % 60 : (src.dueDate?.minute ?? 0),
-      ),
+      dueDate: newDue,
       status: TaskStatus.todo,
       completedAt: null,
       // P2-2（v2.8.6 审计）：副本必须清空 occurrence 级完成历史。此前 copyWith
@@ -4650,14 +4772,17 @@ class TaskProvider extends ChangeNotifier {
       // 置顶是用户对原任务的排序偏好，一次性副本都不该带走。
       focusSecTotal: 0,
       pinned: false,
-      // 时间段任务的开始时间按同一日差整体平移，避免副本一出生就是跨天区间。
-      startDate: src.startDate == null
-          ? null
-          : addCalendarDays(src.startDate!, calendarDaysBetween(origDay0, target)),
+      // 时间段任务的开始时间按「原截止日 → 目标日」的日差整体平移（见上方 N-P2-2）。
+      startDate: newStart,
     );
     final created = await addTask(copy);
     // P3-2（v3.0.8 审计）：副本落盘失败（addTask 已回滚内存返回 null）单独成义。
     if (created == null) {
+      // N-P3-9（v3.2.1 审计）：失败必须**回滚本次跳过**。旧实现只把 copyFailed
+      // 交给 UI 说「请重试」，而界面上没有可点的重试；10 秒撤销消失后，用户只能
+      // 去未来 30 天预览里找到「已跳过」并手动取消——原 occurrence 静默消失。
+      // 回滚后世界回到操作前，重试不会叠加跳过；撤销横幅仍在时的 unskip 幂等。
+      if (!wasSkipped) await unskipOccurrence(taskId, day: origDay0);
       return (copy: null, coveredByLoop: false, copyFailed: true, noop: false, missing: false, attachmentsDropped: false);
     }
     var attachmentsDropped = false;
@@ -5358,16 +5483,15 @@ class TaskProvider extends ChangeNotifier {
   /// P0-2 / U1-2（v2.9.5 审计）：[postponeTo] 的**定向**版本，返回
   /// `(batchId, 条数, saved)`（末位为落盘结果，P2-2 v3.0.7 审计新增）。
   /// 顺延与批量编辑共用 [_editUndoLog]，故同样可被精确撤销。
+  ///
+  /// N-P2-1（v3.2.1 审计）：改期语义统一走 [Task.shiftedToDay]——旧实现只改
+  /// dueDate，14:00–15:00 的时间段任务会被顺延成「昨天 14:00 → 明天 15:00」的
+  /// 跨天区间（与 v3.2.0 P2-1 的日历拖拽完全同构，只是换了入口）。平移真源现在
+  /// 只有一处：日历拖拽 / 批量改期 / 逾期顺延共用同一方法。
   Future<(int, int, bool)> postponeToAs(
           List<String> ids, DateTime targetDay) async =>
-      batchUpdateAs(ids, (t) {
-        final d = t.dueDate;
-        if (d == null) return t;
-        return t.copyWith(
-          dueDate: DateTime(
-              targetDay.year, targetDay.month, targetDay.day, d.hour, d.minute),
-        );
-      }, skipRepeatingIds: true);
+      batchUpdateAs(ids, (t) => t.shiftedToDay(targetDay),
+          skipRepeatingIds: true);
 
   // ===== 删除（移入回收站，带撤销）=====
   // 用批量撤销缓冲，使「单个删除」与「多选批量删除」共用同一套撤销逻辑。
@@ -5569,6 +5693,8 @@ class TaskProvider extends ChangeNotifier {
       _scheduleRemindersFor(r);
       _renumberSection(_sectionNameOf(r));
     }
+    // N-P3-10（v3.2.1 审计）：按原始列表显式结算今日三件名额（见方法注释）。
+    _settleMitAfterRestore(batch.map((t) => t.id));
     notifyListeners();
     final saved = await _persist(); // P2-2（v3.0.7 审计）：透传落盘结果
     _syncTrashExpireNotice(); // P1-12：撤销删除后重排
@@ -5628,6 +5754,8 @@ class TaskProvider extends ChangeNotifier {
     // 就地补算拼音，全拼搜索当次即可命中，不必等下一次冷启动的 load() heal。
     final restored = (_tryHealPinyin(t) ?? t).copyWith(deletedAt: null);
     _tasks.insert(0, restored);
+    // N-P3-10（v3.2.1 审计）：恢复后结算今日三件名额（同 undoDelete 口径）。
+    _settleMitAfterRestore([restored.id]);
     notifyListeners();
     final ok = await _persist();
     if (ok) {

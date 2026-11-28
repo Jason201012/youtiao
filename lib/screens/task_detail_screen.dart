@@ -159,12 +159,15 @@ class _NoteTextState extends State<_NoteText> {
     }
     try {
       // U-1：外链属于当前操作的延伸，返回时豁免一次 resumed 上锁。
-      AppLockProvider.markExternalActivity();
-      if (await canLaunchUrl(uri)) {
+      // N-P3-8（v3.2.1 审计）：改走 launchWithExemption——旧实现先 mark 再
+      // `canLaunchUrl`，链接没打开（无浏览器 / 抛异常）时标记仍残留 90 秒，
+      // 这期间用户真正切出 App 再回来可免验证。
+      final started = await AppLockProvider.launchWithExemption(() async {
+        if (!await canLaunchUrl(uri)) return false;
         await launchUrl(uri, mode: LaunchMode.externalApplication);
-      } else {
-        if (context.mounted) _tip(context, '没有可打开链接的应用');
-      }
+        return true;
+      });
+      if (!started && context.mounted) _tip(context, '没有可打开链接的应用');
     } catch (_) {
       if (context.mounted) _tip(context, '打开链接失败');
     }

@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/schedule_advisor.dart' show kDefaultEstimateMinutes;
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
@@ -91,8 +92,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
     });
   }
 
+  // P3-2（v3.2.1 审计）：日历日加减（DST 地区翻周不会移位一天）。
   void _shiftWeek(int delta) =>
-      setState(() => _viewDate = _viewDate.add(Duration(days: 7 * delta)));
+      setState(() => _viewDate = addCalendarDays(_viewDate, 7 * delta));
 
   /// 把任务改期到 newDate（保留原时分），并提示。
   ///
@@ -666,7 +668,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Widget _buildWeekView(TaskProvider provider, Color base, bool isDark,
       Color onBg, dynamic ext, DateTime today) {
     final start = _weekStart(_viewDate);
-    final days = List.generate(7, (i) => start.add(Duration(days: i)));
+    final days = List.generate(7, (i) => addCalendarDays(start, i));
     const labels = ['一', '二', '三', '四', '五', '六', '日'];
 
     return Container(
@@ -1062,7 +1064,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
 /// 某日期所在周的周一（每周首日）。
 DateTime _weekStart(DateTime d) {
   final base = DateTime(d.year, d.month, d.day);
-  return base.subtract(Duration(days: base.weekday - 1));
+  return addCalendarDays(base, -(base.weekday - 1));
 }
 
 bool _sameDay(DateTime a, DateTime b) =>

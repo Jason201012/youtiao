@@ -1,4 +1,5 @@
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 
 /// iCal (.ics) 标准格式导入 / 导出。
 ///
@@ -273,7 +274,8 @@ DateTime? _exportDue(Task t) {
   // 今天在该时刻的落点是否还没过去（PT0S 语义：提醒时刻 == DUE 时刻）。
   final todaySlot = DateTime(now.year, now.month, now.day,
       (hhmm ~/ 60).clamp(0, 23), (hhmm % 60).clamp(0, 59));
-  final from = todaySlot.isAfter(now) ? now : now.add(const Duration(days: 1));
+  // P3-2（v3.2.1 审计）：日历日加法（DST 地区「明天」不会落回今天）。
+  final from = todaySlot.isAfter(now) ? now : addCalendarDays(now, 1);
   final first = _firstOccurrence(t, from: from);
   if (first == null) return t.dueDate;
   return DateTime(

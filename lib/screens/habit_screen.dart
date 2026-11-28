@@ -4,6 +4,7 @@ import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:provider/provider.dart';
 import 'package:todolist/models/achievement.dart';
 import 'package:todolist/models/habit.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/state/habit_provider.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/state/focus_provider.dart';
@@ -1882,9 +1883,8 @@ class _HabitDetailSheet extends StatelessWidget {
     final picked = await showDatePicker(
       context: context,
       // initialDate 必须同落在 [firstDate, lastDate] 内，否则断言崩溃。
-      initialDate: firstDate.isBefore(today)
-          ? today.subtract(const Duration(days: 1))
-          : today,
+      // P3-2（v3.2.1 审计）：日历日回退（DST 地区「昨天」不会错位到今天）。
+      initialDate: firstDate.isBefore(today) ? addCalendarDays(today, -1) : today,
       firstDate: firstDate,
       lastDate: today,
       helpText: '选择要补卡 / 撤卡的日期',
@@ -2719,8 +2719,9 @@ class _HabitEditSheetState extends State<_HabitEditSheet> {
           title: const Text('确认修改打卡规则？'),
           content: const Text(
             '该习惯已有打卡历史。修改计划星期或宽限日后，历史达标与连续天数'
-            '将按新规则重新计算，可能改变已解锁的成就。\n\n每日目标已有历史快照，'
-            '新目标只影响之后的打卡。仍要保存吗？',
+            '将按新规则重新计算，可能改变已解锁的成就。\n\n每日目标方面：历史打卡'
+            '（含升级前的记录，按升级时的目标补齐快照）保留当时的判定，新目标只'
+            '影响之后的打卡。仍要保存吗？',
           ),
           actions: [
             TextButton(

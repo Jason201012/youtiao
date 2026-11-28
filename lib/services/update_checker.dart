@@ -5,6 +5,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pointycastle/export.dart';
 
+import 'package:todolist/services/app_log.dart';
 import 'package:todolist/services/update_policy.dart';
 
 // F-01：compareVersion / prereleaseOf 已迁入 update_policy.dart（单一真源），
@@ -250,9 +251,19 @@ class UpdateChecker {
     return prefs.getBool(_kAutoCheck) ?? true;
   }
 
-  static Future<void> setAutoCheckEnabled(bool enabled) async {
+  /// N-P3-7（v3.2.1 审计）：返回落盘是否成功。
+  ///
+  /// 旧实现 `await prefs.setBool(...)` 丢弃返回值，调用方无论如何都把 UI 置为
+  /// 关闭——写失败（磁盘满 / 平台异常）时用户以为「已停止自动联网」，重启后
+  /// 开关回到开启、首页继续每天请求。调用方据此 fail-safe：失败时保持原状态并提示。
+  static Future<bool> setAutoCheckEnabled(bool enabled) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_kAutoCheck, enabled);
+    try {
+      return await prefs.setBool(_kAutoCheck, enabled);
+    } catch (e) {
+      AppLog.d('[UpdateChecker] 自动检查更新开关未能保存：$e');
+      return false;
+    }
   }
 
   /// 是否应自动弹窗：开关开启且每天最多一次（跨进程也生效）。

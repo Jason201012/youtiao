@@ -7,6 +7,7 @@ import 'package:todolist/models/focus_session.dart';
 import 'package:todolist/services/local_database.dart';
 import 'package:todolist/services/app_log.dart'; // L9（v3.0.8 审计）：迁移失败日志
 import 'package:todolist/services/notification_service.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/calendar_exporter.dart';
 // M6（v3.0.8 审计）：CSV 公式注入防护收口到 csv_safe 单一真源。
 import 'package:todolist/services/csv_safe.dart';
@@ -910,7 +911,8 @@ class FocusProvider extends ChangeNotifier {
     final today = DateTime(now.year, now.month, now.day);
     final list = <int>[];
     for (var i = 6; i >= 0; i--) {
-      list.add(focusSecOn(today.subtract(Duration(days: i))));
+      // P3-2（v3.2.1 审计）：日历日回退（DST 地区近 7 日不会少一天）。
+      list.add(focusSecOn(addCalendarDays(today, -i)));
     }
     return list;
   }

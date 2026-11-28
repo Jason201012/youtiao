@@ -186,9 +186,17 @@ class _DownloadBodyState extends State<_DownloadBody> {
     }
     final uri = Uri.parse(url);
     // U-1：外链返回时豁免一次应用锁重新上锁。
-    AppLockProvider.markExternalActivity();
-    if (await canLaunchUrl(uri)) {
+    // N-P3-8（v3.2.1 审计）：失败（无浏览器 / 抛异常）时立即清标记，
+    // 不再让残留豁免给下一次真正的切出返回开门。
+    final started = await AppLockProvider.launchWithExemption(() async {
+      if (!await canLaunchUrl(uri)) return false;
       await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return true;
+    });
+    if (!started && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('没有可打开下载页的应用，请稍后重试')),
+      );
     }
   }
 

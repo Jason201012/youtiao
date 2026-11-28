@@ -527,7 +527,8 @@ class TaskParser {
       var candidate = DateTime(day.year, day.month, day.day, h, mi);
       // 只给了时间没给日期，且该时刻今天已过 → 顺延到明天
       if (datePart == null && candidate.isBefore(base)) {
-        candidate = candidate.add(const Duration(days: 1));
+        // P3-2（v3.2.1 审计）：日历日加法（DST 地区「明天」不会落回今天）。
+        candidate = addCalendarDays(candidate, 1);
       }
       due = candidate;
     }
@@ -687,9 +688,9 @@ class TaskParser {
     final today = DateTime(base.year, base.month, base.day);
 
     if (raw == '今天' || raw == '今日') return today;
-    if (raw == '明天' || raw == '明日') return today.add(const Duration(days: 1));
-    if (raw == '后天') return today.add(const Duration(days: 2));
-    if (raw == '大后天') return today.add(const Duration(days: 3));
+    if (raw == '明天' || raw == '明日') return addCalendarDays(today, 1);
+    if (raw == '后天') return addCalendarDays(today, 2);
+    if (raw == '大后天') return addCalendarDays(today, 3);
 
     // N月N日
     if (m.group(1) != null && m.group(2) != null) {
@@ -705,14 +706,14 @@ class TaskParser {
       // 几十年后无意义的远期；异常日期直接返回 null（任务不留日期，按需重输）。
       final n = int.tryParse(m.group(5)!);
       if (n == null || n < 0 || n > 3650) return null;
-      return today.add(Duration(days: n));
+      return addCalendarDays(today, n);
     }
     // N周后
     if (m.group(6) != null) {
       // 同上：tryParse + 上限（约 520 周）。
       final n = int.tryParse(m.group(6)!);
       if (n == null || n < 0 || n > 520) return null;
-      return today.add(Duration(days: n * 7));
+      return addCalendarDays(today, n * 7);
     }
 
     // 星期类：取最后一个字判断目标星期
@@ -721,18 +722,18 @@ class TaskParser {
 
     // 按中国习惯以周一为一周之首，「下周X」指的是下一个自然周，
     // 而不是「往后数 7 天」——今天若是周日，两者会差整整一周。
-    final thisMonday = today.subtract(Duration(days: base.weekday - 1));
+    final thisMonday = addCalendarDays(today, -(base.weekday - 1));
     if (raw.startsWith('下下')) {
-      return thisMonday.add(Duration(days: 14 + target - 1));
+      return addCalendarDays(thisMonday, 14 + target - 1);
     }
     if (raw.startsWith('下')) {
-      return thisMonday.add(Duration(days: 7 + target - 1));
+      return addCalendarDays(thisMonday, 7 + target - 1);
     }
     if (raw.startsWith('本') || raw.startsWith('这')) {
-      return thisMonday.add(Duration(days: target - 1));
+      return addCalendarDays(thisMonday, target - 1);
     }
     // 裸写「周三」：取最近的那一个（今天就是则算今天，已过则顺延到下周）
-    return today.add(Duration(days: (target - base.weekday) % 7));
+    return addCalendarDays(today, (target - base.weekday) % 7);
   }
 
   /// N月N日 → 具体日期；若该日期今年已过，顺延到明年

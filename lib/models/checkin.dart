@@ -62,6 +62,18 @@ class CheckIn {
         targetAtWrite: target ?? targetAtWrite,
       );
 
+  /// N-P2-3（v3.2.1 审计）：只补写目标快照（存量记录回填用），不动累计量。
+  ///
+  /// 与 [withValue] 的区别：后者是「用户重设了这一天」的语义，会顺带改 value；
+  /// 回填只补缺失的快照，绝不能碰用户已经记下的量。
+  CheckIn withTargetSnapshot(int target) => CheckIn(
+        id: id,
+        habitId: habitId,
+        date: date,
+        value: value,
+        targetAtWrite: target,
+      );
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'habitId': habitId,

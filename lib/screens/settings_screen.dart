@@ -169,12 +169,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ...options.map((v) => RadioListTile<int>(
-                  title: Text(v <= 0 ? '关闭' : '$v $unit'),
-                  value: v,
-                  groupValue: current,
-                  onChanged: (v) => Navigator.pop(d, v),
-                )),
+            // N-P3-11（v3.2.1 审计）：不再使用 RadioListTile 的
+            // groupValue/onChanged——Flutter 3.32 起两者已废弃（当前工具链只报
+            // info，未来大版本会直接编译失败）。改走项目既有的
+            // 「ListTile + 选中图标」选择器模式，行为与可访问性等价。
+            for (final v in options)
+              ListTile(
+                title: Text(v <= 0 ? '关闭' : '$v $unit'),
+                trailing: Icon(
+                  v == current
+                      ? Symbols.radio_button_checked
+                      : Symbols.radio_button_unchecked,
+                  size: 20,
+                  color: v == current
+                      ? Theme.of(d).colorScheme.primary
+                      : Theme.of(d).colorScheme.onSurfaceVariant,
+                ),
+                onTap: () => Navigator.pop(d, v),
+              ),
             ListTile(
               title: const Text('自定义…'),
               onTap: () => Navigator.pop(d, -1),
@@ -576,6 +588,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       DataHealthIssueType.staleTrash,
       '超期回收站',
       '彻底删除已过保留期的回收站条目（含附件）'
+    ),
+    // N-P3-3（v3.2.1 审计）：起止时间非法（开始晚于截止）首次进入体检范围。
+    (
+      DataHealthIssueType.invalidTimeRange,
+      '起止时间异常',
+      '保留截止时间、清空开始时间（区间本身不成立）'
     ),
   ];
 
@@ -2123,8 +2141,17 @@ String _formatIdle(int seconds) {
                       subtitle: '关闭后仅手动检查，不会联网',
                       switchValue: _autoUpdateEnabled,
                       onSwitchChanged: (v) async {
-                        await UpdateChecker.setAutoCheckEnabled(v);
-                        if (mounted) setState(() => _autoUpdateEnabled = v);
+                        // N-P3-7（v3.2.1 审计）：按落盘结果决定 UI。旧实现无论
+                        // 保存成功与否都把开关置为关闭——写失败时重启会回到开启，
+                        // 首页继续每日联网，与用户看到的「已关闭」相反。
+                        final ok = await UpdateChecker.setAutoCheckEnabled(v);
+                        if (!mounted) return;
+                        if (!ok) {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                              content: Text('开关未能保存，请稍后重试')));
+                          return;
+                        }
+                        setState(() => _autoUpdateEnabled = v);
                       },
                     ),
                     const SizedBox(height: AppColors.contentGap),

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/theme/tokens.dart';
 import 'package:todolist/theme/app_theme.dart';
 import 'package:todolist/widgets/trend_chart.dart';
@@ -32,7 +33,8 @@ class _TrendStatsState extends State<TrendStats> {
 
   List<DateTime> _lastNDays(int n) {
     final today = _d(DateTime.now());
-    return List.generate(n, (i) => today.subtract(Duration(days: n - 1 - i)));
+    // P3-2（v3.2.1 审计）：日历日回退，DST 地区不会少算一天。
+    return List.generate(n, (i) => addCalendarDays(today, -(n - 1 - i)));
   }
 
   // P2-1（v3.1.0 审计）：三个计数器全部升级为 occurrence 级 [Task.completionEventDays]
@@ -96,7 +98,7 @@ class _TrendStatsState extends State<TrendStats> {
       case TrendPeriod.week:
         final days = _lastNDays(7);
         values = _dailyCounts(days);
-        final prev = days.map((d) => d.subtract(const Duration(days: 7))).toList();
+        final prev = days.map((d) => addCalendarDays(d, -7)).toList();
         compare = _dailyCounts(prev);
         labels = days.map((d) => _wk[d.weekday - 1]).toList();
         highlight = values.length - 1;

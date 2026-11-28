@@ -130,7 +130,16 @@ class TrashScreen extends StatelessWidget {
                             context,
                             provider,
                             t.id,
-                            provider.restoreFromTrash(t.id),
+                            provider.restoreFromTrash(t.id).then((ok) {
+                              // N-P3-10（v3.2.1 审计）：恢复的任务若占用了今日三件
+                              // 名额，被挤出的那条如实告知（此前静默消失）。
+                              final note = provider.takeMitEvictionNote();
+                              if (ok && note != null && context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text(note)));
+                              }
+                              return ok;
+                            }),
                           ),
                           icon: Icon(Symbols.restore_from_trash,
                               size: 22, color: primary),

@@ -9,6 +9,7 @@ import 'package:record/record.dart';
 import 'package:todolist/models/attachment.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/attachment_service.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/services/data_io.dart';
 import 'package:todolist/services/task_parser.dart';
 import 'package:todolist/state/task_provider.dart';
@@ -610,8 +611,9 @@ class _TaskSheetState extends State<TaskSheet> {
       // M15（v3.0.8 审计）：_repeatUntilDate 可能被 endRepeat 写成**昨天**
       // （「结束并保留待办」的口径），旧实现直接传入必触发 firstDate 断言
       // （debug 崩溃）；release 下也会落到错误月份。统一夹取。
+      // P3-2（v3.2.1 审计）：默认「一个月后」用日历日加法（DST 日不会偏一小时）。
       initialDate: _clampDate(
-          _repeatUntilDate ?? now.add(const Duration(days: 30)), now, last),
+          _repeatUntilDate ?? addCalendarDays(now, 30), now, last),
       firstDate: now,
       lastDate: last,
       helpText: '选择重复结束日期（含当日仍循环，之后停止）',
@@ -732,28 +734,60 @@ class _TaskSheetState extends State<TaskSheet> {
   Future<void> _addImage() async {
     // U-1：相册是当前任务的延伸，返回时豁免一次应用锁的 resumed 上锁。
     AppLockProvider.markExternalActivity();
-    final picked = await ImagePicker().pickImage(
-      source: ImageSource.gallery,
-      requestFullMetadata: false,
-    );
+    XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        requestFullMetadata: false,
+      );
+    } catch (e) {
+      // N-P3-8（v3.2.1 审计）：选择器没打开（权限 / 平台异常）时立即清豁免标记，
+      // 否则残留标记会让下一次真正的切出返回免验证。用户主动取消不算失败——
+      // 那时相册确实打开了，返回 null 也要保留豁免。
+      AppLockProvider.clearExternalActivity();
+      if (mounted) {
+        showSheetSnackBar(context, SnackBar(content: Text('打开相册失败：$e')));
+      }
+      return;
+    }
     if (picked != null) await _importPicked(picked, AttachmentType.image);
   }
 
   /// 拍照（相机）。
   Future<void> _takePhoto() async {
     AppLockProvider.markExternalActivity();
-    final picked = await ImagePicker().pickImage(
-      source: ImageSource.camera,
-      requestFullMetadata: false,
-    );
+    XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        requestFullMetadata: false,
+      );
+    } catch (e) {
+      // N-P3-8：同上，相机没打开就清标记。
+      AppLockProvider.clearExternalActivity();
+      if (mounted) {
+        showSheetSnackBar(context, SnackBar(content: Text('打开相机失败：$e')));
+      }
+      return;
+    }
     if (picked != null) await _importPicked(picked, AttachmentType.image);
   }
 
   /// 从本地文件系统选任意文件（文档 / 图片 / 音频等），按扩展名粗判类型。
   Future<void> _addFile() async {
     AppLockProvider.markExternalActivity();
-    final result = await FilePicker.pickFiles();
-    if (result == null || result.isEmpty) return;
+    List<PlatformFile> result;
+    try {
+      result = await FilePicker.pickFiles();
+    } catch (e) {
+      // N-P3-8：文件选择器抛异常时清标记（真正的取消会返回空列表）。
+      AppLockProvider.clearExternalActivity();
+      if (mounted) {
+        showSheetSnackBar(context, SnackBar(content: Text('打开文件选择器失败：$e')));
+      }
+      return;
+    }
+    if (result.isEmpty) return;
     final f = result.single;
     if (f.path == null) return;
     // file_picker 12 / platform_interface 3.x 的 PlatformFile 已移除 .extension getter，
@@ -1055,24 +1089,40 @@ class _TaskSheetState extends State<TaskSheet> {
       // P0-1：新建任务拿到真实 id 后，把暂存目录提升为正式目录（文件随之归位）。
       // P1-11：同时提升从快速录入层继承的分享附件暂存会话。
       // P3-6（v3.2.0 审计）：提升失败旧实现无任何回执，任务显示有附件却打不开。
-      // 失败时只保留实体确实存在的引用，其余从元数据剔除，并给用户明确提示。
-      Future<void> promote(String? session) async {
-        if (session == null) return;
+      // N-P3-5（v3.2.1 审计）：两个会话必须**先都尝试提升**、再统一核对实体。
+      // 旧实现是「提升一个 → 失败就地剔除引用」：此刻第二个会话的文件还在暂存
+      // 目录里，existingRefs 查正式目录必然认为「不存在」，于是第二批引用被误删；
+      // 随后第二个会话提升成功，文件就成了没有任何引用的孤儿。
+      // 注意：本弹层自身的暂存会话恒存在（`_attachmentSession` 非空），继承会话可空。
+      final inherited = widget.inheritedAttachmentSession;
+      final sessions = <String>[
+        _attachmentSession,
+        if (inherited != null) inherited,
+      ];
+      var promoteFailed = false;
+      for (final session in sessions) {
         try {
           await AttachmentService.promoteStaging(session, created.id);
         } catch (_) {
-          final kept = await AttachmentService.existingRefs(
-              created.id, created.attachments);
-          await provider.updateTask(created.copyWith(attachments: kept));
-          if (context.mounted) {
-            showSheetMessage(context, '附件未能保存，任务已创建（可重新添加附件）',
-                isError: true);
-          }
+          promoteFailed = true;
         }
       }
-
-      await promote(_attachmentSession);
-      await promote(widget.inheritedAttachmentSession);
+      if (promoteFailed) {
+        final kept = await AttachmentService.existingRefs(
+            created.id, created.attachments);
+        // N-P3-5：消费 updateTask 的返回值——旧实现丢弃它，剔除只发生在内存，
+        // 重启后「任务显示附件、点开文件不存在」会复活。
+        final repairSaved =
+            await provider.updateTask(created.copyWith(attachments: kept));
+        if (context.mounted) {
+          showSheetMessage(
+              context,
+              repairSaved
+                  ? '附件未能保存，任务已创建（可重新添加附件）'
+                  : '附件未能保存，且修复结果未写入；重启后可能需要重新添加附件',
+              isError: true);
+        }
+      }
     }
     _saved = true;
     if (!mounted) return;

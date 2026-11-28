@@ -23,6 +23,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:todolist/models/task.dart';
 import 'package:todolist/services/app_log.dart'; // L11（v3.0.8 审计）：保存失败日志
 import 'package:todolist/services/calendar_date.dart';
+import 'package:todolist/services/data_io.dart'; // N-P3-6：唯一文件名时间戳
 import 'package:todolist/services/gbk_codec.dart'; // P3-6（v3.0.0 审计）：共享文本解码链
 import 'package:todolist/state/task_provider.dart';
 
@@ -588,7 +589,10 @@ class UserTemplateStore {
   static Future<File> exportTemplate(UserTemplate t) async {
     final base = await getApplicationDocumentsDirectory();
     final safe = t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    final name = '有条-模板-$safe-${_ts()}.json';
+    // N-P3-6（v3.2.1 审计）：文件名改用与备份 / 导出同一个唯一时间戳
+    // （秒 + 毫秒 + 随机后缀）。旧实现只到分钟——同一分钟对同一模板导出两次，
+    // 第二份直接覆盖第一份，与 P3-5 的备份覆盖完全同构。
+    final name = '有条-模板-$safe-${DataIo.uniqueFileStamp()}.json';
     final file = File('${base.path}/$name');
     final tmp = File('${file.path}.tmp');
     await tmp.writeAsString(jsonEncode(t.toJson()));
@@ -795,9 +799,3 @@ Priority _prioFromName(dynamic v) {
 /// 简单唯一 id（微秒时间戳取模，足够模板文件命名用，不依赖 uuid 包）。
 String _uid() =>
     (DateTime.now().microsecondsSinceEpoch % 1000000000).toString();
-
-String _ts() {
-  final d = DateTime.now();
-  final p = (int n) => n.toString().padLeft(2, '0');
-  return '${d.year}${p(d.month)}${p(d.day)}-${p(d.hour)}${p(d.minute)}';
-}

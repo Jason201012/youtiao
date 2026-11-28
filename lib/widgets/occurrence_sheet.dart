@@ -14,6 +14,7 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 import 'package:todolist/models/task.dart';
+import 'package:todolist/services/calendar_date.dart';
 import 'package:todolist/state/task_provider.dart';
 import 'package:todolist/widgets/undo_snack_bar.dart';
 import 'package:todolist/widgets/task_toggle_undo.dart';
@@ -102,7 +103,9 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
     if (!_task.occursOnIgnoringSkip(_today)) return _today;
     if (_isSkipped(_today) || _isDone(_today)) return _today;
     if (!_todayReminderPassed) return _today;
-    return _today.add(const Duration(days: 1));
+    // P3-2（v3.2.1 审计）：日历日加法——`add(Duration(days:1))` 是「+24 小时」，
+    // DST 秋季切换日会把「明天」解析成今天。
+    return addCalendarDays(_today, 1);
   }
 
   void _markDone(DateTime d) {
@@ -143,7 +146,8 @@ class _OccurrenceBodyState extends State<_OccurrenceBody> {
       // copyFailed（副本落盘失败已回滚）不再被误显示成「循环日覆盖」：旧文案
       // 让用户以为「任务已在新日期、只是无需副本」，实际原日被跳过、目标日
       // 没有任何任务（失败被伪装成预期行为，用户不会去点撤销）。
-      final newDay = d.add(const Duration(days: 1));
+      // P3-2（v3.2.1 审计）：日历日加法（DST 安全）。
+      final newDay = addCalendarDays(d, 1);
       final r = await widget.provider.rescheduleOnceOccurrence(
         _task.id,
         newDay,

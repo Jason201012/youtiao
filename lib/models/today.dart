@@ -18,9 +18,11 @@ class TodayAggregate {
 
   /// 今日待办（未完成、且属于今日事务）列表，按截止时间升序（无截止排末）。
   final List<Task> pendingTasks;
-  /// 今日已完成数（当日事件里已 done 的数量）。
+  /// 今日完成数（**完成日口径**：今天勾掉的任务，含提前完成的未来任务）。
+  /// N-P3-1（v3.2.1 审计）：与晚简报、"今日完成"筛选同源；"今日事务总数"仍按
+  /// 事件口径（[todoCount]），两者不再混用。
   final int completedToday;
-  /// 今日事务总数（pending + completedToday）。
+  /// 今日事务总数（事件口径：今天该做的事 = 待办 + 今天已勾掉的当日事件）。
   final int todoCount;
 
   /// 今日专注分钟数（专注阶段秒数 / 60，四舍五入）。
@@ -95,13 +97,20 @@ class TodayAggregate {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
 
-    // —— 任务：复刻 TaskProvider._isEventToday（私有，无法直接调用）——
+    // —— 任务：事件口径与完成口径分开取数 ——
+    // N-P3-1（v3.2.1 审计）：旧实现把「今日事件 ∩ 已完成」当成「今日完成」，
+    // 「今天到期、3 天前就勾掉」的任务会被算进今天的完成数，而晚简报按完成日
+    // 统计为 0。现分为两个数：
+    //   · completedToday = 完成日落在今天（[isTaskCompletedOn]，与简报同源）；
+    //   · eventsCompleted = 「今天该做的事」里已勾掉的（只用于 todoCount 求和）。
     int completedToday = 0;
+    var eventsCompleted = 0;
     final pendingTasks = <Task>[];
     for (final t in task.tasks) {
+      if (isTaskCompletedOn(t, today)) completedToday++;
       if (!_isEventToday(t, today)) continue;
       if (t.done) {
-        completedToday++;
+        eventsCompleted++;
       } else {
         pendingTasks.add(t);
       }
@@ -112,7 +121,7 @@ class TodayAggregate {
       if (b.dueDate == null) return -1;
       return a.dueDate!.compareTo(b.dueDate!);
     });
-    final todoCount = pendingTasks.length + completedToday;
+    final todoCount = pendingTasks.length + eventsCompleted;
 
     // —— 专注 ——
     final focusMinutes = (focus.todayFocusSec / 60).round();
